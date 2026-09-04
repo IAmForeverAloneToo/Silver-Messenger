@@ -528,13 +528,26 @@ impl Client {
     }
 
     /// Fetch the file `info` describes, check it, and save it into `dir`
-    /// under its own name (never overwriting). Returns where it went.
+    /// under its own name (never overwriting). Returns where it went. What
+    /// the sender claimed is checked before any chunk is asked for, and a
+    /// `quota` on `dir` is honoured before fetching and again before
+    /// saving.
     pub async fn download_file(
         &self,
         info: &FileInfo,
         dir: &Path,
+        quota: Option<u64>,
         progress: Option<mpsc::Sender<Progress>>,
     ) -> Result<PathBuf, ClientError> {
+        info.check().map_err(|e| ClientError::File(e.to_string()))?;
+        {
+            let dir = dir.to_path_buf();
+            let size = info.size;
+            tokio::task::spawn_blocking(move || files::check_quota(&dir, size, quota))
+                .await
+                .map_err(|e| ClientError::File(e.to_string()))?
+                .map_err(|e| ClientError::File(e.to_string()))?;
+        }
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(Command::Download {
@@ -553,7 +566,7 @@ impl Client {
         let dir = dir.to_path_buf();
         tokio::task::spawn_blocking(move || {
             let bytes = files::assemble(&info, &chunks)?;
-            files::save(&dir, &info.name, &bytes)
+            files::save(&dir, &info.name, &bytes, quota)
         })
         .await
         .map_err(|e| ClientError::File(e.to_string()))?

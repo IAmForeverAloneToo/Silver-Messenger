@@ -1088,14 +1088,14 @@ async fn files_travel_as_encrypted_blobs() {
     assert!(m.caps.iter().any(|c| c == "files"));
 
     let saved = bob_c
-        .download_file(&received, &dir.path().join("downloads"), None)
+        .download_file(&received, &dir.path().join("downloads"), None, None)
         .await
         .unwrap();
     assert_eq!(saved, dir.path().join("downloads").join("data.bin"));
     assert_eq!(std::fs::read(&saved).unwrap(), data);
     // Fetched again, it lands next to the first copy rather than over it.
     let again = bob_c
-        .download_file(&received, &dir.path().join("downloads"), None)
+        .download_file(&received, &dir.path().join("downloads"), None, None)
         .await
         .unwrap();
     assert_eq!(again, dir.path().join("downloads").join("data (2).bin"));
@@ -1104,18 +1104,56 @@ async fn files_travel_as_encrypted_blobs() {
     let mut missing = received.clone();
     missing.blob = silver_protocol::blob::new_blob_id();
     let err = bob_c
-        .download_file(&missing, dir.path(), None)
+        .download_file(&missing, dir.path(), None, None)
         .await
         .unwrap_err();
     assert!(matches!(err, silver_client::ClientError::Blob(_)), "{err}");
-    // A file the sender lied about is refused after fetching.
+    // A file the sender lied about is refused after fetching, and nothing
+    // of it is written.
     let mut lying = received.clone();
     lying.sha256[0] ^= 1;
+    let lying_dir = dir.path().join("lying");
     let err = bob_c
-        .download_file(&lying, dir.path(), None)
+        .download_file(&lying, &lying_dir, None, None)
         .await
         .unwrap_err();
     assert!(err.to_string().contains("hash"), "{err}");
+    assert!(
+        !lying_dir.exists() || std::fs::read_dir(&lying_dir).unwrap().next().is_none(),
+        "a failed fetch left something behind"
+    );
+    // A size or chunk count the sender made up is refused before any chunk
+    // is asked for.
+    let mut huge = received.clone();
+    huge.size = 1 << 40;
+    let err = bob_c
+        .download_file(&huge, dir.path(), None, None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, silver_client::ClientError::File(_)) && err.to_string().contains("cap"),
+        "{err}"
+    );
+    let mut odd = received.clone();
+    odd.chunks += 1;
+    let err = bob_c
+        .download_file(&odd, dir.path(), None, None)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("chunk"), "{err}");
+    // A downloads quota the file would pass is refused before fetching.
+    let quota_dir = dir.path().join("small");
+    let err = bob_c
+        .download_file(&received, &quota_dir, Some(data.len() as u64 - 1), None)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("quota"), "{err}");
+    assert!(!quota_dir.exists());
+    let fits = bob_c
+        .download_file(&received, &quota_dir, Some(data.len() as u64), None)
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(&fits).unwrap(), data);
     // Neither the message nor the chunks went through the authenticated
     // connections.
     assert_eq!(state.anonymous_submission_count(), 1);
@@ -1171,7 +1209,7 @@ async fn a_file_sent_while_the_recipient_is_offline_is_fetched_on_arrival() {
     };
     let received = silver_client::FileInfo::from_content(&m.content).unwrap();
     let saved = bob_c
-        .download_file(&received, &dir.path().join("dl"), None)
+        .download_file(&received, &dir.path().join("dl"), None, None)
         .await
         .unwrap();
     assert_eq!(std::fs::read(&saved).unwrap(), data);

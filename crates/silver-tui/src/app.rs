@@ -63,6 +63,8 @@ pub struct ChatLine {
     pub receipt: Option<ReceiptKind>,
     /// For received files: where the file was saved.
     pub file: Option<PathBuf>,
+    /// For received files not fetched yet: how to fetch it.
+    pub pending: Option<FileInfo>,
 }
 
 /// The saved location a file line names, if it does: `[file] name (size)
@@ -182,7 +184,7 @@ enum Internal {
     Downloaded {
         peer: UserId,
         id: String,
-        label: String,
+        info: FileInfo,
         result: Result<PathBuf, String>,
     },
 }
@@ -225,6 +227,8 @@ pub struct App {
     last_click: Option<(Instant, (usize, usize), u8)>,
     /// Columns given to the chat list; the divider drags it.
     pub sidebar_width: u16,
+    /// Most `downloads/` may hold, from `downloads_quota_mib` in the config.
+    downloads_quota: Option<u64>,
     /// The left button is down on the divider.
     resizing: bool,
     /// The left button is down on the scrollbar.
@@ -295,6 +299,8 @@ impl App {
                         Direction::Received => saved_file_path(&h.text),
                         Direction::Sent => None,
                     };
+                    // A file still waits until its line says where it went.
+                    let pending = h.file.filter(|_| file.is_none());
                     ChatLine {
                         id: h.id,
                         direction: h.direction,
@@ -304,6 +310,7 @@ impl App {
                         failed: false,
                         receipt: h.receipt,
                         file,
+                        pending,
                     }
                 })
                 .collect();
@@ -335,6 +342,7 @@ impl App {
             selecting: false,
             last_click: None,
             sidebar_width: config.sidebar_width.clamp(12, 60),
+            downloads_quota: config.downloads_quota(),
             resizing: false,
             dragging_scrollbar: false,
             help_open: false,
@@ -654,12 +662,16 @@ impl App {
                 });
                 self.selecting = true;
             }
-            2 => match self.file_at_row(cell.0) {
-                Some(path) => {
+            2 => match (self.file_at_row(cell.0), self.pending_at_row(cell.0)) {
+                (Some(path), _) => {
                     self.selection = None;
                     self.open_file(&path);
                 }
-                None => self.select_word(cell),
+                (None, Some((peer, id, info))) => {
+                    self.selection = None;
+                    self.start_download(peer, id, info);
+                }
+                (None, None) => self.select_word(cell),
             },
             _ => self.select_source(cell.0),
         }
@@ -1277,6 +1289,8 @@ impl App {
             "unblock" => self.cmd_unblock(&rest),
             "blocked" => self.cmd_blocked(),
             "send" | "file" | "attach" => self.cmd_send(&rest),
+            "get" | "fetch" => self.cmd_get(&rest),
+            "files" => self.cmd_files(&rest),
             "open" => self.cmd_open(),
             "relay" => self.cmd_relay(&rest),
             "quit" | "q" | "exit" => self.should_quit = true,
@@ -1403,6 +1417,16 @@ impl App {
             } else {
                 "Tab or a click opens a chat · F1 help".to_owned()
             };
+        }
+        if let Some(info) = self.selected_contact().and_then(|c| {
+            self.threads
+                .get(&c.user_id)?
+                .iter()
+                .rev()
+                .find_map(|l| l.pending.as_ref())
+        }) {
+            let name: String = info.name.chars().take(24).collect();
+            return format!("/get fetches {name} · /files auto skips the asking · F1 help");
         }
         "Enter sends · /send <path> a file · F1 help".to_owned()
     }
@@ -1997,6 +2021,7 @@ impl App {
                                 failed: false,
                                 receipt: None,
                                 file: None,
+                                pending: None,
                             },
                         );
                         self.scroll = 0;
@@ -2031,12 +2056,16 @@ impl App {
             Internal::Downloaded {
                 peer,
                 id,
-                label,
+                info,
                 result,
             } => {
+                let label = info.label();
                 let text = match &result {
                     Ok(path) => format!("[file] {label} {} {}", self.glyphs.arrow, path.display()),
-                    Err(e) => format!("[file] {label} {} {e}", self.glyphs.failed),
+                    Err(e) => format!(
+                        "[file] {label} {} {e} · /get tries again",
+                        self.glyphs.failed
+                    ),
                 };
                 self.set_line_text(&peer, &id, text.clone());
                 if let Err(e) = self.store.append_text(&peer, &id, &text) {
@@ -2046,19 +2075,26 @@ impl App {
                     Ok(path) => {
                         if let Some(line) = self.line_mut(&peer, &id) {
                             line.file = Some(path.clone());
+                            line.pending = None;
                         }
                         self.toast(format!(
                             "Saved {}. Double-click the line or /open to open it.",
                             path.display()
                         ));
                     }
-                    Err(e) => self.system(
-                        Level::Warn,
-                        format!(
-                            "Could not fetch {label} from {}: {e}",
-                            self.contact_name(&peer)
-                        ),
-                    ),
+                    Err(e) => {
+                        // Still fetchable: the failure may have been the network.
+                        if let Some(line) = self.line_mut(&peer, &id) {
+                            line.pending = Some(info);
+                        }
+                        self.system(
+                            Level::Warn,
+                            format!(
+                                "Could not fetch {label} from {}: {e}",
+                                self.contact_name(&peer)
+                            ),
+                        )
+                    }
                 }
             }
         }
@@ -2148,6 +2184,17 @@ impl App {
                         return;
                     }
                 };
+                // A file is fetched now only for a contact on /files auto;
+                // otherwise it waits for /get. What the sender claims about
+                // it is checked before either.
+                let (text, fetch_now, pending) = match file {
+                    None => (text, None, None),
+                    Some(info) => match info.check() {
+                        Err(e) => (format!("{text} · refused: {e}"), None, None),
+                        Ok(()) if self.contacts[index].auto_files => (text, Some(info), None),
+                        Ok(()) => (format!("{text} · /get to fetch"), None, Some(info)),
+                    },
+                };
                 let id = message.id.clone();
                 self.record(
                     from,
@@ -2160,6 +2207,7 @@ impl App {
                         failed: false,
                         receipt: None,
                         file: None,
+                        pending,
                     },
                 );
                 // Shown means in the selected chat of a window that has focus;
@@ -2178,7 +2226,7 @@ impl App {
                 if !shown {
                     self.unread.entry(from).or_default().push(id.clone());
                 }
-                if let Some(info) = file {
+                if let Some(info) = fetch_now {
                     self.start_download(from, id, info);
                 }
             }
@@ -2237,20 +2285,26 @@ impl App {
         }
     }
 
-    /// Fetch a file a contact sent, updating its line as it goes.
+    /// Fetch a file a contact sent, updating its line as it goes. The line
+    /// stops waiting while the fetch runs, so a second `/get` does not
+    /// start it twice; a failure puts it back.
     fn start_download(&mut self, peer: UserId, id: String, info: FileInfo) {
         let label = info.label();
+        if let Some(line) = self.line_mut(&peer, &id) {
+            line.pending = None;
+        }
         self.set_line_text(&peer, &id, format!("[file] {label} · receiving…"));
         let client = self.client.clone();
         let tx = self.internal_tx.clone();
         let dir = self.store.downloads_dir();
+        let quota = self.downloads_quota;
         let (ptx, prx) = mpsc::channel::<Progress>(16);
         tokio::spawn(async move {
             let result = with_progress(
                 &tx,
                 prx,
                 &format!("Receiving {label}"),
-                client.download_file(&info, &dir, Some(ptx)),
+                client.download_file(&info, &dir, quota, Some(ptx)),
             )
             .await
             .map_err(|e| e.to_string());
@@ -2258,7 +2312,7 @@ impl App {
                 .send(Internal::Downloaded {
                     peer,
                     id,
-                    label,
+                    info,
                     result,
                 })
                 .await;
@@ -2310,8 +2364,20 @@ impl App {
         self.threads.get(&peer)?.get(source)?.file.clone()
     }
 
-    /// A single click on a received file's line says how to open it; a
-    /// double click does.
+    /// The file waiting to be fetched behind a row, if it shows one.
+    fn pending_at_row(&self, row: usize) -> Option<(UserId, String, FileInfo)> {
+        let Pane::Thread(peer) = self.view.pane else {
+            return None;
+        };
+        let source = self.view.rows.get(row)?.source?;
+        let line = self.threads.get(&peer)?.get(source)?;
+        line.pending
+            .clone()
+            .map(|info| (peer, line.id.clone(), info))
+    }
+
+    /// A single click on a received file's line says how to open or fetch
+    /// it; a double click does.
     fn click_row(&mut self, row: usize) {
         if let Some(path) = self.file_at_row(row) {
             let name = path
@@ -2319,6 +2385,72 @@ impl App {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
             self.toast(format!("Double-click to open {name}, or /open."));
+        } else if let Some((_, _, info)) = self.pending_at_row(row) {
+            self.toast(format!("Double-click to fetch {}, or /get.", info.label()));
+        }
+    }
+
+    /// `/get [all]`: fetch the newest file waiting in this chat, or all of
+    /// them.
+    fn cmd_get(&mut self, args: &[&str]) {
+        let Some(peer) = self.selected_contact().map(|c| c.user_id) else {
+            self.toast("Select a chat first.");
+            return;
+        };
+        let all = args.first().is_some_and(|a| a.eq_ignore_ascii_case("all"));
+        let waiting: Vec<(String, FileInfo)> = self
+            .threads
+            .get(&peer)
+            .map(|lines| {
+                lines
+                    .iter()
+                    .rev()
+                    .filter_map(|l| l.pending.clone().map(|p| (l.id.clone(), p)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if waiting.is_empty() {
+            self.toast("No file is waiting in this chat.");
+            return;
+        }
+        let chosen = if all { waiting.len() } else { 1 };
+        for (id, info) in waiting.into_iter().take(chosen) {
+            self.start_download(peer, id, info);
+        }
+    }
+
+    /// `/files auto|ask`: whether the selected contact's files are fetched
+    /// as they arrive or wait for `/get`.
+    fn cmd_files(&mut self, args: &[&str]) {
+        let Some(index) = self.selected_contact_index() else {
+            self.toast("Select a contact first.");
+            return;
+        };
+        let name = self.contacts[index].display_name();
+        match args.first().map(|s| s.to_ascii_lowercase()).as_deref() {
+            None => {
+                let state = if self.contacts[index].auto_files {
+                    "fetched as they arrive"
+                } else {
+                    "wait for /get"
+                };
+                self.toast(format!(
+                    "Files from {name} {state}. /files auto fetches them at once, /files ask waits."
+                ));
+            }
+            Some("auto") | Some("on") => {
+                self.contacts[index].auto_files = true;
+                self.persist_contacts();
+                self.toast(format!(
+                    "Files from {name} are fetched as they arrive, into downloads/. /files ask undoes that."
+                ));
+            }
+            Some("ask") | Some("off") => {
+                self.contacts[index].auto_files = false;
+                self.persist_contacts();
+                self.toast(format!("Files from {name} wait for /get."));
+            }
+            Some(_) => self.toast("Usage: /files auto|ask"),
         }
     }
 
@@ -2377,14 +2509,22 @@ impl App {
     /// Keep a message from an unknown sender until the user decides.
     fn hold_request(&mut self, message: Message) {
         let from = message.from;
+        let mut file = None;
         let text = match message.content {
             Content::Text { body } => body,
             Content::File { .. } => {
                 let info = FileInfo::from_content(&message.content).expect("file content");
-                format!(
-                    "[file] {} (files from people you have not accepted are not fetched; ask them to send it again once you have)",
-                    info.label()
-                )
+                match info.check() {
+                    Ok(()) => {
+                        let text = format!(
+                            "[file] {} (not fetched; /get can once you accept them)",
+                            info.label()
+                        );
+                        file = Some(info);
+                        text
+                    }
+                    Err(e) => format!("[file] {} · refused: {e}", info.label()),
+                }
             }
             Content::Receipt { .. } => return,
         };
@@ -2393,6 +2533,7 @@ impl App {
             timestamp_ms: message.sent_at_ms,
             text,
             sequence: message.sequence,
+            file,
         };
         self.known_ids.insert(message.id);
         let is_new = match self.requests.iter_mut().find(|r| r.from == from) {
@@ -2456,17 +2597,26 @@ impl App {
         self.persist_contacts();
         let count = request.messages.len();
         for held in request.messages {
+            // A file they sent while a stranger can be fetched now.
+            let (text, pending) = match held.file {
+                Some(info) => (
+                    format!("[file] {} · /get to fetch", info.label()),
+                    Some(info),
+                ),
+                None => (held.text, None),
+            };
             self.record(
                 from,
                 ChatLine {
                     id: held.id,
                     direction: Direction::Received,
                     timestamp_ms: held.timestamp_ms,
-                    text: held.text,
+                    text,
                     delivered: true,
                     failed: false,
                     receipt: None,
                     file: None,
+                    pending,
                 },
             );
         }
@@ -2569,6 +2719,7 @@ impl App {
             timestamp_ms: line.timestamp_ms,
             text: line.text.clone(),
             receipt: None,
+            file: line.pending.clone(),
         };
         if let Err(e) = self.store.append_history(&peer, &entry) {
             self.toast(format!("Could not save history: {e}"));

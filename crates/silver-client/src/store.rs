@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use silver_protocol::envelope::ReceiptKind;
 use silver_protocol::{Identity, IdentitySecrets, KeyBundle, Sequence, UserId};
 
+use crate::files::FileInfo;
 use crate::sessions::{PrekeyFile, SessionsFile};
 use crate::vault::{FileCipher, Kdf, LINE_PREFIX, VaultError, VaultFile};
 
@@ -82,6 +83,20 @@ pub struct Config {
     /// Width of the chat list, in columns.
     #[serde(default = "default_sidebar_width")]
     pub sidebar_width: u16,
+    /// Most the `downloads/` folder may hold, in MiB; 0 means no limit.
+    #[serde(default = "default_downloads_quota_mib")]
+    pub downloads_quota_mib: u64,
+}
+
+fn default_downloads_quota_mib() -> u64 {
+    1024
+}
+
+impl Config {
+    /// The downloads quota in bytes, if there is one.
+    pub fn downloads_quota(&self) -> Option<u64> {
+        (self.downloads_quota_mib > 0).then(|| self.downloads_quota_mib.saturating_mul(1024 * 1024))
+    }
 }
 
 fn default_true() -> bool {
@@ -117,6 +132,7 @@ impl Default for Config {
             marks: default_marks(),
             theme: default_theme(),
             sidebar_width: default_sidebar_width(),
+            downloads_quota_mib: default_downloads_quota_mib(),
         }
     }
 }
@@ -143,6 +159,10 @@ pub struct Contact {
     /// [`silver_protocol::envelope::capability`].
     #[serde(default)]
     pub caps: Vec<String>,
+    /// Fetch the files they send as they arrive, instead of waiting for
+    /// the user to ask for each one.
+    #[serde(default)]
+    pub auto_files: bool,
 }
 
 impl Contact {
@@ -155,6 +175,7 @@ impl Contact {
             received: None,
             verified: false,
             caps: Vec::new(),
+            auto_files: false,
         }
     }
 
@@ -198,6 +219,9 @@ pub struct HistoryEntry {
     /// written to disk with the entry; applied from later receipt lines.
     #[serde(skip)]
     pub receipt: Option<ReceiptKind>,
+    /// For a received file: how to fetch it, kept until it has been.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<FileInfo>,
 }
 
 /// A later line in a history file that updates earlier entries.
@@ -234,6 +258,10 @@ pub struct HeldMessage {
     pub text: String,
     #[serde(default)]
     pub sequence: Sequence,
+    /// A file they sent: never fetched while they are a stranger, but
+    /// fetchable once they are accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<FileInfo>,
 }
 
 /// Messages from one unknown sender, waiting for a decision.
@@ -770,6 +798,7 @@ mod tests {
             timestamp_ms: i,
             text: format!("msg {i}"),
             receipt: None,
+            file: None,
         }
     }
 

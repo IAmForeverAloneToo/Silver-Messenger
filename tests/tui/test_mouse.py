@@ -12,6 +12,8 @@ def main():
     small = os.path.join(docs, "notes.txt")
     open(small, "w").write("hello\n")
     b.type(f"/send {small}\r")
+    assert a.wait("[file] notes.txt (6 B) · /get to fetch"), "file waits"
+    a.type("/get\r")
     assert a.wait(f"[file] notes.txt (6 B) {G.arrow} "), "file"
 
     # Clicking rows of the chat list switches panes.

@@ -119,6 +119,18 @@ pub const COMMANDS: &[CommandInfo] = &[
         path_arg: true,
     },
     cmd(
+        "get",
+        &["fetch"],
+        "[all]",
+        "fetch the newest file waiting in this chat (or double-click its line); all fetches every one",
+    ),
+    cmd(
+        "files",
+        &[],
+        "auto|ask",
+        "fetch this contact's files as they arrive, or wait for /get (the default)",
+    ),
+    cmd(
         "open",
         &[],
         "",

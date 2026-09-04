@@ -857,6 +857,7 @@ mod tests {
                     failed: false,
                     receipt: Some(ReceiptKind::Read),
                     file: None,
+                    pending: None,
                 },
                 ChatLine {
                     id: "2".into(),
@@ -867,6 +868,7 @@ mod tests {
                     failed: false,
                     receipt: None,
                     file: None,
+                    pending: None,
                 },
                 ChatLine {
                     id: "3".into(),
@@ -877,6 +879,7 @@ mod tests {
                     failed: false,
                     receipt: None,
                     file: None,
+                    pending: None,
                 },
             ],
         );
@@ -889,6 +892,7 @@ mod tests {
                 timestamp_ms: at,
                 text: "can we talk?".into(),
                 sequence: Sequence::default(),
+                file: None,
             }],
         });
         app.selected = 1;
