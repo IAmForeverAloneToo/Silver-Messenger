@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use silver_relay::{
-    DEFAULT_LISTEN, DEFAULT_MESSAGE_TTL, Limits, RelayState, expire_periodically, serve,
+    DEFAULT_LISTEN, DEFAULT_MESSAGE_TTL, Limits, Policy, RelayState, expire_periodically, serve,
 };
 use tokio::net::TcpListener;
 use tracing::info;
@@ -38,6 +38,19 @@ struct Args {
     /// Maximum queued bytes per recipient, in MiB.
     #[arg(long, env = "SILVER_RELAY_MAX_MIB", default_value_t = Limits::default().max_bytes / (1024 * 1024))]
     max_mailbox_mib: u64,
+
+    /// Messages one connection may submit per minute.
+    #[arg(long, env = "SILVER_RELAY_SENDS_PER_MINUTE", default_value_t = Policy::default().sends_per_minute)]
+    sends_per_minute: u32,
+
+    /// Key lookups one connection may make per minute.
+    #[arg(long, env = "SILVER_RELAY_LOOKUPS_PER_MINUTE", default_value_t = Policy::default().lookups_per_minute)]
+    lookups_per_minute: u32,
+
+    /// Only register new identities that present this invite token
+    /// (clients pass it with --invite). Existing identities are unaffected.
+    #[arg(long, env = "SILVER_RELAY_INVITE_TOKEN")]
+    invite_token: Option<String>,
 }
 
 #[tokio::main]
@@ -53,16 +66,24 @@ async fn main() -> anyhow::Result<()> {
         max_messages: args.max_mailbox_messages,
         max_bytes: args.max_mailbox_mib * 1024 * 1024,
     };
+    let policy = Policy {
+        sends_per_minute: args.sends_per_minute,
+        lookups_per_minute: args.lookups_per_minute,
+        invite_token: args.invite_token.filter(|t| !t.trim().is_empty()),
+    };
+    if policy.invite_token.is_some() {
+        info!("registration requires an invite token");
+    }
     let state = if args.ephemeral {
         info!("running with in-memory state; nothing is persisted");
-        RelayState::new()
+        RelayState::with_store_and_policy(silver_relay::Store::in_memory()?, limits, policy.clone())
     } else {
         let dir = args
             .data_dir
             .or_else(|| std::env::var_os("STATE_DIRECTORY").map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from("./silver-relay-data"));
         let path = dir.join("relay.redb");
-        let state = RelayState::open(&path, limits)?;
+        let state = RelayState::open_with(&path, limits, policy.clone())?;
         let stats = state.stats();
         info!(
             "database {} ({} bundles, {} messages in {} mailboxes)",

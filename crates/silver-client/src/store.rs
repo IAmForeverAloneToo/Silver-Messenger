@@ -51,6 +51,9 @@ pub struct Config {
     /// [`silver_protocol::Sequence`].
     #[serde(default)]
     pub send_epoch: Option<u64>,
+    /// Invite token for relays that only register invited identities.
+    #[serde(default)]
+    pub invite_token: Option<String>,
 }
 
 /// A known peer.

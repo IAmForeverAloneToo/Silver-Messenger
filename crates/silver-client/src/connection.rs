@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use silver_protocol::wire::{ClientFrame, ServerFrame, auth_signature};
+use silver_protocol::wire::{ClientFrame, ErrorCode, ServerFrame, auth_signature};
 
 use crate::outbox::Outbox;
 use crate::proxy::Proxy;
@@ -25,6 +25,8 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const KEEPALIVE: Duration = Duration::from_secs(30);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
+/// How long to wait before resending the outbox after the relay rate-limits us.
+const RATE_LIMIT_RETRY: Duration = Duration::from_secs(5);
 
 /// Things the connection task reports to the front end.
 #[derive(Debug)]
@@ -106,6 +108,7 @@ impl Client {
             identity.clone(),
             connector,
             proxy,
+            options.invite_token.clone(),
             outbox,
             pending.clone(),
             cmd_rx,
@@ -215,6 +218,7 @@ async fn run(
     identity: Arc<Identity>,
     connector: Connector,
     proxy: Option<Proxy>,
+    invite_token: Option<String>,
     mut outbox: Outbox,
     pending: PendingIds,
     mut cmd_rx: mpsc::Receiver<Command>,
@@ -227,6 +231,7 @@ async fn run(
             &identity,
             connector.clone(),
             proxy.as_ref(),
+            invite_token.as_deref(),
             &mut outbox,
             &pending,
             &mut cmd_rx,
@@ -282,6 +287,7 @@ async fn session(
     identity: &Identity,
     connector: Connector,
     proxy: Option<&Proxy>,
+    invite_token: Option<&str>,
     outbox: &mut Outbox,
     pending: &PendingIds,
     cmd_rx: &mut mpsc::Receiver<Command>,
@@ -326,6 +332,7 @@ async fn session(
     // discoverable and report `Connected`.
     sink.send(text(&ClientFrame::Publish {
         bundle: identity.key_bundle(),
+        invite: invite_token.map(str::to_owned),
     }))
     .await?;
     let mut published = false;
@@ -334,9 +341,28 @@ async fn session(
     let mut lookups: Pending = HashMap::new();
     let mut keepalive = tokio::time::interval(KEEPALIVE);
     keepalive.tick().await; // first tick fires immediately; skip it
+    // Set when the relay rate-limited us; the outbox is resent at that time.
+    let mut retry_at: Option<tokio::time::Instant> = None;
 
     loop {
+        let retry = async {
+            match retry_at {
+                Some(at) => tokio::time::sleep_until(at).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
         tokio::select! {
+            _ = retry => {
+                retry_at = None;
+                for envelope in outbox.iter() {
+                    let frame = ClientFrame::Send {
+                        envelope: envelope.clone(),
+                    };
+                    if sink.send(text(&frame)).await.is_err() {
+                        return Ok(Exit::Disconnected("resend failed".into()));
+                    }
+                }
+            }
             cmd = cmd_rx.recv() => match cmd {
                 None | Some(Command::Shutdown) => {
                     let _ = sink.close().await;
@@ -394,6 +420,20 @@ async fn session(
                         sync_pending(pending, outbox);
                         let _ = ev_tx.send(ClientEvent::Sent { id }).await;
                     }
+                    ServerFrame::Rejected { id, code: ErrorCode::RateLimited, .. } => {
+                        // Not a verdict on the message: keep it and try again.
+                        if retry_at.is_none() {
+                            retry_at = Some(tokio::time::Instant::now() + RATE_LIMIT_RETRY);
+                            let _ = ev_tx
+                                .send(ClientEvent::Error(format!(
+                                    "the relay is rate limiting; retrying {} queued message(s) in {}s",
+                                    outbox.iter().count(),
+                                    RATE_LIMIT_RETRY.as_secs()
+                                )))
+                                .await;
+                        }
+                        debug!("rate limited on envelope {id}");
+                    }
                     ServerFrame::Rejected { id, code, message } => {
                         outbox.remove(&id);
                         sync_pending(pending, outbox);
@@ -408,6 +448,16 @@ async fn session(
                         for reply in lookups.remove(&user_id).unwrap_or_default() {
                             let _ = reply.send(Ok(bundle.clone()));
                         }
+                    }
+                    ServerFrame::Error { code, message } if !published => {
+                        // Our Publish was refused: this connection is useless.
+                        return Ok(Exit::Disconnected(format!("{message} ({code:?})")));
+                    }
+                    ServerFrame::Error { code: ErrorCode::RateLimited, message } => {
+                        // A lookup was refused; its caller times out. Say why.
+                        let _ = ev_tx
+                            .send(ClientEvent::Error(format!("relay: {message}")))
+                            .await;
                     }
                     ServerFrame::Error { code, message } => {
                         let _ = ev_tx

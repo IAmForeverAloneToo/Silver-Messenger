@@ -28,9 +28,12 @@ pub enum ClientFrame {
         #[serde(with = "b64_array")]
         signature: [u8; 64],
     },
-    /// Publish (or refresh) our signed key bundle.
+    /// Publish (or refresh) our signed key bundle. A relay may require an
+    /// invite token the first time an identity registers.
     Publish {
         bundle: KeyBundle,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        invite: Option<String>,
     },
     /// Ask for someone's key bundle.
     Lookup {
@@ -56,6 +59,10 @@ pub enum ErrorCode {
     TooLarge,
     Forbidden,
     MailboxFull,
+    /// Too many requests from this connection; try again shortly.
+    RateLimited,
+    /// This relay only registers identities that present an invite token.
+    InviteRequired,
     Internal,
 }
 

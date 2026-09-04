@@ -510,3 +510,114 @@ async fn rejected_envelopes_leave_the_outbox() {
     assert!(reason.contains("mailbox is full"), "{reason}");
     assert_eq!(alice_c.pending_count(), 0);
 }
+
+#[tokio::test]
+async fn rate_limited_sends_stay_queued_and_retry_later() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/ws", listener.local_addr().unwrap());
+    let state = RelayState::with_store_and_policy(
+        silver_relay::Store::in_memory().unwrap(),
+        Limits::default(),
+        silver_relay::Policy {
+            sends_per_minute: 2,
+            ..Default::default()
+        },
+    );
+    tokio::spawn(silver_relay::serve(listener, state, std::future::pending()));
+
+    let alice = Arc::new(Identity::generate());
+    let bob = Arc::new(Identity::generate());
+    let (_bob_c, mut bob_ev) =
+        Client::spawn(url.clone(), bob.clone(), ConnectOptions::default()).unwrap();
+    wait_for(&mut bob_ev, "bob connected", |e| {
+        matches!(e, ClientEvent::Connected { .. })
+    })
+    .await;
+    let (alice_c, mut alice_ev) = Client::spawn(url, alice, ConnectOptions::default()).unwrap();
+    wait_for(&mut alice_ev, "alice connected", |e| {
+        matches!(e, ClientEvent::Connected { .. })
+    })
+    .await;
+    let bundle = alice_c.lookup(bob.user_id()).await.unwrap().unwrap();
+
+    let mut ids = Vec::new();
+    for i in 0..3 {
+        ids.push(
+            alice_c
+                .send_text(&bundle, format!("burst {i}"))
+                .await
+                .unwrap()
+                .id,
+        );
+    }
+    wait_for(
+        &mut alice_ev,
+        "first sent",
+        |e| matches!(e, ClientEvent::Sent { id } if *id == ids[0]),
+    )
+    .await;
+    wait_for(
+        &mut alice_ev,
+        "second sent",
+        |e| matches!(e, ClientEvent::Sent { id } if *id == ids[1]),
+    )
+    .await;
+    let ev = wait_for(&mut alice_ev, "rate limit notice", |e| {
+        matches!(e, ClientEvent::Error(_))
+    })
+    .await;
+    let ClientEvent::Error(text) = ev else {
+        unreachable!()
+    };
+    assert!(text.contains("rate limiting"), "{text}");
+    // The third message is kept for a later retry, not dropped.
+    assert_eq!(alice_c.pending_ids(), vec![ids[2].clone()]);
+}
+
+#[tokio::test]
+async fn invite_token_gates_registration_of_new_identities() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/ws", listener.local_addr().unwrap());
+    let state = RelayState::with_store_and_policy(
+        silver_relay::Store::in_memory().unwrap(),
+        Limits::default(),
+        silver_relay::Policy {
+            invite_token: Some("secret".into()),
+            ..Default::default()
+        },
+    );
+    tokio::spawn(silver_relay::serve(listener, state, std::future::pending()));
+    let alice = Arc::new(Identity::generate());
+
+    // Without the token the relay refuses to register the identity.
+    let (c, mut ev) = Client::spawn(url.clone(), alice.clone(), ConnectOptions::default()).unwrap();
+    let ev1 = wait_for(&mut ev, "refusal", |e| {
+        matches!(e, ClientEvent::Disconnected { .. })
+    })
+    .await;
+    let ClientEvent::Disconnected { reason, .. } = ev1 else {
+        unreachable!()
+    };
+    assert!(reason.contains("invite"), "{reason}");
+    c.shutdown().await;
+
+    // With it, registration works.
+    let options = ConnectOptions {
+        invite_token: Some("secret".into()),
+        ..Default::default()
+    };
+    let (c, mut ev) = Client::spawn(url.clone(), alice.clone(), options).unwrap();
+    wait_for(&mut ev, "connected with token", |e| {
+        matches!(e, ClientEvent::Connected { .. })
+    })
+    .await;
+    c.shutdown().await;
+
+    // A known identity no longer needs it.
+    let (c, mut ev) = Client::spawn(url, alice, ConnectOptions::default()).unwrap();
+    wait_for(&mut ev, "known identity connects", |e| {
+        matches!(e, ClientEvent::Connected { .. })
+    })
+    .await;
+    c.shutdown().await;
+}

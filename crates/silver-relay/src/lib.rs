@@ -16,7 +16,7 @@ use std::future::Future;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::extract::State;
@@ -48,10 +48,81 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
 /// Default time an unacknowledged envelope is kept.
 pub const DEFAULT_MESSAGE_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
+/// Abuse controls applied per connection, plus the registration policy.
+#[derive(Clone, Debug)]
+pub struct Policy {
+    /// Envelopes one connection may submit per minute (burst of the same size).
+    pub sends_per_minute: u32,
+    /// Key lookups one connection may make per minute.
+    pub lookups_per_minute: u32,
+    /// When set, an identity not yet known to the relay must present this
+    /// token with its first `Publish`.
+    pub invite_token: Option<String>,
+}
+
+impl Default for Policy {
+    fn default() -> Self {
+        Self {
+            sends_per_minute: 60,
+            lookups_per_minute: 30,
+            invite_token: None,
+        }
+    }
+}
+
+/// A token bucket: `burst` tokens, refilled at `per_minute / 60` per second.
+struct Bucket {
+    tokens: f64,
+    burst: f64,
+    per_second: f64,
+    last: Instant,
+}
+
+impl Bucket {
+    fn per_minute(per_minute: u32) -> Self {
+        let burst = f64::from(per_minute.max(1));
+        Self {
+            tokens: burst,
+            burst,
+            per_second: burst / 60.0,
+            last: Instant::now(),
+        }
+    }
+
+    fn try_take(&mut self) -> bool {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last).as_secs_f64();
+        self.last = now;
+        self.tokens = (self.tokens + elapsed * self.per_second).min(self.burst);
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Per-connection rate limiters.
+struct Buckets {
+    sends: Bucket,
+    lookups: Bucket,
+}
+
+impl Buckets {
+    fn new(policy: &Policy) -> Self {
+        Self {
+            sends: Bucket::per_minute(policy.sends_per_minute),
+            lookups: Bucket::per_minute(policy.lookups_per_minute),
+        }
+    }
+}
+
 /// Everything the relay knows. Shared between connections.
 pub struct RelayState {
     store: Store,
     limits: Limits,
+    policy: Policy,
     online: Mutex<HashMap<UserId, Session>>,
     next_session: AtomicU64,
 }
@@ -84,10 +155,23 @@ impl RelayState {
         Ok(Self::with_store(Store::open(path)?, limits))
     }
 
+    pub fn open_with(path: &Path, limits: Limits, policy: Policy) -> anyhow::Result<Arc<Self>> {
+        Ok(Self::with_store_and_policy(
+            Store::open(path)?,
+            limits,
+            policy,
+        ))
+    }
+
     pub fn with_store(store: Store, limits: Limits) -> Arc<Self> {
+        Self::with_store_and_policy(store, limits, Policy::default())
+    }
+
+    pub fn with_store_and_policy(store: Store, limits: Limits, policy: Policy) -> Arc<Self> {
         Arc::new(Self {
             store,
             limits,
+            policy,
             online: Mutex::new(HashMap::new()),
             next_session: AtomicU64::new(0),
         })
@@ -153,7 +237,12 @@ impl RelayState {
         }
     }
 
-    fn publish(&self, me: &UserId, bundle: KeyBundle) -> Result<(), Rejection> {
+    fn publish(
+        &self,
+        me: &UserId,
+        bundle: KeyBundle,
+        invite: Option<&str>,
+    ) -> Result<(), Rejection> {
         if bundle.user_id != *me {
             return Err((
                 ErrorCode::Forbidden,
@@ -162,6 +251,15 @@ impl RelayState {
         }
         if bundle.verify().is_err() {
             return Err((ErrorCode::BadSignature, "bundle signature is invalid"));
+        }
+        if let Some(token) = &self.policy.invite_token {
+            let known = self.bundle(me).is_some();
+            if !known && invite != Some(token.as_str()) {
+                return Err((
+                    ErrorCode::InviteRequired,
+                    "this relay requires an invite token to register a new identity",
+                ));
+            }
         }
         self.store.put_bundle(&bundle).map_err(|e| {
             error!("storing bundle: {e:#}");
@@ -293,6 +391,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>) {
     };
 
     let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut buckets = Buckets::new(&state.policy);
     let session_id = state.register(user, tx.clone());
     info!(%user, session_id, "client authenticated");
     if send(&mut sink, &ServerFrame::AuthOk { user_id: user })
@@ -321,7 +420,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>) {
             },
             inbound = next_frame(&mut stream) => match inbound {
                 Some(Ok(frame)) => {
-                    if let Some(reply) = handle_frame(&state, &user, frame) {
+                    if let Some(reply) = handle_frame(&state, &user, frame, &mut buckets) {
                         let _ = tx.send(Outbound::Frame(reply));
                     }
                 }
@@ -337,22 +436,46 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>) {
     info!(%user, session_id, "client disconnected");
 }
 
-fn handle_frame(state: &RelayState, me: &UserId, frame: ClientFrame) -> Option<ServerFrame> {
+fn handle_frame(
+    state: &RelayState,
+    me: &UserId,
+    frame: ClientFrame,
+    buckets: &mut Buckets,
+) -> Option<ServerFrame> {
     match frame {
         ClientFrame::Auth { .. } => Some(ServerFrame::error(
             ErrorCode::Malformed,
             "already authenticated",
         )),
-        ClientFrame::Publish { bundle } => Some(match state.publish(me, bundle) {
-            Ok(()) => ServerFrame::Published,
-            Err((code, message)) => ServerFrame::error(code, message),
-        }),
-        ClientFrame::Lookup { user_id } => Some(ServerFrame::LookupResult {
-            user_id,
-            bundle: state.bundle(&user_id),
-        }),
+        ClientFrame::Publish { bundle, invite } => {
+            Some(match state.publish(me, bundle, invite.as_deref()) {
+                Ok(()) => ServerFrame::Published,
+                Err((code, message)) => ServerFrame::error(code, message),
+            })
+        }
+        ClientFrame::Lookup { user_id } => {
+            if !buckets.lookups.try_take() {
+                warn!(%me, "lookup rate limit hit");
+                return Some(ServerFrame::error(
+                    ErrorCode::RateLimited,
+                    "too many lookups; slow down",
+                ));
+            }
+            Some(ServerFrame::LookupResult {
+                user_id,
+                bundle: state.bundle(&user_id),
+            })
+        }
         ClientFrame::Send { envelope } => {
             let id = envelope.id.clone();
+            if !buckets.sends.try_take() {
+                warn!(%me, "send rate limit hit");
+                return Some(ServerFrame::Rejected {
+                    id,
+                    code: ErrorCode::RateLimited,
+                    message: "too many messages; slow down".into(),
+                });
+            }
             Some(match state.route(envelope) {
                 Ok(()) => ServerFrame::Sent { id },
                 Err((code, message)) => ServerFrame::Rejected {

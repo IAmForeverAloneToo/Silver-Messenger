@@ -28,6 +28,8 @@ pub struct ConnectOptions {
     pub outbox_path: Option<PathBuf>,
     /// Encrypts the outbox file when the data directory has a passphrase.
     pub outbox_cipher: Option<Arc<FileCipher>>,
+    /// Invite token for relays that only register invited identities.
+    pub invite_token: Option<String>,
 }
 
 pub(crate) fn connector(options: &ConnectOptions) -> anyhow::Result<Connector> {

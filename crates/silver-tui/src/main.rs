@@ -32,6 +32,11 @@ struct Args {
     #[arg(long, env = "SILVER_PROXY")]
     proxy: Option<String>,
 
+    /// Invite token, for relays that only register invited identities.
+    /// Remembered for later runs.
+    #[arg(long, env = "SILVER_INVITE")]
+    invite: Option<String>,
+
     /// Directory for keys, contacts and history (default: platform data dir).
     #[arg(long, env = "SILVER_DATA_DIR")]
     data_dir: Option<PathBuf>,
@@ -142,7 +147,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let mut config = store.load_config()?;
-    if args.relay.is_some() || args.ca_cert.is_some() || args.proxy.is_some() {
+    if args.relay.is_some()
+        || args.ca_cert.is_some()
+        || args.proxy.is_some()
+        || args.invite.is_some()
+    {
         if let Some(relay) = args.relay {
             config.relay_url = Some(relay);
         }
@@ -152,6 +161,9 @@ async fn main() -> anyhow::Result<()> {
         if let Some(proxy) = args.proxy {
             config.proxy = Some(proxy);
         }
+        if let Some(invite) = args.invite {
+            config.invite_token = Some(invite);
+        }
         store.save_config(&config)?;
     }
     let send_epoch = store.ensure_send_epoch(&mut config)?;
@@ -160,6 +172,7 @@ async fn main() -> anyhow::Result<()> {
         proxy: config.proxy.clone().or_else(Proxy::url_from_env),
         outbox_path: Some(store.outbox_path()),
         outbox_cipher: store.cipher(),
+        invite_token: config.invite_token.clone(),
     };
     let relay_url = config
         .relay_url
