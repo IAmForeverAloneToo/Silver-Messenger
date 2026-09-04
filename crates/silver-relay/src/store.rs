@@ -125,13 +125,17 @@ pub struct Store {
 }
 
 impl Store {
-    /// Open (or create) the database file at `path`.
+    /// Open (or create) the database file at `path`. The directory and the
+    /// file are readable by the relay's user only: the database holds every
+    /// mailbox and every key bundle.
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
+            Self::private(parent, 0o700);
         }
         let db = Database::create(path).with_context(|| format!("opening {}", path.display()))?;
+        Self::private(path, 0o600);
         Self::init(db)
     }
 
@@ -139,6 +143,19 @@ impl Store {
     pub fn in_memory() -> anyhow::Result<Self> {
         let db = Database::builder().create_with_backend(redb::backends::InMemoryBackend::new())?;
         Self::init(db)
+    }
+
+    /// Keep `path` to its owner on Unix; other systems keep their defaults.
+    fn private(path: &Path, mode: u32) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (path, mode);
+        }
     }
 
     fn init(db: Database) -> anyhow::Result<Self> {
@@ -800,6 +817,22 @@ mod tests {
             store.enqueue(&old, 300, Limits::default()).unwrap(),
             Enqueue::Stored
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_database_is_readable_by_its_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state").join("relay.redb");
+        let _store = Store::open(&path).unwrap();
+        let dir_mode = std::fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        let file_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!((dir_mode, file_mode), (0o700, 0o600));
     }
 
     #[test]

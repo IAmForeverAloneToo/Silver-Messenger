@@ -354,3 +354,24 @@ async fn uploads_per_address_are_limited() {
         Some(ServerFrame::BlobAck { .. })
     ));
 }
+
+#[tokio::test]
+async fn the_log_names_clients_by_a_pseudonym_unless_asked_not_to() {
+    let (_, quiet) = start(Policy::default()).await;
+    let (_, other) = start(Policy::default()).await;
+    let (_, loud) = start(Policy {
+        log_ids: true,
+        ..Policy::default()
+    })
+    .await;
+    let alice = Identity::generate().user_id();
+    let bob = Identity::generate().user_id();
+    let name = quiet.who(&alice);
+    assert_eq!(name.len(), 12, "{name}");
+    assert!(name.chars().all(|c| c.is_ascii_hexdigit()));
+    assert_eq!(quiet.who(&alice), name, "stable within a run");
+    assert_ne!(quiet.who(&bob), name, "tells clients apart");
+    assert_ne!(other.who(&alice), name, "means nothing to another run");
+    assert!(!name.contains(&alice.to_string()[..8]));
+    assert_eq!(loud.who(&alice), alice.to_string());
+}

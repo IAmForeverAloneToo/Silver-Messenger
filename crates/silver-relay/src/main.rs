@@ -99,6 +99,12 @@ struct Args {
     /// addresses are trusted, which is where the installer puts Caddy.
     #[arg(long, env = "SILVER_RELAY_TRUSTED_PROXY", value_delimiter = ',')]
     trusted_proxy: Vec<IpAddr>,
+
+    /// Write user ids into the log as they are. Without this the log names
+    /// clients by a pseudonym that holds for one run of the relay, so the
+    /// journal is not a record of who used it.
+    #[arg(long, env = "SILVER_RELAY_LOG_IDS")]
+    log_ids: bool,
 }
 
 #[tokio::main]
@@ -128,8 +134,12 @@ async fn main() -> anyhow::Result<()> {
         max_identities: args.max_identities,
         blob_mib_per_address_per_hour: args.blob_mib_per_address_per_hour,
         trusted_proxies: args.trusted_proxy,
+        log_ids: args.log_ids,
         ..Policy::default()
     };
+    if policy.log_ids {
+        info!("user ids are written to the log as they are (--log-ids)");
+    }
     info!(
         "limits: {} connections per address, {} in total, idle after {}s, {} registrations per address per hour, {} identities at most, {} MiB of uploads per address per hour",
         policy.connections_per_address,

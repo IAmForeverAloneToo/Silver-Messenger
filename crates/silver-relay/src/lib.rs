@@ -99,6 +99,11 @@ pub struct Policy {
     /// header names the real client. Empty means the loopback addresses,
     /// where the installer puts the front.
     pub trusted_proxies: Vec<IpAddr>,
+    /// Write user ids into the log as they are. Off, the log shows a
+    /// pseudonym that holds for this run of the relay only, so the log
+    /// still tells one client from another without being a record of who
+    /// used the relay.
+    pub log_ids: bool,
 }
 
 impl Default for Policy {
@@ -118,6 +123,7 @@ impl Default for Policy {
             max_identities: 100_000,
             blob_mib_per_address_per_hour: 256,
             trusted_proxies: Vec::new(),
+            log_ids: false,
         }
     }
 }
@@ -273,6 +279,8 @@ pub struct RelayState {
     counters: Counters,
     next_session: AtomicU64,
     anonymous_submissions: AtomicU64,
+    /// Salt for the pseudonyms in the log; new every run.
+    log_salt: [u8; 16],
 }
 
 struct Session {
@@ -332,11 +340,30 @@ impl RelayState {
             counters: Counters::default(),
             next_session: AtomicU64::new(0),
             anonymous_submissions: AtomicU64::new(0),
+            log_salt: {
+                let mut salt = [0u8; 16];
+                OsRng.fill_bytes(&mut salt);
+                salt
+            },
         })
     }
 
     pub fn online_count(&self) -> usize {
         self.online().len()
+    }
+
+    /// How a user is named in the log: the id itself with `log_ids`, else
+    /// twelve hex digits of a salted hash that mean nothing after this run.
+    pub fn who(&self, user: &UserId) -> String {
+        if self.policy.log_ids {
+            return user.to_string();
+        }
+        use sha2::Digest;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(self.log_salt);
+        hasher.update(user.to_string().as_bytes());
+        let digest = hasher.finalize();
+        digest[..6].iter().map(|b| format!("{b:02x}")).collect()
     }
 
     pub fn policy(&self) -> &Policy {
@@ -796,7 +823,7 @@ impl RelayState {
         let id = envelope.id.clone();
         if !bucket.try_take() {
             match who {
-                Some(me) => warn!(%me, "send rate limit hit"),
+                Some(me) => warn!(who = %self.who(me), "send rate limit hit"),
                 None => warn!("send rate limit hit on an anonymous connection"),
             }
             return ServerFrame::Rejected {
@@ -965,7 +992,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, addr: IpAddr) 
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut conn = Conn::new(&state.policy, addr);
     let session_id = state.register(user, tx.clone());
-    info!(%user, session_id, "client authenticated");
+    let who = state.who(&user);
+    info!(%who, session_id, "client authenticated");
     let auth_ok = ServerFrame::AuthOk {
         user_id: user,
         features: state.features(),
@@ -981,12 +1009,12 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, addr: IpAddr) 
             outbound = rx.recv() => match outbound {
                 Some(Outbound::Frame(frame)) => {
                     if let Err(e) = send(&mut sink, &frame).await {
-                        debug!(%user, session_id, "write failed ({e}); closing");
+                        debug!(%who, session_id, "write failed ({e}); closing");
                         break;
                     }
                 }
                 Some(Outbound::Close) => {
-                    debug!(%user, session_id, "replaced by a newer session");
+                    debug!(%who, session_id, "replaced by a newer session");
                     let _ = sink.close().await;
                     return; // the newer session owns the registry entry now
                 }
@@ -1006,7 +1034,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, addr: IpAddr) 
                 }
                 Ok(None) => break,
                 Err(_) => {
-                    debug!(%user, session_id, "closing an idle connection");
+                    debug!(%who, session_id, "closing an idle connection");
                     state.counters.idle_closed.fetch_add(1, Ordering::Relaxed);
                     break;
                 }
@@ -1015,7 +1043,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, addr: IpAddr) 
     }
 
     state.unregister(&user, session_id);
-    info!(%user, session_id, "client disconnected");
+    info!(%who, session_id, "client disconnected");
 }
 
 /// A connection that only submits envelopes and moves file chunks, and
@@ -1112,7 +1140,7 @@ fn handle_frame(
         }
         ClientFrame::Lookup { user_id } => {
             if !conn.lookups.try_take() {
-                warn!(%me, "lookup rate limit hit");
+                warn!(who = %state.who(me), "lookup rate limit hit");
                 return vec![ServerFrame::error(
                     ErrorCode::RateLimited,
                     "too many lookups; slow down",

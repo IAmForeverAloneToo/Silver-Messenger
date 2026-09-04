@@ -199,6 +199,16 @@ in `/etc/silver-relay/relay.env`, the database in `/var/lib/silver-relay`,
 and logs are in `journalctl -u silver-relay`.
 Remember to open port 7777/tcp in your provider's firewall as well.
 
+The relay is careful about what it keeps. Its log names clients by a
+pseudonym that changes every run (`--log-ids` writes the real ids, for
+debugging); the database directory and file are readable by the `silver`
+user only. What the log still records is when a client was connected, so
+keep the journal short: `journalctl --vacuum-time=7d` trims it once, and
+`MaxRetentionSec=7day` in `/etc/systemd/journald.conf` keeps it so. A relay
+for a few people can run with `SILVER_RELAY_EPHEMERAL=1` in `relay.env`,
+keeping mailboxes in memory only: a restart loses queued messages, and the
+disk never holds any.
+
 **From GitHub Actions** (works for a private repository): add the secrets
 `VPS_HOST` and `VPS_SSH_KEY` (a private key whose public half is in the
 server's `authorized_keys`; `VPS_USER` optionally, default `root`) and run
