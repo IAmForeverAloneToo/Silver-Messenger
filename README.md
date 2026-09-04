@@ -74,6 +74,29 @@ Default data directory: `~/.local/share/silver-message` on Linux,
 `~/Library/Application Support/silver-message` on macOS,
 `%APPDATA%\silver-message\data` on Windows.
 
+## Deploying a relay
+
+A relay is a single static-ish binary that needs one open TCP port. On a
+fresh Debian/Ubuntu or Fedora VPS, as root:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/IAmForeverAloneToo/Silver-Messanger/main/deploy/install.sh | bash
+```
+
+The script installs build tools and Rust, clones this repository into
+`/opt/silver-messanger`, builds the relay, and runs it as the unprivileged
+`silver` user under a hardened systemd unit (`deploy/silver-relay.service`)
+listening on `0.0.0.0:7777`. Re-running the script updates to the latest
+`main`. Settings live in `/etc/silver-relay/relay.env`; logs are in
+`journalctl -u silver-relay`. Remember to open port 7777/tcp in your
+provider's firewall as well.
+
+Clients then start with `silver --relay ws://<server-ip>:7777/ws`. The
+transport is plain WebSocket for now, which is safe for message content
+(everything is end-to-end encrypted before it leaves the client) but exposes
+recipient ids and timing to the network path; put the relay behind a
+TLS-terminating reverse proxy and use `wss://` once you have a domain name.
+
 ## How the crypto works (v1)
 
 * **Identity**: an Ed25519 signing key (its public half is your user id,

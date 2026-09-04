@@ -1,0 +1,32 @@
+[Unit]
+Description=Silver Message relay (stores and forwards encrypted envelopes)
+Documentation=https://github.com/IAmForeverAloneToo/Silver-Messanger
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=silver
+Group=silver
+EnvironmentFile=-/etc/silver-relay/relay.env
+ExecStart=/usr/local/bin/silver-relay
+Restart=always
+RestartSec=2
+LimitNOFILE=65536
+
+# Hardening: the relay needs nothing but a network socket.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

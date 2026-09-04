@@ -1,0 +1,51 @@
+name: Deploy relay
+
+# Runs deploy/install.sh (or a status/log/restart command) on the relay server
+# over SSH. Needs repository secrets:
+#   VPS_HOST     server IP or hostname
+#   VPS_SSH_KEY  private key whose public half is in the server's authorized_keys
+#   VPS_USER     optional, defaults to root
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: What to do on the server
+        type: choice
+        default: deploy
+        options: [deploy, status, logs, restart]
+
+concurrency: deploy-relay
+
+jobs:
+  relay:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up SSH
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+        run: |
+          test -n "$VPS_SSH_KEY" || { echo "::error::repository secret VPS_SSH_KEY is not set"; exit 1; }
+          test -n "$VPS_HOST" || { echo "::error::repository secret VPS_HOST is not set"; exit 1; }
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Run "${{ inputs.action }}" on the server
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER || 'root' }}
+          ACTION: ${{ inputs.action }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          target="$VPS_USER@$VPS_HOST"
+          case "$ACTION" in
+            deploy)  ssh "$target" "SILVER_BRANCH='$BRANCH' bash -s" < deploy/install.sh ;;
+            status)  ssh "$target" "systemctl status silver-relay --no-pager; ss -ltnp | grep silver-relay || true" ;;
+            logs)    ssh "$target" "journalctl -u silver-relay -n 200 --no-pager" ;;
+            restart) ssh "$target" "systemctl restart silver-relay && sleep 1 && systemctl is-active silver-relay" ;;
+          esac
