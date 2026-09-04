@@ -752,6 +752,171 @@ mod tests {
         assert_eq!(truncate("hello world", 6), "hello…");
     }
 
+    /// Replace what varies between runs (clocks, ids) so the screen can be
+    /// compared with a stored snapshot.
+    fn mask(screen: &str) -> String {
+        const BASE58: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+        let is_id = |t: &str| t.len() >= 40 && t.chars().all(|c| BASE58.contains(c));
+        let is_short = |t: &str| {
+            t.ends_with('…')
+                && t.chars().count() == 9
+                && t.chars().take(8).all(|c| BASE58.contains(c))
+        };
+        // Clocks depend on the time zone: "12:00" becomes "hh:mm" wherever
+        // it appears, borders and all.
+        let mut chars: Vec<char> = screen.chars().collect();
+        let mut i = 0;
+        while i + 5 <= chars.len() {
+            let window = &chars[i..i + 5];
+            let clock = window[2] == ':'
+                && [0, 1, 3, 4].iter().all(|&j| window[j].is_ascii_digit())
+                && (i == 0 || !chars[i - 1].is_ascii_digit())
+                && (i + 5 == chars.len() || !chars[i + 5].is_ascii_digit());
+            if clock {
+                chars[i..i + 5].copy_from_slice(&['h', 'h', ':', 'm', 'm']);
+                i += 5;
+            } else {
+                i += 1;
+            }
+        }
+        let screen: String = chars.into_iter().collect();
+        screen
+            .lines()
+            .map(|line| {
+                line.split(' ')
+                    .map(|t| {
+                        if is_id(t) {
+                            "<id>"
+                        } else if is_short(t) {
+                            "<short>…"
+                        } else {
+                            t
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The main screen, drawn into a test backend and compared with
+    /// `tests/snapshots/main.txt`. Run with `UPDATE_SNAPSHOTS=1` to accept
+    /// a changed layout after looking at it.
+    #[tokio::test]
+    async fn the_main_screen_matches_its_snapshot() {
+        use crate::app::{ChatLine, Connection};
+        use ratatui::{Terminal, backend::TestBackend};
+        use silver_client::{Client, ConnectOptions, Contact, ContactRequest, HeldMessage, Store};
+        use silver_protocol::{Identity, Sequence};
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let (identity, _) = store.load_or_create_identity().unwrap();
+        let url = "ws://127.0.0.1:1/ws".to_owned();
+        let (client, _events) =
+            Client::spawn(url.clone(), Arc::new(identity), ConnectOptions::default()).unwrap();
+        let mut app = App::new(
+            store,
+            client,
+            url,
+            false,
+            1,
+            crate::glyphs::UNICODE,
+            crate::theme::Theme::dark(),
+        )
+        .unwrap();
+        app.connection = Connection::Connected;
+        // Fixed identities, so the ids (and the title's width) do not vary.
+        let fixed = |seed: u8| {
+            Identity::from_secrets(&silver_protocol::identity::IdentitySecrets {
+                signing_seed: [seed; 32],
+                dh_secret: [seed; 32],
+            })
+            .user_id()
+        };
+        let bob = fixed(1);
+        let carol = fixed(2);
+        let mut contact = Contact::new(bob);
+        contact.alias = Some("bob".into());
+        contact.verified = true;
+        app.contacts.push(contact);
+        app.contacts.push(Contact::new(carol));
+        // Noon UTC on a fixed day, so the date rule reads the same in any zone.
+        let at = 1_735_732_800_000;
+        app.threads.insert(
+            bob,
+            vec![
+                ChatLine {
+                    id: "1".into(),
+                    direction: Direction::Sent,
+                    timestamp_ms: at,
+                    text: "hello bob".into(),
+                    delivered: true,
+                    failed: false,
+                    receipt: Some(ReceiptKind::Read),
+                    file: None,
+                },
+                ChatLine {
+                    id: "2".into(),
+                    direction: Direction::Received,
+                    timestamp_ms: at + 60_000,
+                    text: "hi alice, this is a longer message that has to wrap onto a second row so the hanging indent shows".into(),
+                    delivered: true,
+                    failed: false,
+                    receipt: None,
+                    file: None,
+                },
+                ChatLine {
+                    id: "3".into(),
+                    direction: Direction::Sent,
+                    timestamp_ms: at + 120_000,
+                    text: "[file] photo.jpg (1.2 MiB)".into(),
+                    delivered: false,
+                    failed: false,
+                    receipt: None,
+                    file: None,
+                },
+            ],
+        );
+        app.unread.insert(carol, vec!["9".into()]);
+        app.requests.push(ContactRequest {
+            from: fixed(3),
+            first_seen_ms: at,
+            messages: vec![HeldMessage {
+                id: "r1".into(),
+                timestamp_ms: at,
+                text: "can we talk?".into(),
+                sequence: Sequence::default(),
+            }],
+        });
+        app.selected = 1;
+        app.input = "/se".into();
+        app.cursor = 3;
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let buf = terminal.backend().buffer();
+        let mut got = String::new();
+        for y in 0..buf.area.height {
+            let line: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+            got.push_str(line.trim_end());
+            got.push('\n');
+        }
+        let got = mask(&got);
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/snapshots/main.txt");
+        if std::env::var_os("UPDATE_SNAPSHOTS").is_some() {
+            std::fs::create_dir_all(std::path::Path::new(path).parent().unwrap()).unwrap();
+            std::fs::write(path, &got).unwrap();
+        }
+        let want = std::fs::read_to_string(path).unwrap_or_default();
+        assert!(
+            got == want,
+            "the screen changed; look at it and run with UPDATE_SNAPSHOTS=1 to accept:\n{got}"
+        );
+    }
+
     #[test]
     fn date_rules_name_today_and_yesterday() {
         let today = NaiveDate::from_ymd_opt(2026, 9, 4).unwrap();

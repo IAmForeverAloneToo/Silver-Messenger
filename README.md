@@ -326,8 +326,17 @@ cargo audit
 ```
 
 CI runs the same checks on every push, plus the test suite on Linux, macOS
-and Windows. Pushing a `v*` tag builds release archives for all platforms
-with a `SHA256SUMS` file and publishes them on the releases page.
+and Windows, and the terminal tests below under two terminal types.
+Pushing a `v*` tag builds release archives for all platforms with a
+`SHA256SUMS` file and publishes them on the releases page.
+
+The terminal client is tested for real in `tests/tui/`: each test starts a
+relay and one or two clients in pseudo-terminals, types, clicks, drags
+and reads the screen back through a terminal emulator (`pip install pyte`
+first; `tests/tui/run.sh` runs them all, `TERMS="xterm-256color linux"`
+for both terminal types, and `test_tmux.py` drives a client inside tmux).
+Which terminals are known to work, and how, is in
+[docs/TERMINALS.md](docs/TERMINALS.md).
 
 The end-to-end tests in `crates/silver-client/tests/e2e.rs` start a relay
 on a random port, connect two clients, and check both directions, offline

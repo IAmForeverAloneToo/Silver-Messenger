@@ -46,3 +46,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --all-targets
       - run: cargo test --workspace
+
+  tui:
+    name: terminal tests (${{ matrix.term }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        term: [xterm-256color, linux]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y tmux
+      - run: pip install pyte || pip install --break-system-packages pyte
+      - run: TERMS=${{ matrix.term }} tests/tui/run.sh

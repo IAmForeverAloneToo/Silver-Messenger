@@ -1,0 +1,24 @@
+┌ Chats ─────────────────┐┌ ✓ bob · <id> ──────────────────┐
+│ System                 ││─────────────────────── Wednesday 1 January 2025 ───────────────────────│
+│ ✓ bob                  ││hh:mm you ✓✓: hello bob                                                 │
+│ <short>…            1 ││hh:mm bob: hi alice, this is a longer message that has to wrap onto a   │
+│ Requests             1 ││           second row so the hanging indent shows                       │
+│                        ││hh:mm you ⋯: [file] photo.jpg (1.2 MiB)                                 │
+│                        ││                                                                        │
+│                        ││                                                                        │
+│                        ││                                                                        │
+│                        ││                                                                        │
+│                        ││                                                                        │
+│                        ││                                                                        │
+│                        ││                                                                        │
+│                        ││                                                                        │
+│                        ││                                                                        │
+│                        ││                                                                        │
+│                        ││                                                                        │
+│                        ││                                                                        │
+│                        ││                                                                        │
+│                        │└────────────────────────────────────────────────────────────────────────┘
+│                        │┌ Command ───────────────────────────────────────────────────────────────┐
+│                        ││/se                                                                     │
+└────────────────────────┘└────────────────────────────────────────────────────────────────────────┘
+ ● connected ws://127.0.0.1:1/ws  /search  /send  /session · Tab completes
