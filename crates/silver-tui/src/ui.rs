@@ -6,15 +6,13 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::{Block, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use silver_client::Direction;
 use silver_protocol::UserId;
 use silver_protocol::envelope::ReceiptKind;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Connection, Level, Pane, View, ViewRow};
-
-const SIDEBAR_WIDTH: u16 = 26;
 
 /// Rows the compose box may grow to before it scrolls.
 const INPUT_MAX_ROWS: u16 = 6;
@@ -27,7 +25,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let [main, status] =
         Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).areas(frame.area());
     let [sidebar, chat] =
-        Layout::horizontal([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(20)]).areas(main);
+        Layout::horizontal([Constraint::Length(app.sidebar_width), Constraint::Min(20)])
+            .areas(main);
     let input_rows = (app.input.split('\n').count() as u16).clamp(1, INPUT_MAX_ROWS);
     let [messages, input] =
         Layout::vertical([Constraint::Min(3), Constraint::Length(input_rows + 2)]).areas(chat);
@@ -173,6 +172,24 @@ fn draw_messages(frame: &mut Frame, app: &mut App, area: Rect) {
         ));
     }
     frame.render_widget(Paragraph::new(visible).block(block), area);
+    if total > height && height > 0 {
+        // On the right border, between the corners; clicks and drags on
+        // it scroll (see App::on_scrollbar).
+        let mut state = ScrollbarState::new(total.saturating_sub(height)).position(start);
+        let track = Rect::new(
+            area.x,
+            area.y + 1,
+            area.width,
+            area.height.saturating_sub(2),
+        );
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None),
+            track,
+            &mut state,
+        );
+    }
     app.view = View {
         pane,
         messages: inner,

@@ -59,6 +59,19 @@ pub struct ChatLine {
     pub failed: bool,
     /// For sent messages: the furthest receipt the peer returned.
     pub receipt: Option<ReceiptKind>,
+    /// For received files: where the file was saved.
+    pub file: Option<PathBuf>,
+}
+
+/// The saved location a file line names, if it does: `[file] name (size)
+/// → /path` (or `->` in ASCII).
+fn saved_file_path(text: &str) -> Option<PathBuf> {
+    let rest = text.strip_prefix("[file] ")?;
+    let path = rest
+        .rsplit_once(" → ")
+        .or_else(|| rest.rsplit_once(" -> "))
+        .map(|(_, path)| path.trim())?;
+    (!path.is_empty()).then(|| PathBuf::from(path))
 }
 
 /// One row in the system pane.
@@ -192,6 +205,12 @@ pub struct App {
     selecting: bool,
     /// The last press: when, where, and how many in a row.
     last_click: Option<(Instant, (usize, usize), u8)>,
+    /// Columns given to the chat list; the divider drags it.
+    pub sidebar_width: u16,
+    /// The left button is down on the divider.
+    resizing: bool,
+    /// The left button is down on the scrollbar.
+    dragging_scrollbar: bool,
     notifier: Notifier,
     pub system: Vec<SystemLine>,
     /// 0 is the system pane; `i >= 1` selects `contacts[i - 1]`.
@@ -248,6 +267,10 @@ impl App {
                 .map(|h| {
                     known_ids.insert(h.id.clone());
                     let delivered = !pending.contains(&h.id);
+                    let file = match h.direction {
+                        Direction::Received => saved_file_path(&h.text),
+                        Direction::Sent => None,
+                    };
                     ChatLine {
                         id: h.id,
                         direction: h.direction,
@@ -256,6 +279,7 @@ impl App {
                         delivered,
                         failed: false,
                         receipt: h.receipt,
+                        file,
                     }
                 })
                 .collect();
@@ -283,6 +307,9 @@ impl App {
             selection: None,
             selecting: false,
             last_click: None,
+            sidebar_width: config.sidebar_width.clamp(12, 60),
+            resizing: false,
+            dragging_scrollbar: false,
             notifier,
             system: Vec::new(),
             selected: 0,
@@ -502,11 +529,55 @@ impl App {
         (row < self.view.rows.len()).then_some((row, (x - pane.x) as usize))
     }
 
+    /// Whether (x, y) is the sidebar's right border, which drags to resize.
+    fn on_divider(&self, x: u16, y: u16) -> bool {
+        let sidebar = self.view.sidebar;
+        sidebar.width > 0
+            && x == sidebar.x + sidebar.width - 1
+            && y >= sidebar.y
+            && y < sidebar.y + sidebar.height
+    }
+
+    /// Whether (x, y) is on the message pane's scrollbar (its right border).
+    fn on_scrollbar(&self, x: u16, y: u16) -> bool {
+        let pane = self.view.messages;
+        self.max_scroll > 0 && x == pane.x + pane.width && y >= pane.y && y < pane.y + pane.height
+    }
+
+    /// Scroll so the position on the scrollbar at row `y` is under the thumb.
+    fn scroll_to_scrollbar(&mut self, y: u16) {
+        let pane = self.view.messages;
+        let span = pane.height.saturating_sub(1).max(1) as usize;
+        let at = (y.saturating_sub(pane.y) as usize).min(span);
+        let from_top = (at * self.max_scroll).div_ceil(span).min(self.max_scroll);
+        self.scroll = self.max_scroll - from_top;
+    }
+
     fn mouse_down(&mut self, x: u16, y: u16) {
+        if self.on_divider(x, y) {
+            self.resizing = true;
+            return;
+        }
+        if self.on_scrollbar(x, y) {
+            self.dragging_scrollbar = true;
+            self.scroll_to_scrollbar(y);
+            return;
+        }
         let Some(cell) = self.cell_at(x, y) else {
-            // A click anywhere else drops the selection.
+            // A click anywhere else drops the selection; in the chat list
+            // it also opens the chat under the pointer.
             self.selection = None;
             self.selecting = false;
+            let sidebar = self.view.sidebar;
+            if sidebar.contains(ratatui::layout::Position::new(x, y))
+                && y > sidebar.y
+                && x > sidebar.x
+            {
+                let row = (y - sidebar.y - 1) as usize;
+                if row < self.pane_count() {
+                    self.select(row);
+                }
+            }
             return;
         };
         let clicks = match self.last_click {
@@ -523,12 +594,27 @@ impl App {
                 });
                 self.selecting = true;
             }
-            2 => self.select_word(cell),
+            2 => match self.file_at_row(cell.0) {
+                Some(path) => {
+                    self.selection = None;
+                    self.open_file(&path);
+                }
+                None => self.select_word(cell),
+            },
             _ => self.select_source(cell.0),
         }
     }
 
     fn mouse_drag(&mut self, x: u16, y: u16) {
+        if self.resizing {
+            let sidebar = self.view.sidebar;
+            self.sidebar_width = (x.saturating_sub(sidebar.x) + 1).clamp(12, 60);
+            return;
+        }
+        if self.dragging_scrollbar {
+            self.scroll_to_scrollbar(y);
+            return;
+        }
         if !self.selecting {
             return;
         }
@@ -550,16 +636,27 @@ impl App {
     }
 
     fn mouse_up(&mut self) {
+        if self.resizing {
+            self.resizing = false;
+            let mut config = self.store.load_config().unwrap_or_default();
+            config.sidebar_width = self.sidebar_width;
+            if let Err(e) = self.store.save_config(&config) {
+                self.toast(format!("Could not save config: {e}"));
+            }
+            return;
+        }
+        self.dragging_scrollbar = false;
         if !self.selecting {
             return;
         }
         self.selecting = false;
-        // A click without a drag is not a selection.
-        if self
+        // A click without a drag is not a selection; it may be an open.
+        if let Some(s) = self
             .selection
-            .is_some_and(|s| s.anchor == s.head && !s.rows_only)
+            .filter(|s| s.anchor == s.head && !s.rows_only)
         {
             self.selection = None;
+            self.click_row(s.anchor.0);
         }
     }
 
@@ -1093,6 +1190,7 @@ impl App {
             "unblock" => self.cmd_unblock(&rest),
             "blocked" => self.cmd_blocked(),
             "send" | "file" | "attach" => self.cmd_send(&rest),
+            "open" => self.cmd_open(),
             "relay" => self.cmd_relay(&rest),
             "quit" | "q" | "exit" => self.should_quit = true,
             other => self.toast(format!("Unknown command /{other}. Try /help.")),
@@ -1118,13 +1216,15 @@ impl App {
             "  /block <n|user-id>       ignore a requester or contact from now on; /unblock <user-id> undoes it",
             "  /blocked                 list blocked ids",
             "  /send <path>             send a file (up to 16 MiB) to the selected contact; received files land in <data-dir>/downloads",
+            "  /open                    open the last file received in this chat (or double-click its line)",
             "  /search <text>           find messages in the selected chat (or all chats from System)",
             "  /me                      show your own id",
             "  /relay <ws-url>          change the relay (takes effect on next start)",
             "  /quit                    exit",
             "Keys: Tab/Shift-Tab or Alt-Up/Down switch chats · Up/Down recall earlier lines · Alt-Enter new line",
             "      PgUp/PgDn or mouse wheel scroll, Ctrl-Home/End jump · Esc clears input or the selection",
-            "      Select text by dragging, double click a word, triple click a message, or Shift-Up/Down for rows",
+            "      Mouse: click a chat in the list to open it, drag the divider to resize the list, drag the scrollbar",
+            "      Select text by dragging, double click a word, triple click a message, or Shift-Up/Down for messages",
             "      Ctrl-V, Shift-Insert or right click paste · Ctrl-C copies the selection (twice: quit) · Ctrl-Q quits",
         ] {
             self.system(Level::Info, line);
@@ -1690,6 +1790,7 @@ impl App {
                                 delivered,
                                 failed: false,
                                 receipt: None,
+                                file: None,
                             },
                         );
                         self.scroll = 0;
@@ -1736,7 +1837,15 @@ impl App {
                     self.toast(format!("Could not save history: {e}"));
                 }
                 match result {
-                    Ok(path) => self.toast(format!("Saved {}", path.display())),
+                    Ok(path) => {
+                        if let Some(line) = self.line_mut(&peer, &id) {
+                            line.file = Some(path.clone());
+                        }
+                        self.toast(format!(
+                            "Saved {}. Double-click the line or /open to open it.",
+                            path.display()
+                        ));
+                    }
                     Err(e) => self.system(
                         Level::Warn,
                         format!(
@@ -1775,6 +1884,7 @@ impl App {
             }
             ClientEvent::Message(message) => {
                 let message = *message;
+                tracing::debug!(id = %message.id, "front end received a message");
                 if self.known_ids.contains(&message.id) {
                     return; // relay re-delivered something we already have
                 }
@@ -1843,6 +1953,7 @@ impl App {
                         delivered: true,
                         failed: false,
                         receipt: None,
+                        file: None,
                     },
                 );
                 // Shown means in the selected chat of a window that has focus;
@@ -1948,13 +2059,60 @@ impl App {
         });
     }
 
-    fn set_line_text(&mut self, peer: &UserId, id: &str, text: String) {
-        if let Some(line) = self
-            .threads
+    fn line_mut(&mut self, peer: &UserId, id: &str) -> Option<&mut ChatLine> {
+        self.threads
             .get_mut(peer)
             .and_then(|lines| lines.iter_mut().rev().find(|l| l.id == id))
-        {
+    }
+
+    fn set_line_text(&mut self, peer: &UserId, id: &str, text: String) {
+        if let Some(line) = self.line_mut(peer, id) {
             line.text = text;
+        }
+    }
+
+    /// Open a received file with whatever the system uses for its kind.
+    fn open_file(&mut self, path: &std::path::Path) {
+        match open::that_detached(path) {
+            Ok(()) => self.toast(format!("Opening {}", path.display())),
+            Err(e) => self.toast(format!("Could not open {}: {e}", path.display())),
+        }
+    }
+
+    /// `/open`: the last received file in this chat that was saved.
+    fn cmd_open(&mut self) {
+        let Some(peer) = self.selected_contact().map(|c| c.user_id) else {
+            self.toast("Select a chat first.");
+            return;
+        };
+        let path = self
+            .threads
+            .get(&peer)
+            .and_then(|lines| lines.iter().rev().find_map(|l| l.file.clone()));
+        match path {
+            Some(path) => self.open_file(&path),
+            None => self.toast("No saved file in this chat yet."),
+        }
+    }
+
+    /// The saved file behind a row of the message pane, if it shows one.
+    fn file_at_row(&self, row: usize) -> Option<PathBuf> {
+        let Pane::Thread(peer) = self.view.pane else {
+            return None;
+        };
+        let source = self.view.rows.get(row)?.source?;
+        self.threads.get(&peer)?.get(source)?.file.clone()
+    }
+
+    /// A single click on a received file's line says how to open it; a
+    /// double click does.
+    fn click_row(&mut self, row: usize) {
+        if let Some(path) = self.file_at_row(row) {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            self.toast(format!("Double-click to open {name}, or /open."));
         }
     }
 
@@ -2102,6 +2260,7 @@ impl App {
                     delivered: true,
                     failed: false,
                     receipt: None,
+                    file: None,
                 },
             );
         }

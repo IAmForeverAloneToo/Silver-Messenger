@@ -527,10 +527,15 @@ impl RelayState {
             })?;
         match outcome {
             Enqueue::Stored => {
-                if let Some(session) = self.online().get(&envelope.to) {
-                    let _ = session
-                        .tx
-                        .send(Outbound::Frame(Box::new(ServerFrame::Deliver { envelope })));
+                let id = envelope.id.clone();
+                match self.online().get(&envelope.to) {
+                    Some(session) => {
+                        debug!(%id, "queued and pushed to the recipient's connection");
+                        let _ = session
+                            .tx
+                            .send(Outbound::Frame(Box::new(ServerFrame::Deliver { envelope })));
+                    }
+                    None => debug!(%id, "queued; recipient offline"),
                 }
                 Ok(())
             }
@@ -699,7 +704,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>) {
         tokio::select! {
             outbound = rx.recv() => match outbound {
                 Some(Outbound::Frame(frame)) => {
-                    if send(&mut sink, &frame).await.is_err() {
+                    if let Err(e) = send(&mut sink, &frame).await {
+                        debug!(%user, session_id, "write failed ({e}); closing");
                         break;
                     }
                 }

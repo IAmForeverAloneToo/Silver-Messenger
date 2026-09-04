@@ -857,7 +857,9 @@ async fn session(
                 match frame {
                     ServerFrame::Deliver { envelope } => {
                         let id = envelope.id.clone();
+                        debug!(%id, "envelope delivered by the relay");
                         deliver(setup, envelope, ev_tx).await;
+                        debug!(%id, "envelope handed to the front end; acknowledging");
                         // Ack either way so a poison envelope cannot wedge the mailbox.
                         if sink.send(text(&ClientFrame::Ack { id })).await.is_err() {
                             return Ok(Exit::Disconnected("ack failed".into()));
