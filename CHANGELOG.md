@@ -4,7 +4,7 @@ Notable changes to Silver Messenger. Versions follow [semantic
 versioning](https://semver.org); while the major version is 0, a minor bump
 means behaviour or the wire protocol changed in a way worth reading about.
 
-## Unreleased
+## 0.3.0 - 2026-09-04
 
 Forward secrecy. Clients and relays from this version interoperate with
 0.2.0 peers: a recipient without prekeys, or anyone behind an older relay,
