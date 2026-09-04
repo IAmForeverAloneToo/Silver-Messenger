@@ -436,8 +436,7 @@ CI runs the same checks on every push, plus the test suite on Linux, macOS
 and Windows, the terminal tests below under two terminal types, a minute
 of fuzzing per parser, and a reproducibility check that builds the Linux
 binaries twice from scratch and compares them. Every GitHub Action is
-pinned to a commit hash and Dependabot keeps the pins and the crates
-current; the OpenSSF Scorecard runs weekly.
+pinned to a commit hash; the OpenSSF Scorecard runs weekly.
 
 Pushing a `v*` tag (or running the release workflow with a tag) builds
 the archives for all platforms with `cargo auditable`, attaches a CycloneDX

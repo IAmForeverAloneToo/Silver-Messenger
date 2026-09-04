@@ -60,7 +60,7 @@ all. The gaps that matter are listed at the end with what closes them.
 | 1.12.2 Uploaded files served safely | N/A | The relay stores ciphertext chunks by random id and never serves files as files. |
 | 1.14.1 Segregation of components | Met | Separate crates; the relay has no client code and vice versa. |
 | 1.14.2 Binary signatures, trusted pipeline | Met | Reproducible builds, SLSA provenance, minisign signature on `SHA256SUMS` (once the key is set up); README "Verifying a release". |
-| 1.14.3 Pipeline warns on outdated or insecure components | Met | `cargo audit`, `cargo deny` on every push; Dependabot. |
+| 1.14.3 Pipeline warns on outdated or insecure components | Met | `cargo audit`, `cargo deny` on every push. |
 | 1.14.4 Deployment automated and repeatable | Met | `deploy/install.sh`, the deploy workflow, pinned actions. |
 | 1.14.6 No unsupported or insecure client technologies | Met | Native Rust binaries; no plugins, no embedded browser. |
 
@@ -252,7 +252,7 @@ routes (`/` with the source notice, `/healthz`).
 | 14.1.2 Compiler flags | Met | Rust; `forbid(unsafe_code)`; `-D warnings`; overflow checks on in release. |
 | 14.1.3 Server hardened | Met | systemd unit as in 1.2.1; relay data directory 0700 and database 0600; runs as an unprivileged user. |
 | 14.1.4 Deployment automated | Met | `deploy/` and the deploy workflow. |
-| 14.2.1 Components up to date | Met | Dependabot (weekly, grouped), `cargo audit` and `cargo deny` on every push. |
+| 14.2.1 Components up to date | Partly | `cargo audit` and `cargo deny` on every push catch a vulnerable or yanked crate; routine version and action-pin updates are done by hand, so they lag. |
 | 14.2.2 Unneeded features removed | Met | Minimal feature sets (rustls without defaults, ml-kem with zeroize and getrandom only). |
 | 14.2.4 Trusted repositories only | Met | `cargo deny` allows crates.io only. |
 | 14.2.5 SBOM | Met | CycloneDX per binary in every release; `cargo auditable` in the binaries. |

@@ -22,7 +22,7 @@ name: Release binaries
 #   * builds with locked dependencies, remapped paths and a fixed timestamp,
 #     so a rebuild of the same commit gives the same bytes (CI checks this
 #     for Linux on every push).
-# Every action is pinned to a commit hash; Dependabot moves the pins.
+# Every action is pinned to a commit hash; the pins are moved by hand.
 
 on:
   push:

@@ -90,7 +90,7 @@ Release binaries are reproducible and signed; the README section
 published hashes, the maintainer's signature and the build provenance, and
 how to rebuild the tagged commit and compare. Dependencies are checked
 against the RustSec advisory database on every push (`cargo audit`,
-`cargo deny`) and by Dependabot between pushes.
+`cargo deny`).
 
 ## How the code is assessed
 

@@ -251,7 +251,7 @@ sends, so a message cannot drive the terminal.
         talked to over `ws://`. The threat model then says exactly what
         the relay still learns. (Signal Sealed Sender; ASVS V9.)
 33. [x] **Supply chain and release integrity** (S). GitHub Actions
-        pinned by commit hash, Dependabot for actions and crates,
+        pinned by commit hash,
         `cargo auditable` builds and a CycloneDX SBOM attached to each
         release, SLSA build provenance attestations, `SHA256SUMS`
         signed with a minisign key published in the repository and the

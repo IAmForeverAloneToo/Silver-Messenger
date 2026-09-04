@@ -335,9 +335,10 @@ protection above. What is done about that, from 0.6.0:
   is published next to each binary.
 - **The build itself.** Every GitHub Action is pinned to a commit hash,
   workflow tokens can only read except where publishing needs to write,
-  Dependabot proposes updates so pins do not rot, `cargo deny` refuses
-  advisories, unexpected licences and unknown sources, and the OpenSSF
-  Scorecard reports on the repository's practices in public.
+  `cargo deny` refuses advisories, unexpected licences and unknown
+  sources, and the OpenSSF Scorecard reports on the repository's
+  practices in public. Pins are moved by hand; `cargo audit` on every
+  push is what catches a vulnerable crate in the meantime.
 - **Updates are never automatic.** `silver --check-release` asks the
   releases page once, on request, and prints the answer; nothing is
   downloaded or run.

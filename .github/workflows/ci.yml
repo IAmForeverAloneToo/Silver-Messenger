@@ -1,7 +1,7 @@
 name: CI
 
 # Every action is pinned to a commit hash (the version follows in a
-# comment); Dependabot moves the pins. The workflow token can only read.
+# comment); the pins are moved by hand. The workflow token can only read.
 
 on:
   push:
