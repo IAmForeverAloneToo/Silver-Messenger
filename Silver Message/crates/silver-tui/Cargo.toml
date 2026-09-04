@@ -1,0 +1,24 @@
+[package]
+name = "silver-tui"
+description = "Terminal user interface for Silver Message"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "silver"
+path = "src/main.rs"
+
+[dependencies]
+silver-protocol = { workspace = true }
+silver-client = { workspace = true }
+tokio = { workspace = true }
+ratatui = { workspace = true }
+unicode-width = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

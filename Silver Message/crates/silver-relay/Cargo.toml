@@ -1,0 +1,24 @@
+[package]
+name = "silver-relay"
+description = "Self-hosted store-and-forward relay for Silver Message (sees only encrypted blobs)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "silver-relay"
+path = "src/main.rs"
+
+[dependencies]
+silver-protocol = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+futures-util = { workspace = true }
+serde_json = { workspace = true }
+rand = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
