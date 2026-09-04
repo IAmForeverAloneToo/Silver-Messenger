@@ -111,6 +111,13 @@ struct Args {
     #[arg(long)]
     force: bool,
 
+    /// Ask the releases page once whether a newer version exists, print
+    /// the answer, and exit. Never happens by itself: the request shows
+    /// GitHub this computer's address. Goes through --proxy / --ca-cert
+    /// from this command line (or the environment), and touches no data.
+    #[arg(long)]
+    check_release: bool,
+
     /// Submit messages on the authenticated relay connection even when the
     /// relay offers a separate anonymous one (which hides the sender from
     /// the relay). Useful behind networks that allow one connection only.
@@ -185,6 +192,10 @@ fn harden_process() {
 
 async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
     let args = Args::parse();
+
+    if args.check_release {
+        return check_release(&args).await;
+    }
 
     if args.data_dir.is_none() {
         Store::migrate_legacy_dir();
@@ -448,6 +459,39 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
             }
         }
     }
+}
+
+/// `--check-release`: one request to the releases page, then a line.
+async fn check_release(args: &Args) -> anyhow::Result<()> {
+    use silver_client::update::{RELEASES_API, compare, latest_release};
+    use std::cmp::Ordering;
+
+    let options = ConnectOptions {
+        extra_ca_certs: args.ca_cert.iter().cloned().collect(),
+        proxy: args.proxy.clone().or_else(Proxy::url_from_env),
+        ..Default::default()
+    };
+    let current = env!("CARGO_PKG_VERSION");
+    let release = latest_release(RELEASES_API, &options)
+        .await
+        .context("asking the releases page")?;
+    match compare(release.version(), current) {
+        Some(Ordering::Greater) => println!(
+            "Silver Messenger {} is available; this is {current}.\n{}",
+            release.version(),
+            release.url
+        ),
+        Some(Ordering::Equal) => println!("Silver Messenger {current} is the newest release."),
+        Some(Ordering::Less) => println!(
+            "This is Silver Messenger {current}; the newest release is {}.",
+            release.version()
+        ),
+        None => println!(
+            "The newest release is called {}; this is {current}.\n{}",
+            release.tag, release.url
+        ),
+    }
+    Ok(())
 }
 
 /// A relay once reached over `wss://` is not talked to over `ws://`.

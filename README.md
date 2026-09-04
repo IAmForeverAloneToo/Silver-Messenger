@@ -58,6 +58,36 @@ ASCII marks (`v`, `vv`, `x`, `..`) by itself; `/marks` changes that, and
 refused. Right-click `silver` and choose Open once, or run
 `xattr -d com.apple.quarantine silver`.
 
+### Verifying a release
+
+Every release page carries, next to the archives, a `SHA256SUMS` file,
+its signature `SHA256SUMS.minisig`, and a CycloneDX SBOM per binary; every
+file has a build provenance attestation from GitHub. To check a download:
+
+```sh
+sha256sum -c SHA256SUMS --ignore-missing          # the archive is what was published
+minisign -Vm SHA256SUMS -p minisign.pub           # ...by the maintainer (key: minisign.pub in this repository)
+gh attestation verify silver-messenger-*.tar.gz --owner IAmForeverAloneToo   # ...by the release workflow, from the tagged commit
+cargo audit bin silver                            # the dependencies inside the binary, against the advisory database
+```
+
+The binaries are reproducible: build the tagged commit yourself and the
+bytes match (CI does this twice on every push for Linux and fails when
+they differ). From a fresh clone at the tag, with the same stable
+toolchain as the release (see the workflow run), on Linux:
+
+```sh
+SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" \
+RUSTFLAGS="--remap-path-prefix=$PWD=/src --remap-path-prefix=$HOME/.cargo=/cargo" \
+cargo auditable build --release --locked --workspace --target x86_64-unknown-linux-musl
+sha256sum target/x86_64-unknown-linux-musl/release/silver-relay   # compare with SHA256SUMS
+```
+
+`silver --check-release` asks the releases page once whether a newer
+version exists and prints the answer. It never runs by itself, downloads
+nothing, and tells GitHub only that some computer at your address runs
+Silver Messenger.
+
 ### From source
 
 You need a Rust toolchain (https://rustup.rs). From the repository root:
@@ -159,6 +189,7 @@ silver --ca-cert <PEM>     extra trusted root certificates for wss://; remembere
 silver --proxy <URL>       proxy to reach the relay through: http://host:port (CONNECT) or socks5://host:port (Tor); remembered (env SILVER_PROXY, else HTTPS_PROXY / ALL_PROXY)
 silver --pin <PIN>         pin the relay's TLS key (sha256:<hex>); refuse any other; remembered (env SILVER_PIN)
 silver --print-pin         connect once, print the pin of the key the relay presents and whether its certificate is trusted, and exit
+silver --check-release     ask the releases page once whether a newer version exists, print the answer, and exit (never by itself)
 silver --invite <TOKEN>    invite token for a relay that only registers invited identities; remembered (env SILVER_INVITE)
 silver --print-id          print your user id and exit
 silver --print-invite      print your invite link (silver://add/<id>?relay=…) and exit
@@ -377,8 +408,8 @@ it does not, is in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
   connection; it shows a pending mark (`⋯`) until the relay accepts it, and a
   failure mark (`✗`) if the relay refuses it for good.
 
-What it does **not** do: deniability (messages are signed), padding of
-message sizes, cover traffic. The ordered plan is in
+What it does **not** do: deniability (messages are signed), cover
+traffic, post-quantum key agreement. The ordered plan is in
 [ROADMAP.md](ROADMAP.md).
 
 ## Development
@@ -392,9 +423,24 @@ cargo audit
 ```
 
 CI runs the same checks on every push, plus the test suite on Linux, macOS
-and Windows, and the terminal tests below under two terminal types.
-Pushing a `v*` tag builds release archives for all platforms with a
-`SHA256SUMS` file and publishes them on the releases page.
+and Windows, the terminal tests below under two terminal types, a minute
+of fuzzing per parser, and a reproducibility check that builds the Linux
+binaries twice from scratch and compares them. Every GitHub Action is
+pinned to a commit hash and Dependabot keeps the pins and the crates
+current; the OpenSSF Scorecard runs weekly.
+
+Pushing a `v*` tag (or running the release workflow with a tag) builds
+the archives for all platforms with `cargo auditable`, attaches a CycloneDX
+SBOM per binary, writes `SHA256SUMS`, signs it, attests the build
+provenance, and publishes it all on the releases page.
+
+**Signing releases** is the one step that needs a maintainer's key, kept
+outside the build: once, run `minisign -G -W -p minisign.pub -s
+minisign.key`, commit `minisign.pub` at the repository root, and put the
+contents of `minisign.key` in the repository secret `MINISIGN_SECRET_KEY`
+(the key is generated unencrypted so the workflow can use it; the secret
+store protects it). Until then the workflow says so and publishes
+`SHA256SUMS` unsigned; the provenance attestation is there either way.
 
 The terminal client is tested for real in `tests/tui/`: each test starts a
 relay and one or two clients in pseudo-terminals, types, clicks, drags

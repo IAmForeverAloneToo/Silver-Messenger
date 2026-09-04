@@ -250,7 +250,7 @@ sends, so a message cannot drive the terminal.
         and a rule that a relay once reached over `wss://` is never
         talked to over `ws://`. The threat model then says exactly what
         the relay still learns. (Signal Sealed Sender; ASVS V9.)
-33. [ ] **Supply chain and release integrity** (S). GitHub Actions
+33. [x] **Supply chain and release integrity** (S). GitHub Actions
         pinned by commit hash, Dependabot for actions and crates,
         `cargo auditable` builds and a CycloneDX SBOM attached to each
         release, SLSA build provenance attestations, `SHA256SUMS`

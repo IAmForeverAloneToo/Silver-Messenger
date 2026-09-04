@@ -1,0 +1,31 @@
+# Keeps the pinned GitHub Actions and the Cargo dependencies current.
+# Actions are pinned by commit hash in the workflows; Dependabot bumps the
+# hash and the version comment together. Crate updates arrive grouped, one
+# pull request a week for everything that is not a major version, so the
+# advisory and licence checks in CI see them all at once.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      crates:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: cargo
+    directory: /fuzz
+    schedule:
+      interval: weekly
+    groups:
+      fuzz-crates:
+        patterns: ["*"]

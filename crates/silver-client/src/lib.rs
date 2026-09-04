@@ -21,6 +21,7 @@ pub mod sessions;
 pub mod store;
 mod submitter;
 pub mod tls;
+pub mod update;
 pub mod vault;
 
 pub use backup::{BackupPayload, export_backup, import_backup, read_backup};

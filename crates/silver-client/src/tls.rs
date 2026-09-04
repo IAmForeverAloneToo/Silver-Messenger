@@ -155,16 +155,25 @@ pub(crate) struct Connectors {
     pub(crate) anonymous: Connector,
 }
 
-pub(crate) fn connectors(options: &ConnectOptions) -> anyhow::Result<Connectors> {
-    let verifier: Arc<dyn ServerCertVerifier> = if options.pins.is_empty() {
+/// The TLS configuration the options describe: the trust store (plus any
+/// extra roots) and, when `pins` is not empty, the pin check on top.
+pub(crate) fn tls_config(
+    options: &ConnectOptions,
+    pins: &[Pin],
+) -> anyhow::Result<rustls::ClientConfig> {
+    let verifier: Arc<dyn ServerCertVerifier> = if pins.is_empty() {
         chain_verifier(options)?
     } else {
         Arc::new(PinnedVerifier {
             inner: chain_verifier(options)?,
-            pins: options.pins.clone(),
+            pins: pins.to_vec(),
         })
     };
-    let config = client_config(verifier);
+    Ok(client_config(verifier))
+}
+
+pub(crate) fn connectors(options: &ConnectOptions) -> anyhow::Result<Connectors> {
+    let config = tls_config(options, &options.pins)?;
     let mut anonymous = config.clone();
     anonymous.resumption = Resumption::disabled();
     Ok(Connectors {

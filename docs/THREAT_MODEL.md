@@ -232,6 +232,43 @@ traffic, post-quantum key agreement.
    the same identity is either a reinstall or a stolen identity key. The
    client says so, drops the sessions, and leaves the decision to the user.
 
+## Supply chain
+
+The software itself is an attack surface: a tampered download, a
+poisoned dependency or a compromised build machine defeats every
+protection above. What is done about that, from 0.6.0:
+
+- **Builds you can check.** Release binaries are built from locked
+  dependencies with build paths and timestamps removed, so rebuilding the
+  tagged commit gives the same bytes; CI rebuilds the Linux binaries twice
+  on every push and fails if they differ. The README says how to repeat
+  the build and compare.
+- **Provenance and signatures.** Every release file carries a SLSA build
+  provenance attestation issued by GitHub for the workflow run that built
+  it (`gh attestation verify`), and `SHA256SUMS` is signed with the
+  project's minisign key once that key is set up (`minisign.pub` in the
+  repository). The attestation says *which workflow built what from which
+  commit*; the signature says *the maintainer published this*. Together
+  they leave a hostile mirror, a swapped download, or a compromised GitHub
+  account without the signing key nothing to offer that checks out.
+- **What is inside.** Binaries are built with `cargo auditable`, so the
+  exact dependency versions are embedded and `cargo audit bin` can check
+  a binary against the advisory database years later; a CycloneDX SBOM
+  is published next to each binary.
+- **The build itself.** Every GitHub Action is pinned to a commit hash,
+  workflow tokens can only read except where publishing needs to write,
+  Dependabot proposes updates so pins do not rot, `cargo deny` refuses
+  advisories, unexpected licences and unknown sources, and the OpenSSF
+  Scorecard reports on the repository's practices in public.
+- **Updates are never automatic.** `silver --check-release` asks the
+  releases page once, on request, and prints the answer; nothing is
+  downloaded or run.
+
+Not addressed: a compromised Rust toolchain or GitHub-hosted runner (the
+attestation would then be honestly issued for a dishonest build; the
+reproducible-build check by an independent party is the answer), and a
+maintainer's account plus signing key both being taken.
+
 ## Out of scope
 
 - Compromise of the operating system or terminal of a running client.

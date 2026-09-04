@@ -64,6 +64,16 @@ relay-bound login), so an older peer reads a newer one and vice versa.
   blob-chunk, session, invite-link, file-name and stored-record parsers
   run in CI, alongside stable-toolchain tests that throw random bytes at
   the same parsers and assert they never panic.
+- **Releases you can check.** Binaries are built with `cargo auditable`
+  from locked dependencies, with build paths and timestamps removed, so a
+  rebuild of the tagged commit gives the same bytes (CI rebuilds twice on
+  every push and compares). Each release carries a CycloneDX SBOM per
+  binary, a SLSA build provenance attestation for every file, and a
+  `SHA256SUMS` signed with the project's minisign key once the key is
+  set up. Every GitHub Action is pinned to a commit hash, Dependabot
+  keeps the pins and the crates current, and the OpenSSF Scorecard runs
+  weekly. `silver --check-release` asks the releases page whether a
+  newer version exists; only on request, never by itself.
 
 ### Changed
 

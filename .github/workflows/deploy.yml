@@ -8,6 +8,10 @@ name: Deploy relay
 #   VPS_USER     optional, defaults to root
 # and optionally the repository variable VPS_DOMAIN (a hostname pointing at
 # the server) to serve the relay over HTTPS/wss on port 443.
+#
+# The binary is built the same way as a release (cargo auditable, locked
+# dependencies, remapped paths), so it carries its dependency list and
+# matches what the release workflow would produce for the same commit.
 
 on:
   workflow_dispatch:
@@ -18,16 +22,20 @@ on:
         default: deploy
         options: [deploy, status, logs, restart]
 
+permissions:
+  contents: read
+
 concurrency: deploy-relay
 
 env:
   TARGET: x86_64-unknown-linux-musl
+  CARGO_INCREMENTAL: 0
 
 jobs:
   relay:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up SSH
         env:
@@ -43,19 +51,30 @@ jobs:
 
       - name: Install Rust
         if: inputs.action == 'deploy'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
         with:
+          toolchain: stable
           targets: x86_64-unknown-linux-musl
 
       - name: Cache cargo
         if: inputs.action == 'deploy'
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Install cargo-auditable
+        if: inputs.action == 'deploy'
+        run: cargo install --locked cargo-auditable@0.7.5
 
       - name: Build static relay binary
         if: inputs.action == 'deploy'
         run: |
-          cargo build --release -p silver-relay --target "$TARGET"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq musl-tools
+          export CC_x86_64_unknown_linux_musl=musl-gcc
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          export RUSTFLAGS="--remap-path-prefix=${{ github.workspace }}=/src --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
+          cargo auditable build --release --locked -p silver-relay --target "$TARGET"
           file "target/$TARGET/release/silver-relay"
+          sha256sum "target/$TARGET/release/silver-relay"
 
       - name: Install on the server
         if: inputs.action == 'deploy'

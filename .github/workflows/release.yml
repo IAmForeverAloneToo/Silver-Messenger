@@ -8,6 +8,21 @@ name: Release binaries
 #   * Manual run with a tag (e.g. v0.1.0): the tag is created on the selected
 #     branch and the archives are published on a GitHub release.
 #   * Tag push `v*`: the same archives are published on a GitHub release.
+#
+# What a release carries, and how to check it (see README, "Verifying a
+# release"):
+#   * binaries built with `cargo auditable`, so `cargo audit bin <file>`
+#     lists the exact dependencies inside them;
+#   * a CycloneDX SBOM per binary and target;
+#   * SHA256SUMS over every file, signed with the project's minisign key
+#     (minisign.pub in the repository) when the MINISIGN_SECRET_KEY secret
+#     is set;
+#   * a SLSA build provenance attestation from GitHub for every file, which
+#     `gh attestation verify <file> --owner IAmForeverAloneToo` checks;
+#   * builds with locked dependencies, remapped paths and a fixed timestamp,
+#     so a rebuild of the same commit gives the same bytes (CI checks this
+#     for Linux on every push).
+# Every action is pinned to a commit hash; Dependabot moves the pins.
 
 on:
   push:
@@ -20,10 +35,11 @@ on:
         default: ""
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
 
 jobs:
   build:
@@ -42,15 +58,20 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: ${{ matrix.target }}
+
+      - name: Install cargo-auditable and cargo-cyclonedx
+        shell: bash
+        run: cargo install --locked cargo-auditable@0.7.5 cargo-cyclonedx@0.5.9
 
       - name: Install musl toolchain
         if: contains(matrix.target, 'musl')
@@ -61,7 +82,20 @@ jobs:
 
       - name: Build
         shell: bash
-        run: cargo build --release --workspace --target "${{ matrix.target }}"
+        run: |
+          # The same flags as the "reproducible build" job in ci.yml and as
+          # the README's rebuild instructions: no build paths or times end
+          # up in the binary, so anyone can rebuild the commit and compare.
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          export RUSTFLAGS="--remap-path-prefix=${{ github.workspace }}=/src --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
+          cargo auditable build --release --locked --workspace --target "${{ matrix.target }}"
+
+      - name: SBOM
+        shell: bash
+        run: |
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          cargo cyclonedx --format json --describe binaries --target "${{ matrix.target }}" --target-in-filename --all
+          find crates -name '*.cdx.json' -print
 
       - name: Package
         shell: bash
@@ -77,13 +111,20 @@ jobs:
             esac
           fi
           name="silver-messenger-${version}-${{ matrix.target }}"
-          mkdir -p "dist/$name"
+          mkdir -p "dist/$name/sbom"
           ext=""
           case "${{ matrix.target }}" in *windows*) ext=".exe" ;; esac
           for bin in silver silver-relay; do
             cp "target/${{ matrix.target }}/release/$bin$ext" "dist/$name/"
           done
           cp README.md CHANGELOG.md LICENSE "dist/$name/"
+          # The SBOMs go inside the archive and next to it, so they can be
+          # read without unpacking anything.
+          find crates -name '*.cdx.json' -exec cp {} "dist/$name/sbom/" \;
+          for f in "dist/$name/sbom/"*.cdx.json; do
+            cp "$f" "dist/$name-$(basename "$f")"
+          done
+          if [ -f minisign.pub ]; then cp minisign.pub "dist/$name/"; fi
           cd dist
           case "${{ matrix.target }}" in
             *windows*) 7z a "$name.zip" "$name" >/dev/null ;;
@@ -92,7 +133,7 @@ jobs:
           rm -r "$name"
           ls -la
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ matrix.target }}
           path: dist/*
@@ -103,21 +144,59 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v') || inputs.tag != ''
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # For the build provenance attestation.
+      id-token: write
+      attestations: write
     steps:
       # Checkout first: it cleans the workspace, which would remove dist/.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          sparse-checkout: CHANGELOG.md
+          sparse-checkout: |
+            CHANGELOG.md
+            minisign.pub
           sparse-checkout-cone-mode: false
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
           merge-multiple: true
+
       - name: Checksums
         run: |
           cd dist
           sha256sum * > SHA256SUMS
           cat SHA256SUMS
+
+      - name: Sign the checksums
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          if [ -z "$MINISIGN_SECRET_KEY" ]; then
+            echo "::notice::MINISIGN_SECRET_KEY is not set; SHA256SUMS is published unsigned (README, \"Signing releases\")"
+            exit 0
+          fi
+          if [ ! -f minisign.pub ]; then
+            echo "::error::MINISIGN_SECRET_KEY is set but the repository has no minisign.pub to check it against"
+            exit 1
+          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq minisign
+          umask 077
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$RUNNER_TEMP/minisign.key"
+          minisign -S -s "$RUNNER_TEMP/minisign.key" -m dist/SHA256SUMS -t "Silver Messenger $TAG"
+          rm -f "$RUNNER_TEMP/minisign.key"
+          # The signature must check out against the key the repository
+          # publishes, or the secret is not the key people will verify with.
+          minisign -Vm dist/SHA256SUMS -p minisign.pub
+          cat dist/SHA256SUMS.minisig
+
+      - name: Build provenance attestation
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+
       - name: Release notes from CHANGELOG.md
         env:
           TAG: ${{ inputs.tag || github.ref_name }}
@@ -129,7 +208,8 @@ jobs:
           else
             echo "CHANGELOG.md has no section for ${TAG#v}; the release gets generated notes only"
           fi
-      - uses: softprops/action-gh-release@v2
+
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           target_commitish: ${{ github.sha }}

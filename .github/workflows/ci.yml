@@ -1,9 +1,15 @@
 name: CI
 
+# Every action is pinned to a commit hash (the version follows in a
+# comment); Dependabot moves the pins. The workflow token can only read.
+
 on:
   push:
     branches: [main]
   pull_request:
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -13,11 +19,12 @@ jobs:
     name: fmt + clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
         with:
+          toolchain: stable
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -25,11 +32,11 @@ jobs:
     name: advisories + licenses
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check advisories licenses bans sources
-      - uses: rustsec/audit-check@v2
+      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -41,11 +48,13 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo build --workspace --all-targets
-      - run: cargo test --workspace
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo build --workspace --all-targets --locked
+      - run: cargo test --workspace --locked
 
   tui:
     name: terminal tests (${{ matrix.term }})
@@ -55,12 +64,56 @@ jobs:
       matrix:
         term: [xterm-256color, linux]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: sudo apt-get update && sudo apt-get install -y tmux
-      - run: pip install pyte || pip install --break-system-packages pyte
+      - run: pip install pyte==0.8.2 || pip install --break-system-packages pyte==0.8.2
       - run: TERMS=${{ matrix.term }} tests/tui/run.sh
+
+  reproducible:
+    # The release binaries are built with these exact flags; two clean
+    # builds of the same commit must be byte for byte the same, or a
+    # published binary could not be checked against the source.
+    name: reproducible build
+    runs-on: ubuntu-latest
+    env:
+      TARGET: x86_64-unknown-linux-musl
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-musl
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq musl-tools
+          echo "CC_x86_64_unknown_linux_musl=musl-gcc" >> "$GITHUB_ENV"
+      - name: Build twice from scratch and compare
+        run: |
+          # Same flags as the release workflow and the README's rebuild
+          # instructions. Both builds use target/ (cleaned in between), the
+          # directory a release and a verifier build in too: under the
+          # remap it is /src/target for everyone, so nothing about where
+          # the build ran can tell the two apart.
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          export RUSTFLAGS="--remap-path-prefix=${{ github.workspace }}=/src --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
+          mkdir -p first
+          for n in 1 2; do
+            cargo clean --release
+            cargo build --release --locked --workspace --target "$TARGET"
+            if [ "$n" = 1 ]; then
+              cp "target/$TARGET/release/silver" "target/$TARGET/release/silver-relay" first/
+            fi
+          done
+          for bin in silver silver-relay; do
+            cmp "first/$bin" "target/$TARGET/release/$bin"
+            sha256sum "target/$TARGET/release/$bin"
+          done
+          echo "both builds are identical"
 
   fuzz:
     name: fuzz (${{ matrix.target }})
@@ -80,16 +133,18 @@ jobs:
       matrix:
         target: [frames, envelope, blob_chunk, session, invite_link, file_name, stored]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-      - uses: taiki-e/install-action@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
         with:
-          tool: cargo-fuzz
-      - uses: Swatinem/rust-cache@v2
+          toolchain: nightly
+      - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
+        with:
+          tool: cargo-fuzz@0.13.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: fuzz
       - run: cargo fuzz run --target $FUZZ_TARGET_TRIPLE ${{ matrix.target }} -- -max_total_time=60 -max_len=4096
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: failure()
         with:
           name: fuzz-${{ matrix.target }}-crash
