@@ -43,10 +43,27 @@ pub enum Content {
     Text { body: String },
 }
 
+/// Position of a message in the sender's stream to one recipient.
+///
+/// `seq` counts up by one per message; `epoch` is a random value chosen when
+/// a client starts counting from scratch (a fresh installation), so a reset
+/// is distinguishable from a replay. Both live inside the encrypted body and
+/// let the recipient detect replayed, missing or reordered messages. A zero
+/// `seq` means the sender does not number messages.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Sequence {
+    pub epoch: u64,
+    pub seq: u64,
+}
+
 /// The encrypted, signed body of an envelope.
 #[derive(Serialize, Deserialize)]
 struct Body {
     sent_at_ms: u64,
+    #[serde(default)]
+    epoch: u64,
+    #[serde(default)]
+    seq: u64,
     content: Content,
 }
 
@@ -57,18 +74,34 @@ pub struct Message {
     pub from: UserId,
     pub to: UserId,
     pub sent_at_ms: u64,
+    pub sequence: Sequence,
     pub content: Content,
 }
 
-/// Encrypt and sign `content` from `sender` to `recipient`.
+/// Encrypt and sign `content` from `sender` to `recipient`, without a
+/// sequence number. Prefer [`seal_with`].
 pub fn seal(
     sender: &Identity,
     recipient: &KeyBundle,
     content: Content,
     sent_at_ms: u64,
 ) -> Result<Envelope, ProtocolError> {
+    seal_with(sender, recipient, content, sent_at_ms, Sequence::default())
+}
+
+/// Encrypt and sign `content` from `sender` to `recipient`, numbered with
+/// `sequence` so the recipient can spot replays and gaps.
+pub fn seal_with(
+    sender: &Identity,
+    recipient: &KeyBundle,
+    content: Content,
+    sent_at_ms: u64,
+    sequence: Sequence,
+) -> Result<Envelope, ProtocolError> {
     let body = serde_json::to_vec(&Body {
         sent_at_ms,
+        epoch: sequence.epoch,
+        seq: sequence.seq,
         content,
     })
     .map_err(|e| ProtocolError::Malformed(e.to_string()))?;
@@ -180,6 +213,10 @@ pub fn open(recipient: &Identity, envelope: &Envelope) -> Result<Message, Protoc
         from,
         to: envelope.to,
         sent_at_ms: body.sent_at_ms,
+        sequence: Sequence {
+            epoch: body.epoch,
+            seq: body.seq,
+        },
         content: body.content,
     })
 }
@@ -227,6 +264,20 @@ mod tests {
 
     fn text(s: &str) -> Content {
         Content::Text { body: s.into() }
+    }
+
+    #[test]
+    fn sequence_travels_inside_the_body() {
+        let alice = Identity::generate();
+        let bob = Identity::generate();
+        let sequence = Sequence { epoch: 42, seq: 7 };
+        let env = seal_with(&alice, &bob.key_bundle(), text("x"), 0, sequence).unwrap();
+        assert_eq!(open(&bob, &env).unwrap().sequence, sequence);
+        // The relay-visible bytes do not reveal it.
+        assert!(!serde_json::to_string(&env).unwrap().contains("\"seq\""));
+        // Unnumbered senders read as sequence zero.
+        let legacy = seal(&alice, &bob.key_bundle(), text("x"), 0).unwrap();
+        assert_eq!(open(&bob, &legacy).unwrap().sequence, Sequence::default());
     }
 
     #[test]

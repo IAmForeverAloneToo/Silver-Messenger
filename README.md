@@ -142,6 +142,11 @@ the machine.
   and ephemeral key are bound as associated data, and the signature covers the
   recipient, ephemeral key, nonce and body, so an envelope cannot be
   re-addressed, altered, or forged.
+* **Sequence numbers**: every message carries, inside the encrypted body, a
+  per-conversation counter plus a random per-installation epoch. The
+  recipient drops replays, points out gaps, and notices when a contact has
+  started over from a fresh installation. Messages from older clients that
+  do not number messages are accepted unchecked.
 * **Relay auth**: on connect the relay sends a random nonce; the client signs
   it with its identity key. Only the owner of an id can read its mailbox.
 * **Delivery**: the relay keeps an envelope in an embedded database until the

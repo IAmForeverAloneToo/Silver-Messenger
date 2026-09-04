@@ -8,6 +8,7 @@
 pub mod connection;
 mod outbox;
 pub mod proxy;
+pub mod sequence;
 pub mod store;
 pub mod tls;
 

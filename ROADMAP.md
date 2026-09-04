@@ -23,7 +23,7 @@ Tick items off as they land on `main`.
 2. [x] **Client outbox** (S). Queue messages written while offline and flush
        them on reconnect, with a visible pending state. Second because it is
        the other half of "nothing gets lost".
-3. [ ] **Per-conversation sequence numbers** (S). A counter inside the
+3. [x] **Per-conversation sequence numbers** (S). A counter inside the
        encrypted body so the client detects replays, gaps and reordering.
        Early because later protocol work builds on it.
 4. [ ] **v0.1.0 release, checksums, `cargo audit` and `cargo deny` in CI**

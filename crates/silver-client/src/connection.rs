@@ -11,7 +11,8 @@ use crate::outbox::Outbox;
 use crate::proxy::Proxy;
 use crate::tls::{ConnectOptions, connector};
 use silver_protocol::{
-    Content, Envelope, Identity, KeyBundle, Message, ProtocolError, UserId, now_ms, open, seal,
+    Content, Envelope, Identity, KeyBundle, Message, ProtocolError, Sequence, UserId, now_ms, open,
+    seal_with,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -166,7 +167,25 @@ impl Client {
     /// envelope is in the outbox, connected or not; [`ClientEvent::Sent`] or
     /// [`ClientEvent::Rejected`] follows once the relay has answered.
     pub async fn send_text(&self, to: &KeyBundle, text: String) -> Result<Envelope, ClientError> {
-        let envelope = seal(&self.identity, to, Content::Text { body: text }, now_ms())?;
+        self.send_text_sequenced(to, text, Sequence::default())
+            .await
+    }
+
+    /// Like [`Client::send_text`], numbered with `sequence` so the recipient
+    /// can detect replays and gaps.
+    pub async fn send_text_sequenced(
+        &self,
+        to: &KeyBundle,
+        text: String,
+        sequence: Sequence,
+    ) -> Result<Envelope, ClientError> {
+        let envelope = seal_with(
+            &self.identity,
+            to,
+            Content::Text { body: text },
+            now_ms(),
+            sequence,
+        )?;
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(Command::Send {

@@ -71,6 +71,7 @@ async fn main() -> anyhow::Result<()> {
         }
         store.save_config(&config)?;
     }
+    let send_epoch = store.ensure_send_epoch(&mut config)?;
     let options = ConnectOptions {
         extra_ca_certs: config.ca_cert.iter().cloned().collect(),
         proxy: config.proxy.clone().or_else(Proxy::url_from_env),
@@ -95,7 +96,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let (client, events) = Client::spawn(relay_url.clone(), Arc::new(identity), options)?;
-    let app = app::App::new(store, client, relay_url, created)?;
+    let app = app::App::new(store, client, relay_url, created, send_epoch)?;
 
     let terminal = ratatui::init();
     let result = app.run(terminal, events).await;

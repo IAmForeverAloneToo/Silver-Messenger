@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use silver_client::sequence::{self, SequenceCheck};
 use silver_client::{Client, ClientError, ClientEvent, Contact, Direction, HistoryEntry, Store};
 use silver_protocol::{Content, Envelope, KeyBundle, UserId, now_ms};
 use tokio::sync::mpsc;
@@ -85,6 +86,8 @@ pub struct App {
     pub toast: Option<(String, Instant)>,
     internal_tx: mpsc::Sender<Internal>,
     internal_rx: Option<mpsc::Receiver<Internal>>,
+    /// Epoch for numbering outgoing messages; see [`silver_protocol::Sequence`].
+    send_epoch: u64,
     should_quit: bool,
 }
 
@@ -94,6 +97,7 @@ impl App {
         client: Client,
         relay_url: String,
         fresh_identity: bool,
+        send_epoch: u64,
     ) -> anyhow::Result<Self> {
         let me = client.user_id();
         let contacts = store.load_contacts()?;
@@ -139,6 +143,7 @@ impl App {
             toast: None,
             internal_tx,
             internal_rx: Some(internal_rx),
+            send_epoch,
             should_quit: false,
         };
         app.system(Level::Info, "Welcome to Silver Messenger.");
@@ -470,12 +475,15 @@ impl App {
     // --- messaging ---------------------------------------------------------
 
     fn send_message(&mut self, text: String) {
-        let Some(contact) = self.selected_contact() else {
+        let Some(index) = self.selected.checked_sub(1) else {
             self.toast("Select a contact first, or /add <user-id>.");
             return;
         };
+        let contact = &mut self.contacts[index];
         let peer = contact.user_id;
         let pinned = contact.bundle.clone();
+        let sequence = contact.next_sequence(self.send_epoch);
+        self.persist_contacts();
         let client = self.client.clone();
         let tx = self.internal_tx.clone();
         tokio::spawn(async move {
@@ -508,7 +516,7 @@ impl App {
                 },
             };
             let result = client
-                .send_text(&bundle, text.clone())
+                .send_text_sequenced(&bundle, text.clone(), sequence)
                 .await
                 .map_err(|e| e.to_string());
             let _ = tx
@@ -629,6 +637,34 @@ impl App {
                         ),
                     );
                 }
+
+                // Sequence numbers: drop replays, mention gaps and resets.
+                let name = self.contact_name(&from);
+                let index = self.contact_index(&from).expect("contact exists");
+                let check = sequence::check(self.contacts[index].received, message.sequence);
+                match check {
+                    SequenceCheck::Replay => {
+                        self.system(
+                            Level::Warn,
+                            format!("Dropped a replayed message from {name}."),
+                        );
+                        return;
+                    }
+                    SequenceCheck::Gap { missing } => self.system(
+                        Level::Warn,
+                        format!("{missing} earlier message(s) from {name} have not arrived (yet)."),
+                    ),
+                    SequenceCheck::NewEpoch => self.system(
+                        Level::Info,
+                        format!("{name} is sending from a fresh installation."),
+                    ),
+                    SequenceCheck::Fresh | SequenceCheck::Legacy => {}
+                }
+                if check != SequenceCheck::Legacy {
+                    self.contacts[index].received = Some(message.sequence);
+                    self.persist_contacts();
+                }
+
                 let Content::Text { body } = message.content;
                 self.record(
                     from,

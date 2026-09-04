@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use silver_protocol::{Identity, IdentitySecrets, KeyBundle, UserId};
+use silver_protocol::{Identity, IdentitySecrets, KeyBundle, Sequence, UserId};
 
 /// Client-side configuration.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -33,6 +33,10 @@ pub struct Config {
     /// environment is used.
     #[serde(default)]
     pub proxy: Option<String>,
+    /// Random value identifying this installation's message numbering; see
+    /// [`silver_protocol::Sequence`].
+    #[serde(default)]
+    pub send_epoch: Option<u64>,
 }
 
 /// A known peer.
@@ -44,6 +48,12 @@ pub struct Contact {
     /// Pinned on first lookup (trust on first use).
     #[serde(default)]
     pub bundle: Option<KeyBundle>,
+    /// Sequence number of the last message we sent them.
+    #[serde(default)]
+    pub sent_seq: u64,
+    /// Sequence of the last message accepted from them.
+    #[serde(default)]
+    pub received: Option<Sequence>,
 }
 
 impl Contact {
@@ -52,6 +62,17 @@ impl Contact {
             user_id,
             alias: None,
             bundle: None,
+            sent_seq: 0,
+            received: None,
+        }
+    }
+
+    /// Allocate the sequence for the next message to this contact.
+    pub fn next_sequence(&mut self, epoch: u64) -> Sequence {
+        self.sent_seq += 1;
+        Sequence {
+            epoch,
+            seq: self.sent_seq,
         }
     }
 
@@ -157,6 +178,23 @@ impl Store {
             &self.root.join("config.json"),
             serde_json::to_string_pretty(config)?.as_bytes(),
         )
+    }
+
+    /// The epoch this installation numbers outgoing messages with, created
+    /// and saved on first use.
+    pub fn ensure_send_epoch(&self, config: &mut Config) -> anyhow::Result<u64> {
+        if let Some(epoch) = config.send_epoch {
+            return Ok(epoch);
+        }
+        let epoch = loop {
+            let candidate: u64 = rand::random();
+            if candidate != 0 {
+                break candidate;
+            }
+        };
+        config.send_epoch = Some(epoch);
+        self.save_config(config)?;
+        Ok(epoch)
     }
 
     pub fn load_contacts(&self) -> anyhow::Result<Vec<Contact>> {
@@ -291,6 +329,7 @@ mod tests {
                 relay_url: Some("ws://example:7777/ws".into()),
                 ca_cert: None,
                 proxy: None,
+                send_epoch: None,
             })
             .unwrap();
         assert_eq!(

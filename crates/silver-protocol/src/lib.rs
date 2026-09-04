@@ -30,7 +30,10 @@ pub mod identity;
 pub mod wire;
 
 pub use bundle::KeyBundle;
-pub use envelope::{Content, Envelope, MAX_BODY_BYTES, MAX_CIPHERTEXT_BYTES, Message, open, seal};
+pub use envelope::{
+    Content, Envelope, MAX_BODY_BYTES, MAX_CIPHERTEXT_BYTES, Message, Sequence, open, seal,
+    seal_with,
+};
 pub use error::ProtocolError;
 pub use identity::{DhPublic, Identity, IdentitySecrets, UserId};
 pub use wire::{ClientFrame, ErrorCode, ServerFrame};
