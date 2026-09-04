@@ -104,6 +104,11 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      # Checkout first: it cleans the workspace, which would remove dist/.
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: CHANGELOG.md
+          sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -113,9 +118,21 @@ jobs:
           cd dist
           sha256sum * > SHA256SUMS
           cat SHA256SUMS
+      - name: Release notes from CHANGELOG.md
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          # The "## <version> - <date>" section for this tag, without the heading.
+          awk -v v="${TAG#v}" '/^## / { on = ($2 == v); next } on { print }' CHANGELOG.md > notes.md
+          if [ -s notes.md ]; then
+            cat notes.md
+          else
+            echo "CHANGELOG.md has no section for ${TAG#v}; the release gets generated notes only"
+          fi
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           target_commitish: ${{ github.sha }}
           files: dist/*
+          body_path: notes.md
           generate_release_notes: true
