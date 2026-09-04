@@ -374,14 +374,14 @@ maintainer's account plus signing key both being taken.
 | --- | --- |
 | Deniability: a recipient can prove who wrote what | Decided against for now; reasoning and the path (a body format without the inner signature once v1 fallback can go) in `PROTOCOL.md` section 9. |
 | Cover traffic: the relay and the network see when messages travel and roughly how big they are | Not planned. Padding steps and receipt delays (0.6.0) are as far as this goes without a traffic-shaping design. |
-| Post-quantum ratchet steps: after the hybrid handshake the ratchet is X25519 only | Follows once the design settles (roadmap item 34 says so); the handshake already protects recordings. |
+| Post-quantum ratchet steps: after the hybrid handshake the ratchet is X25519 only | Roadmap item 41; the handshake already protects recordings. |
 | Identity revocation | Not planned; the remedy is a new identity and word of mouth. |
 | Certificate revocation checking | Not planned; key pins are the mitigation. |
-| Relay metrics, alerting, a count of failed logins per address | Roadmap item 36. |
+| Relay metrics, alerting, a count of failed logins per address | Roadmap item 37. |
 | Received files stored unencrypted in `downloads/` | By design, so other programs can open them; a "keep encrypted" option could follow if asked for. |
 | History kept until the user removes it | By design; an expiry setting could follow if asked for. |
 | A panic in the terminal client can leave the terminal in raw mode | Small; next client pass. |
-| Group chats and multiple devices are not designed yet, so nothing here says what they protect | Roadmap items 39 and 40; this document grows when they do. |
+| Group chats and multiple devices are not designed yet, so nothing here says what they protect | Roadmap items 47 and 48; this document grows when they do. |
 
 ## Out of scope
 

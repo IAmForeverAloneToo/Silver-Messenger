@@ -111,7 +111,7 @@ V6 and the threat model.
 | 4.1.5 Fail securely | Met | Every error path refuses; the relay's frame handler returns an error code and does nothing else. |
 | 4.2.1 Insecure direct object reference | Met | Mailboxes are addressed by authenticated identity, never by a parameter; blobs by a random id that only the recipient's message reveals (a guess of it yields ciphertext). |
 | 4.2.2 CSRF | N/A | No cookies, no browser. |
-| 4.3.1 Administrative interfaces | Met (by absence) | The relay has no admin interface; operation is by flags, environment and the journal. Metrics and admin tooling are item 36, to be designed with this in mind. |
+| 4.3.1 Administrative interfaces | Met (by absence) | The relay has no admin interface; operation is by flags, environment and the journal. Metrics and admin tooling are items 37 and 38, to be designed with this in mind. |
 | 4.3.2 Directory browsing | N/A | The relay serves three fixed routes (`/`, `/healthz`, `/ws`). |
 
 ## V5 Validation, sanitisation and encoding
@@ -156,7 +156,7 @@ V6 and the threat model.
 | --- | --- | --- |
 | 7.1.1 No credentials or secrets in logs | Met | Secrets implement `Debug` without their bytes; the invite token is never logged. |
 | 7.1.2 No unnecessary sensitive data in logs | Met | The relay names clients by a per-run salted pseudonym unless `--log-ids` is set; the client's own log does not record its user id at the info level; aliases and message text are never logged. |
-| 7.1.3 Security-relevant events logged | Partly | Refused registrations, connections and uploads are counted and reported hourly; rate-limit hits are logged; a failed login is answered with `bad_signature` but not counted per address (gap: item 36 metrics). |
+| 7.1.3 Security-relevant events logged | Partly | Refused registrations, connections and uploads are counted and reported hourly; rate-limit hits are logged; a failed login is answered with `bad_signature` but not counted per address (gap: item 37 metrics). |
 | 7.1.4 Log entries have context | Met | Structured `tracing` fields. |
 | 7.3.1 Log injection | Met | `tracing` escapes; no user-controlled text reaches the relay log; the client log gets sanitised aliases only. |
 | 7.3.3 Logs protected from modification | Met | The relay logs to the journal; `silver.log` is created 0600. |
@@ -213,7 +213,7 @@ V6 and the threat model.
 | 11.1.3, 11.1.5 Limits on actions and business limits | Met | Per-connection and per-address rate limits, mailbox and storage caps, prekey deposit caps, downloads quota on the client. |
 | 11.1.4 Anti-automation | Met | As above plus invite tokens for registration. |
 | 11.1.6 TOCTOU | Met | Files are created exclusively; ratchet decryption advances state only on success; one-time prekeys are taken in one database transaction. |
-| 11.1.7 Monitoring for unusual activity | Partly | Hourly counters in the relay log; no metrics endpoint (item 36). |
+| 11.1.7 Monitoring for unusual activity | Partly | Hourly counters in the relay log; no metrics endpoint (item 37). |
 | 11.1.8 Alerting | Not met | Item 36. |
 
 ## V12 Files and resources
@@ -266,7 +266,7 @@ routes (`/` with the source notice, `/healthz`).
 | Gap | Control | Closed by |
 | --- | --- | --- |
 | No independent review of the cryptography and the relay | 1.1.1 | Roadmap item 35: before 1.0. |
-| No metrics, alerting or per-address failed-login counting | 7.1.3, 11.1.7, 11.1.8 | Roadmap item 36. |
+| No metrics, alerting or per-address failed-login counting | 7.1.3, 11.1.7, 11.1.8 | Roadmap item 37. |
 | Plain `ws://` allowed when configured | 9.1.1 | By design for local relays; the no-downgrade rule covers the case that matters. |
 | Certificate revocation not checked | 9.2.4 | Not planned; pins and short-lived Let's Encrypt certificates are the mitigation. |
 | No panic hook in the terminal client | 7.4.3 | Next TUI pass. |

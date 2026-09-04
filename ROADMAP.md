@@ -277,21 +277,154 @@ sends, so a message cannot drive the terminal.
         review of `silver-protocol` and the relay by someone who did not
         write them. Last because it records what the phase achieved.
 
-## Phase 7: beyond one relay
+## Phase 7: run it well
 
-36. [ ] **Relay metrics and admin tooling, built-in TLS** (S). Prometheus
-        endpoint, mailbox inspection, ACME in the relay so Caddy is optional.
-37. [ ] **Relay-agnostic addresses** (M). Contacts as `id@relay` so people
-        on different self-hosted relays can talk.
-38. [ ] **Username registry** (M). Optional, signed claims on a relay.
-        Decide the openness of the network before this one.
-39. [ ] **Group chats** (L). Sender keys, membership and invites.
-40. [ ] **Multiple devices** (L). Linked devices first, full identity sync
-        later.
+The relay is where a self-hosted program lives or dies: every new user is
+also someone running one. Today it needs Caddy in front for TLS, keeps no
+metrics, has no administration tooling, and has no backup, upgrade or
+container story. Operations come before reach.
+
+36. [ ] **Built-in TLS** (M). ACME in the relay, so a bare host with a DNS
+        name gets and renews its certificate itself, plus `--tls-cert`
+        and `--tls-key` for people who have their own; Caddy becomes
+        optional and the deployment docs show both. Publishing the relay
+        as a Tor onion service is documented and tested in the same
+        item, since a relay that hides its own address is the natural
+        partner of a client that already connects through Tor.
+        (RFC 8555.)
+37. [ ] **Metrics and structured logs** (S). A Prometheus endpoint on a
+        separate listener that is never public, with the counters the
+        relay already keeps plus failed logins per address; JSON log
+        output as an option; example alert rules for a full mailbox
+        store, a full blob store and a burst of refused registrations.
+        Closes the monitoring gap in `docs/SECURITY_ASSESSMENT.md`.
+38. [ ] **Administration** (M). `silver-relay admin` over a local Unix
+        socket, for the operator only: identities and their mailbox
+        sizes under the log pseudonyms, blob usage, evict an identity,
+        rotate the invite token, ban an address or an id. Nothing an
+        administrator can do reveals a message or a social graph beyond
+        what the store already holds.
+39. [ ] **Lifecycle** (M). A schema version in the database with
+        migrations run at start, `silver-relay backup` and `restore`
+        that take and load a consistent snapshot, an upgrade guide, and
+        a reproducible container image for the usual architectures with
+        a Compose example that uses the built-in TLS.
+40. [ ] **Operator's guide** (S). `docs/OPERATING.md`: sizing, journald
+        retention, tuning the limits, monitoring, what to do after a
+        compromise of the host, and a checklist for a first deployment.
+
+## Phase 8: finish the protocol
+
+Each item here is a line in the threat model's table of gaps. The
+handshake is post-quantum; the ratchet after it is not. Messages are not
+deniable. An identity cannot be rotated or revoked. A relay that shows one
+person a substitute key is caught only when two people compare safety
+numbers by hand. Nothing has been formally modelled.
+
+41. [ ] **Post-quantum ratchet** (L). An ML-KEM ratchet next to the
+        Diffie–Hellman one, so healing after a compromise is post-quantum
+        too, not only the handshake. Signal's Sparse Post-Quantum Ratchet
+        is the reference design; a simpler step every fixed number of
+        messages is the fallback if its cost does not fit. Settled
+        together with item 47: if one-to-one conversations move to
+        two-member MLS groups, the ratchet here is MLS's and this item
+        becomes choosing a post-quantum ciphersuite.
+42. [ ] **Deniability** (M). The v4 ratchet body drops the inner
+        signature, as `docs/PROTOCOL.md` section 9 already plans; the
+        AEAD authenticates and either party could have produced the
+        transcript. This needs the v1 fallback retired, so the item sets
+        the schedule: two minor versions in which v1 bodies are still
+        sent to peers without prekeys but warned about, then v1 is
+        refused.
+43. [ ] **Identity lifecycle** (M). A revocation statement pre-signed when
+        an identity is created and kept in the backup, so a key that is
+        lost can still be declared dead; a signed successor statement for
+        a planned rotation; both published in the bundle and pushed to
+        contacts, who verify them against the old key and re-pin. A lost
+        or rotated key then no longer needs word of mouth. OpenPGP
+        revocation certificates and Matrix cross-signing are the
+        references.
+44. [ ] **Key transparency, small edition** (L). The relay keeps a
+        hash-chained, append-only log of every bundle it serves, and
+        clients carry the log head inside their encrypted messages and
+        compare what they were shown. A relay that shows one person a
+        substitute key is then caught by the two clients gossiping, with
+        nobody reading numbers aloud. CONIKS and Signal's key
+        transparency are the references; with one relay per network the
+        gossip between clients is the essential part, since the relay is
+        the only log server.
+45. [ ] **Formal model and test vectors** (M). The handshake and the
+        ratchet modelled in Verifpal or Tamarin with the properties the
+        threat model claims; published test vectors for the envelope, the
+        handshake and the ratchet; a conformance harness a second
+        implementation could run; property tests for seal and open. Done
+        before the outside review so the reviewer starts from a model.
+46. [ ] **Cover traffic, opt-in** (S). Two clients that both advertise
+        it send dummy padded messages at random intervals while online
+        and discard them on receipt, so the relay's picture of who talks
+        when blurs. It costs bandwidth, so it is off by default and the
+        threat model says exactly what it does and does not hide.
+
+## Phase 9: more than two people, more than one device
+
+47. [ ] **Groups on MLS** (L). RFC 9420 through OpenMLS, with the relay
+        as the delivery service: key packages published and handed out
+        like prekeys, welcome messages and ordered commits through group
+        mailboxes, membership changes as signed proposals by group
+        administrators, invites as links, and sealed sender kept so the
+        relay still does not learn who wrote what. The design decides
+        whether one-to-one conversations stay on the Double Ratchet or
+        become two-member groups, and picks the ciphersuite, with a
+        post-quantum hybrid as soon as one is standardised.
+48. [ ] **Multiple devices** (L). Each device has its own keys under the
+        identity, listed in the bundle and signed by the identity key;
+        linking by a QR code and a short-lived secret; every device is a
+        leaf in the MLS tree of every conversation it belongs to;
+        optional encrypted history sync through the relay. Signal's
+        Sesame is the reference for the device list.
+49. [ ] **Usernames scoped to a relay** (M). `alice` as a signed claim,
+        unique on that relay, resolved by the relay and verified by the
+        client against the signature, with the safety number still the
+        truth. Last, and only if 47 and 48 show that people want
+        discovery beyond invite links.
+
+## Phase 10: a finished terminal client
+
+50. [ ] **Everyday privacy features** (M). Disappearing messages with a
+        per-conversation timer enforced by both sides; delete for me and
+        a best-effort delete for everyone that says exactly what it can
+        and cannot promise; edits as new messages that reference the old
+        one; replies and reactions; all as encrypted content types behind
+        capabilities, so older clients see something sensible. Encrypted
+        `downloads/` as an option, and history export.
+51. [ ] **Accessibility in the terminal** (M). A screen-reader mode with
+        linear output and no box drawing, high-contrast palettes, and
+        every action reachable without the mouse checked against a
+        screen reader on each platform.
+52. [ ] **Client robustness** (S). The terminal restored on a panic,
+        atomic writes for every store file checked under a kill test,
+        memory caps for history and the seen-id set, and a soak test
+        that runs a client for a day against a local relay.
+53. [ ] **Distribution** (M). Authenticode on Windows and notarisation on
+        macOS, a Homebrew tap, winget, an AUR package and a Debian
+        package, each built from the same reproducible release.
+54. [ ] **Contributor guide and FAQ** (S). How to build, test and propose
+        a change; a FAQ for people who are not developers, written from
+        the questions the first users ask.
+
+## Phase 11: 1.0
+
+55. [ ] **Independent review** (L). The review of `silver-protocol` and
+        the relay promised in item 35, by someone who did not write
+        them, its findings fixed and published with the report.
+56. [ ] **Stable** (S). Protocol v4 frozen and documented as such, a
+        support policy for what a stable release promises and for how
+        long, and the first 1.0 release.
 
 ## Continuous
 
-- [ ] Fuzzing for the envelope and frame parsers (item 27), property
-      tests for seal/open
-- [ ] Docker image for the relay; code signing for Windows and macOS
-- [ ] Contributor guide and FAQ for non-technical users
+- [ ] Every new parser gets a fuzz target; the terminal matrix, the
+      reproducible-build check and the live test against the deployed
+      relay stay green.
+- [ ] The threat model and the assessment are re-read at the end of each
+      phase and changed where the phase changed the facts.
