@@ -1122,6 +1122,68 @@ async fn files_travel_as_encrypted_blobs() {
 }
 
 #[tokio::test]
+async fn a_file_sent_while_the_recipient_is_offline_is_fetched_on_arrival() {
+    let (url, state) = start_relay().await;
+    let alice = Arc::new(Identity::generate());
+    let bob = Arc::new(Identity::generate());
+    // Bob registers once so his key is discoverable, then goes offline,
+    // keeping his prekeys for when he returns.
+    let bob_sessions = SessionStore::ephemeral(bob.user_id()).shared();
+    let (bob_c, mut bob_ev) =
+        Client::spawn(url.clone(), bob.clone(), reuse_sessions(&bob_sessions)).unwrap();
+    connected(&mut bob_ev, "bob").await;
+    bob_c.shutdown().await;
+    let (alice_c, mut alice_ev) =
+        Client::spawn(url.clone(), alice.clone(), with_sessions(&alice)).unwrap();
+    connected(&mut alice_ev, "alice").await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("late.bin");
+    let data: Vec<u8> = (0..100_000u32).map(|i| (i * 7 % 251) as u8).collect();
+    std::fs::write(&path, &data).unwrap();
+    let info = alice_c.upload_file(&path, None).await.unwrap();
+    alice_c
+        .send_content(
+            bob.user_id(),
+            None,
+            info.clone().into_content(),
+            Sequence::default(),
+        )
+        .await
+        .unwrap();
+    wait_for(&mut alice_ev, "sent", |e| {
+        matches!(e, ClientEvent::Sent { .. })
+    })
+    .await;
+
+    // Bob connects now. The relay replays his mailbox before it has taken
+    // his bundle, and his client asks for the file at once: the fetch must
+    // wait for the connection to be ready rather than fail.
+    let (bob_c, mut bob_ev) =
+        Client::spawn(url.clone(), bob.clone(), reuse_sessions(&bob_sessions)).unwrap();
+    let got = wait_for(
+        &mut bob_ev,
+        "file message",
+        |e| matches!(e, ClientEvent::Message(m) if matches!(m.content, Content::File { .. })),
+    )
+    .await;
+    let ClientEvent::Message(m) = got else {
+        unreachable!()
+    };
+    let received = silver_client::FileInfo::from_content(&m.content).unwrap();
+    let saved = bob_c
+        .download_file(&received, &dir.path().join("dl"), None)
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(&saved).unwrap(), data);
+    connected(&mut bob_ev, "bob").await;
+    // The chunks went over the anonymous connection, not the authenticated
+    // one that was still being set up.
+    assert_eq!(state.anonymous_submission_count(), 1);
+    alice_c.shutdown().await;
+    bob_c.shutdown().await;
+}
+
+#[tokio::test]
 async fn a_relay_without_file_storage_says_so() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}/ws", listener.local_addr().unwrap());

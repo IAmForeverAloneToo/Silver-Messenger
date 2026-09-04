@@ -152,6 +152,56 @@ struct Download {
     reply: oneshot::Sender<Result<Vec<Vec<u8>>, ClientError>>,
 }
 
+/// File transfers in progress. They outlive one connection: a transfer
+/// asked for while disconnected, or before the relay has taken our bundle,
+/// waits, and one cut off by a disconnect carries on over the next
+/// connection.
+#[derive(Default)]
+struct Transfers {
+    uploads: HashMap<String, Upload>,
+    downloads: HashMap<String, Download>,
+}
+
+impl Transfers {
+    fn queue_upload(
+        &mut self,
+        blob: String,
+        chunks: Vec<Vec<u8>>,
+        progress: Option<mpsc::Sender<Progress>>,
+        reply: oneshot::Sender<Result<(), ClientError>>,
+    ) {
+        self.uploads.insert(
+            blob,
+            Upload {
+                chunks,
+                sent: 0,
+                acked: 0,
+                progress,
+                reply,
+            },
+        );
+    }
+
+    fn queue_download(
+        &mut self,
+        blob: String,
+        total: u32,
+        progress: Option<mpsc::Sender<Progress>>,
+        reply: oneshot::Sender<Result<Vec<Vec<u8>>, ClientError>>,
+    ) {
+        self.downloads.insert(
+            blob,
+            Download {
+                chunks: vec![None; total as usize],
+                received: 0,
+                requested: false,
+                progress,
+                reply,
+            },
+        );
+    }
+}
+
 fn report(progress: &Option<mpsc::Sender<Progress>>, done: usize, total: usize) {
     if let Some(tx) = progress {
         let _ = tx.try_send(Progress {
@@ -555,11 +605,13 @@ async fn run(
     ev_tx: mpsc::Sender<ClientEvent>,
 ) {
     let mut backoff = Duration::from_secs(1);
+    let mut transfers = Transfers::default();
     loop {
         let outcome = session(
             &setup,
             &mut outbox,
             &pending,
+            &mut transfers,
             &mut cmd_rx,
             &ev_tx,
             &mut backoff,
@@ -581,8 +633,8 @@ async fn run(
             return; // front end is gone
         }
 
-        // Sleep before reconnecting. Sends are queued meanwhile; lookups
-        // need the relay and are refused.
+        // Sleep before reconnecting. Sends and transfers are queued
+        // meanwhile; lookups need the relay and are refused.
         let sleep = tokio::time::sleep(backoff);
         tokio::pin!(sleep);
         loop {
@@ -598,11 +650,11 @@ async fn run(
                     Some(Command::Lookup { reply, .. }) => {
                         let _ = reply.send(Err(ClientError::NotConnected));
                     }
-                    Some(Command::Upload { reply, .. }) => {
-                        let _ = reply.send(Err(ClientError::NotConnected));
+                    Some(Command::Upload { blob, chunks, progress, reply }) => {
+                        transfers.queue_upload(blob, chunks, progress, reply);
                     }
-                    Some(Command::Download { reply, .. }) => {
-                        let _ = reply.send(Err(ClientError::NotConnected));
+                    Some(Command::Download { blob, total, progress, reply }) => {
+                        transfers.queue_download(blob, total, progress, reply);
                     }
                 },
             }
@@ -626,6 +678,7 @@ async fn session(
     setup: &Setup,
     outbox: &mut Outbox,
     pending: &PendingIds,
+    transfers: &mut Transfers,
     cmd_rx: &mut mpsc::Receiver<Command>,
     ev_tx: &mpsc::Sender<ClientEvent>,
     backoff: &mut Duration,
@@ -682,8 +735,7 @@ async fn session(
 
     // --- steady state ------------------------------------------------------
     let mut lookups: Lookups = HashMap::new();
-    let mut uploads: HashMap<String, Upload> = HashMap::new();
-    let mut downloads: HashMap<String, Download> = HashMap::new();
+    let Transfers { uploads, downloads } = transfers;
     let mut keepalive = tokio::time::interval(KEEPALIVE);
     keepalive.tick().await; // first tick fires immediately; skip it
     // Set when the relay rate-limited us; the outbox is resent at that time.
@@ -732,29 +784,24 @@ async fn session(
                     }
                     lookups.entry(user_id).or_default().push(reply);
                 }
+                // Transfers asked for before `Published` (the relay replays
+                // the mailbox first, and a delivered file is fetched at
+                // once) wait for it; `Published` resumes them.
                 Some(Command::Upload { blob, chunks, progress, reply }) => {
-                    if !published {
-                        let _ = reply.send(Err(ClientError::NotConnected));
-                        continue;
-                    }
                     uploads.insert(blob.clone(), Upload { chunks, sent: 0, acked: 0, progress, reply });
-                    if !pump_upload(&mut sink, &mut submission, &blob, &mut uploads).await {
+                    if published && !pump_upload(&mut sink, &mut submission, &blob, uploads).await {
                         return Ok(Exit::Disconnected("send failed".into()));
                     }
                 }
                 Some(Command::Download { blob, total, progress, reply }) => {
-                    if !published {
-                        let _ = reply.send(Err(ClientError::NotConnected));
-                        continue;
-                    }
-                    downloads.insert(blob.clone(), Download {
+                    downloads.insert(blob, Download {
                         chunks: vec![None; total as usize],
                         received: 0,
                         requested: false,
                         progress,
                         reply,
                     });
-                    if !request_downloads(&mut sink, &mut submission, &mut downloads).await {
+                    if published && !request_downloads(&mut sink, &mut submission, downloads).await {
                         return Ok(Exit::Disconnected("send failed".into()));
                     }
                 }
@@ -770,13 +817,13 @@ async fn session(
                         s.ready = true;
                     }
                     if !flush_outbox(&mut sink, &mut submission, outbox).await
-                        || !resume_transfers(&mut sink, &mut submission, &mut uploads, &mut downloads).await
+                        || !resume_transfers(&mut sink, &mut submission, uploads, downloads).await
                     {
                         return Ok(Exit::Disconnected("resend failed".into()));
                     }
                 }
                 Some(SubmitEvent::Blob(frame)) => {
-                    if !handle_blob_frame(*frame, &mut sink, &mut submission, &mut uploads, &mut downloads).await {
+                    if !handle_blob_frame(*frame, &mut sink, &mut submission, uploads, downloads).await {
                         return Ok(Exit::Disconnected("send failed".into()));
                     }
                 }
@@ -790,7 +837,7 @@ async fn session(
                     warn!("submitting on the authenticated connection instead");
                     submission = Submission::Authenticated;
                     if !flush_outbox(&mut sink, &mut submission, outbox).await
-                        || !resume_transfers(&mut sink, &mut submission, &mut uploads, &mut downloads).await
+                        || !resume_transfers(&mut sink, &mut submission, uploads, downloads).await
                     {
                         return Ok(Exit::Disconnected("resend failed".into()));
                     }
@@ -830,7 +877,7 @@ async fn session(
                     frame @ (ServerFrame::BlobAck { .. }
                     | ServerFrame::BlobRejected { .. }
                     | ServerFrame::BlobChunk { .. }) => {
-                        if !handle_blob_frame(frame, &mut sink, &mut submission, &mut uploads, &mut downloads).await {
+                        if !handle_blob_frame(frame, &mut sink, &mut submission, uploads, downloads).await {
                             return Ok(Exit::Disconnected("send failed".into()));
                         }
                     }
@@ -867,8 +914,12 @@ async fn session(
                                 ));
                             }
                             // Resend everything the relay has not accepted
-                            // yet; it ignores ids it already holds.
-                            if !flush_outbox(&mut sink, &mut submission, outbox).await {
+                            // yet; it ignores ids it already holds. Transfers
+                            // that waited for this connection start now (or
+                            // once the anonymous connection is ready).
+                            if !flush_outbox(&mut sink, &mut submission, outbox).await
+                                || !resume_transfers(&mut sink, &mut submission, uploads, downloads).await
+                            {
                                 return Ok(Exit::Disconnected("resend failed".into()));
                             }
                         }
@@ -1009,8 +1060,9 @@ async fn request_downloads(
 }
 
 /// After the submitting connection changed, push transfers along again.
-/// Chunks sent but not acknowledged are sent once more; the relay ignores
-/// the duplicates.
+/// Chunks sent but not acknowledged are sent once more, and every unfinished
+/// download is asked for again; the relay ignores duplicate chunks and the
+/// client ignores chunks it already has.
 async fn resume_transfers(
     sink: &mut WsSink,
     submission: &mut Submission,
@@ -1027,9 +1079,7 @@ async fn resume_transfers(
         }
     }
     for download in downloads.values_mut() {
-        if download.received == 0 {
-            download.requested = false;
-        }
+        download.requested = false;
     }
     request_downloads(sink, submission, downloads).await
 }
