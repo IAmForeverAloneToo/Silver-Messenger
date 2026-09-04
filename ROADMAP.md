@@ -140,21 +140,158 @@ xterm, the Linux console and tmux are driven in CI. Windows Terminal, the
 classic console, Terminal.app and iTerm2 are documented in
 `docs/TERMINALS.md` from hand checks and the terminals' own documentation.
 
-## Phase 6: beyond one relay
+## Phase 6: secure by default
 
-25. [ ] **Relay metrics and admin tooling, built-in TLS** (S). Prometheus
+The first file exchange over a real relay (0.5.0) showed that a contact's
+file is fetched and written to disk the moment it arrives, with nothing
+asked and nothing checked beyond its hash. That is one symptom of a
+program that grew feature by feature; this phase does nothing but go
+through the whole of it, relay and client, with the eyes of an attacker
+and the checklists the industry uses, and closes what it finds. The point
+of the program is to be secure and private, so this comes before any more
+reach. The yardsticks: OWASP ASVS 4.0 (V2 authentication, V6
+cryptography, V7 logging, V8 data protection, V12 files, V13 API), the
+CWE Top 25, NIST SP 800-63B, RFC 9106 (Argon2) and FIPS 203 (ML-KEM), the
+Signal specifications (X3DH, PQXDH, Double Ratchet, Sealed Sender), SLSA
+and the OpenSSF Scorecard for the build, and `systemd-analyze security`
+for the relay host.
+
+Already checked and found sound while writing this phase, so they are
+not items: secrets are zeroized (identity, prekeys, sessions, file keys),
+the passphrase vault is Argon2id with 64 MiB and 3 passes under
+XChaCha20-Poly1305, store files are created 0600, the relay's systemd
+unit is hardened, frames are size-capped and unauthenticated connections
+time out, bundles and signed prekeys are signature-checked, the anonymous
+connection runs without TLS resumption, and the renderer drops control
+characters, escape sequences and bidi overrides from anything a peer
+sends, so a message cannot drive the terminal.
+
+25. [ ] **Files you agree to** (M). Nothing from the network is written
+        to disk without consent: a file line shows the name, size and
+        sender, and `/get` (or a click) fetches it; a per-contact
+        `auto` setting restores today's behaviour for people you trust,
+        and the default is "ask". Before any chunk is requested the
+        announced size and chunk count are checked against the 16 MiB
+        cap (today `assemble` allocates whatever size the sender claims),
+        a total quota for `downloads/` is enforced, and a fetch that
+        fails its hash leaves nothing behind. First because it is the
+        finding that started the phase, and the only one a contact can
+        exploit today with no skill. (ASVS V12, CWE-434, CWE-770.)
+26. [ ] **Opening files safely** (S). `/open` and the double click never
+        launch an executable or script (`.exe`, `.msi`, `.bat`, `.cmd`,
+        `.ps1`, `.scr`, `.lnk`, `.js`, `.vbs`, `.jar`, `.sh`, `.app`,
+        `.desktop` and the rest) and say why; saved files carry the mark
+        of the web on Windows so SmartScreen and Defender treat them as
+        downloads; names are normalised (NFC), stripped of Unicode
+        format and bidi characters (a right-to-left override makes
+        `photo` + `gnp.exe` read as `photoexe.png` in a file manager),
+        refused when they are Windows device names
+        (`CON`, `NUL`, `COM1`) or end in a dot or space, and the chat
+        line shows the full name as saved. (CWE-451, CWE-22.)
+27. [ ] **Untrusted input, bounded** (M). Everything a peer or the relay
+        controls gets a limit and a test: held requests capped per
+        stranger and in total (today a flood fills memory and
+        `requests.json`), the seen-id set bounded, claimed timestamps
+        clamped for ordering, envelope, frame, blob chunk, invite link,
+        file name and history parsers fuzzed with `cargo-fuzz` in CI
+        (the Continuous item moves here), a regression test that
+        control characters and escape sequences in messages, aliases,
+        file names and notifications never reach the terminal, and a
+        `#![forbid(unsafe_code)]` on every crate. (CWE-400, CWE-116,
+        CWE-150.)
+28. [ ] **Relay abuse controls** (M). Limits per address, not only per
+        connection: connections per address and in total, an idle
+        timeout with WebSocket ping/pong, registrations per address per
+        hour and a cap on stored identities, file storage quotas per
+        uploader address and per recipient so one client cannot fill
+        the shared 1 GiB for everyone, and a constant-time invite token
+        comparison. Behind the TLS front the client address comes from
+        `X-Forwarded-For`, trusted only from the configured proxy.
+        `silver-relay --status` shows the counters. (ASVS V13, CWE-770,
+        CWE-208.)
+29. [ ] **Relay logs and storage that reveal less** (S). User ids leave
+        the default log level (today every authentication and
+        disconnection is logged with the id and time, which is the
+        social graph in `journalctl`); ids are truncated or hashed
+        unless `--log-ids` is set; the database directory is created
+        0700 and the database 0600 (`StateDirectoryMode=0700` in the
+        unit); a retention note for journald goes into the deployment
+        docs; `--ephemeral` stays the recommended mode for small
+        relays. (ASVS V7.1, data minimisation.)
+30. [ ] **Authentication bound to the relay, bundles that expire** (S).
+        The auth signature covers the relay's host name (or the TLS
+        exporter, RFC 9266) as well as the nonce, so a hostile relay
+        cannot forward a challenge from another relay and use the
+        client's signature there; signed prekeys already carry a
+        creation time, so the client refuses bundles whose signed
+        prekey is older than the rotation period plus a grace, and
+        publishes a last-resort prekey so draining one-time keys costs
+        nothing but forward secrecy of one message. (ASVS V2.8, Signal
+        X3DH.)
+31. [ ] **Protected at rest without a passphrase** (M). Keys, sessions,
+        contacts and history are encrypted under a key kept in the
+        operating system's store (DPAPI on Windows, the Keychain on
+        macOS, the Secret Service on Linux where there is one), so a
+        copied data directory is useless without the account, with the
+        passphrase remaining the stronger option; `downloads/` gets the
+        same on request; `silver.log` is created 0600 and never logs
+        ids at `info`; `SILVER_PASSPHRASE` is removed from the process
+        environment once read; `/lock` and an idle lock after a
+        configurable time wipe the keys from memory; core dumps are
+        disabled (RLIMIT_CORE 0, PR_SET_DUMPABLE, and the Windows
+        equivalent). (ASVS V6, V8; CWE-312, CWE-526, CWE-528.)
+32. [ ] **Less for the relay to see** (M). Bodies padded to size buckets
+        (Signal's 160-byte steps) so a receipt, a short and a long
+        message look alike; receipts sent after a random delay so they
+        do not mark the moment a message was read; a SOCKS5 proxy
+        option so both connections can go through Tor and the
+        anonymous connection stops sharing an address with the
+        authenticated one; a relay certificate pin (`--pin <sha256>`)
+        and a rule that a relay once reached over `wss://` is never
+        talked to over `ws://`. The threat model then says exactly what
+        the relay still learns. (Signal Sealed Sender; ASVS V9.)
+33. [ ] **Supply chain and release integrity** (S). GitHub Actions
+        pinned by commit hash, Dependabot for actions and crates,
+        `cargo auditable` builds and a CycloneDX SBOM attached to each
+        release, SLSA build provenance attestations, `SHA256SUMS`
+        signed with a minisign key published in the repository and the
+        README, reproducible builds checked in CI, and the OpenSSF
+        Scorecard run on every push. An opt-in `silver --check-release`
+        tells a user when a newer version exists; it never runs by
+        itself. (SLSA v1.0, OpenSSF Scorecard.)
+34. [ ] **Post-quantum key agreement** (L). Protocol v3: the initial
+        handshake becomes a hybrid of X3DH and ML-KEM-768 (PQXDH), with
+        post-quantum prekeys published and rotated like the classical
+        ones, so a recording of today's traffic cannot be opened by a
+        future quantum computer; a post-quantum ratchet step follows
+        once the design settles. The same item decides deniability
+        (bodies are signed today, so a recipient can prove who wrote
+        what) and records the decision either way. (FIPS 203, Signal
+        PQXDH.)
+35. [ ] **Security policy, assessment and outside eyes** (S). A
+        `SECURITY.md` with how to report a vulnerability and which
+        versions get fixes; `docs/SECURITY_ASSESSMENT.md` that walks the
+        ASVS Level 2 controls and says for each whether the code meets
+        it, with the item that closes any gap; the threat model
+        rewritten for everything above; and, before 1.0, an independent
+        review of `silver-protocol` and the relay by someone who did not
+        write them. Last because it records what the phase achieved.
+
+## Phase 7: beyond one relay
+
+36. [ ] **Relay metrics and admin tooling, built-in TLS** (S). Prometheus
         endpoint, mailbox inspection, ACME in the relay so Caddy is optional.
-26. [ ] **Relay-agnostic addresses** (M). Contacts as `id@relay` so people
+37. [ ] **Relay-agnostic addresses** (M). Contacts as `id@relay` so people
         on different self-hosted relays can talk.
-27. [ ] **Username registry** (M). Optional, signed claims on a relay.
+38. [ ] **Username registry** (M). Optional, signed claims on a relay.
         Decide the openness of the network before this one.
-28. [ ] **Group chats** (L). Sender keys, membership and invites.
-29. [ ] **Multiple devices** (L). Linked devices first, full identity sync
+39. [ ] **Group chats** (L). Sender keys, membership and invites.
+40. [ ] **Multiple devices** (L). Linked devices first, full identity sync
         later.
 
 ## Continuous
 
-- [ ] Fuzzing for the envelope and frame parsers, property tests for
-      seal/open
+- [ ] Fuzzing for the envelope and frame parsers (item 27), property
+      tests for seal/open
 - [ ] Docker image for the relay; code signing for Windows and macOS
 - [ ] Contributor guide and FAQ for non-technical users
