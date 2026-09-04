@@ -28,6 +28,7 @@ use std::sync::Arc;
 use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 use silver_protocol::envelope::ReceiptKind;
+use silver_protocol::wire::url_host;
 use silver_protocol::{Identity, IdentitySecrets, KeyBundle, Sequence, UserId};
 
 use crate::files::FileInfo;
@@ -54,10 +55,19 @@ pub struct Config {
     /// behind a private CA.
     #[serde(default)]
     pub ca_cert: Option<PathBuf>,
-    /// HTTP CONNECT proxy URL. When unset, `HTTPS_PROXY` from the
-    /// environment is used.
+    /// Proxy URL, `http://` (CONNECT) or `socks5://`. When unset,
+    /// `HTTPS_PROXY` (else `ALL_PROXY`) from the environment is used.
     #[serde(default)]
     pub proxy: Option<String>,
+    /// Pins for the relay's TLS public key (`sha256:<hex>`); with any set,
+    /// a `wss://` connection whose chain carries none of them is refused.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relay_pins: Vec<String>,
+    /// Hosts this client has reached over `wss://`. A relay once reached
+    /// securely is never talked to over plain `ws://`, so that a changed
+    /// URL cannot quietly strip the transport encryption.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secure_hosts: Vec<String>,
     /// Random value identifying this installation's message numbering; see
     /// [`silver_protocol::Sequence`].
     #[serde(default)]
@@ -105,6 +115,32 @@ impl Config {
     pub fn downloads_quota(&self) -> Option<u64> {
         (self.downloads_quota_mib > 0).then(|| self.downloads_quota_mib.saturating_mul(1024 * 1024))
     }
+
+    /// Remember that `url` was reached over `wss://`. `true` when that is
+    /// news (and the config should be saved).
+    pub fn note_secure(&mut self, url: &str) -> bool {
+        if !url.trim_start().to_ascii_lowercase().starts_with("wss://") {
+            return false;
+        }
+        let Some(host) = url_host(url) else {
+            return false;
+        };
+        if self.secure_hosts.contains(&host) {
+            return false;
+        }
+        self.secure_hosts.push(host);
+        true
+    }
+
+    /// The host of `url` when `url` is plain `ws://` to a host this client
+    /// has reached over `wss://` before: such a URL must not be used.
+    pub fn downgrade(&self, url: &str) -> Option<String> {
+        if !url.trim_start().to_ascii_lowercase().starts_with("ws://") {
+            return None;
+        }
+        let host = url_host(url)?;
+        self.secure_hosts.contains(&host).then_some(host)
+    }
 }
 
 fn default_true() -> bool {
@@ -133,6 +169,8 @@ impl Default for Config {
             relay_url: None,
             ca_cert: None,
             proxy: None,
+            relay_pins: Vec::new(),
+            secure_hosts: Vec::new(),
             send_epoch: None,
             invite_token: None,
             read_receipts: true,
@@ -277,6 +315,11 @@ pub struct HeldMessage {
     /// fetchable once they are accepted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<FileInfo>,
+    /// What the sender's client said it understands, so that once the
+    /// sender is accepted the new contact knows their capabilities without
+    /// waiting for another message.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub caps: Vec<String>,
 }
 
 /// Messages from one unknown sender, waiting for a decision.
@@ -1094,6 +1137,33 @@ mod tests {
         assert_eq!(history.len(), 2);
         assert_eq!(history[1].direction, Direction::Received);
         assert_eq!(history[1].text, "msg 1");
+    }
+
+    #[test]
+    fn a_relay_reached_over_wss_is_never_talked_to_over_ws() {
+        let mut config = Config::default();
+        assert!(!config.note_secure("ws://relay.example:7777/ws"));
+        assert!(config.downgrade("ws://relay.example:7777/ws").is_none());
+
+        assert!(config.note_secure("wss://Relay.Example/ws"));
+        assert!(
+            !config.note_secure("wss://relay.example:443/ws"),
+            "known already"
+        );
+        assert_eq!(config.secure_hosts, vec!["relay.example".to_owned()]);
+        assert_eq!(
+            config.downgrade("ws://RELAY.example.:7777/ws").as_deref(),
+            Some("relay.example")
+        );
+        assert!(config.downgrade("wss://relay.example/ws").is_none());
+        assert!(config.downgrade("ws://other.example/ws").is_none());
+
+        // It survives a round trip through the file.
+        let (store, _dir) = temp_store();
+        store.save_config(&config).unwrap();
+        let loaded = store.load_config().unwrap();
+        assert_eq!(loaded.secure_hosts, config.secure_hosts);
+        assert!(loaded.downgrade("ws://relay.example/ws").is_some());
     }
 
     #[test]

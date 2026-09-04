@@ -108,6 +108,15 @@ a WebSocket frame at most 131 072 bytes.
 The body is JSON. Its version is the integer field `v`, absent (0) or 1 for
 a plain body, 2 for a ratchet body. Other values are rejected.
 
+**Padding.** An encoded body is padded with trailing ASCII spaces (0x20)
+to a multiple of 160 bytes (clients from 0.6.0). JSON ignores trailing
+whitespace, so a padded body decodes like an unpadded one and vice versa,
+which is what keeps older and newer clients talking. The ciphertext is the
+body plus a fixed 112 bytes, so a relay sees envelope sizes in 160-byte
+steps: a receipt, a short and a medium message are the same size on the
+wire. A ratchet body is padded twice, once as the inner plain body and once
+around it.
+
 ### 4.1 Plain body (v1)
 
 ```json
@@ -153,6 +162,7 @@ the relay does not learn which clients have which features.
 | --- | --- |
 | `receipts` | Understands `receipt` content and wants to be sent it. |
 | `files` | Understands `file` content and can fetch blobs (section 7.5). |
+| `padded_files` | Cuts a fetched file to its announced `size`, so the sender may pad the last chunk (4.5). |
 
 ### 4.4 Receipts
 
@@ -164,11 +174,14 @@ the relay does not learn which clients have which features.
 stored) or `read` (they were shown to the user); `read` implies
 `delivered`. `ids` are envelope ids the recipient of the receipt sent. A
 receipt is an ordinary body, numbered with `seq` like any other, and is
-carried in a session when one exists. This implementation batches ids for
-400 ms and sends one receipt per peer and kind, sends `delivered` for every
-stored message and `read` only while the user has not turned read receipts
-off, and never sends receipts to a sender it has not accepted as a
-contact. Receipts from strangers are ignored.
+carried in a session when one exists. This implementation batches ids and
+sends one receipt per peer and kind, sends `delivered` for every stored
+message and `read` only while the user has not turned read receipts off,
+and never sends receipts to a sender it has not accepted as a contact. A
+batch waits 400 ms plus a random while (up to 2 s for `delivered`, 2 to
+12 s for `read`), so that the moment a receipt leaves does not mark the
+moment a message arrived or was looked at. Receipts from strangers are
+ignored.
 
 ### 4.5 Files
 
@@ -201,6 +214,13 @@ control characters removed; recipients must still treat it as untrusted
 when choosing where to save. Files are at most 16 MiB (256 chunks). The
 key is used for one file only and travels inside the session-encrypted
 body, so the relay stores ciphertext it has no key for.
+
+When the recipient advertised `padded_files`, the sender may fill the
+last chunk with zero bytes up to the full 65 536 (an empty file becomes
+one full chunk); `chunks` and `size` are unchanged, and the recipient
+cuts the decrypted bytes to `size` before checking `sha256`. The relay
+then sees file sizes in 64 KiB steps only. A recipient without the
+capability requires the decrypted length to equal `size` exactly.
 
 ## 5. Session establishment (X3DH)
 
@@ -434,24 +454,38 @@ without the key from the same message.
   accepts from a contact and sends `receipt` and `file` content only to
   contacts whose last list carried the capability. It advertises its own
   in every body it sends, receipts included.
-* **Receipts.** Sent only to accepted contacts; batched for 400 ms; `read`
-  only for messages shown while the window has focus, and only while the
-  user allows it. Receipt bodies are not themselves acknowledged.
+* **Receipts.** Sent only to accepted contacts; batched for 400 ms plus a
+  random delay (4.4); `read` only for messages shown while the window has
+  focus, and only while the user allows it. Receipt bodies are not
+  themselves acknowledged.
 * **Files.** Sent only when the recipient advertised `files` and the relay
-  advertises `blobs`. The upload finishes (every chunk acknowledged)
-  before the `file` message is sent, so a recipient never asks for an
-  incomplete blob. Up to four chunks are in flight; after a reconnect,
-  chunks not yet acknowledged are put again. A recipient fetches a file
-  as soon as the message is decrypted, but only from accepted contacts; a
-  file announced by a stranger is shown with the request and fetched
-  never, so acceptance later means asking the sender to send it again.
-  Saved files never overwrite: a name already taken gets ` (2)`, ` (3)`
-  and so on before the extension.
+  advertises `blobs`; padded (4.5) when it advertised `padded_files` too.
+  The upload finishes (every chunk acknowledged) before the `file` message
+  is sent, so a recipient never asks for an incomplete blob. Up to four
+  chunks are in flight; after a reconnect, chunks not yet acknowledged are
+  put again. A recipient fetches a file only when the user asks (or has
+  asked for that contact's files to be fetched as they arrive), and only
+  from accepted contacts; a file announced by a stranger is shown with the
+  request and fetched never, so acceptance later means asking the sender
+  to send it again. Saved files never overwrite: a name already taken gets
+  ` (2)`, ` (3)` and so on before the extension.
+* **Transport.** A client that has reached a relay host over `wss://`
+  refuses to connect to that host over `ws://` from then on. A client may
+  carry pins for the relay's TLS public key (the SHA-256 of the DER
+  `SubjectPublicKeyInfo`, as RFC 7469); with pins set, a chain that
+  carries none of the pinned keys is refused even when it validates. Both
+  connections (7.1, 7.2) may go through an HTTP `CONNECT` or a SOCKS5
+  proxy; through SOCKS5 the relay's name is resolved by the proxy, and
+  each connection logs in to the proxy with fresh random credentials
+  unless the proxy URL carries fixed ones, so that a Tor proxy gives each
+  its own circuit.
 
 ## 9. What the protocol does not do
 
-Messages are signed, so they are not deniable. Sizes are not padded and
-there is no cover traffic, so a relay or network observer sees message and
-blob sizes and timing, including that a small message (a receipt) tends to
-follow a delivery, and that a blob is fetched shortly after a message is
-delivered. Group messaging is not defined yet.
+Messages are signed, so they are not deniable. Sizes are padded to steps
+(160 bytes for messages, 64 KiB for files between clients that support
+it) rather than to one size, and there is no cover traffic, so a relay or
+network observer still sees when messages and blobs travel and roughly
+how big they are, including that a blob is fetched some time after a
+message is delivered. Receipts are delayed at random rather than hidden.
+Group messaging is not defined yet.

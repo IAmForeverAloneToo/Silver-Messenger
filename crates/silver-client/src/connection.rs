@@ -16,7 +16,7 @@ use crate::outbox::Outbox;
 use crate::proxy::Proxy;
 use crate::sessions::{SessionError, SessionInfo, SharedSessions};
 use crate::submitter::{SubmitEvent, Submitter};
-use crate::tls::{ConnectOptions, Connectors, connectors};
+use crate::tls::{ConnectOptions, Connectors, Observed, connectors, observing_connector};
 use silver_protocol::{
     Body, Content, Envelope, Identity, KeyBundle, Message, ProtocolError, Sequence, UserId, now_ms,
     open_bytes, seal_bytes,
@@ -515,10 +515,14 @@ impl Client {
 
     /// Encrypt the file at `path` and park it on the relay. The returned
     /// description is what to send the recipient (as `Content::File`);
-    /// `progress` gets a note per chunk acknowledged.
+    /// `progress` gets a note per chunk acknowledged. With `pad` the last
+    /// chunk is filled up to a whole chunk, which hides the exact size from
+    /// the relay; only for recipients that advertise
+    /// [`capability::PADDED_FILES`](silver_protocol::envelope::capability::PADDED_FILES).
     pub async fn upload_file(
         &self,
         path: &Path,
+        pad: bool,
         progress: Option<mpsc::Sender<Progress>>,
     ) -> Result<FileInfo, ClientError> {
         if !self.relay_supports(feature::BLOBS) {
@@ -527,7 +531,7 @@ impl Client {
             ));
         }
         let path = path.to_path_buf();
-        let (info, chunks) = tokio::task::spawn_blocking(move || files::prepare(&path))
+        let (info, chunks) = tokio::task::spawn_blocking(move || files::prepare(&path, pad))
             .await
             .map_err(|e| ClientError::File(e.to_string()))?
             .map_err(|e| ClientError::File(e.to_string()))?;
@@ -943,7 +947,7 @@ async fn session(
                     ServerFrame::Published => {
                         if !published {
                             published = true;
-                            info!("connected to {relay_url} as {}", identity.user_id());
+                            info!("connected to {relay_url}");
                             *backoff = Duration::from_secs(1);
                             let _ = ev_tx
                                 .send(ClientEvent::Connected {
@@ -1389,6 +1393,29 @@ async fn deliver(setup: &Setup, envelope: Envelope, ev_tx: &mpsc::Sender<ClientE
 
 type Ws = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 type WsSink = futures_util::stream::SplitSink<Ws, WsMessage>;
+
+/// Connect to a `wss://` relay once, say nothing, and report the pin of
+/// the key it presented and whether its certificate chain is trusted. For
+/// choosing a pin: what comes back is only as good as the path to the
+/// relay at that moment, so compare it with what the operator published.
+pub async fn observe_relay(url: &str, options: &ConnectOptions) -> anyhow::Result<Observed> {
+    if !url.trim_start().to_ascii_lowercase().starts_with("wss://") {
+        anyhow::bail!("only a wss:// relay has a certificate to pin");
+    }
+    let (connector, seen) = observing_connector(options)?;
+    let proxy = options.proxy.as_deref().map(Proxy::parse).transpose()?;
+    let ws = tokio::time::timeout(
+        HANDSHAKE_TIMEOUT,
+        open_websocket(url, connector, proxy.as_ref()),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("connect timed out"))??;
+    drop(ws);
+    seen.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("the relay presented no certificate"))
+}
 
 /// Open the WebSocket, directly or through a CONNECT proxy. TLS (for
 /// `wss://`) is always negotiated end to end with the relay by us.

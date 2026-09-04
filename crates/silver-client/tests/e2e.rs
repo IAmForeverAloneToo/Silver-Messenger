@@ -1033,6 +1033,70 @@ async fn submission_uses_the_authenticated_connection_when_it_must() {
 // --- attachments --------------------------------------------------------------
 
 #[tokio::test]
+async fn padded_files_show_the_relay_whole_chunks_only() {
+    let (url, state) = start_relay().await;
+    let alice = Arc::new(Identity::generate());
+    let bob = Arc::new(Identity::generate());
+    let (alice_c, mut alice_ev) =
+        Client::spawn(url.clone(), alice.clone(), with_sessions(&alice)).unwrap();
+    let (bob_c, mut bob_ev) = Client::spawn(url.clone(), bob.clone(), with_sessions(&bob)).unwrap();
+    connected(&mut alice_ev, "alice").await;
+    connected(&mut bob_ev, "bob").await;
+
+    // Just over a chunk and a half: the relay is shown two whole chunks.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("notes.txt");
+    let data: Vec<u8> = (0..100_001u32).map(|i| (i * 7 % 251) as u8).collect();
+    std::fs::write(&path, &data).unwrap();
+    let info = alice_c.upload_file(&path, true, None).await.unwrap();
+    assert_eq!((info.chunks, info.size), (2, 100_001));
+    let chunk = 65_536 + 16;
+    assert_eq!(state.stats().blob_bytes as usize, 2 * chunk);
+
+    // An empty file padded is one whole chunk too, and reads back empty.
+    let empty = dir.path().join("empty");
+    std::fs::write(&empty, b"").unwrap();
+    let empty_info = alice_c.upload_file(&empty, true, None).await.unwrap();
+    assert_eq!((empty_info.chunks, empty_info.size), (1, 0));
+    assert_eq!(state.stats().blob_bytes as usize, 3 * chunk);
+
+    for info in [&info, &empty_info] {
+        alice_c
+            .send_content(
+                bob.user_id(),
+                None,
+                info.clone().into_content(),
+                Sequence::default(),
+            )
+            .await
+            .unwrap();
+        let got = wait_for(
+            &mut bob_ev,
+            "file message",
+            |e| matches!(e, ClientEvent::Message(m) if matches!(m.content, Content::File { .. })),
+        )
+        .await;
+        let ClientEvent::Message(m) = got else {
+            unreachable!()
+        };
+        assert!(m.caps.iter().any(|c| c == "padded_files"));
+        let received = silver_client::FileInfo::from_content(&m.content).unwrap();
+        let saved = bob_c
+            .download_file(&received, &dir.path().join("downloads"), None, None)
+            .await
+            .unwrap();
+        let expected = if received.size == 0 {
+            Vec::new()
+        } else {
+            data.clone()
+        };
+        assert_eq!(std::fs::read(&saved).unwrap(), expected);
+    }
+    alice_c.shutdown().await;
+    bob_c.shutdown().await;
+}
+
+#[tokio::test]
 async fn files_travel_as_encrypted_blobs() {
     let (url, state) = start_relay().await;
     let alice = Arc::new(Identity::generate());
@@ -1053,7 +1117,7 @@ async fn files_travel_as_encrypted_blobs() {
     std::fs::write(&path, &data).unwrap();
 
     let (ptx, mut prx) = mpsc::channel(64);
-    let info = alice_c.upload_file(&path, Some(ptx)).await.unwrap();
+    let info = alice_c.upload_file(&path, false, Some(ptx)).await.unwrap();
     assert_eq!((info.chunks, info.size), (4, 200_000));
     let mut last = None;
     while let Ok(p) = prx.try_recv() {
@@ -1178,7 +1242,7 @@ async fn a_file_sent_while_the_recipient_is_offline_is_fetched_on_arrival() {
     let path = dir.path().join("late.bin");
     let data: Vec<u8> = (0..100_000u32).map(|i| (i * 7 % 251) as u8).collect();
     std::fs::write(&path, &data).unwrap();
-    let info = alice_c.upload_file(&path, None).await.unwrap();
+    let info = alice_c.upload_file(&path, false, None).await.unwrap();
     alice_c
         .send_content(
             bob.user_id(),
@@ -1242,6 +1306,6 @@ async fn a_relay_without_file_storage_says_so() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("note.txt");
     std::fs::write(&path, b"hello").unwrap();
-    let err = alice_c.upload_file(&path, None).await.unwrap_err();
+    let err = alice_c.upload_file(&path, false, None).await.unwrap_err();
     assert!(err.to_string().contains("does not store files"), "{err}");
 }

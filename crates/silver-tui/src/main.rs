@@ -23,8 +23,8 @@ use ratatui::crossterm::event::{
 };
 use ratatui::crossterm::execute;
 use silver_client::{
-    Client, ConnectOptions, DEFAULT_RELAY_URL, InviteLink, Protection, Proxy, SessionStore, Store,
-    VaultError, keystore,
+    Client, ConnectOptions, DEFAULT_RELAY_URL, InviteLink, Pin, Protection, Proxy, SessionStore,
+    Store, VaultError, keystore,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -44,10 +44,22 @@ struct Args {
     #[arg(long, env = "SILVER_CA_CERT")]
     ca_cert: Option<PathBuf>,
 
-    /// HTTP CONNECT proxy to reach the relay through, e.g.
-    /// http://proxy.corp:3128. Remembered. Defaults to $HTTPS_PROXY.
+    /// Proxy to reach the relay through: http://proxy.corp:3128 (HTTP
+    /// CONNECT) or socks5://127.0.0.1:9050 (SOCKS5, e.g. Tor). Remembered.
+    /// Defaults to $HTTPS_PROXY, else $ALL_PROXY.
     #[arg(long, env = "SILVER_PROXY")]
     proxy: Option<String>,
+
+    /// Pin the relay's TLS public key (sha256:<hex>, as --print-pin shows
+    /// it): a wss:// connection is refused unless the relay presents a
+    /// pinned key. Remembered; give it again to add another.
+    #[arg(long, env = "SILVER_PIN", value_name = "PIN")]
+    pin: Option<String>,
+
+    /// Connect to the relay once, print the pin of the key it presents and
+    /// whether its certificate is trusted, then exit.
+    #[arg(long)]
+    print_pin: bool,
 
     /// Invite token, for relays that only register invited identities.
     /// Remembered for later runs.
@@ -259,17 +271,26 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
     if args.relay.is_some()
         || args.ca_cert.is_some()
         || args.proxy.is_some()
+        || args.pin.is_some()
         || args.invite.is_some()
         || args.no_keystore
     {
         if let Some(relay) = args.relay {
+            refuse_downgrade(&config, &relay)?;
             config.relay_url = Some(relay);
         }
         if let Some(ca_cert) = args.ca_cert {
             config.ca_cert = Some(ca_cert);
         }
         if let Some(proxy) = args.proxy {
+            Proxy::parse(&proxy)?;
             config.proxy = Some(proxy);
+        }
+        if let Some(pin) = args.pin {
+            let pin = Pin::parse(&pin)?.to_hex();
+            if !config.relay_pins.contains(&pin) {
+                config.relay_pins.push(pin);
+            }
         }
         if let Some(invite) = args.invite {
             config.invite_token = Some(invite);
@@ -309,6 +330,38 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
         .relay_url
         .clone()
         .unwrap_or_else(|| DEFAULT_RELAY_URL.to_owned());
+    // The config file may have been edited by hand; the rule holds anyway.
+    refuse_downgrade(&config, &relay_url)?;
+    let pins = config
+        .relay_pins
+        .iter()
+        .map(|p| Pin::parse(p))
+        .collect::<anyhow::Result<Vec<_>>>()
+        .context("relay_pins in config.json")?;
+    let proxy = config.proxy.clone().or_else(Proxy::url_from_env);
+
+    if args.print_pin {
+        let options = ConnectOptions {
+            extra_ca_certs: config.ca_cert.iter().cloned().collect(),
+            proxy,
+            ..Default::default()
+        };
+        let observed = silver_client::observe_relay(&relay_url, &options).await?;
+        println!("{relay_url} presents the key {}", observed.pins[0]);
+        match &observed.trusted {
+            Ok(()) => println!("Its certificate is trusted by this computer."),
+            Err(e) => println!("Its certificate is NOT trusted by this computer: {e}"),
+        }
+        for pin in &observed.pins[1..] {
+            println!("Issuer key in its chain: {pin}");
+        }
+        println!(
+            "This is what answered right now; compare it with the pin the relay's operator \
+             published before trusting it. To pin it: silver --pin {}",
+            observed.pins[0]
+        );
+        return Ok(());
+    }
 
     // The terminal belongs to the UI, so logs go to a file, and only on
     // request; the file is the user's alone.
@@ -347,7 +400,8 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
             .shared();
         let options = ConnectOptions {
             extra_ca_certs: config.ca_cert.iter().cloned().collect(),
-            proxy: config.proxy.clone().or_else(Proxy::url_from_env),
+            proxy: proxy.clone(),
+            pins: pins.clone(),
             outbox_path: Some(store.outbox_path()),
             outbox_cipher: store.cipher(),
             invite_token: config.invite_token.clone(),
@@ -393,6 +447,18 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
                 created = false;
             }
         }
+    }
+}
+
+/// A relay once reached over `wss://` is not talked to over `ws://`.
+fn refuse_downgrade(config: &silver_client::Config, url: &str) -> anyhow::Result<()> {
+    match config.downgrade(url) {
+        Some(host) => bail!(
+            "{host} was reached over wss:// before; refusing to talk to it over plain ws://. \
+             Use a wss:// URL, or remove the host from secure_hosts in config.json if the \
+             relay really stopped offering TLS."
+        ),
+        None => Ok(()),
     }
 }
 

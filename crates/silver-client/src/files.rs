@@ -200,8 +200,11 @@ impl TryFrom<Content> for FileInfo {
     }
 }
 
-/// Read `path`, encrypt it chunk by chunk under a fresh key, and describe it.
-pub fn prepare(path: &Path) -> anyhow::Result<(FileInfo, Vec<Vec<u8>>)> {
+/// Read `path`, encrypt it chunk by chunk under a fresh key, and describe
+/// it. With `pad`, the last chunk is filled up to a whole chunk with zeros
+/// (the description carries the real size), so the relay learns the size
+/// to the nearest 64 KiB only; only for recipients that cut files to size.
+pub fn prepare(path: &Path, pad: bool) -> anyhow::Result<(FileInfo, Vec<Vec<u8>>)> {
     let metadata =
         std::fs::metadata(path).with_context(|| format!("reading {}", path.display()))?;
     if !metadata.is_file() {
@@ -222,7 +225,13 @@ pub fn prepare(path: &Path) -> anyhow::Result<(FileInfo, Vec<Vec<u8>>)> {
         .unwrap_or_else(|| "file".to_owned());
     let key = BlobKey::generate();
     let blob = new_blob_id();
-    let total = chunk_count(bytes.len() as u64);
+    let size = bytes.len() as u64;
+    let total = chunk_count(size);
+    let sha256 = Sha256::digest(&bytes).into();
+    let mut bytes = bytes;
+    if pad {
+        bytes.resize(total as usize * CHUNK_BYTES, 0);
+    }
     let mut chunks = Vec::with_capacity(total as usize);
     // An empty file is one empty chunk.
     let pieces: Vec<&[u8]> = if bytes.is_empty() {
@@ -235,11 +244,11 @@ pub fn prepare(path: &Path) -> anyhow::Result<(FileInfo, Vec<Vec<u8>>)> {
     }
     let info = FileInfo {
         name,
-        size: bytes.len() as u64,
+        size,
         blob,
         key,
         chunks: total,
-        sha256: Sha256::digest(&bytes).into(),
+        sha256,
     };
     Ok((info, chunks))
 }
@@ -257,9 +266,12 @@ pub fn assemble(info: &FileInfo, chunks: &[Vec<u8>]) -> anyhow::Result<Vec<u8>> 
             .with_context(|| format!("chunk {index} does not decrypt"))?;
         bytes.extend_from_slice(&plain);
     }
-    if bytes.len() as u64 != info.size {
+    // A sender that pads fills the last chunk up; the promised size says
+    // where the file ends.
+    if (bytes.len() as u64) < info.size {
         bail!("file is {} bytes, expected {}", bytes.len(), info.size);
     }
+    bytes.truncate(info.size as usize);
     if <[u8; 32]>::from(Sha256::digest(&bytes)) != info.sha256 {
         bail!("file hash does not match what the sender promised");
     }
@@ -511,7 +523,7 @@ mod tests {
             .map(|i| (i * 7 % 251) as u8)
             .collect();
         std::fs::write(&path, &data).unwrap();
-        let (info, chunks) = prepare(&path).unwrap();
+        let (info, chunks) = prepare(&path, false).unwrap();
         assert_eq!(info.name, "photo.jpg");
         assert_eq!(info.size, data.len() as u64);
         assert_eq!(info.chunks, 3);
@@ -520,6 +532,15 @@ mod tests {
         let content = info.clone().into_content();
         assert_eq!(FileInfo::from_content(&content), Some(info.clone()));
         assert_eq!(assemble(&info, &chunks).unwrap(), data);
+        // Padded, the last chunk is a whole one and the file still comes
+        // back exactly; the relay sees three full chunks either way.
+        let (padded, padded_chunks) = prepare(&path, true).unwrap();
+        assert_eq!(
+            (padded.size, padded.chunks, padded.sha256),
+            (info.size, 3, info.sha256)
+        );
+        assert!(padded_chunks.iter().all(|c| c.len() == CHUNK_BYTES + 16));
+        assert_eq!(assemble(&padded, &padded_chunks).unwrap(), data);
 
         // A damaged chunk, a missing chunk or the wrong count are refused.
         let mut damaged = chunks.clone();
@@ -537,7 +558,10 @@ mod tests {
 
         let empty = dir.path().join("empty");
         std::fs::write(&empty, b"").unwrap();
-        let (info, chunks) = prepare(&empty).unwrap();
+        let (info, chunks) = prepare(&empty, false).unwrap();
+        assert_eq!((info.chunks, chunks.len()), (1, 1));
+        assert!(assemble(&info, &chunks).unwrap().is_empty());
+        let (info, chunks) = prepare(&empty, true).unwrap();
         assert_eq!((info.chunks, chunks.len()), (1, 1));
         assert!(assemble(&info, &chunks).unwrap().is_empty());
     }
@@ -547,7 +571,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.bin");
         std::fs::write(&path, vec![7u8; CHUNK_BYTES + 1]).unwrap();
-        let (info, chunks) = prepare(&path).unwrap();
+        let (info, chunks) = prepare(&path, false).unwrap();
         assert!(info.check().is_ok());
         let mut huge = info.clone();
         huge.size = MAX_FILE_BYTES + 1;

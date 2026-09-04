@@ -4,6 +4,86 @@ Notable changes to Silver Messenger. Versions follow [semantic
 versioning](https://semver.org); while the major version is 0, a minor bump
 means behaviour or the wire protocol changed in a way worth reading about.
 
+## Unreleased
+
+Phase 6: secure and private by default. A relay and a network observer are
+shown less; a stolen data directory and a hostile relay get less; what a
+peer sends is bounded and never reaches the terminal raw. Clients and
+relays still interoperate with 0.4.0 and 0.5.0 peers; the new protections
+turn on by themselves. The wire gains only optional, backward-compatible
+additions (body padding as trailing spaces, a `padded_files` capability, a
+relay-bound login), so an older peer reads a newer one and vice versa.
+[docs/PROTOCOL.md](docs/PROTOCOL.md) and
+[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) are rewritten for all of it.
+
+### Added
+
+- **Files you agree to.** Nothing announced by a peer is fetched on its
+  own: a file waits until `/get`, or, per contact, `/files auto` fetches
+  as they arrive. A `downloads/` quota (`downloads_quota_mib`, 1 GiB) is
+  honoured, and a file whose declared size or chunk count is impossible is
+  refused before a byte is asked for.
+- **Opening files safely.** `/open` and the double click refuse to run an
+  executable (a long, cross-platform list), mark downloads on Windows with
+  the zone that makes SmartScreen check them, and normalise saved names
+  (no path separators, control or invisible characters, no reserved device
+  names, Unicode NFC), never overwriting.
+- **Protected at rest without a passphrase.** With no passphrase set, the
+  data key is kept in the operating system's key store (Credential Manager
+  on Windows, Keychain on macOS, Secret Service on Linux), so a copied data
+  directory is useless elsewhere; `--no-keystore` keeps the files plain.
+  `/lock` and `lock_after_minutes` drop the keys and ask for the passphrase
+  again; core dumps and same-user debuggers are refused; `silver.log` is
+  created private; `SILVER_PASSPHRASE` is taken out of the environment
+  before anything else runs.
+- **Less for the relay to see.** Message bodies are padded to 160-byte
+  steps, so a receipt, a short and a medium message are the same size on
+  the wire. Delivery and read receipts leave after a random delay (up to
+  2 s and 2–12 s), so a receipt no longer marks the moment a message was
+  read. A recipient that advertises `padded_files` may be sent a file
+  whose last chunk is filled to a whole 64 KiB, hiding its exact size from
+  the relay. A SOCKS5 proxy option (`--proxy socks5://…`) sends both
+  connections through Tor, each on its own circuit, so they no longer
+  share an address. A relay's TLS key can be pinned (`--pin sha256:…`,
+  shown by `--print-pin`), and a relay once reached over `wss://` is never
+  talked to over plain `ws://`.
+- **Relay-bound login.** The login signature now covers the relay's host
+  name as well as the nonce, so a challenge collected by one relay is
+  worthless at another; older logins are still accepted unless the
+  operator turns them off (`--require-bound-auth`).
+- **Relay abuse controls.** Limits per client address (open connections,
+  new identities an hour, upload bytes an hour), an idle timeout, a total
+  connection and identity cap, and per-user one-time-prekey hand-out
+  limits, on top of the existing per-connection rates. A trusted TLS front
+  can pass the real address in `X-Forwarded-For` (`--trusted-proxy`).
+- **Relay logs and storage that reveal less.** The log names clients by a
+  pseudonym that changes every run (`--log-ids` restores real ids); the
+  database directory and file are private to the relay's user
+  (`StateDirectoryMode=0700`).
+- **Continuous fuzzing.** `cargo fuzz` targets for the frame, envelope,
+  blob-chunk, session, invite-link, file-name and stored-record parsers
+  run in CI, alongside stable-toolchain tests that throw random bytes at
+  the same parsers and assert they never panic.
+
+### Changed
+
+- A signed prekey older than three weeks is refused: the sender falls back
+  to a message without forward secrecy and says so, rather than start a
+  session the peer could never read.
+- `silver-tui`'s `main` scrubs the passphrase environment variables before
+  the async runtime starts; that one function is the sole exception to the
+  crate's `forbid(unsafe_code)` (documented and isolated).
+- The capabilities a contact advertises are remembered the moment their
+  request is accepted, so a file or receipt can go to them at once rather
+  than waiting for their next message.
+
+### Security
+
+- Everything a peer or the relay sends is bounded before it is stored or
+  drawn (message, alias and request caps; a per-sender request limit), and
+  a terminal-safety test asserts that nothing a peer controls reaches the
+  terminal as raw control sequences.
+
 ## 0.5.0 - 2026-09-04
 
 A terminal client that feels native. Nothing on the wire changed; clients

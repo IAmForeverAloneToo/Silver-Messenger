@@ -162,6 +162,11 @@ if [ -n "$DOMAIN" ]; then
     cat >/etc/caddy/Caddyfile <<CADDY
 # Managed by the Silver Messenger relay installer.
 $DOMAIN {
+    # Keep the same private key across certificate renewals, so that
+    # clients that pin the relay's key (silver --pin) keep working.
+    tls {
+        reuse_private_keys
+    }
     reverse_proxy 127.0.0.1:7777
 }
 CADDY

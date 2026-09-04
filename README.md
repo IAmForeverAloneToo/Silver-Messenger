@@ -109,6 +109,8 @@ refused. Received files are saved under their own name in
 | `/refresh`                      | Fetch the selected contact's key again and report any change |
 | `/session`                      | Show how messages with the selected contact are protected    |
 | `/send <path>`                  | Send a file to the selected contact (also `/file`, `/attach`) |
+| `/get [all]`                    | Fetch the newest file waiting in this chat, or `all` of them (double-click its line also fetches) |
+| `/files auto\|ask`              | Fetch this contact's files as they arrive, or wait for `/get` (the default) |
 | `/open`                         | Open the last file received in this chat (or double-click its line) |
 | `/search <text>`                | Find messages in the selected chat, or in all chats from System |
 | `/receipts on\|off`             | Tell contacts when you have read their messages (default on) |
@@ -154,7 +156,9 @@ shows where you are.
 silver --relay <URL>       relay WebSocket URL; remembered in config.json   (env SILVER_RELAY)
 silver --data-dir <DIR>    where keys, contacts and history live            (env SILVER_DATA_DIR)
 silver --ca-cert <PEM>     extra trusted root certificates for wss://; remembered (env SILVER_CA_CERT)
-silver --proxy <URL>       HTTP CONNECT proxy to reach the relay through; remembered (env SILVER_PROXY, else HTTPS_PROXY)
+silver --proxy <URL>       proxy to reach the relay through: http://host:port (CONNECT) or socks5://host:port (Tor); remembered (env SILVER_PROXY, else HTTPS_PROXY / ALL_PROXY)
+silver --pin <PIN>         pin the relay's TLS key (sha256:<hex>); refuse any other; remembered (env SILVER_PIN)
+silver --print-pin         connect once, print the pin of the key the relay presents and whether its certificate is trusted, and exit
 silver --invite <TOKEN>    invite token for a relay that only registers invited identities; remembered (env SILVER_INVITE)
 silver --print-id          print your user id and exit
 silver --print-invite      print your invite link (silver://add/<id>?relay=…) and exit
@@ -250,7 +254,31 @@ localhost, and opens ports 80 and 443 instead. Clients then use
 `silver --relay wss://relay.example.org/ws`. The client trusts both the
 operating system's certificate store and Mozilla's root bundle, so it also
 works behind TLS-inspecting proxies whose root certificate is installed on
-the machine.
+the machine. Once a client has reached a relay over `wss://` it refuses to
+talk to that host over plain `ws://`, so a mistyped or tampered URL cannot
+quietly drop the encryption (the list is `secure_hosts` in `config.json`).
+
+**Pinning the relay's key.** To trust one key rather than every
+certificate authority on the machine, pin it: `silver --print-pin` shows
+the pin of the key the relay presents right now, and `silver --pin
+sha256:…` remembers it, after which any other key is refused. Compare the
+pin with what the relay's operator published (they get it with
+`openssl s_client -connect relay.example.org:443 </dev/null | openssl x509
+-pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256`)
+rather than trusting the first answer. The pin names the public key, not
+the certificate, so a renewal that keeps the key needs no change: the
+installer's Caddyfile sets `reuse_private_keys` for that, and certbot does
+the same with `--reuse-key`. When the key does change, clients fail to
+connect until they are given the new pin (`--pin` again adds it; the list
+is `relay_pins` in `config.json`).
+
+**Through Tor.** With Tor running locally, `silver --proxy
+socks5://127.0.0.1:9050` sends both relay connections through it. The
+relay's name is resolved by Tor, not on the machine, and every connection
+gets its own circuit, so the relay sees two unrelated exit addresses rather
+than one address for the authenticated and the anonymous connection. An
+HTTP `CONNECT` proxy (`--proxy http://proxy.corp:3128`, or `HTTPS_PROXY`)
+works as before.
 
 ## How the crypto works
 

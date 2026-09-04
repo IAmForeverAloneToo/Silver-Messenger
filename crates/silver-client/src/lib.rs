@@ -24,7 +24,9 @@ pub mod tls;
 pub mod vault;
 
 pub use backup::{BackupPayload, export_backup, import_backup, read_backup};
-pub use connection::{Client, ClientError, ClientEvent, DEFAULT_RELAY_URL, Delivery, Progress};
+pub use connection::{
+    Client, ClientError, ClientEvent, DEFAULT_RELAY_URL, Delivery, Progress, observe_relay,
+};
 pub use files::{FileInfo, human_size};
 pub use invite::InviteLink;
 pub use proxy::Proxy;
@@ -36,10 +38,11 @@ pub use sessions::{SessionError, SessionInfo, SessionStore, SharedSessions};
 pub const CAPABILITIES: &[&str] = &[
     silver_protocol::envelope::capability::RECEIPTS,
     silver_protocol::envelope::capability::FILES,
+    silver_protocol::envelope::capability::PADDED_FILES,
 ];
 pub use silver_protocol as protocol;
 pub use store::{
     Config, Contact, ContactRequest, Direction, HeldMessage, HistoryEntry, Protection, Store,
 };
-pub use tls::ConnectOptions;
+pub use tls::{ConnectOptions, Observed, Pin};
 pub use vault::{FileCipher, VaultError};

@@ -166,7 +166,7 @@ connection runs without TLS resumption, and the renderer drops control
 characters, escape sequences and bidi overrides from anything a peer
 sends, so a message cannot drive the terminal.
 
-25. [ ] **Files you agree to** (M). Nothing from the network is written
+25. [x] **Files you agree to** (M). Nothing from the network is written
         to disk without consent: a file line shows the name, size and
         sender, and `/get` (or a click) fetches it; a per-contact
         `auto` setting restores today's behaviour for people you trust,
@@ -177,7 +177,7 @@ sends, so a message cannot drive the terminal.
         fails its hash leaves nothing behind. First because it is the
         finding that started the phase, and the only one a contact can
         exploit today with no skill. (ASVS V12, CWE-434, CWE-770.)
-26. [ ] **Opening files safely** (S). `/open` and the double click never
+26. [x] **Opening files safely** (S). `/open` and the double click never
         launch an executable or script (`.exe`, `.msi`, `.bat`, `.cmd`,
         `.ps1`, `.scr`, `.lnk`, `.js`, `.vbs`, `.jar`, `.sh`, `.app`,
         `.desktop` and the rest) and say why; saved files carry the mark
@@ -188,7 +188,7 @@ sends, so a message cannot drive the terminal.
         refused when they are Windows device names
         (`CON`, `NUL`, `COM1`) or end in a dot or space, and the chat
         line shows the full name as saved. (CWE-451, CWE-22.)
-27. [ ] **Untrusted input, bounded** (M). Everything a peer or the relay
+27. [x] **Untrusted input, bounded** (M). Everything a peer or the relay
         controls gets a limit and a test: held requests capped per
         stranger and in total (today a flood fills memory and
         `requests.json`), the seen-id set bounded, claimed timestamps
@@ -199,7 +199,7 @@ sends, so a message cannot drive the terminal.
         file names and notifications never reach the terminal, and a
         `#![forbid(unsafe_code)]` on every crate. (CWE-400, CWE-116,
         CWE-150.)
-28. [ ] **Relay abuse controls** (M). Limits per address, not only per
+28. [x] **Relay abuse controls** (M). Limits per address, not only per
         connection: connections per address and in total, an idle
         timeout with WebSocket ping/pong, registrations per address per
         hour and a cap on stored identities, file storage quotas per
@@ -209,7 +209,7 @@ sends, so a message cannot drive the terminal.
         `X-Forwarded-For`, trusted only from the configured proxy.
         `silver-relay --status` shows the counters. (ASVS V13, CWE-770,
         CWE-208.)
-29. [ ] **Relay logs and storage that reveal less** (S). User ids leave
+29. [x] **Relay logs and storage that reveal less** (S). User ids leave
         the default log level (today every authentication and
         disconnection is logged with the id and time, which is the
         social graph in `journalctl`); ids are truncated or hashed
@@ -218,7 +218,7 @@ sends, so a message cannot drive the terminal.
         unit); a retention note for journald goes into the deployment
         docs; `--ephemeral` stays the recommended mode for small
         relays. (ASVS V7.1, data minimisation.)
-30. [ ] **Authentication bound to the relay, bundles that expire** (S).
+30. [x] **Authentication bound to the relay, bundles that expire** (S).
         The auth signature covers the relay's host name (or the TLS
         exporter, RFC 9266) as well as the nonce, so a hostile relay
         cannot forward a challenge from another relay and use the
@@ -228,7 +228,7 @@ sends, so a message cannot drive the terminal.
         publishes a last-resort prekey so draining one-time keys costs
         nothing but forward secrecy of one message. (ASVS V2.8, Signal
         X3DH.)
-31. [ ] **Protected at rest without a passphrase** (M). Keys, sessions,
+31. [x] **Protected at rest without a passphrase** (M). Keys, sessions,
         contacts and history are encrypted under a key kept in the
         operating system's store (DPAPI on Windows, the Keychain on
         macOS, the Secret Service on Linux where there is one), so a
@@ -240,7 +240,7 @@ sends, so a message cannot drive the terminal.
         configurable time wipe the keys from memory; core dumps are
         disabled (RLIMIT_CORE 0, PR_SET_DUMPABLE, and the Windows
         equivalent). (ASVS V6, V8; CWE-312, CWE-526, CWE-528.)
-32. [ ] **Less for the relay to see** (M). Bodies padded to size buckets
+32. [x] **Less for the relay to see** (M). Bodies padded to size buckets
         (Signal's 160-byte steps) so a receipt, a short and a long
         message look alike; receipts sent after a random delay so they
         do not mark the moment a message was read; a SOCKS5 proxy

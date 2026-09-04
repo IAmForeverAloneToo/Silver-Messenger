@@ -222,9 +222,10 @@ class Term:
                 return "".join(row[x] for x in cols), {self.sc.buffer[y][x].fg for x in cols}
         return None, set()
 
-    def wait_marks(self, text, marks, colour=None, timeout=15):
+    def wait_marks(self, text, marks, colour=None, timeout=30):
         """Wait for the row with `text` to show exactly `marks`, optionally
-        in `colour` (a set of pyte colour names)."""
+        in `colour` (a set of pyte colour names). Receipts leave after a
+        random delay of up to about twelve seconds, hence the long wait."""
         deadline = time.time() + timeout
         got, colours = None, set()
         while time.time() < deadline:

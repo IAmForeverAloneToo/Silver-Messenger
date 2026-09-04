@@ -91,6 +91,22 @@ pub mod capability {
     pub const RECEIPTS: &str = "receipts";
     /// The client understands `Content::File` and fetches blobs.
     pub const FILES: &str = "files";
+    /// The client reads files whose last chunk was padded to a whole chunk
+    /// (it cuts them to `size`), so the relay sees file sizes in 64 KiB
+    /// steps only.
+    pub const PADDED_FILES: &str = "padded_files";
+}
+
+/// Bodies are padded to a multiple of this many bytes, so a relay sees
+/// sizes in steps: a receipt, a short and a long message look alike.
+pub const PAD_BLOCK: usize = 160;
+
+/// Pad an encoded body with trailing spaces, which JSON ignores, to the
+/// next multiple of [`PAD_BLOCK`]. Clients before 0.6.0 read padded bodies
+/// as they are, and unpadded bodies from them still decode.
+pub fn pad(bytes: &mut Vec<u8>) {
+    let target = bytes.len().div_ceil(PAD_BLOCK).max(1) * PAD_BLOCK;
+    bytes.resize(target, b' ');
 }
 
 /// Position of a message in the sender's stream to one recipient.
@@ -171,8 +187,9 @@ impl Body {
         }
     }
 
+    /// The body as bytes, padded to a multiple of [`PAD_BLOCK`].
     pub fn encode(&self) -> Result<Vec<u8>, ProtocolError> {
-        let bytes = match self {
+        let mut bytes = match self {
             Self::Plain {
                 sent_at_ms,
                 sequence,
@@ -188,6 +205,7 @@ impl Body {
             Self::Ratchet(body) => serde_json::to_vec(body),
         }
         .map_err(|e| ProtocolError::Malformed(e.to_string()))?;
+        pad(&mut bytes);
         if bytes.len() > MAX_BODY_BYTES {
             return Err(ProtocolError::TooLarge(bytes.len()));
         }
@@ -550,17 +568,57 @@ mod tests {
     }
 
     #[test]
-    fn plain_body_encoding_is_unchanged_from_v1() {
+    fn plain_body_encoding_is_v1_json_padded_with_spaces() {
         let bytes = Body::plain(text("hi"), 5, Sequence { epoch: 1, seq: 2 })
             .encode()
             .unwrap();
+        let json = String::from_utf8(bytes.clone()).unwrap();
         assert_eq!(
-            String::from_utf8(bytes.clone()).unwrap(),
+            json.trim_end(),
             r#"{"sent_at_ms":5,"epoch":1,"seq":2,"content":{"type":"text","body":"hi"}}"#
         );
+        assert_eq!(bytes.len(), PAD_BLOCK);
         assert!(matches!(Body::decode(&bytes), Ok(Body::Plain { .. })));
+        // Unpadded bodies (from clients before 0.6.0) still decode.
+        assert!(matches!(
+            Body::decode(json.trim_end().as_bytes()),
+            Ok(Body::Plain { .. })
+        ));
         assert!(Body::decode(br#"{"v":9}"#).is_err());
         assert!(Body::decode(b"nonsense").is_err());
+    }
+
+    #[test]
+    fn bodies_come_in_size_steps() {
+        let alice = Identity::generate();
+        let bob = Identity::generate();
+        let size = |s: &str| {
+            seal(&alice, &bob.key_bundle(), text(s), 0)
+                .unwrap()
+                .ciphertext
+                .len()
+        };
+        // A short and a somewhat longer message are the same size on the
+        // wire; a receipt too.
+        assert_eq!(size("hi"), size("see you at eight, bring the papers"));
+        let receipt = seal(
+            &alice,
+            &bob.key_bundle(),
+            Content::Receipt {
+                kind: ReceiptKind::Read,
+                ids: vec!["0".repeat(36)],
+            },
+            0,
+        )
+        .unwrap();
+        assert_eq!(receipt.ciphertext.len(), size("hi"));
+        // Every body is a whole number of blocks, plus the envelope's fixed
+        // overhead (sender id, signature, tag).
+        for n in [1, 100, 200, 1000] {
+            let len = size(&"x".repeat(n));
+            assert_eq!((len - 96 - 16) % PAD_BLOCK, 0, "{n} chars gave {len} bytes");
+        }
+        assert!(size(&"x".repeat(1000)) > size("hi"));
     }
 
     #[test]

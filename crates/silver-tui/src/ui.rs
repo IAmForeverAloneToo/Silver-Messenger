@@ -894,6 +894,7 @@ mod tests {
                 text: "can we talk?".into(),
                 sequence: Sequence::default(),
                 file: None,
+                caps: Vec::new(),
             }],
         });
         app.selected = 1;
@@ -1010,6 +1011,7 @@ mod tests {
                 text: NASTY.to_owned(),
                 sequence: Sequence::default(),
                 file: None,
+                caps: Vec::new(),
             }],
         });
         app.input = NASTY.to_owned();

@@ -38,15 +38,20 @@ honest before adding features. The wire format itself is specified in
 
 Can:
 
-- See every recipient id, every envelope size, and the timing of every
-  send and delivery.
+- See every recipient id, the timing of every send and delivery, and
+  every envelope's size to the nearest 160 bytes (from 0.6.0 bodies are
+  padded in steps, so a receipt, a short and a medium message look alike;
+  a long message is still visibly long).
 - See the network address and timing of the connection that submitted each
   envelope. With a relay and clients from 0.3.0 on, envelopes arrive on
   connections that never authenticate, so the relay is not told which
   identity sent them; it can still guess from addresses and timing, and a
   client that reaches a relay that offers no anonymous submission (or is
   told `--submit-authenticated`) submits on its authenticated connection,
-  where the pairing is exact.
+  where the pairing is exact. A client that goes through Tor
+  (`--proxy socks5://127.0.0.1:9050`) gives each connection its own
+  circuit, so the two connections arrive from different exit addresses and
+  the address tells the relay nothing; timing still does.
 - Withhold, delay or reorder deliveries; drop mailboxes; refuse service.
 - Serve a *stale* key bundle for a user, or withhold one-time prekeys so a
   session starts without one. It cannot serve a forged bundle or signed
@@ -54,15 +59,20 @@ Can:
   the signatures. A signed prekey older than three weeks is not used at
   all: the sender falls back to a message without forward secrecy and says
   so, rather than start a session its peer could never read.
-- See that a file was sent and how big it is: the encrypted chunks are put
-  and fetched on anonymous connections, but a blob of a certain size
-  arriving from one address, a message delivered to a recipient, and a
-  fetch of that blob shortly after from another address line up in time.
-  It can also drop or withhold a blob, in which case the recipient sees a
-  failed fetch. It cannot alter one: every chunk is authenticated under a
-  key it does not have and bound to its position.
-- Guess from sizes and timing that a small message going back right after
-  a delivery is a receipt, and so that the recipient's client is running.
+- See that a file was sent and roughly how big it is (to the nearest
+  64 KiB between clients from 0.6.0, exactly otherwise): the encrypted
+  chunks are put and fetched on anonymous connections, but a blob of a
+  certain size arriving from one address, a message delivered to a
+  recipient, and a fetch of that blob some time after from another address
+  line up in time. It can also drop or withhold a blob, in which case the
+  recipient sees a failed fetch. It cannot alter one: every chunk is
+  authenticated under a key it does not have and bound to its position.
+- Guess from timing that a message going back some seconds after a
+  delivery is a receipt, and so that the recipient's client is running.
+  The guess is weaker than it was: receipts are the same size as short
+  messages and leave after a random delay (up to two seconds for
+  delivery, two to twelve for read receipts), so a receipt no longer marks
+  the moment a message was read.
 
 Cannot:
 
@@ -88,7 +98,15 @@ Sees the same as the relay operator when the transport is plain `ws://`
 `wss://` on port 443 the observer sees only that a client talks to the relay
 host, plus traffic volume and timing. TLS certificates are validated against
 the operating system's trust store and Mozilla's roots; a corporate proxy
-that inspects TLS with an installed root sees what the relay sees.
+that inspects TLS with an installed root sees what the relay sees, unless
+the client carries a pin for the relay's key (`--pin`), in which case the
+connection fails loudly instead of going through the proxy's certificate.
+A relay once reached over `wss://` is never talked to over `ws://` again
+by that client, so a changed URL (a bad invite link, a typo, a tampered
+config file) cannot quietly strip the transport encryption. Through Tor
+the observer near the client sees Tor traffic and nothing about the
+relay; the relay's operator and anyone near the relay see Tor exit
+addresses.
 
 ### Stranger who knows your id
 
@@ -194,8 +212,14 @@ without comparing safety numbers out of band.
   inside the message. The relay stores ciphertext under a random id that
   only the message reveals.
 
-Deliberately absent so far: deniability (messages are signed), padding of
-message sizes, cover traffic, post-quantum key agreement.
+- **Sizes and timing** (0.6.0 on): bodies are padded with spaces to
+  160-byte steps and, between clients that support it, the last file
+  chunk to a whole 64 KiB; receipts leave after a random delay. Both
+  connections can go through a SOCKS5 proxy such as Tor, one circuit per
+  connection.
+
+Deliberately absent so far: deniability (messages are signed), cover
+traffic, post-quantum key agreement.
 
 ## Trust decisions a user makes
 

@@ -2000,6 +2000,18 @@ impl App {
             return;
         };
         let mut config = self.store.load_config().unwrap_or_default();
+        if let Some(host) = config.downgrade(url) {
+            self.system(
+                Level::Warn,
+                format!(
+                    "{host} was reached over wss:// before, so it is not talked to over plain ws://. \
+                     Use a wss:// URL, or remove the host from secure_hosts in config.json if the \
+                     relay really stopped offering TLS."
+                ),
+            );
+            self.toast("Refused: that relay speaks wss://; see System.");
+            return;
+        }
         config.relay_url = Some(url.to_string());
         match self.store.save_config(&config) {
             Ok(()) => self.system(
@@ -2241,6 +2253,13 @@ impl App {
             ClientEvent::Connected { relay_url } => {
                 self.connection = Connection::Connected;
                 self.system(Level::Info, format!("Connected to {relay_url}"));
+                // Reached over TLS: from now on, never without.
+                let mut config = self.store.load_config().unwrap_or_default();
+                if config.note_secure(&relay_url)
+                    && let Err(e) = self.store.save_config(&config)
+                {
+                    self.toast(format!("Could not save config: {e}"));
+                }
             }
             ClientEvent::Disconnected { reason, retry_in } => {
                 self.connection = Connection::Disconnected;
@@ -2633,6 +2652,9 @@ impl App {
             self.toast("The relay is too old for files; see System.");
             return;
         }
+        // A recipient that cuts files to their promised size can be sent a
+        // padded one, so the relay sees only a multiple of the chunk size.
+        let pad = contact.supports(capability::PADDED_FILES);
         let path = commands::expand_home(&args.join(" "));
         let client = self.client.clone();
         let tx = self.internal_tx.clone();
@@ -2643,7 +2665,7 @@ impl App {
                 &tx,
                 prx,
                 &format!("Sending {}", path.display()),
-                client.upload_file(&path, Some(ptx)),
+                client.upload_file(&path, pad, Some(ptx)),
             )
             .await
             .map_err(|e| e.to_string());
@@ -2684,6 +2706,7 @@ impl App {
             text,
             sequence: message.sequence,
             file,
+            caps: message.caps.clone(),
         };
         self.known_ids.insert(message.id);
         let is_new = match self.requests.iter().position(|r| r.from == from) {
@@ -2759,6 +2782,9 @@ impl App {
             if last.sequence.seq != 0 {
                 contact.received = Some(last.sequence);
             }
+            // Remember what their client can do, so a file or receipt can go
+            // to them at once rather than waiting for their next message.
+            contact.caps = last.caps.clone();
         }
         self.contacts.push(contact);
         self.persist_contacts();

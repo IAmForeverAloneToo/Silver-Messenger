@@ -24,3 +24,5 @@ target
 fuzz/target
 fuzz/artifacts
 fuzz/corpus
+
+tests/tui/__pycache__/

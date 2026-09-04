@@ -4,6 +4,11 @@
 //! one costs a relay round trip and a place in the peer's mailbox. The
 //! queue collects ids for a moment and sends one receipt per peer and kind,
 //! which matters most when a mailbox full of messages is delivered at once.
+//!
+//! A batch also waits a random while, so that the moment a receipt leaves
+//! does not mark the moment a message arrived or was looked at: a relay
+//! that sees a small message go back right after a delivery learns less
+//! when the gap varies.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -13,12 +18,28 @@ use silver_protocol::{Content, UserId};
 
 /// How long ids wait for company before a receipt goes out.
 pub const BATCH_DELAY: Duration = Duration::from_millis(400);
+/// Most a delivery receipt waits on top of that.
+pub const DELIVERED_JITTER: Duration = Duration::from_secs(2);
+/// Least and most a read receipt waits on top of that: it says when
+/// someone was at the keyboard, so it is blurred more.
+pub const READ_JITTER: (Duration, Duration) = (Duration::from_secs(2), Duration::from_secs(12));
 
 #[derive(Default)]
 struct Pending {
     delivered: Vec<String>,
     read: Vec<String>,
-    since: Option<Instant>,
+    due: Option<Instant>,
+}
+
+impl Pending {
+    /// Let the batch wait at least until `earliest` past `now`, and at most
+    /// `latest`, chosen at random.
+    fn wait(&mut self, now: Instant, earliest: Duration, latest: Duration) {
+        let span = latest.saturating_sub(earliest).as_secs_f64();
+        let extra = earliest + Duration::from_secs_f64(span * rand::random::<f64>());
+        let due = now + BATCH_DELAY + extra;
+        self.due = Some(self.due.map_or(due, |d| d.max(due)));
+    }
 }
 
 /// Receipts waiting to be sent, per peer.
@@ -30,24 +51,34 @@ pub struct ReceiptQueue {
 impl ReceiptQueue {
     /// Note that a message from `peer` was stored.
     pub fn delivered(&mut self, peer: UserId, id: impl Into<String>) {
+        self.delivered_at(peer, id, Instant::now());
+    }
+
+    fn delivered_at(&mut self, peer: UserId, id: impl Into<String>, now: Instant) {
         let pending = self.peers.entry(peer).or_default();
         let id = id.into();
         if !pending.delivered.contains(&id) && !pending.read.contains(&id) {
             pending.delivered.push(id);
         }
-        pending.since.get_or_insert_with(Instant::now);
+        if pending.due.is_none() {
+            pending.wait(now, Duration::ZERO, DELIVERED_JITTER);
+        }
     }
 
     /// Note that a message from `peer` was shown. A read receipt implies
     /// delivery, so a pending delivered receipt for the same id is dropped.
     pub fn read(&mut self, peer: UserId, id: impl Into<String>) {
+        self.read_at(peer, id, Instant::now());
+    }
+
+    fn read_at(&mut self, peer: UserId, id: impl Into<String>, now: Instant) {
         let pending = self.peers.entry(peer).or_default();
         let id = id.into();
         pending.delivered.retain(|d| *d != id);
         if !pending.read.contains(&id) {
             pending.read.push(id);
+            pending.wait(now, READ_JITTER.0, READ_JITTER.1);
         }
-        pending.since.get_or_insert_with(Instant::now);
     }
 
     /// Whether anything is waiting.
@@ -55,9 +86,9 @@ impl ReceiptQueue {
         self.peers.is_empty()
     }
 
-    /// The receipts whose batch delay has passed, ready to send.
+    /// The receipts whose wait has passed, ready to send.
     pub fn take_due(&mut self, now: Instant) -> Vec<(UserId, Content)> {
-        self.take(|since| now.saturating_duration_since(since) >= BATCH_DELAY)
+        self.take(|due| due <= now)
     }
 
     /// Everything, regardless of age (for example before quitting).
@@ -65,10 +96,10 @@ impl ReceiptQueue {
         self.take(|_| true)
     }
 
-    fn take(&mut self, due: impl Fn(Instant) -> bool) -> Vec<(UserId, Content)> {
+    fn take(&mut self, ready: impl Fn(Instant) -> bool) -> Vec<(UserId, Content)> {
         let mut out = Vec::new();
         self.peers.retain(|peer, pending| {
-            if !pending.since.is_some_and(&due) {
+            if !pending.due.is_some_and(&ready) {
                 return true;
             }
             if !pending.delivered.is_empty() {
@@ -108,13 +139,19 @@ mod tests {
         );
         let mut queue = ReceiptQueue::default();
         let start = Instant::now();
-        queue.delivered(a, "1");
-        queue.delivered(a, "2");
-        queue.delivered(a, "1");
-        queue.read(a, "2");
-        queue.delivered(b, "9");
+        queue.delivered_at(a, "1", start);
+        queue.delivered_at(a, "2", start);
+        queue.delivered_at(a, "1", start);
+        queue.read_at(a, "2", start);
+        queue.delivered_at(b, "9", start);
         assert!(queue.take_due(start).is_empty(), "too early");
-        let mut due = queue.take_due(start + BATCH_DELAY + Duration::from_millis(1));
+        assert!(
+            queue.take_due(start + BATCH_DELAY).is_empty(),
+            "the batch delay alone is not enough any more"
+        );
+        // Well past the longest wait, everything is due.
+        let mut due =
+            queue.take_due(start + BATCH_DELAY + READ_JITTER.1 + Duration::from_millis(1));
         due.sort_by_key(|(peer, _)| *peer);
         let mut expected = vec![
             (
@@ -146,5 +183,42 @@ mod tests {
         queue.read(b, "10");
         assert_eq!(queue.take_all().len(), 1);
         assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn waits_are_random_within_their_bounds() {
+        let a = Identity::generate().user_id();
+        let start = Instant::now();
+        let mut delivered_waits = Vec::new();
+        let mut read_waits = Vec::new();
+        for _ in 0..40 {
+            let mut queue = ReceiptQueue::default();
+            queue.delivered_at(a, "1", start);
+            delivered_waits.push(queue.peers[&a].due.unwrap() - start);
+            let mut queue = ReceiptQueue::default();
+            queue.read_at(a, "1", start);
+            read_waits.push(queue.peers[&a].due.unwrap() - start);
+        }
+        for wait in &delivered_waits {
+            assert!(
+                *wait >= BATCH_DELAY && *wait <= BATCH_DELAY + DELIVERED_JITTER,
+                "{wait:?}"
+            );
+        }
+        for wait in &read_waits {
+            assert!(
+                *wait >= BATCH_DELAY + READ_JITTER.0 && *wait <= BATCH_DELAY + READ_JITTER.1,
+                "{wait:?}"
+            );
+        }
+        // Not all the same: forty draws from ten seconds coincide by chance
+        // only in a broken generator.
+        assert!(read_waits.iter().any(|w| *w != read_waits[0]));
+        // A read after a delivered receipt pushes the batch out, never in.
+        let mut queue = ReceiptQueue::default();
+        queue.delivered_at(a, "1", start);
+        let first = queue.peers[&a].due.unwrap();
+        queue.read_at(a, "2", start);
+        assert!(queue.peers[&a].due.unwrap() >= first);
     }
 }
