@@ -7,13 +7,15 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use silver_protocol::wire::{ClientFrame, ServerFrame, auth_signature};
 
+use crate::proxy::Proxy;
 use crate::tls::{ConnectOptions, connector};
 use silver_protocol::{
     Content, Envelope, Identity, KeyBundle, Message, ProtocolError, UserId, now_ms, open, seal,
 };
 use tokio::sync::{mpsc, oneshot};
-use tokio_tungstenite::Connector;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 use tracing::{debug, info, warn};
 
 pub const DEFAULT_RELAY_URL: &str = "ws://127.0.0.1:7777/ws";
@@ -81,9 +83,17 @@ impl Client {
         options: ConnectOptions,
     ) -> anyhow::Result<(Self, mpsc::Receiver<ClientEvent>)> {
         let connector = connector(&options)?;
+        let proxy = options.proxy.as_deref().map(Proxy::parse).transpose()?;
         let (cmd_tx, cmd_rx) = mpsc::channel(64);
         let (ev_tx, ev_rx) = mpsc::channel(256);
-        tokio::spawn(run(relay_url, identity.clone(), connector, cmd_rx, ev_tx));
+        tokio::spawn(run(
+            relay_url,
+            identity.clone(),
+            connector,
+            proxy,
+            cmd_rx,
+            ev_tx,
+        ));
         Ok((Self { identity, cmd_tx }, ev_rx))
     }
 
@@ -149,6 +159,7 @@ async fn run(
     relay_url: String,
     identity: Arc<Identity>,
     connector: Connector,
+    proxy: Option<Proxy>,
     mut cmd_rx: mpsc::Receiver<Command>,
     ev_tx: mpsc::Sender<ClientEvent>,
 ) {
@@ -158,6 +169,7 @@ async fn run(
             &relay_url,
             &identity,
             connector.clone(),
+            proxy.as_ref(),
             &mut cmd_rx,
             &ev_tx,
             &mut backoff,
@@ -213,18 +225,18 @@ async fn session(
     relay_url: &str,
     identity: &Identity,
     connector: Connector,
+    proxy: Option<&Proxy>,
     cmd_rx: &mut mpsc::Receiver<Command>,
     ev_tx: &mpsc::Sender<ClientEvent>,
     backoff: &mut Duration,
 ) -> anyhow::Result<Exit> {
     debug!("connecting to {relay_url}");
-    let (ws, _) = tokio::time::timeout(
+    let ws = tokio::time::timeout(
         HANDSHAKE_TIMEOUT,
-        tokio_tungstenite::connect_async_tls_with_config(relay_url, None, false, Some(connector)),
+        open_websocket(relay_url, connector, proxy),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("connect timed out"))?
-    .map_err(describe_connect_error)?;
+    .map_err(|_| anyhow::anyhow!("connect timed out"))??;
     let (mut sink, mut stream) = ws.split();
 
     // --- handshake: challenge -> auth -> auth_ok ---------------------------
@@ -353,6 +365,44 @@ async fn session(
             }
         }
     }
+}
+
+type Ws = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// Open the WebSocket, directly or through a CONNECT proxy. TLS (for
+/// `wss://`) is always negotiated end to end with the relay by us.
+async fn open_websocket(
+    url: &str,
+    connector: Connector,
+    proxy: Option<&Proxy>,
+) -> anyhow::Result<Ws> {
+    let Some(proxy) = proxy else {
+        let (ws, _) =
+            tokio_tungstenite::connect_async_tls_with_config(url, None, false, Some(connector))
+                .await
+                .map_err(describe_connect_error)?;
+        return Ok(ws);
+    };
+    let request = url.into_client_request().map_err(describe_connect_error)?;
+    let uri = request.uri();
+    let host = uri
+        .host()
+        .ok_or_else(|| anyhow::anyhow!("relay URL has no host"))?
+        .to_owned();
+    let port = uri.port_u16().unwrap_or(match uri.scheme_str() {
+        Some("wss") => 443,
+        _ => 80,
+    });
+    debug!(
+        "tunnelling to {host}:{port} via proxy {}:{}",
+        proxy.host, proxy.port
+    );
+    let stream = proxy.connect(&host, port).await?;
+    let (ws, _) =
+        tokio_tungstenite::client_async_tls_with_config(request, stream, None, Some(connector))
+            .await
+            .map_err(describe_connect_error)?;
+    Ok(ws)
 }
 
 /// Turn a failed WebSocket connect into a message a person can act on. An

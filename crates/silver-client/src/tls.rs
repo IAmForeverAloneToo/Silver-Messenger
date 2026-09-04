@@ -19,6 +19,8 @@ use tokio_tungstenite::Connector;
 pub struct ConnectOptions {
     /// PEM files whose certificates are trusted as additional roots.
     pub extra_ca_certs: Vec<PathBuf>,
+    /// An HTTP CONNECT proxy URL to reach the relay through.
+    pub proxy: Option<String>,
 }
 
 pub(crate) fn connector(options: &ConnectOptions) -> anyhow::Result<Connector> {

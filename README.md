@@ -67,6 +67,7 @@ scroll, `Esc` clears the input line, `Ctrl-C` quits.
 silver --relay <URL>       relay WebSocket URL; remembered in config.json   (env SILVER_RELAY)
 silver --data-dir <DIR>    where keys, contacts and history live            (env SILVER_DATA_DIR)
 silver --ca-cert <PEM>     extra trusted root certificates for wss://; remembered (env SILVER_CA_CERT)
+silver --proxy <URL>       HTTP CONNECT proxy to reach the relay through; remembered (env SILVER_PROXY, else HTTPS_PROXY)
 silver --print-id          print your user id and exit
 SILVER_LOG=debug silver    write logs to <data-dir>/silver.log
 

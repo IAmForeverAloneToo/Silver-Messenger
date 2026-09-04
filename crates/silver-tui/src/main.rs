@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use clap::Parser;
-use silver_client::{Client, ConnectOptions, DEFAULT_RELAY_URL, Store};
+use silver_client::{Client, ConnectOptions, DEFAULT_RELAY_URL, Proxy, Store};
 use tracing_subscriber::EnvFilter;
 
 /// End-to-end encrypted messaging in your terminal.
@@ -24,6 +24,11 @@ struct Args {
     /// behind a private CA. Remembered for later runs.
     #[arg(long, env = "SILVER_CA_CERT")]
     ca_cert: Option<PathBuf>,
+
+    /// HTTP CONNECT proxy to reach the relay through, e.g.
+    /// http://proxy.corp:3128. Remembered. Defaults to $HTTPS_PROXY.
+    #[arg(long, env = "SILVER_PROXY")]
+    proxy: Option<String>,
 
     /// Directory for keys, contacts and history (default: platform data dir).
     #[arg(long, env = "SILVER_DATA_DIR")]
@@ -54,17 +59,21 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let mut config = store.load_config()?;
-    if args.relay.is_some() || args.ca_cert.is_some() {
+    if args.relay.is_some() || args.ca_cert.is_some() || args.proxy.is_some() {
         if let Some(relay) = args.relay {
             config.relay_url = Some(relay);
         }
         if let Some(ca_cert) = args.ca_cert {
             config.ca_cert = Some(ca_cert);
         }
+        if let Some(proxy) = args.proxy {
+            config.proxy = Some(proxy);
+        }
         store.save_config(&config)?;
     }
     let options = ConnectOptions {
         extra_ca_certs: config.ca_cert.iter().cloned().collect(),
+        proxy: config.proxy.clone().or_else(Proxy::url_from_env),
     };
     let relay_url = config
         .relay_url

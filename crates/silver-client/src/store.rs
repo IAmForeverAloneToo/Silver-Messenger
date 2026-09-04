@@ -29,6 +29,10 @@ pub struct Config {
     /// behind a private CA.
     #[serde(default)]
     pub ca_cert: Option<PathBuf>,
+    /// HTTP CONNECT proxy URL. When unset, `HTTPS_PROXY` from the
+    /// environment is used.
+    #[serde(default)]
+    pub proxy: Option<String>,
 }
 
 /// A known peer.
@@ -281,6 +285,7 @@ mod tests {
             .save_config(&Config {
                 relay_url: Some("ws://example:7777/ws".into()),
                 ca_cert: None,
+                proxy: None,
             })
             .unwrap();
         assert_eq!(
