@@ -9,6 +9,7 @@ use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
+use ratatui::layout::Rect;
 use silver_client::sequence::{self, SequenceCheck};
 use silver_client::{
     Client, ClientError, ClientEvent, Contact, ContactRequest, Delivery, Direction, FileInfo,
@@ -67,6 +68,72 @@ pub struct SystemLine {
     pub text: String,
 }
 
+/// What the message pane shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pane {
+    System,
+    Requests,
+    Thread(UserId),
+}
+
+/// One row of the message pane as laid out: its text, and which entry of
+/// the pane's list (a message, a system line) it belongs to.
+pub struct ViewRow {
+    pub text: String,
+    pub source: Option<usize>,
+}
+
+/// What the last frame drew, so mouse positions and selections can be
+/// mapped back to text.
+pub struct View {
+    pub pane: Pane,
+    /// The inside of the message pane.
+    pub messages: Rect,
+    /// Every row of the pane's content, visible or not.
+    pub rows: Vec<ViewRow>,
+    /// Index into `rows` of the first visible row.
+    pub start: usize,
+    pub sidebar: Rect,
+    pub input: Rect,
+}
+
+impl Default for View {
+    fn default() -> Self {
+        Self {
+            pane: Pane::System,
+            messages: Rect::default(),
+            rows: Vec::new(),
+            start: 0,
+            sidebar: Rect::default(),
+            input: Rect::default(),
+        }
+    }
+}
+
+/// A selection in the message pane, in (row, column) coordinates of
+/// `View::rows`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Selection {
+    pub anchor: (usize, usize),
+    pub head: (usize, usize),
+    /// Whole rows, whatever the columns say (keyboard and triple click).
+    pub rows_only: bool,
+}
+
+impl Selection {
+    /// Start and end (both inclusive), ordered.
+    pub fn bounds(&self) -> ((usize, usize), (usize, usize)) {
+        if self.anchor <= self.head {
+            (self.anchor, self.head)
+        } else {
+            (self.head, self.anchor)
+        }
+    }
+}
+
+/// Clicks closer together than this on the same cell count as one.
+const MULTI_CLICK: Duration = Duration::from_millis(450);
+
 /// Results of background work spawned by the UI.
 enum Internal {
     LookupDone {
@@ -118,6 +185,13 @@ pub struct App {
     clipboard: Clipboard,
     /// When Ctrl-C was pressed with nothing to copy; a second press quits.
     quit_armed: Option<Instant>,
+    /// What the last frame drew.
+    pub view: View,
+    pub selection: Option<Selection>,
+    /// The left button is down in the message pane.
+    selecting: bool,
+    /// The last press: when, where, and how many in a row.
+    last_click: Option<(Instant, (usize, usize), u8)>,
     notifier: Notifier,
     pub system: Vec<SystemLine>,
     /// 0 is the system pane; `i >= 1` selects `contacts[i - 1]`.
@@ -205,6 +279,10 @@ impl App {
             glyphs,
             clipboard: Clipboard::new(),
             quit_armed: None,
+            view: View::default(),
+            selection: None,
+            selecting: false,
+            last_click: None,
             notifier,
             system: Vec::new(),
             selected: 0,
@@ -393,6 +471,9 @@ impl App {
                 MouseEventKind::ScrollUp => self.scroll_by(MOUSE_SCROLL_STEP as isize),
                 MouseEventKind::ScrollDown => self.scroll_by(-(MOUSE_SCROLL_STEP as isize)),
                 MouseEventKind::Down(MouseButton::Right) => self.paste_from_clipboard(),
+                MouseEventKind::Down(MouseButton::Left) => self.mouse_down(mouse.column, mouse.row),
+                MouseEventKind::Drag(MouseButton::Left) => self.mouse_drag(mouse.column, mouse.row),
+                MouseEventKind::Up(MouseButton::Left) => self.mouse_up(),
                 _ => {}
             },
             Event::FocusGained => {
@@ -406,6 +487,256 @@ impl App {
 
     fn scroll_by(&mut self, rows: isize) {
         self.scroll = self.scroll.saturating_add_signed(rows).min(self.max_scroll);
+    }
+
+    // --- selection ---------------------------------------------------------
+
+    /// The content row and column under a screen position inside the
+    /// message pane, if any.
+    fn cell_at(&self, x: u16, y: u16) -> Option<(usize, usize)> {
+        let pane = self.view.messages;
+        if !pane.contains(ratatui::layout::Position::new(x, y)) {
+            return None;
+        }
+        let row = self.view.start + (y - pane.y) as usize;
+        (row < self.view.rows.len()).then_some((row, (x - pane.x) as usize))
+    }
+
+    fn mouse_down(&mut self, x: u16, y: u16) {
+        let Some(cell) = self.cell_at(x, y) else {
+            // A click anywhere else drops the selection.
+            self.selection = None;
+            self.selecting = false;
+            return;
+        };
+        let clicks = match self.last_click {
+            Some((at, last, n)) if last == cell && at.elapsed() < MULTI_CLICK => n % 3 + 1,
+            _ => 1,
+        };
+        self.last_click = Some((Instant::now(), cell, clicks));
+        match clicks {
+            1 => {
+                self.selection = Some(Selection {
+                    anchor: cell,
+                    head: cell,
+                    rows_only: false,
+                });
+                self.selecting = true;
+            }
+            2 => self.select_word(cell),
+            _ => self.select_source(cell.0),
+        }
+    }
+
+    fn mouse_drag(&mut self, x: u16, y: u16) {
+        if !self.selecting {
+            return;
+        }
+        let pane = self.view.messages;
+        // Dragging past the top or bottom scrolls the pane along.
+        if y < pane.y {
+            self.scroll_by(1);
+        } else if y >= pane.y + pane.height {
+            self.scroll_by(-1);
+        }
+        let y = y.clamp(pane.y, (pane.y + pane.height).saturating_sub(1).max(pane.y));
+        let x = x.clamp(pane.x, (pane.x + pane.width).saturating_sub(1).max(pane.x));
+        let Some(cell) = self.cell_at(x, y) else {
+            return;
+        };
+        if let Some(selection) = &mut self.selection {
+            selection.head = cell;
+        }
+    }
+
+    fn mouse_up(&mut self) {
+        if !self.selecting {
+            return;
+        }
+        self.selecting = false;
+        // A click without a drag is not a selection.
+        if self
+            .selection
+            .is_some_and(|s| s.anchor == s.head && !s.rows_only)
+        {
+            self.selection = None;
+        }
+    }
+
+    /// Double click: the word under the cursor.
+    fn select_word(&mut self, (row, col): (usize, usize)) {
+        let Some(text) = self.view.rows.get(row).map(|r| r.text.as_str()) else {
+            return;
+        };
+        self.selection = ui::word_at(text, col).map(|(from, to)| Selection {
+            anchor: (row, from),
+            head: (row, to),
+            rows_only: false,
+        });
+    }
+
+    /// Triple click: every row of the message (or system line) the row
+    /// belongs to; a row that belongs to none is selected alone.
+    fn select_source(&mut self, row: usize) {
+        if row >= self.view.rows.len() {
+            return;
+        }
+        let (first, last) = self.source_rows(row);
+        self.selection = Some(Selection {
+            anchor: (first, 0),
+            head: (last, usize::MAX),
+            rows_only: true,
+        });
+    }
+
+    /// Shift-Up / Shift-Down: extend a selection of whole messages from the
+    /// newest one upwards, or shrink it again.
+    fn select_rows_by_key(&mut self, up: bool) {
+        let total = self.view.rows.len();
+        if total == 0 {
+            return;
+        }
+        let selection = match self.selection {
+            Some(s) if s.rows_only => s,
+            _ => {
+                // The first press selects the newest message.
+                let (first, last) = self.source_rows(total - 1);
+                self.selection = Some(Selection {
+                    anchor: (last, usize::MAX),
+                    head: (first, 0),
+                    rows_only: true,
+                });
+                self.scroll_row_into_view(first);
+                return;
+            }
+        };
+        let head_row = if up {
+            let Some(above) = selection.head.0.checked_sub(1) else {
+                return;
+            };
+            self.source_rows(above).0
+        } else {
+            let below = self.source_rows(selection.head.0).1 + 1;
+            if below > selection.anchor.0 {
+                return; // nothing left to shrink
+            }
+            below
+        };
+        self.selection = Some(Selection {
+            head: (head_row, 0),
+            ..selection
+        });
+        self.scroll_row_into_view(head_row);
+    }
+
+    /// First and last row of the message that `row` belongs to, or `row`
+    /// alone when it belongs to none (a date rule).
+    fn source_rows(&self, row: usize) -> (usize, usize) {
+        let Some(source) = self.view.rows.get(row).and_then(|r| r.source) else {
+            return (row, row);
+        };
+        let mut rows = self
+            .view
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.source == Some(source))
+            .map(|(i, _)| i);
+        let first = rows.next().unwrap_or(row);
+        let last = rows.next_back().unwrap_or(first);
+        (first, last)
+    }
+
+    /// Scroll so that content row `row` is on screen.
+    fn scroll_row_into_view(&mut self, row: usize) {
+        let height = self.view.messages.height as usize;
+        let total = self.view.rows.len();
+        if height == 0 || total == 0 {
+            return;
+        }
+        let end = total.saturating_sub(self.scroll);
+        let start = end.saturating_sub(height);
+        if row < start {
+            self.scroll = total
+                .saturating_sub(height)
+                .saturating_sub(row)
+                .min(self.max_scroll);
+        } else if row >= end {
+            self.scroll = total.saturating_sub(row + 1);
+        }
+    }
+
+    /// The selected text, as a terminal would copy it: whole messages come
+    /// out as "time name: text", partial rows as what is on screen.
+    fn selection_text(&self) -> Option<String> {
+        let selection = self.selection?;
+        let ((r0, c0), (r1, c1)) = selection.bounds();
+        let rows = &self.view.rows;
+        if rows.is_empty() {
+            return None;
+        }
+        let r1 = r1.min(rows.len() - 1);
+        let mut out: Vec<String> = Vec::new();
+        let mut skip_source: Option<usize> = None;
+        for (i, row) in rows.iter().enumerate().take(r1 + 1).skip(r0) {
+            if selection.rows_only {
+                if row.source.is_some() && row.source == skip_source {
+                    continue;
+                }
+                skip_source = None;
+                // Date rules between messages are not text anyone wants.
+                if row.source.is_none() && matches!(self.view.pane, Pane::Thread(_)) {
+                    continue;
+                }
+                if let Some(source) = row.source {
+                    let all_rows: Vec<usize> = rows
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, r)| r.source == Some(source))
+                        .map(|(j, _)| j)
+                        .collect();
+                    let whole = all_rows.iter().all(|j| (r0..=r1).contains(j));
+                    if whole && let Some(text) = self.source_text(source) {
+                        out.push(text);
+                        skip_source = Some(source);
+                        continue;
+                    }
+                }
+                out.push(row.text.trim_end().to_owned());
+            } else {
+                let from = if i == r0 { c0 } else { 0 };
+                let to = if i == r1 { c1 } else { usize::MAX };
+                out.push(ui::slice_columns(&row.text, from, to).trim_end().to_owned());
+            }
+        }
+        let text = out.join("\n");
+        (!text.trim().is_empty()).then_some(text)
+    }
+
+    /// The clean text of entry `source` of the shown pane.
+    fn source_text(&self, source: usize) -> Option<String> {
+        match self.view.pane {
+            Pane::System => self.system.get(source).map(|l| {
+                if l.level == Level::Code {
+                    l.text.clone()
+                } else {
+                    format!("{} {}", ui::clock(l.timestamp_ms), l.text)
+                }
+            }),
+            Pane::Requests => None,
+            Pane::Thread(peer) => {
+                let line = self.threads.get(&peer)?.get(source)?;
+                let who = match line.direction {
+                    Direction::Sent => "you".to_owned(),
+                    Direction::Received => self.contact_name(&peer),
+                };
+                Some(format!(
+                    "{} {who}: {}",
+                    ui::clock(line.timestamp_ms),
+                    line.text
+                ))
+            }
+        }
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
@@ -426,6 +757,8 @@ impl App {
             KeyCode::BackTab => self.select_prev(),
             KeyCode::Down if alt => self.select_next(),
             KeyCode::Up if alt => self.select_prev(),
+            KeyCode::Up if shift => self.select_rows_by_key(true),
+            KeyCode::Down if shift => self.select_rows_by_key(false),
             KeyCode::Up => self.input_up(),
             KeyCode::Down => self.input_down(),
             KeyCode::Home if ctrl => self.scroll = self.max_scroll,
@@ -452,6 +785,7 @@ impl App {
             }
             KeyCode::PageUp => self.scroll = (self.scroll + SCROLL_STEP).min(self.max_scroll),
             KeyCode::PageDown => self.scroll = self.scroll.saturating_sub(SCROLL_STEP),
+            KeyCode::Esc if self.selection.is_some() => self.selection = None,
             KeyCode::Esc => self.clear_input(),
             KeyCode::Enter => self.submit(),
             KeyCode::Char(c) if !ctrl && !alt => {
@@ -486,7 +820,17 @@ impl App {
 
     /// Copy the selection in the message pane, if there is one.
     fn copy_selection(&mut self) -> bool {
-        false
+        let Some(text) = self.selection_text() else {
+            return false;
+        };
+        let rows = text.lines().count();
+        let what = if rows > 1 {
+            format!("{rows} lines")
+        } else {
+            "the selection".to_owned()
+        };
+        self.copy_text(&text, &what);
+        true
     }
 
     /// Put `text` on the clipboard and say so; `what` names it in the toast.
@@ -679,6 +1023,7 @@ impl App {
     fn select(&mut self, index: usize) {
         self.selected = index.min(self.pane_count() - 1);
         self.scroll = 0;
+        self.selection = None;
         self.mark_selected_read();
     }
 
@@ -779,6 +1124,7 @@ impl App {
             "  /quit                    exit",
             "Keys: Tab/Shift-Tab or Alt-Up/Down switch chats · Up/Down recall earlier lines · Alt-Enter new line",
             "      PgUp/PgDn or mouse wheel scroll, Ctrl-Home/End jump · Esc clears input or the selection",
+            "      Select text by dragging, double click a word, triple click a message, or Shift-Up/Down for rows",
             "      Ctrl-V, Shift-Insert or right click paste · Ctrl-C copies the selection (twice: quit) · Ctrl-Q quits",
         ] {
             self.system(Level::Info, line);

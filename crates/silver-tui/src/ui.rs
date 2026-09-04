@@ -8,15 +8,20 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 use silver_client::Direction;
+use silver_protocol::UserId;
 use silver_protocol::envelope::ReceiptKind;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, Connection, Level};
+use crate::app::{App, Connection, Level, Pane, View, ViewRow};
 
 const SIDEBAR_WIDTH: u16 = 26;
 
 /// Rows the compose box may grow to before it scrolls.
 const INPUT_MAX_ROWS: u16 = 6;
+
+/// One row of the message pane before it is drawn: the styled line and
+/// which entry of the pane's list it came from.
+type Row = (Line<'static>, Option<usize>);
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let [main, status] =
@@ -31,6 +36,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_messages(frame, app, messages);
     draw_input(frame, app, input);
     draw_status(frame, app, status);
+    app.view.sidebar = sidebar;
+    app.view.input = input;
 }
 
 fn dim() -> Style {
@@ -107,11 +114,13 @@ fn draw_messages(frame: &mut Frame, app: &mut App, area: Rect) {
     let width = area.width.saturating_sub(2) as usize;
     let height = area.height.saturating_sub(2) as usize;
 
-    let (title, rows) = match app.selected_contact() {
-        None if app.requests_pane_selected() => {
-            (" Contact requests ".to_owned(), request_rows(app, width))
-        }
-        None => (" System ".to_owned(), system_rows(app, width)),
+    let (title, rows, pane) = match app.selected_contact() {
+        None if app.requests_pane_selected() => (
+            " Contact requests ".to_owned(),
+            request_rows(app, width),
+            Pane::Requests,
+        ),
+        None => (" System ".to_owned(), system_rows(app, width), Pane::System),
         Some(contact) => (
             format!(
                 " {}{} · {}{} ",
@@ -127,6 +136,7 @@ fn draw_messages(frame: &mut Frame, app: &mut App, area: Rect) {
                     .unwrap_or_default()
             ),
             thread_rows(app, &contact.user_id, width),
+            Pane::Thread(contact.user_id),
         ),
     };
 
@@ -135,7 +145,25 @@ fn draw_messages(frame: &mut Frame, app: &mut App, area: Rect) {
     app.scroll = app.scroll.min(app.max_scroll);
     let end = total.saturating_sub(app.scroll);
     let start = end.saturating_sub(height);
-    let visible: Vec<Line> = rows.into_iter().skip(start).take(end - start).collect();
+    let inner = Rect::new(
+        area.x + 1,
+        area.y + 1,
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
+    );
+    // A pane drawn at another width lays its rows out differently, so a
+    // selection made before no longer names the same text.
+    if app.view.messages.width != inner.width || app.view.pane != pane {
+        app.selection = None;
+    }
+    let (visible, recorded): (Vec<Line>, Vec<ViewRow>) = rows
+        .into_iter()
+        .map(|(line, source)| {
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            (line, ViewRow { text, source })
+        })
+        .unzip();
+    let visible: Vec<Line> = visible.into_iter().skip(start).take(end - start).collect();
 
     let mut block = Block::bordered().title(truncate(&title, width));
     if app.scroll > 0 {
@@ -145,20 +173,65 @@ fn draw_messages(frame: &mut Frame, app: &mut App, area: Rect) {
         ));
     }
     frame.render_widget(Paragraph::new(visible).block(block), area);
+    app.view = View {
+        pane,
+        messages: inner,
+        rows: recorded,
+        start,
+        sidebar: app.view.sidebar,
+        input: app.view.input,
+    };
+    highlight_selection(frame, app, inner, start, end);
 }
 
-fn system_rows(app: &App, width: usize) -> Vec<Line<'static>> {
+/// Draw the selection over the rows just rendered, by reversing the cells
+/// it covers.
+fn highlight_selection(frame: &mut Frame, app: &App, inner: Rect, start: usize, end: usize) {
+    let Some(selection) = app.selection else {
+        return;
+    };
+    let ((r0, c0), (r1, c1)) = selection.bounds();
+    let reversed = Style::default().add_modifier(Modifier::REVERSED);
+    let buf = frame.buffer_mut();
+    for row in r0.max(start)..=r1.min(end.saturating_sub(1)) {
+        if row < start {
+            continue;
+        }
+        let y = inner.y + (row - start) as u16;
+        let (from, to) = if selection.rows_only {
+            (0, inner.width as usize)
+        } else {
+            let from = if row == r0 { c0 } else { 0 };
+            let to = if row == r1 {
+                c1.saturating_add(1).min(inner.width as usize)
+            } else {
+                inner.width as usize
+            };
+            (from, to)
+        };
+        for col in from..to {
+            if let Some(cell) = buf.cell_mut((inner.x + col as u16, y)) {
+                cell.set_style(reversed);
+            }
+        }
+    }
+}
+
+fn system_rows(app: &App, width: usize) -> Vec<Row> {
     let mut rows = Vec::new();
-    for line in &app.system {
+    for (i, line) in app.system.iter().enumerate() {
         let style = match line.level {
             Level::Info => Style::default(),
             Level::Warn => Style::default().fg(Color::Yellow),
             Level::Code => {
                 // Dark modules on a light ground whatever the theme, so a
                 // phone camera reads it.
-                rows.push(Line::styled(
-                    truncate(&line.text, width),
-                    Style::default().fg(Color::Black).bg(Color::White),
+                rows.push((
+                    Line::styled(
+                        truncate(&line.text, width),
+                        Style::default().fg(Color::Black).bg(Color::White),
+                    ),
+                    Some(i),
                 ));
                 continue;
             }
@@ -167,50 +240,64 @@ fn system_rows(app: &App, width: usize) -> Vec<Line<'static>> {
             format!("{} ", clock(line.timestamp_ms)),
             dim(),
         )];
-        rows.extend(wrap_message(prefix, &line.text, style, width));
+        rows.extend(
+            wrap_message(prefix, &line.text, style, width)
+                .into_iter()
+                .map(|l| (l, Some(i))),
+        );
     }
     rows
 }
 
-fn request_rows(app: &App, width: usize) -> Vec<Line<'static>> {
-    let mut rows = Vec::new();
+fn request_rows(app: &App, width: usize) -> Vec<Row> {
+    let mut rows: Vec<Row> = Vec::new();
     rows.extend(wrap_message(
         vec![],
         "People who wrote to you but are not contacts yet. /accept <n> starts a chat with them; /block <n> drops their messages from now on.",
         dim(),
         width,
-    ));
-    rows.push(Line::from(""));
+    ).into_iter().map(|l| (l, None)));
+    rows.push((Line::from(""), None));
     for (i, request) in app.requests.iter().enumerate() {
-        rows.push(Line::from(vec![
-            Span::styled(
-                format!("{}. {}…", i + 1, request.from.short()),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(format!("  {}", request.from), dim()),
-        ]));
+        rows.push((
+            Line::from(vec![
+                Span::styled(
+                    format!("{}. {}…", i + 1, request.from.short()),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!("  {}", request.from), dim()),
+            ]),
+            None,
+        ));
         let shown = request.messages.len().min(3);
         for held in &request.messages[request.messages.len() - shown..] {
             let prefix = vec![Span::styled(
                 format!("   {} ", clock(held.timestamp_ms)),
                 dim(),
             )];
-            rows.extend(wrap_message(prefix, &held.text, Style::default(), width));
+            rows.extend(
+                wrap_message(prefix, &held.text, Style::default(), width)
+                    .into_iter()
+                    .map(|l| (l, None)),
+            );
         }
         if request.messages.len() > shown {
-            rows.push(Line::styled(
-                format!("   … and {} earlier", request.messages.len() - shown),
-                dim(),
+            rows.push((
+                Line::styled(
+                    format!("   … and {} earlier", request.messages.len() - shown),
+                    dim(),
+                ),
+                None,
             ));
         }
-        rows.push(Line::from(""));
+        rows.push((Line::from(""), None));
     }
     rows
 }
 
-fn thread_rows(app: &App, peer: &silver_protocol::UserId, width: usize) -> Vec<Line<'static>> {
+fn thread_rows(app: &App, peer: &UserId, width: usize) -> Vec<Row> {
     let Some(lines) = app.threads.get(peer) else {
         return Vec::new();
     };
@@ -220,9 +307,9 @@ fn thread_rows(app: &App, peer: &silver_protocol::UserId, width: usize) -> Vec<L
         .find(|c| c.user_id == *peer)
         .map(|c| c.display_name())
         .unwrap_or_default();
-    let mut rows = Vec::new();
+    let mut rows: Vec<Row> = Vec::new();
     let mut last_day: Option<NaiveDate> = None;
-    for line in lines {
+    for (i, line) in lines.iter().enumerate() {
         // A separator whenever the calendar day changes.
         let day = Local
             .timestamp_millis_opt(line.timestamp_ms as i64)
@@ -230,7 +317,10 @@ fn thread_rows(app: &App, peer: &silver_protocol::UserId, width: usize) -> Vec<L
             .map(|t| t.date_naive());
         if day != last_day {
             if let Some(day) = day {
-                rows.push(separator(&day.format(" %A %-d %B %Y ").to_string(), width));
+                rows.push((
+                    separator(&day.format(" %A %-d %B %Y ").to_string(), width),
+                    None,
+                ));
             }
             last_day = day;
         }
@@ -268,9 +358,55 @@ fn thread_rows(app: &App, peer: &silver_protocol::UserId, width: usize) -> Vec<L
             Span::styled(mark, mark_style),
             Span::raw(": "),
         ];
-        rows.extend(wrap_message(prefix, &line.text, Style::default(), width));
+        rows.extend(
+            wrap_message(prefix, &line.text, Style::default(), width)
+                .into_iter()
+                .map(|l| (l, Some(i))),
+        );
     }
     rows
+}
+
+/// The text of `text` between display columns `from` and `to` (inclusive),
+/// as a terminal would select it.
+pub fn slice_columns(text: &str, from: usize, to: usize) -> String {
+    let mut out = String::new();
+    let mut col = 0;
+    for ch in text.chars() {
+        let w = ch.width().unwrap_or(0);
+        if col > to {
+            break;
+        }
+        if col >= from {
+            out.push(ch);
+        }
+        col += w;
+    }
+    out
+}
+
+/// The word (run of non-blank characters) under display column `col`, as
+/// its first and last column.
+pub fn word_at(text: &str, col: usize) -> Option<(usize, usize)> {
+    let mut start = None;
+    let mut cursor = 0;
+    for ch in text.chars() {
+        let w = ch.width().unwrap_or(0).max(1);
+        if ch.is_whitespace() {
+            if let Some(s) = start.take()
+                && col < cursor
+            {
+                return Some((s, cursor - 1));
+            }
+        } else if start.is_none() {
+            start = Some(cursor);
+        }
+        cursor += w;
+    }
+    match start {
+        Some(s) if col >= s && col < cursor => Some((s, cursor - 1)),
+        _ => None,
+    }
 }
 
 fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
@@ -513,5 +649,19 @@ mod tests {
     fn truncates_with_ellipsis() {
         assert_eq!(truncate("hello", 10), "hello");
         assert_eq!(truncate("hello world", 6), "hello…");
+    }
+
+    #[test]
+    fn selection_helpers_work_in_columns() {
+        assert_eq!(slice_columns("hello world", 6, 10), "world");
+        assert_eq!(slice_columns("hello world", 0, 4), "hello");
+        assert_eq!(slice_columns("hello", 3, 99), "lo");
+        // A wide character occupies two columns.
+        assert_eq!(slice_columns("a日b", 1, 2), "日");
+        assert_eq!(word_at("hello world", 7), Some((6, 10)));
+        assert_eq!(word_at("hello world", 0), Some((0, 4)));
+        assert_eq!(word_at("hello world", 5), None);
+        assert_eq!(word_at("hello", 9), None);
+        assert_eq!(word_at("  x", 2), Some((2, 2)));
     }
 }
