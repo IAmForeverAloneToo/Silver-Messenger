@@ -46,8 +46,10 @@ verifying a fingerprint). Then:
 hello!                         # anything not starting with / is sent to the selected chat
 ```
 
-Whoever receives a message from someone new gets a contact created
-automatically; `/alias <name>` gives it a friendly name.
+A message from someone who is not a contact yet lands in the **Requests**
+pane rather than in a chat; `/accept <n>` turns it into a contact (and moves
+the held messages into the chat), `/block <n>` drops everything from that id
+from then on. `/alias <name>` gives a contact a friendly name.
 
 ### Commands and keys
 
@@ -59,6 +61,9 @@ automatically; `/alias <name>` gives it a friendly name.
 | `/verify`                   | Show the safety number to compare with the selected contact  |
 | `/verify ok` / `/verify no` | Mark the selected contact as verified, or clear the mark     |
 | `/refresh`                  | Fetch the selected contact's key again and report any change |
+| `/accept <n>`               | Accept a contact request from the Requests pane              |
+| `/block <n or id>`          | Drop everything from that id from now on                     |
+| `/unblock <id>`, `/blocked` | Undo a block; list blocked ids                               |
 | `/me`                       | Show your own id                                             |
 | `/relay <ws-url>`           | Change the relay (used on next start)                        |
 | `/help`, `/quit`            |                                                              |
@@ -73,6 +78,7 @@ silver --relay <URL>       relay WebSocket URL; remembered in config.json   (env
 silver --data-dir <DIR>    where keys, contacts and history live            (env SILVER_DATA_DIR)
 silver --ca-cert <PEM>     extra trusted root certificates for wss://; remembered (env SILVER_CA_CERT)
 silver --proxy <URL>       HTTP CONNECT proxy to reach the relay through; remembered (env SILVER_PROXY, else HTTPS_PROXY)
+silver --invite <TOKEN>    invite token for a relay that only registers invited identities; remembered (env SILVER_INVITE)
 silver --print-id          print your user id and exit
 silver --set-passphrase    encrypt keys, contacts and history under a passphrase (asked at every start)
 silver --remove-passphrase store everything unencrypted again
@@ -87,6 +93,9 @@ silver-relay --data-dir <DIR>         database location; under systemd /var/lib/
 silver-relay --message-ttl-days <N>   delete unacknowledged messages after N days, default 30 (env SILVER_RELAY_TTL_DAYS)
 silver-relay --max-mailbox-messages   per-recipient queue cap, default 1000            (env SILVER_RELAY_MAX_MESSAGES)
 silver-relay --max-mailbox-mib        per-recipient queue cap in MiB, default 32       (env SILVER_RELAY_MAX_MIB)
+silver-relay --sends-per-minute <N>   messages one connection may submit per minute, default 60 (env SILVER_RELAY_SENDS_PER_MINUTE)
+silver-relay --lookups-per-minute <N> key lookups per connection per minute, default 30   (env SILVER_RELAY_LOOKUPS_PER_MINUTE)
+silver-relay --invite-token <T>       only register new identities that present T   (env SILVER_RELAY_INVITE_TOKEN)
 silver-relay --ephemeral              keep everything in memory only
 RUST_LOG=debug silver-relay           relay log level
 ```
@@ -153,6 +162,11 @@ the machine.
   and ephemeral key are bound as associated data, and the signature covers the
   recipient, ephemeral key, nonce and body, so an envelope cannot be
   re-addressed, altered, or forged.
+* **Abuse controls**: strangers who know your id can write to you, but their
+  messages wait in the Requests pane until you accept or block them. The
+  relay limits each connection to 60 messages and 30 key lookups per minute,
+  caps every mailbox, and can be told to register only identities that
+  present an invite token.
 * **Encryption at rest**: with a passphrase set, every file in the data
   directory (identity keys, contacts, history, outbox, config) is encrypted
   with XChaCha20-Poly1305 under a random data key, which is itself wrapped

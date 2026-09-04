@@ -32,6 +32,8 @@ const IDENTITY_FILE: &str = "identity.json";
 const CONFIG_FILE: &str = "config.json";
 const CONTACTS_FILE: &str = "contacts.json";
 const OUTBOX_FILE: &str = "outbox.json";
+const REQUESTS_FILE: &str = "requests.json";
+const BLOCKED_FILE: &str = "blocked.json";
 const HISTORY_DIR: &str = "history";
 
 /// Client-side configuration.
@@ -119,6 +121,25 @@ pub struct HistoryEntry {
     pub direction: Direction,
     pub timestamp_ms: u64,
     pub text: String,
+}
+
+/// A message from someone who is not a contact yet, held until the user
+/// accepts or blocks them.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HeldMessage {
+    pub id: String,
+    pub timestamp_ms: u64,
+    pub text: String,
+    #[serde(default)]
+    pub sequence: Sequence,
+}
+
+/// Messages from one unknown sender, waiting for a decision.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ContactRequest {
+    pub from: UserId,
+    pub first_seen_ms: u64,
+    pub messages: Vec<HeldMessage>,
 }
 
 /// Handle to the data directory.
@@ -250,7 +271,14 @@ impl Store {
         from: Option<&FileCipher>,
         to: Option<&FileCipher>,
     ) -> anyhow::Result<()> {
-        for name in [IDENTITY_FILE, CONFIG_FILE, CONTACTS_FILE, OUTBOX_FILE] {
+        for name in [
+            IDENTITY_FILE,
+            CONFIG_FILE,
+            CONTACTS_FILE,
+            OUTBOX_FILE,
+            REQUESTS_FILE,
+            BLOCKED_FILE,
+        ] {
             let path = self.root.join(name);
             if !path.exists() {
                 continue;
@@ -383,6 +411,32 @@ impl Store {
         self.write_file(
             CONTACTS_FILE,
             serde_json::to_string_pretty(contacts)?.as_bytes(),
+            false,
+        )
+    }
+
+    // --- contact requests and blocking ------------------------------------------
+
+    pub fn load_requests(&self) -> anyhow::Result<Vec<ContactRequest>> {
+        self.read_json_or_default(REQUESTS_FILE)
+    }
+
+    pub fn save_requests(&self, requests: &[ContactRequest]) -> anyhow::Result<()> {
+        self.write_file(
+            REQUESTS_FILE,
+            serde_json::to_string_pretty(requests)?.as_bytes(),
+            false,
+        )
+    }
+
+    pub fn load_blocked(&self) -> anyhow::Result<Vec<UserId>> {
+        self.read_json_or_default(BLOCKED_FILE)
+    }
+
+    pub fn save_blocked(&self, blocked: &[UserId]) -> anyhow::Result<()> {
+        self.write_file(
+            BLOCKED_FILE,
+            serde_json::to_string_pretty(blocked)?.as_bytes(),
             false,
         )
     }

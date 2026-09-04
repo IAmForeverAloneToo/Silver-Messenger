@@ -41,7 +41,7 @@ Tick items off as they land on `main`.
        (Argon2id, XChaCha20-Poly1305), optional OS keychain unlock.
 8. [x] **Identity backup and restore** (S). Seed phrase or encrypted export,
        so a lost machine is not a lost identity.
-9. [ ] **Contact requests and relay abuse controls** (M). First messages
+9. [x] **Contact requests and relay abuse controls** (M). First messages
        from strangers land in a pending list; relay rate limits, per-sender
        quotas, optional invite-token registration.
 

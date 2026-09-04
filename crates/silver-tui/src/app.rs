@@ -6,8 +6,11 @@ use std::time::{Duration, Instant};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use silver_client::sequence::{self, SequenceCheck};
-use silver_client::{Client, ClientError, ClientEvent, Contact, Direction, HistoryEntry, Store};
-use silver_protocol::{Content, Envelope, KeyBundle, UserId, now_ms};
+use silver_client::{
+    Client, ClientError, ClientEvent, Contact, ContactRequest, Direction, HeldMessage,
+    HistoryEntry, Store,
+};
+use silver_protocol::{Content, Envelope, KeyBundle, Message, UserId, now_ms};
 use tokio::sync::mpsc;
 
 use crate::ui;
@@ -70,6 +73,9 @@ pub struct App {
     pub me: UserId,
     pub connection: Connection,
     pub contacts: Vec<Contact>,
+    /// Messages from unknown senders awaiting /accept or /block.
+    pub requests: Vec<ContactRequest>,
+    blocked: Vec<UserId>,
     pub threads: HashMap<UserId, Vec<ChatLine>>,
     pub unread: HashMap<UserId, usize>,
     known_ids: HashSet<String>,
@@ -101,9 +107,14 @@ impl App {
     ) -> anyhow::Result<Self> {
         let me = client.user_id();
         let contacts = store.load_contacts()?;
+        let requests = store.load_requests()?;
+        let blocked = store.load_blocked()?;
         let pending: HashSet<String> = client.pending_ids().into_iter().collect();
         let mut threads = HashMap::new();
-        let mut known_ids = HashSet::new();
+        let mut known_ids: HashSet<String> = requests
+            .iter()
+            .flat_map(|r| r.messages.iter().map(|m| m.id.clone()))
+            .collect();
         for contact in &contacts {
             let lines: Vec<ChatLine> = store
                 .load_history(&contact.user_id)?
@@ -131,6 +142,8 @@ impl App {
             me,
             connection: Connection::Connecting,
             contacts,
+            requests,
+            blocked,
             threads,
             unread: HashMap::new(),
             known_ids,
@@ -158,6 +171,13 @@ impl App {
             Level::Info,
             "Share it with people who want to message you. Type /help for commands.",
         );
+        if !app.requests.is_empty() {
+            let n = app.requests.len();
+            app.system(
+                Level::Info,
+                format!("{n} contact request(s) waiting in the Requests pane."),
+            );
+        }
         Ok(app)
     }
 
@@ -196,6 +216,27 @@ impl App {
 
     fn contact_index(&self, user_id: &UserId) -> Option<usize> {
         self.contacts.iter().position(|c| c.user_id == *user_id)
+    }
+
+    /// Index into `contacts` of the selected pane, if it is a contact.
+    fn selected_contact_index(&self) -> Option<usize> {
+        self.selected
+            .checked_sub(1)
+            .filter(|i| *i < self.contacts.len())
+    }
+
+    /// Panes: System, one per contact, then Requests while any are pending.
+    fn pane_count(&self) -> usize {
+        self.contacts.len() + 1 + usize::from(!self.requests.is_empty())
+    }
+
+    pub fn requests_pane_selected(&self) -> bool {
+        !self.requests.is_empty() && self.selected == self.contacts.len() + 1
+    }
+
+    /// Total messages waiting in contact requests.
+    pub fn held_message_count(&self) -> usize {
+        self.requests.iter().map(|r| r.messages.len()).sum()
     }
 
     fn contact_name(&self, user_id: &UserId) -> String {
@@ -313,17 +354,17 @@ impl App {
     }
 
     fn select_next(&mut self) {
-        let n = self.contacts.len() + 1;
+        let n = self.pane_count();
         self.select((self.selected + 1) % n);
     }
 
     fn select_prev(&mut self) {
-        let n = self.contacts.len() + 1;
+        let n = self.pane_count();
         self.select((self.selected + n - 1) % n);
     }
 
     fn select(&mut self, index: usize) {
-        self.selected = index.min(self.contacts.len());
+        self.selected = index.min(self.pane_count() - 1);
         self.scroll = 0;
         if let Some(id) = self.selected_contact().map(|c| c.user_id) {
             self.unread.remove(&id);
@@ -360,6 +401,10 @@ impl App {
             "remove" | "rm" => self.cmd_remove(),
             "verify" => self.cmd_verify(&rest),
             "refresh" => self.cmd_refresh(),
+            "accept" => self.cmd_accept(&rest),
+            "block" => self.cmd_block(&rest),
+            "unblock" => self.cmd_unblock(&rest),
+            "blocked" => self.cmd_blocked(),
             "relay" => self.cmd_relay(&rest),
             "quit" | "q" | "exit" => self.should_quit = true,
             other => self.toast(format!("Unknown command /{other}. Try /help.")),
@@ -375,6 +420,9 @@ impl App {
             "  /verify                  show the safety number to compare with the selected contact",
             "  /verify ok | no          mark the selected contact as verified, or not",
             "  /refresh                 fetch the selected contact's key again and report changes",
+            "  /accept <n|user-id>      accept a contact request from the Requests pane",
+            "  /block <n|user-id>       ignore a requester or contact from now on; /unblock <user-id> undoes it",
+            "  /blocked                 list blocked ids",
             "  /me                      show your own id",
             "  /relay <ws-url>          change the relay (takes effect on next start)",
             "  /quit                    exit",
@@ -440,7 +488,7 @@ impl App {
     }
 
     fn cmd_verify(&mut self, args: &[&str]) {
-        let Some(index) = self.selected.checked_sub(1) else {
+        let Some(index) = self.selected_contact_index() else {
             self.toast("Select a contact first.");
             return;
         };
@@ -485,7 +533,7 @@ impl App {
     }
 
     fn cmd_alias(&mut self, args: &[&str]) {
-        let Some(index) = self.selected.checked_sub(1) else {
+        let Some(index) = self.selected_contact_index() else {
             self.toast("Select a contact first.");
             return;
         };
@@ -498,7 +546,7 @@ impl App {
     }
 
     fn cmd_remove(&mut self) {
-        let Some(index) = self.selected.checked_sub(1) else {
+        let Some(index) = self.selected_contact_index() else {
             self.toast("Select a contact first.");
             return;
         };
@@ -539,7 +587,11 @@ impl App {
     // --- messaging ---------------------------------------------------------
 
     fn send_message(&mut self, text: String) {
-        let Some(index) = self.selected.checked_sub(1) else {
+        if self.requests_pane_selected() {
+            self.toast("Accept a request first: /accept <n>.");
+            return;
+        }
+        let Some(index) = self.selected_contact_index() else {
             self.toast("Select a contact first, or /add <user-id>.");
             return;
         };
@@ -724,16 +776,12 @@ impl App {
                     return; // relay re-delivered something we already have
                 }
                 let from = message.from;
+                if self.blocked.contains(&from) {
+                    return;
+                }
                 if self.contact_index(&from).is_none() {
-                    self.contacts.push(Contact::new(from));
-                    self.persist_contacts();
-                    self.system(
-                        Level::Info,
-                        format!(
-                            "New contact {}… ({from}). Use /alias to name them.",
-                            from.short()
-                        ),
-                    );
+                    self.hold_request(message);
+                    return;
                 }
 
                 // Sequence numbers: drop replays, mention gaps and resets.
@@ -783,6 +831,180 @@ impl App {
                 self.system(Level::Warn, text.clone());
                 self.toast(text);
             }
+        }
+    }
+
+    // --- contact requests ------------------------------------------------------
+
+    /// Keep a message from an unknown sender until the user decides.
+    fn hold_request(&mut self, message: Message) {
+        let from = message.from;
+        let Content::Text { body } = message.content;
+        let held = HeldMessage {
+            id: message.id.clone(),
+            timestamp_ms: message.sent_at_ms,
+            text: body,
+            sequence: message.sequence,
+        };
+        self.known_ids.insert(message.id);
+        let is_new = match self.requests.iter_mut().find(|r| r.from == from) {
+            Some(request) => {
+                request.messages.push(held);
+                false
+            }
+            None => {
+                self.requests.push(ContactRequest {
+                    from,
+                    first_seen_ms: now_ms(),
+                    messages: vec![held],
+                });
+                true
+            }
+        };
+        self.persist_requests();
+        if is_new {
+            let n = self.requests.len();
+            self.system(
+                Level::Info,
+                format!(
+                    "Contact request from {}… ({from}). Open the Requests pane, then /accept {n} or /block {n}.",
+                    from.short()
+                ),
+            );
+            self.toast(format!("Contact request from {}…", from.short()));
+        }
+    }
+
+    /// Find a request by 1-based position or by user id.
+    fn resolve_request(&self, arg: &str) -> Option<usize> {
+        if let Ok(n) = arg.parse::<usize>() {
+            return (1..=self.requests.len()).contains(&n).then(|| n - 1);
+        }
+        let id: UserId = arg.parse().ok()?;
+        self.requests.iter().position(|r| r.from == id)
+    }
+
+    fn cmd_accept(&mut self, args: &[&str]) {
+        let Some(arg) = args.first() else {
+            self.toast("Usage: /accept <n|user-id> (see the Requests pane)");
+            return;
+        };
+        let Some(index) = self.resolve_request(arg) else {
+            self.toast("No such request. Numbers are shown in the Requests pane.");
+            return;
+        };
+        let request = self.requests.remove(index);
+        self.persist_requests();
+        let from = request.from;
+        let mut contact = Contact::new(from);
+        if let Some(last) = request.messages.last() {
+            if last.sequence.seq != 0 {
+                contact.received = Some(last.sequence);
+            }
+        }
+        self.contacts.push(contact);
+        self.persist_contacts();
+        let count = request.messages.len();
+        for held in request.messages {
+            self.record(
+                from,
+                ChatLine {
+                    id: held.id,
+                    direction: Direction::Received,
+                    timestamp_ms: held.timestamp_ms,
+                    text: held.text,
+                    delivered: true,
+                    failed: false,
+                },
+            );
+        }
+        self.select(self.contacts.len());
+        self.system(
+            Level::Info,
+            format!(
+                "Accepted {}… ({from}); {count} message(s) moved into the chat. Use /alias to name them and /verify to confirm who they are.",
+                from.short()
+            ),
+        );
+    }
+
+    fn cmd_block(&mut self, args: &[&str]) {
+        let Some(arg) = args.first() else {
+            self.toast("Usage: /block <n|user-id>");
+            return;
+        };
+        let id = match self.resolve_request(arg) {
+            Some(index) => {
+                let request = self.requests.remove(index);
+                self.persist_requests();
+                request.from
+            }
+            None => match arg.parse::<UserId>() {
+                Ok(id) => id,
+                Err(_) => {
+                    self.toast("Give a request number or a user id.");
+                    return;
+                }
+            },
+        };
+        if let Some(index) = self.contact_index(&id) {
+            self.contacts.remove(index);
+            self.threads.remove(&id);
+            self.unread.remove(&id);
+            self.persist_contacts();
+        }
+        if !self.blocked.contains(&id) {
+            self.blocked.push(id);
+            self.persist_blocked();
+        }
+        self.select(0);
+        self.system(
+            Level::Info,
+            format!("Blocked {id}. Their messages are dropped; /unblock {id} undoes this."),
+        );
+    }
+
+    fn cmd_unblock(&mut self, args: &[&str]) {
+        let id = match args.first().map(|a| a.parse::<UserId>()) {
+            Some(Ok(id)) => id,
+            _ => {
+                self.toast("Usage: /unblock <user-id>");
+                return;
+            }
+        };
+        let before = self.blocked.len();
+        self.blocked.retain(|b| *b != id);
+        if self.blocked.len() == before {
+            self.toast("That id is not blocked.");
+            return;
+        }
+        self.persist_blocked();
+        self.system(Level::Info, format!("Unblocked {id}."));
+    }
+
+    fn cmd_blocked(&mut self) {
+        if self.blocked.is_empty() {
+            self.system(Level::Info, "No blocked ids.");
+        } else {
+            for id in self.blocked.clone() {
+                self.system(Level::Info, format!("Blocked: {id}"));
+            }
+        }
+        self.select(0);
+    }
+
+    fn persist_requests(&mut self) {
+        if let Err(e) = self.store.save_requests(&self.requests) {
+            self.toast(format!("Could not save requests: {e}"));
+        }
+        if self.requests.is_empty() && self.selected >= self.pane_count() {
+            self.select(0);
+        }
+    }
+
+    fn persist_blocked(&mut self) {
+        if let Err(e) = self.store.save_blocked(&self.blocked) {
+            self.toast(format!("Could not save the blocked list: {e}"));
         }
     }
 

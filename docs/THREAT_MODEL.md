@@ -69,9 +69,12 @@ that inspects TLS with an installed root sees what the relay sees.
 ### Stranger who knows your id
 
 Can send you messages until your mailbox is full, and can fetch your public
-key bundle. Cannot learn who your contacts are from the relay. Today every
-message from an unknown sender is accepted and creates a contact
-automatically. (Gap: roadmap item 9.)
+key bundle. Cannot learn who your contacts are from the relay. Their
+messages are decrypted but held in the Requests pane until you accept them,
+and a blocked id is dropped on arrival. On the relay, each connection is
+limited to 60 messages and 30 lookups per minute, mailboxes are capped, and
+an operator can require an invite token to register at all. Flooding a
+mailbox to its cap remains possible for anyone with the id.
 
 ### Malicious contact
 

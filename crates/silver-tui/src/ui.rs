@@ -77,7 +77,14 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
         };
         lines.push(row(label, unread, app.selected == i + 1));
     }
-    if app.contacts.is_empty() {
+    if !app.requests.is_empty() {
+        lines.push(row(
+            "Requests".into(),
+            Some(app.held_message_count()),
+            app.requests_pane_selected(),
+        ));
+    }
+    if app.contacts.is_empty() && app.requests.is_empty() {
         lines.push(Line::from(""));
         lines.push(Line::styled(" no contacts yet", dim()));
         lines.push(Line::styled(" /add <user-id>", dim()));
@@ -92,6 +99,9 @@ fn draw_messages(frame: &mut Frame, app: &mut App, area: Rect) {
     let height = area.height.saturating_sub(2) as usize;
 
     let (title, rows) = match app.selected_contact() {
+        None if app.requests_pane_selected() => {
+            (" Contact requests ".to_owned(), request_rows(app, width))
+        }
         None => (" System ".to_owned(), system_rows(app, width)),
         Some(contact) => (
             format!(
@@ -130,6 +140,44 @@ fn system_rows(app: &App, width: usize) -> Vec<Line<'static>> {
             dim(),
         )];
         rows.extend(wrap_message(prefix, &line.text, style, width));
+    }
+    rows
+}
+
+fn request_rows(app: &App, width: usize) -> Vec<Line<'static>> {
+    let mut rows = Vec::new();
+    rows.extend(wrap_message(
+        vec![],
+        "People who wrote to you but are not contacts yet. /accept <n> starts a chat with them; /block <n> drops their messages from now on.",
+        dim(),
+        width,
+    ));
+    rows.push(Line::from(""));
+    for (i, request) in app.requests.iter().enumerate() {
+        rows.push(Line::from(vec![
+            Span::styled(
+                format!("{}. {}…", i + 1, request.from.short()),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("  {}", request.from), dim()),
+        ]));
+        let shown = request.messages.len().min(3);
+        for held in &request.messages[request.messages.len() - shown..] {
+            let prefix = vec![Span::styled(
+                format!("   {} ", clock(held.timestamp_ms)),
+                dim(),
+            )];
+            rows.extend(wrap_message(prefix, &held.text, Style::default(), width));
+        }
+        if request.messages.len() > shown {
+            rows.push(Line::styled(
+                format!("   … and {} earlier", request.messages.len() - shown),
+                dim(),
+            ));
+        }
+        rows.push(Line::from(""));
     }
     rows
 }

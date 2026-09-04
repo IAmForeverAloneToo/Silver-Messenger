@@ -18,6 +18,6 @@ pub use backup::{BackupPayload, export_backup, import_backup, read_backup};
 pub use connection::{Client, ClientError, ClientEvent, DEFAULT_RELAY_URL};
 pub use proxy::Proxy;
 pub use silver_protocol as protocol;
-pub use store::{Config, Contact, Direction, HistoryEntry, Store};
+pub use store::{Config, Contact, ContactRequest, Direction, HeldMessage, HistoryEntry, Store};
 pub use tls::ConnectOptions;
 pub use vault::{FileCipher, VaultError};
