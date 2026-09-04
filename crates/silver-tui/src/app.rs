@@ -575,11 +575,14 @@ impl App {
                 self.connection = Connection::Connected;
                 self.system(Level::Info, format!("Connected to {relay_url}"));
             }
-            ClientEvent::Disconnected { reason } => {
+            ClientEvent::Disconnected { reason, retry_in } => {
                 self.connection = Connection::Disconnected;
                 self.system(
                     Level::Warn,
-                    format!("Disconnected: {reason} (reconnecting…)"),
+                    format!(
+                        "Disconnected: {reason} (retrying in {}s)",
+                        retry_in.as_secs()
+                    ),
                 );
             }
             ClientEvent::Sent { id } => {

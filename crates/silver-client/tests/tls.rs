@@ -86,7 +86,7 @@ async fn wss_with_an_unknown_ca_is_rejected() {
         matches!(e, ClientEvent::Disconnected { .. })
     })
     .await;
-    let ClientEvent::Disconnected { reason } = ev else {
+    let ClientEvent::Disconnected { reason, .. } = ev else {
         unreachable!()
     };
     assert!(

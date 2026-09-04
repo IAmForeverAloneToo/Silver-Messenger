@@ -26,18 +26,14 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 #[derive(Debug)]
 pub enum ClientEvent {
     /// Authenticated and our key bundle is published.
-    Connected {
-        relay_url: String,
-    },
-    Disconnected {
-        reason: String,
-    },
+    Connected { relay_url: String },
+    /// The connection dropped or could not be made; another attempt follows
+    /// after `retry_in`.
+    Disconnected { reason: String, retry_in: Duration },
     /// A decrypted, signature-verified incoming message.
     Message(Message),
     /// The relay accepted the envelope with this id.
-    Sent {
-        id: String,
-    },
+    Sent { id: String },
     /// A non-fatal problem worth surfacing (undecryptable envelope, relay error).
     Error(String),
 }
@@ -173,7 +169,10 @@ async fn run(
             Err(e) => e.to_string(),
         };
         if ev_tx
-            .send(ClientEvent::Disconnected { reason })
+            .send(ClientEvent::Disconnected {
+                reason,
+                retry_in: backoff,
+            })
             .await
             .is_err()
         {
@@ -224,7 +223,8 @@ async fn session(
         tokio_tungstenite::connect_async_tls_with_config(relay_url, None, false, Some(connector)),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("connect timed out"))??;
+    .map_err(|_| anyhow::anyhow!("connect timed out"))?
+    .map_err(describe_connect_error)?;
     let (mut sink, mut stream) = ws.split();
 
     // --- handshake: challenge -> auth -> auth_ok ---------------------------
@@ -355,6 +355,86 @@ async fn session(
     }
 }
 
+/// Turn a failed WebSocket connect into a message a person can act on. An
+/// HTTP status instead of an upgrade usually means a proxy or firewall on the
+/// path answered instead of the relay, so include what it said.
+fn describe_connect_error(err: tokio_tungstenite::tungstenite::Error) -> anyhow::Error {
+    use tokio_tungstenite::tungstenite::Error as WsError;
+    match err {
+        WsError::Http(response) => {
+            let status = response.status();
+            let excerpt = response
+                .body()
+                .as_deref()
+                .map(|body| text_excerpt(&String::from_utf8_lossy(body), 200))
+                .unwrap_or_default();
+            if excerpt.is_empty() {
+                anyhow::anyhow!(
+                    "HTTP {status} instead of a WebSocket upgrade (a proxy or firewall may be intercepting)"
+                )
+            } else {
+                anyhow::anyhow!("HTTP {status} instead of a WebSocket upgrade: {excerpt}")
+            }
+        }
+        other => anyhow::Error::new(other),
+    }
+}
+
+/// The readable text of an HTML page: tags, scripts and styles removed,
+/// whitespace collapsed, at most `max` characters.
+fn text_excerpt(html: &str, max: usize) -> String {
+    let lower = html.to_ascii_lowercase();
+    let mut out = String::new();
+    let mut count = 0;
+    let mut last_space = true;
+    let mut i = 0;
+    while i < html.len() {
+        if html[i..].starts_with('<') {
+            let rest = &lower[i..];
+            let block_end = if rest.starts_with("<script") {
+                Some("</script>")
+            } else if rest.starts_with("<style") {
+                Some("</style>")
+            } else {
+                None
+            };
+            if let Some(close) = block_end {
+                match rest.find(close) {
+                    Some(end) => i += end + close.len(),
+                    None => break,
+                }
+            } else {
+                match html[i..].find('>') {
+                    Some(end) => i += end + 1,
+                    None => break,
+                }
+                if !last_space {
+                    out.push(' ');
+                    last_space = true;
+                }
+            }
+            continue;
+        }
+        let ch = html[i..].chars().next().expect("in bounds");
+        i += ch.len_utf8();
+        if ch.is_whitespace() {
+            if !last_space {
+                out.push(' ');
+                last_space = true;
+            }
+        } else {
+            out.push(ch);
+            last_space = false;
+            count += 1;
+            if count >= max {
+                out.push('…');
+                break;
+            }
+        }
+    }
+    out.trim().to_owned()
+}
+
 fn text(frame: &ClientFrame) -> WsMessage {
     WsMessage::Text(frame.encode().into())
 }
@@ -378,5 +458,23 @@ async fn next_frame(stream: &mut WsStream) -> anyhow::Result<ServerFrame> {
             WsMessage::Ping(_) | WsMessage::Pong(_) | WsMessage::Frame(_) => continue,
         };
         return Ok(ServerFrame::decode(&text)?);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::text_excerpt;
+
+    #[test]
+    fn block_page_becomes_readable_text() {
+        let html = "<html><head><title>Blocked</title><style>h1{color:red}</style>\
+                    <script>var x = 1;</script></head><body><h1>Sorry,</h1> company \n\
+                    policy   <b>prohibits</b> this action.</body></html>";
+        assert_eq!(
+            text_excerpt(html, 200),
+            "Blocked Sorry, company policy prohibits this action."
+        );
+        assert_eq!(text_excerpt("abcdef", 3), "abc…");
+        assert_eq!(text_excerpt("", 10), "");
     }
 }
