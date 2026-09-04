@@ -35,6 +35,8 @@ pub struct ChatLine {
     pub text: String,
     /// The relay has accepted this outgoing message.
     pub delivered: bool,
+    /// The relay refused this outgoing message for good.
+    pub failed: bool,
 }
 
 /// One row in the system pane.
@@ -95,6 +97,7 @@ impl App {
     ) -> anyhow::Result<Self> {
         let me = client.user_id();
         let contacts = store.load_contacts()?;
+        let pending: HashSet<String> = client.pending_ids().into_iter().collect();
         let mut threads = HashMap::new();
         let mut known_ids = HashSet::new();
         for contact in &contacts {
@@ -103,12 +106,14 @@ impl App {
                 .into_iter()
                 .map(|h| {
                     known_ids.insert(h.id.clone());
+                    let delivered = !pending.contains(&h.id);
                     ChatLine {
                         id: h.id,
                         direction: h.direction,
                         timestamp_ms: h.timestamp_ms,
                         text: h.text,
-                        delivered: true,
+                        delivered,
+                        failed: false,
                     }
                 })
                 .collect();
@@ -192,6 +197,20 @@ impl App {
         self.contact_index(user_id)
             .map(|i| self.contacts[i].display_name())
             .unwrap_or_else(|| format!("{}…", user_id.short()))
+    }
+
+    /// Outgoing messages the relay has not accepted yet.
+    pub fn pending_count(&self) -> usize {
+        self.client.pending_count()
+    }
+
+    fn mark_line(&mut self, id: &str, update: impl FnOnce(&mut ChatLine)) {
+        for lines in self.threads.values_mut() {
+            if let Some(line) = lines.iter_mut().rev().find(|l| l.id == id) {
+                update(line);
+                return;
+            }
+        }
     }
 
     // --- notices -----------------------------------------------------------
@@ -553,6 +572,7 @@ impl App {
                                 timestamp_ms: now_ms(),
                                 text,
                                 delivered: false,
+                                failed: false,
                             },
                         );
                         self.scroll = 0;
@@ -586,12 +606,12 @@ impl App {
                 );
             }
             ClientEvent::Sent { id } => {
-                for lines in self.threads.values_mut() {
-                    if let Some(line) = lines.iter_mut().rev().find(|l| l.id == id) {
-                        line.delivered = true;
-                        break;
-                    }
-                }
+                self.mark_line(&id, |line| line.delivered = true);
+            }
+            ClientEvent::Rejected { id, reason } => {
+                self.mark_line(&id, |line| line.failed = true);
+                self.system(Level::Warn, format!("Relay refused a message: {reason}"));
+                self.toast(format!("Not delivered: {reason}"));
             }
             ClientEvent::Message(message) => {
                 if self.known_ids.contains(&message.id) {
@@ -618,6 +638,7 @@ impl App {
                         timestamp_ms: message.sent_at_ms,
                         text: body,
                         delivered: true,
+                        failed: false,
                     },
                 );
                 if self.selected_contact().map(|c| c.user_id) != Some(from) {

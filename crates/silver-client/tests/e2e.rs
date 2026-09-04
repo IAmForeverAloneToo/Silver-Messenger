@@ -325,3 +325,188 @@ async fn relay_restart_keeps_queued_messages() {
     assert_eq!(state.queued_for(&bob.user_id()), 0);
     bob_c.shutdown().await;
 }
+
+async fn stop_runtime(rt: tokio::runtime::Runtime) {
+    tokio::task::spawn_blocking(move || rt.shutdown_timeout(Duration::from_secs(5)))
+        .await
+        .unwrap();
+}
+
+async fn rebind(addr: std::net::SocketAddr) -> TcpListener {
+    loop {
+        match TcpListener::bind(addr).await {
+            Ok(l) => return l,
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(e) => panic!("rebind failed: {e}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn messages_written_while_offline_go_out_on_reconnect() {
+    let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    std_listener.set_nonblocking(true).unwrap();
+    let addr = std_listener.local_addr().unwrap();
+    let url = format!("ws://{addr}/ws");
+    let first = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    first.spawn(async move {
+        let listener = TcpListener::from_std(std_listener).unwrap();
+        silver_relay::serve(listener, RelayState::new(), std::future::pending()).await
+    });
+
+    let alice = Arc::new(Identity::generate());
+    let bob = Arc::new(Identity::generate());
+    let (alice_c, mut alice_ev) =
+        Client::spawn(url.clone(), alice.clone(), ConnectOptions::default()).unwrap();
+    let (_bob_c, mut bob_ev) =
+        Client::spawn(url.clone(), bob.clone(), ConnectOptions::default()).unwrap();
+    wait_for(&mut alice_ev, "alice connected", |e| {
+        matches!(e, ClientEvent::Connected { .. })
+    })
+    .await;
+    wait_for(&mut bob_ev, "bob connected", |e| {
+        matches!(e, ClientEvent::Connected { .. })
+    })
+    .await;
+    let bundle = alice_c.lookup(bob.user_id()).await.unwrap().unwrap();
+
+    // The relay dies; Alice writes anyway.
+    stop_runtime(first).await;
+    wait_for(&mut alice_ev, "alice offline", |e| {
+        matches!(e, ClientEvent::Disconnected { .. })
+    })
+    .await;
+    let env = alice_c
+        .send_text(&bundle, "queued while offline".into())
+        .await
+        .unwrap();
+    assert_eq!(alice_c.pending_count(), 1);
+    assert_eq!(alice_c.pending_ids(), vec![env.id.clone()]);
+
+    // The relay returns; the outbox drains and Bob (who reconnects too) gets it.
+    let listener = rebind(addr).await;
+    tokio::spawn(silver_relay::serve(
+        listener,
+        RelayState::new(),
+        std::future::pending(),
+    ));
+    wait_for(
+        &mut alice_ev,
+        "queued message sent",
+        |e| matches!(e, ClientEvent::Sent { id } if *id == env.id),
+    )
+    .await;
+    assert_eq!(alice_c.pending_count(), 0);
+    let got = wait_for(&mut bob_ev, "bob's message", |e| body(e).is_some()).await;
+    assert_eq!(body(&got).unwrap().1, "queued while offline");
+}
+
+#[tokio::test]
+async fn outbox_survives_a_client_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let outbox = dir.path().join("outbox.json");
+    // A port nobody listens on yet.
+    let addr = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let url = format!("ws://{addr}/ws");
+    let alice = Arc::new(Identity::generate());
+    let bob = Arc::new(Identity::generate());
+    let options = || ConnectOptions {
+        outbox_path: Some(outbox.clone()),
+        ..Default::default()
+    };
+
+    // Written with no relay reachable, then the client exits.
+    let (alice_c, _alice_ev) = Client::spawn(url.clone(), alice.clone(), options()).unwrap();
+    let env = alice_c
+        .send_text(&bob.key_bundle(), "survives restart".into())
+        .await
+        .unwrap();
+    assert_eq!(alice_c.pending_count(), 1);
+    alice_c.shutdown().await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // A new client with the same data still holds it, and delivers once a
+    // relay appears.
+    let (alice_c, mut alice_ev) = Client::spawn(url.clone(), alice.clone(), options()).unwrap();
+    assert_eq!(alice_c.pending_ids(), vec![env.id.clone()]);
+    let listener = rebind(addr).await;
+    tokio::spawn(silver_relay::serve(
+        listener,
+        RelayState::new(),
+        std::future::pending(),
+    ));
+    wait_for(
+        &mut alice_ev,
+        "sent after restart",
+        |e| matches!(e, ClientEvent::Sent { id } if *id == env.id),
+    )
+    .await;
+    assert_eq!(alice_c.pending_count(), 0);
+
+    let (_bob_c, mut bob_ev) = Client::spawn(url, bob, ConnectOptions::default()).unwrap();
+    let got = wait_for(&mut bob_ev, "bob's message", |e| body(e).is_some()).await;
+    assert_eq!(body(&got).unwrap().1, "survives restart");
+}
+
+#[tokio::test]
+async fn rejected_envelopes_leave_the_outbox() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/ws", listener.local_addr().unwrap());
+    let state = RelayState::with_store(
+        silver_relay::Store::in_memory().unwrap(),
+        Limits {
+            max_messages: 1,
+            max_bytes: u64::MAX,
+        },
+    );
+    tokio::spawn(silver_relay::serve(listener, state, std::future::pending()));
+
+    let alice = Arc::new(Identity::generate());
+    let bob = Arc::new(Identity::generate());
+    let (bob_c, mut bob_ev) =
+        Client::spawn(url.clone(), bob.clone(), ConnectOptions::default()).unwrap();
+    wait_for(&mut bob_ev, "bob connected", |e| {
+        matches!(e, ClientEvent::Connected { .. })
+    })
+    .await;
+    bob_c.shutdown().await;
+
+    let (alice_c, mut alice_ev) = Client::spawn(url, alice, ConnectOptions::default()).unwrap();
+    wait_for(&mut alice_ev, "alice connected", |e| {
+        matches!(e, ClientEvent::Connected { .. })
+    })
+    .await;
+    let bundle = alice_c.lookup(bob.user_id()).await.unwrap().unwrap();
+    let first = alice_c.send_text(&bundle, "fits".into()).await.unwrap();
+    let second = alice_c
+        .send_text(&bundle, "does not fit".into())
+        .await
+        .unwrap();
+    wait_for(
+        &mut alice_ev,
+        "first sent",
+        |e| matches!(e, ClientEvent::Sent { id } if *id == first.id),
+    )
+    .await;
+    let ev = wait_for(
+        &mut alice_ev,
+        "second rejected",
+        |e| matches!(e, ClientEvent::Rejected { id, .. } if *id == second.id),
+    )
+    .await;
+    let ClientEvent::Rejected { reason, .. } = ev else {
+        unreachable!()
+    };
+    assert!(reason.contains("mailbox is full"), "{reason}");
+    assert_eq!(alice_c.pending_count(), 0);
+}

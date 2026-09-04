@@ -20,7 +20,7 @@ Tick items off as they land on `main`.
        store (redb or SQLite) so an update or reboot loses nothing. Includes
        message expiry and a per-user disk quota. First because every deploy
        currently drops queued mail.
-2. [ ] **Client outbox** (S). Queue messages written while offline and flush
+2. [x] **Client outbox** (S). Queue messages written while offline and flush
        them on reconnect, with a visible pending state. Second because it is
        the other half of "nothing gets lost".
 3. [ ] **Per-conversation sequence numbers** (S). A counter inside the

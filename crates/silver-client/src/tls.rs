@@ -21,6 +21,9 @@ pub struct ConnectOptions {
     pub extra_ca_certs: Vec<PathBuf>,
     /// An HTTP CONNECT proxy URL to reach the relay through.
     pub proxy: Option<String>,
+    /// Where to keep envelopes the relay has not accepted yet, so they
+    /// survive a restart of the client. `None` keeps them in memory only.
+    pub outbox_path: Option<PathBuf>,
 }
 
 pub(crate) fn connector(options: &ConnectOptions) -> anyhow::Result<Connector> {

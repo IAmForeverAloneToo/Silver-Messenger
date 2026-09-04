@@ -61,7 +61,7 @@ async fn wss_with_a_trusted_ca_connects() {
     let alice = Arc::new(Identity::generate());
     let options = ConnectOptions {
         extra_ca_certs: vec![ca.path().to_path_buf()],
-        proxy: None,
+        ..Default::default()
     };
     let (client, mut events) =
         Client::spawn(format!("wss://localhost:{port}/ws"), alice.clone(), options).unwrap();
@@ -103,7 +103,7 @@ fn unreadable_ca_file_is_an_error_up_front() {
     let _guard = rt.enter();
     let options = ConnectOptions {
         extra_ca_certs: vec!["/nonexistent/ca.pem".into()],
-        proxy: None,
+        ..Default::default()
     };
     let result = Client::spawn(
         "wss://localhost:1/ws".into(),

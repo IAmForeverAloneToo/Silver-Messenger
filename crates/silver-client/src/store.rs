@@ -208,6 +208,11 @@ impl Store {
     fn history_path(&self, peer: &UserId) -> PathBuf {
         self.root.join("history").join(format!("{peer}.jsonl"))
     }
+
+    /// Where the client keeps not-yet-accepted outgoing envelopes.
+    pub fn outbox_path(&self) -> PathBuf {
+        self.root.join("outbox.json")
+    }
 }
 
 fn read_json_or_default<T: Default + for<'de> Deserialize<'de>>(path: &Path) -> anyhow::Result<T> {

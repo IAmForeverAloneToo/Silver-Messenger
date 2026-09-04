@@ -74,6 +74,7 @@ async fn main() -> anyhow::Result<()> {
     let options = ConnectOptions {
         extra_ca_certs: config.ca_cert.iter().cloned().collect(),
         proxy: config.proxy.clone().or_else(Proxy::url_from_env),
+        outbox_path: Some(store.outbox_path()),
     };
     let relay_url = config
         .relay_url

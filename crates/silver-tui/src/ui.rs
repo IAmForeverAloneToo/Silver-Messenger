@@ -140,8 +140,9 @@ fn thread_rows(app: &App, peer: &silver_protocol::UserId, width: usize) -> Vec<L
             Direction::Sent => ("you".to_owned(), Style::default().fg(Color::Green)),
             Direction::Received => (peer_name.clone(), Style::default().fg(Color::Cyan)),
         };
-        let mark = match (line.direction, line.delivered) {
-            (Direction::Sent, false) => " ⋯",
+        let mark = match (line.direction, line.delivered, line.failed) {
+            (Direction::Sent, _, true) => " ✗",
+            (Direction::Sent, false, false) => " ⋯",
             _ => "",
         };
         let prefix = vec![
@@ -193,6 +194,13 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled(format!(" {dot} {label} "), Style::default().fg(color)),
         Span::styled(app.relay_url.clone(), dim()),
     ];
+    let pending = app.pending_count();
+    if pending > 0 {
+        spans.push(Span::styled(
+            format!("  {pending} queued"),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
     match &app.toast {
         Some((text, _)) => {
             spans.push(Span::raw("  "));

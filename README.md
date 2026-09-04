@@ -149,6 +149,10 @@ the machine.
   mid-download or the relay restarts. Unacknowledged envelopes expire after
   30 days by default, mailboxes are capped per recipient, and resends of the
   same envelope id are ignored. Clients de-duplicate by envelope id too.
+* **Outbox**: a message written while offline is sealed immediately, kept in
+  `outbox.json` in the data directory, and handed to the relay on the next
+  connection; it shows a pending mark (`⋯`) until the relay accepts it, and a
+  failure mark (`✗`) if the relay refuses it for good.
 
 What v1 does **not** do yet: forward secrecy against a later compromise of
 a long-term key, and encrypted storage at rest. The ordered plan is in

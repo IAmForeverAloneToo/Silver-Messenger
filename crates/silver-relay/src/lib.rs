@@ -343,7 +343,11 @@ fn handle_frame(state: &RelayState, me: &UserId, frame: ClientFrame) -> Option<S
             let id = envelope.id.clone();
             Some(match state.route(envelope) {
                 Ok(()) => ServerFrame::Sent { id },
-                Err((code, message)) => ServerFrame::error(code, message),
+                Err((code, message)) => ServerFrame::Rejected {
+                    id,
+                    code,
+                    message: message.into(),
+                },
             })
         }
         ClientFrame::Ack { id } => {

@@ -1,12 +1,13 @@
 //! Background relay connection with reconnect, auth and envelope handling.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use silver_protocol::wire::{ClientFrame, ServerFrame, auth_signature};
 
+use crate::outbox::Outbox;
 use crate::proxy::Proxy;
 use crate::tls::{ConnectOptions, connector};
 use silver_protocol::{
@@ -36,8 +37,18 @@ pub enum ClientEvent {
     Message(Message),
     /// The relay accepted the envelope with this id.
     Sent { id: String },
+    /// The relay refused the envelope with this id for good (for example the
+    /// recipient's mailbox is full); it has been dropped from the outbox.
+    Rejected { id: String, reason: String },
     /// A non-fatal problem worth surfacing (undecryptable envelope, relay error).
     Error(String),
+}
+
+/// Ids of envelopes the relay has not accepted yet, shared with the front end.
+type PendingIds = Arc<Mutex<Vec<String>>>;
+
+fn sync_pending(pending: &PendingIds, outbox: &Outbox) {
+    *pending.lock().unwrap_or_else(|e| e.into_inner()) = outbox.ids();
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -71,12 +82,13 @@ enum Command {
 pub struct Client {
     identity: Arc<Identity>,
     cmd_tx: mpsc::Sender<Command>,
+    pending: PendingIds,
 }
 
 impl Client {
     /// Start the connection task. Events arrive on the returned receiver.
-    /// Fails only if the TLS options cannot be applied (e.g. an unreadable
-    /// CA file); connection problems are reported as events.
+    /// Fails only if the options cannot be applied (an unreadable CA file,
+    /// a corrupt outbox file); connection problems are reported as events.
     pub fn spawn(
         relay_url: String,
         identity: Arc<Identity>,
@@ -84,6 +96,8 @@ impl Client {
     ) -> anyhow::Result<(Self, mpsc::Receiver<ClientEvent>)> {
         let connector = connector(&options)?;
         let proxy = options.proxy.as_deref().map(Proxy::parse).transpose()?;
+        let outbox = Outbox::load(options.outbox_path.clone())?;
+        let pending: PendingIds = Arc::new(Mutex::new(outbox.ids()));
         let (cmd_tx, cmd_rx) = mpsc::channel(64);
         let (ev_tx, ev_rx) = mpsc::channel(256);
         tokio::spawn(run(
@@ -91,10 +105,19 @@ impl Client {
             identity.clone(),
             connector,
             proxy,
+            outbox,
+            pending.clone(),
             cmd_rx,
             ev_tx,
         ));
-        Ok((Self { identity, cmd_tx }, ev_rx))
+        Ok((
+            Self {
+                identity,
+                cmd_tx,
+                pending,
+            },
+            ev_rx,
+        ))
     }
 
     pub fn identity(&self) -> &Identity {
@@ -103,6 +126,18 @@ impl Client {
 
     pub fn user_id(&self) -> UserId {
         self.identity.user_id()
+    }
+
+    /// Ids of outgoing envelopes the relay has not accepted yet.
+    pub fn pending_ids(&self) -> Vec<String> {
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.pending.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// Fetch and verify someone's key bundle from the relay.
@@ -127,9 +162,9 @@ impl Client {
         Ok(bundle)
     }
 
-    /// Seal `text` for `to` and hand it to the relay. Resolves once the
-    /// envelope is on the wire; [`ClientEvent::Sent`] follows when the relay
-    /// accepts it.
+    /// Seal `text` for `to` and queue it for the relay. Resolves once the
+    /// envelope is in the outbox, connected or not; [`ClientEvent::Sent`] or
+    /// [`ClientEvent::Rejected`] follows once the relay has answered.
     pub async fn send_text(&self, to: &KeyBundle, text: String) -> Result<Envelope, ClientError> {
         let envelope = seal(&self.identity, to, Content::Text { body: text }, now_ms())?;
         let (tx, rx) = oneshot::channel();
@@ -155,11 +190,14 @@ enum Exit {
     Disconnected(String),
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run(
     relay_url: String,
     identity: Arc<Identity>,
     connector: Connector,
     proxy: Option<Proxy>,
+    mut outbox: Outbox,
+    pending: PendingIds,
     mut cmd_rx: mpsc::Receiver<Command>,
     ev_tx: mpsc::Sender<ClientEvent>,
 ) {
@@ -170,6 +208,8 @@ async fn run(
             &identity,
             connector.clone(),
             proxy.as_ref(),
+            &mut outbox,
+            &pending,
             &mut cmd_rx,
             &ev_tx,
             &mut backoff,
@@ -191,7 +231,8 @@ async fn run(
             return; // front end is gone
         }
 
-        // Sleep before reconnecting, still answering commands with NotConnected.
+        // Sleep before reconnecting. Sends are queued meanwhile; lookups
+        // need the relay and are refused.
         let sleep = tokio::time::sleep(backoff);
         tokio::pin!(sleep);
         loop {
@@ -199,7 +240,14 @@ async fn run(
                 _ = &mut sleep => break,
                 cmd = cmd_rx.recv() => match cmd {
                     Some(Command::Shutdown) | None => return,
-                    Some(cmd) => reject(cmd),
+                    Some(Command::Send { envelope, reply }) => {
+                        outbox.push(envelope);
+                        sync_pending(&pending, &outbox);
+                        let _ = reply.send(Ok(()));
+                    }
+                    Some(Command::Lookup { reply, .. }) => {
+                        let _ = reply.send(Err(ClientError::NotConnected));
+                    }
                 },
             }
         }
@@ -207,25 +255,16 @@ async fn run(
     }
 }
 
-fn reject(cmd: Command) {
-    match cmd {
-        Command::Send { reply, .. } => {
-            let _ = reply.send(Err(ClientError::NotConnected));
-        }
-        Command::Lookup { reply, .. } => {
-            let _ = reply.send(Err(ClientError::NotConnected));
-        }
-        Command::Shutdown => {}
-    }
-}
-
 type Pending = HashMap<UserId, Vec<oneshot::Sender<Result<Option<KeyBundle>, ClientError>>>>;
 
+#[allow(clippy::too_many_arguments)]
 async fn session(
     relay_url: &str,
     identity: &Identity,
     connector: Connector,
     proxy: Option<&Proxy>,
+    outbox: &mut Outbox,
+    pending: &PendingIds,
     cmd_rx: &mut mpsc::Receiver<Command>,
     ev_tx: &mpsc::Sender<ClientEvent>,
     backoff: &mut Duration,
@@ -273,7 +312,7 @@ async fn session(
     let mut published = false;
 
     // --- steady state ------------------------------------------------------
-    let mut pending: Pending = HashMap::new();
+    let mut lookups: Pending = HashMap::new();
     let mut keepalive = tokio::time::interval(KEEPALIVE);
     keepalive.tick().await; // first tick fires immediately; skip it
 
@@ -285,13 +324,12 @@ async fn session(
                     return Ok(Exit::Shutdown);
                 }
                 Some(Command::Send { envelope, reply }) => {
-                    let result = sink
-                        .send(text(&ClientFrame::Send { envelope }))
-                        .await
-                        .map_err(|e| ClientError::Relay(e.to_string()));
-                    let failed = result.is_err();
-                    let _ = reply.send(result);
-                    if failed {
+                    // Queue first: if the write fails the envelope is resent
+                    // on the next connection.
+                    outbox.push(envelope.clone());
+                    sync_pending(pending, outbox);
+                    let _ = reply.send(Ok(()));
+                    if sink.send(text(&ClientFrame::Send { envelope })).await.is_err() {
                         return Ok(Exit::Disconnected("send failed".into()));
                     }
                 }
@@ -300,7 +338,7 @@ async fn session(
                         let _ = reply.send(Err(ClientError::Relay(e.to_string())));
                         return Ok(Exit::Disconnected("send failed".into()));
                     }
-                    pending.entry(user_id).or_default().push(reply);
+                    lookups.entry(user_id).or_default().push(reply);
                 }
             },
             _ = keepalive.tick() => {
@@ -333,10 +371,22 @@ async fn session(
                         }
                     }
                     ServerFrame::Sent { id } => {
+                        outbox.remove(&id);
+                        sync_pending(pending, outbox);
                         let _ = ev_tx.send(ClientEvent::Sent { id }).await;
                     }
+                    ServerFrame::Rejected { id, code, message } => {
+                        outbox.remove(&id);
+                        sync_pending(pending, outbox);
+                        let _ = ev_tx
+                            .send(ClientEvent::Rejected {
+                                id,
+                                reason: format!("{message} ({code:?})"),
+                            })
+                            .await;
+                    }
                     ServerFrame::LookupResult { user_id, bundle } => {
-                        for reply in pending.remove(&user_id).unwrap_or_default() {
+                        for reply in lookups.remove(&user_id).unwrap_or_default() {
                             let _ = reply.send(Ok(bundle.clone()));
                         }
                     }
@@ -355,6 +405,16 @@ async fn session(
                                     relay_url: relay_url.to_owned(),
                                 })
                                 .await;
+                            // Resend everything the relay has not accepted
+                            // yet; it ignores ids it already holds.
+                            for envelope in outbox.iter() {
+                                let frame = ClientFrame::Send {
+                                    envelope: envelope.clone(),
+                                };
+                                if sink.send(text(&frame)).await.is_err() {
+                                    return Ok(Exit::Disconnected("resend failed".into()));
+                                }
+                            }
                         }
                     }
                     ServerFrame::Pong => {}

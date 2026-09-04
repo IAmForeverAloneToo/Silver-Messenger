@@ -6,6 +6,7 @@
 //!   reports everything as [`ClientEvent`]s.
 
 pub mod connection;
+mod outbox;
 pub mod proxy;
 pub mod store;
 pub mod tls;

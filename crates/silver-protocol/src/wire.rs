@@ -78,6 +78,13 @@ pub enum ServerFrame {
     Sent {
         id: String,
     },
+    /// The relay refused to queue the envelope with this id; the sender
+    /// should not retry it.
+    Rejected {
+        id: String,
+        code: ErrorCode,
+        message: String,
+    },
     Deliver {
         envelope: Envelope,
     },

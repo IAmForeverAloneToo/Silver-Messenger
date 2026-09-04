@@ -84,8 +84,8 @@ async fn connects_through_a_connect_proxy() {
     let (proxy_url, seen) = start_proxy(true).await;
     let alice = Arc::new(Identity::generate());
     let options = ConnectOptions {
-        extra_ca_certs: vec![],
         proxy: Some(proxy_url),
+        ..Default::default()
     };
     let (client, mut events) = Client::spawn(relay_url.clone(), alice.clone(), options).unwrap();
     wait_for(&mut events, "connected", |e| {
@@ -108,8 +108,8 @@ async fn a_refusing_proxy_is_reported() {
     let relay_url = start_relay().await;
     let (proxy_url, _) = start_proxy(false).await;
     let options = ConnectOptions {
-        extra_ca_certs: vec![],
         proxy: Some(proxy_url),
+        ..Default::default()
     };
     let (client, mut events) =
         Client::spawn(relay_url, Arc::new(Identity::generate()), options).unwrap();
