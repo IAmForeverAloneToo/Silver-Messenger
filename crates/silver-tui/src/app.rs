@@ -16,6 +16,7 @@ use silver_protocol::envelope::{ReceiptKind, capability};
 use silver_protocol::{Content, KeyBundle, Message, UserId, now_ms};
 use tokio::sync::mpsc;
 
+use crate::notify::{Notifier, NotifyMode};
 use crate::ui;
 
 const TOAST_TTL: Duration = Duration::from_secs(6);
@@ -90,6 +91,7 @@ pub struct App {
     receipts: ReceiptQueue,
     /// Whether to tell contacts when their messages were shown.
     pub read_receipts: bool,
+    notifier: Notifier,
     pub system: Vec<SystemLine>,
     /// 0 is the system pane; `i >= 1` selects `contacts[i - 1]`.
     pub selected: usize,
@@ -128,7 +130,9 @@ impl App {
         let contacts = store.load_contacts()?;
         let requests = store.load_requests()?;
         let blocked = store.load_blocked()?;
-        let read_receipts = store.load_config()?.read_receipts;
+        let config = store.load_config()?;
+        let read_receipts = config.read_receipts;
+        let notifier = Notifier::new(NotifyMode::parse(&config.notify).unwrap_or(NotifyMode::All));
         let pending: HashSet<String> = client.pending_ids().into_iter().collect();
         let mut threads = HashMap::new();
         let mut known_ids: HashSet<String> = requests
@@ -170,6 +174,7 @@ impl App {
             known_ids,
             receipts: ReceiptQueue::default(),
             read_receipts,
+            notifier,
             system: Vec::new(),
             selected: 0,
             input: String::new(),
@@ -216,9 +221,13 @@ impl App {
         let mut keys = spawn_input_thread();
         let mut internal_rx = self.internal_rx.take().expect("run is called once");
         let mut tick = tokio::time::interval(Duration::from_millis(250));
+        self.notifier.push_title();
 
         loop {
             terminal.draw(|frame| ui::draw(frame, &mut self))?;
+            let unread: usize =
+                self.unread.values().map(Vec::len).sum::<usize>() + self.held_message_count();
+            self.notifier.set_unread(unread);
             tokio::select! {
                 Some(ev) = keys.recv() => self.handle_terminal_event(ev),
                 Some(ev) = events.recv() => self.handle_client_event(ev),
@@ -232,6 +241,7 @@ impl App {
                 break;
             }
         }
+        self.notifier.pop_title();
         self.client.shutdown().await;
         Ok(())
     }
@@ -596,6 +606,7 @@ impl App {
             "refresh" => self.cmd_refresh(),
             "session" => self.cmd_session(),
             "receipts" => self.cmd_receipts(&rest),
+            "notify" => self.cmd_notify(&rest),
             "search" | "find" => self.cmd_search(&rest),
             "accept" => self.cmd_accept(&rest),
             "block" => self.cmd_block(&rest),
@@ -618,6 +629,7 @@ impl App {
             "  /refresh                 fetch the selected contact's key again and report changes",
             "  /session                 show how messages with the selected contact are protected",
             "  /receipts on|off         tell contacts when you have read their messages (default on)",
+            "  /notify all|bell|off     bell and desktop notification for new messages, bell only, or nothing",
             "  /accept <n|user-id>      accept a contact request from the Requests pane",
             "  /block <n|user-id>       ignore a requester or contact from now on; /unblock <user-id> undoes it",
             "  /blocked                 list blocked ids",
@@ -742,6 +754,39 @@ impl App {
             self.system(Level::Info, text);
         }
         self.select(0);
+    }
+
+    fn cmd_notify(&mut self, args: &[&str]) {
+        let mode = match args.first() {
+            None => {
+                self.toast(format!(
+                    "Notifications: {}. Usage: /notify all|bell|off",
+                    self.notifier.mode().as_str()
+                ));
+                return;
+            }
+            Some(arg) => match NotifyMode::parse(arg) {
+                Some(mode) => mode,
+                None => {
+                    self.toast("Usage: /notify all|bell|off");
+                    return;
+                }
+            },
+        };
+        self.notifier.set_mode(mode);
+        let mut config = self.store.load_config().unwrap_or_default();
+        config.notify = mode.as_str().to_owned();
+        if let Err(e) = self.store.save_config(&config) {
+            self.toast(format!("Could not save config: {e}"));
+        }
+        self.system(
+            Level::Info,
+            match mode {
+                NotifyMode::All => "Notifications on: the terminal rings and, where it can, raises a desktop notification for messages you are not looking at. The window title shows the unread count.",
+                NotifyMode::Bell => "Notifications: bell only.",
+                NotifyMode::Off => "Notifications off. The window title still shows the unread count.",
+            },
+        );
     }
 
     fn cmd_receipts(&mut self, args: &[&str]) {
@@ -1163,6 +1208,9 @@ impl App {
                             },
                         );
                         let shown = self.selected_contact().map(|c| c.user_id) == Some(from);
+                        if !shown || !self.focused {
+                            self.notifier.announce(&format!("New message from {name}"));
+                        }
                         let wants = self.contacts[index].supports(capability::RECEIPTS);
                         if shown && wants && self.read_receipts {
                             self.receipts.read(from, id.clone());
@@ -1272,6 +1320,8 @@ impl App {
                 ),
             );
             self.toast(format!("Contact request from {}…", from.short()));
+            self.notifier
+                .announce(&format!("Contact request from {}…", from.short()));
         }
     }
 

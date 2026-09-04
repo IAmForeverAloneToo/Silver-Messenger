@@ -1,6 +1,7 @@
 //! Silver Messenger terminal client.
 
 mod app;
+mod notify;
 mod ui;
 
 use std::path::PathBuf;

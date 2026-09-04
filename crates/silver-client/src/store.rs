@@ -68,10 +68,17 @@ pub struct Config {
     /// are always sent.
     #[serde(default = "default_true")]
     pub read_receipts: bool,
+    /// How to draw attention to new messages: `all`, `bell` or `off`.
+    #[serde(default = "default_notify")]
+    pub notify: String,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_notify() -> String {
+    "all".to_owned()
 }
 
 impl Default for Config {
@@ -83,6 +90,7 @@ impl Default for Config {
             send_epoch: None,
             invite_token: None,
             read_receipts: true,
+            notify: default_notify(),
         }
     }
 }
