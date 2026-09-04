@@ -1,4 +1,4 @@
-//! Silver Message terminal client.
+//! Silver Messenger terminal client.
 
 mod app;
 mod ui;
@@ -38,6 +38,9 @@ struct Args {
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
+    if args.data_dir.is_none() {
+        Store::migrate_legacy_dir();
+    }
     let data_dir = args
         .data_dir
         .or_else(Store::default_dir)

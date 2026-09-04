@@ -1,4 +1,4 @@
-//! Shared types and end-to-end cryptography for Silver Message.
+//! Shared types and end-to-end cryptography for Silver Messenger.
 //!
 //! Everything a relay is allowed to see lives in [`wire`] and [`Envelope`].
 //! Everything a relay must never see is produced and consumed only by

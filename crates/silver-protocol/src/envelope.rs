@@ -15,8 +15,8 @@ use crate::bundle::KeyBundle;
 use crate::encoding::{b64, b64_array};
 use crate::identity::{DhPublic, Identity, UserId};
 
-pub const ENVELOPE_DOMAIN: &[u8] = b"silver-message/v1/envelope";
-const KDF_INFO: &[u8] = b"silver-message/v1/xchacha20poly1305";
+pub const ENVELOPE_DOMAIN: &[u8] = b"silver-messenger/v1/envelope";
+const KDF_INFO: &[u8] = b"silver-messenger/v1/xchacha20poly1305";
 
 /// Upper bound on the serialized plaintext body.
 pub const MAX_BODY_BYTES: usize = 32 * 1024;

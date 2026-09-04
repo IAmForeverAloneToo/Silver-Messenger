@@ -84,7 +84,36 @@ pub struct Store {
 impl Store {
     /// The platform's standard data directory for this app.
     pub fn default_dir() -> Option<PathBuf> {
-        directories::ProjectDirs::from("", "", "silver-message").map(|d| d.data_dir().to_path_buf())
+        directories::ProjectDirs::from("", "", "silver-messenger")
+            .map(|d| d.data_dir().to_path_buf())
+    }
+
+    /// Move a data directory created under the app's former name, if one
+    /// exists and the current one does not. Best effort; never fails.
+    pub fn migrate_legacy_dir() {
+        let Some(new) = Self::default_dir() else {
+            return;
+        };
+        let Some(old) = directories::ProjectDirs::from("", "", "silver-message")
+            .map(|d| d.data_dir().to_path_buf())
+        else {
+            return;
+        };
+        if !old.exists() || new.exists() {
+            return;
+        }
+        if let Some(parent) = new.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        match fs::rename(&old, &new) {
+            Ok(()) => {
+                tracing::info!("moved data from {} to {}", old.display(), new.display());
+                if let Some(parent) = old.parent() {
+                    let _ = fs::remove_dir(parent); // only succeeds if now empty
+                }
+            }
+            Err(e) => tracing::warn!("could not move {} to {}: {e}", old.display(), new.display()),
+        }
     }
 
     pub fn open(root: impl Into<PathBuf>) -> anyhow::Result<Self> {

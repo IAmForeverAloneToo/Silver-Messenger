@@ -1,6 +1,6 @@
 [package]
 name = "silver-protocol"
-description = "Shared wire types and end-to-end cryptography for Silver Message"
+description = "Shared wire types and end-to-end cryptography for Silver Messenger"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

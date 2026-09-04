@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install or update the Silver Message relay on a Linux server (Debian/Ubuntu
+# Install or update the Silver Messenger relay on a Linux server (Debian/Ubuntu
 # or Fedora/RHEL family) and run it as a hardened systemd service.
 #
 # Two ways to use it:
@@ -11,7 +11,7 @@
 #   * From source: with nothing next to it, the script installs Rust, clones
 #     the repository and builds the relay. The repository must be reachable
 #     from the server (public, or SILVER_REPO carrying credentials):
-#       curl -fsSL https://raw.githubusercontent.com/IAmForeverAloneToo/Silver-Messanger/main/deploy/install.sh | bash
+#       curl -fsSL https://raw.githubusercontent.com/IAmForeverAloneToo/Silver-Messenger/main/deploy/install.sh | bash
 #
 # Re-running it updates the relay and restarts the service.
 #
@@ -23,12 +23,12 @@
 #   SILVER_BINARY        path to a prebuilt relay binary (default: silver-relay next to this script)
 #   SILVER_BRANCH        git branch to deploy         (default main)
 #   SILVER_REPO          git repository URL
-#   SILVER_SRC_DIR       where the source is checked out (default /opt/silver-messanger)
+#   SILVER_SRC_DIR       where the source is checked out (default /opt/silver-messenger)
 set -euo pipefail
 
-REPO_URL="${SILVER_REPO:-https://github.com/IAmForeverAloneToo/Silver-Messanger.git}"
+REPO_URL="${SILVER_REPO:-https://github.com/IAmForeverAloneToo/Silver-Messenger.git}"
 BRANCH="${SILVER_BRANCH:-main}"
-SRC_DIR="${SILVER_SRC_DIR:-/opt/silver-messanger}"
+SRC_DIR="${SILVER_SRC_DIR:-/opt/silver-messenger}"
 LISTEN="${SILVER_RELAY_LISTEN:-0.0.0.0:7777}"
 SERVICE_USER=silver
 BIN=/usr/local/bin/silver-relay
@@ -92,6 +92,10 @@ else
     fi
 
     # ---- 4. source ----------------------------------------------------------------
+    # The repository used to be checked out under a misspelled name.
+    if [ ! -d "$SRC_DIR" ] && [ -d /opt/silver-messanger ]; then
+        mv /opt/silver-messanger "$SRC_DIR"
+    fi
     if [ -d "$SRC_DIR/.git" ]; then
         log "Updating $SRC_DIR from $BRANCH"
         git -C "$SRC_DIR" fetch -q origin "$BRANCH"
@@ -156,7 +160,7 @@ if [ -n "$DOMAIN" ]; then
     fi
     mkdir -p /etc/caddy
     cat >/etc/caddy/Caddyfile <<CADDY
-# Managed by the Silver Message relay installer.
+# Managed by the Silver Messenger relay installer.
 $DOMAIN {
     reverse_proxy 127.0.0.1:7777
 }
@@ -234,7 +238,7 @@ fi
 
 cat <<MSG
 
-Silver Message relay is running.
+Silver Messenger relay is running.
 
   service:  systemctl status silver-relay
   logs:     journalctl -u silver-relay -f

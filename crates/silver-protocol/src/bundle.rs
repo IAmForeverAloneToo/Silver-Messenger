@@ -6,7 +6,7 @@ use crate::ProtocolError;
 use crate::encoding::b64_array;
 use crate::identity::{DhPublic, UserId};
 
-pub const BUNDLE_DOMAIN: &[u8] = b"silver-message/v1/key-bundle";
+pub const BUNDLE_DOMAIN: &[u8] = b"silver-messenger/v1/key-bundle";
 
 /// A user's X25519 public key, signed by their identity key.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

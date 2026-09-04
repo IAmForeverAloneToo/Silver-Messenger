@@ -1,4 +1,4 @@
-//! Client core for Silver Message: everything a front end needs except the UI.
+//! Client core for Silver Messenger: everything a front end needs except the UI.
 //!
 //! * [`Store`] – on-disk identity, contacts, config and message history.
 //! * [`Client`] – a background task that keeps a relay connection alive,

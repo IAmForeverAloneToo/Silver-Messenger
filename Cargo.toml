@@ -11,7 +11,7 @@ members = [
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-only"
-repository = "https://github.com/IAmForeverAloneToo/Silver-Messanger"
+repository = "https://github.com/IAmForeverAloneToo/Silver-Messenger"
 rust-version = "1.85"
 
 [workspace.dependencies]

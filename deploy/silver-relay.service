@@ -1,6 +1,6 @@
 [Unit]
-Description=Silver Message relay (stores and forwards encrypted envelopes)
-Documentation=https://github.com/IAmForeverAloneToo/Silver-Messanger
+Description=Silver Messenger relay (stores and forwards encrypted envelopes)
+Documentation=https://github.com/IAmForeverAloneToo/Silver-Messenger
 After=network-online.target
 Wants=network-online.target
 

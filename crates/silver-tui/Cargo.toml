@@ -1,6 +1,6 @@
 [package]
 name = "silver-tui"
-description = "Terminal user interface for Silver Message"
+description = "Terminal user interface for Silver Messenger"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

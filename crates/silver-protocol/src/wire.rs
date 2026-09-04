@@ -11,7 +11,7 @@ use crate::encoding::b64_array;
 use crate::envelope::Envelope;
 use crate::identity::{Identity, UserId};
 
-pub const AUTH_DOMAIN: &[u8] = b"silver-message/v1/relay-auth";
+pub const AUTH_DOMAIN: &[u8] = b"silver-messenger/v1/relay-auth";
 
 /// Largest WebSocket frame either side will accept.
 pub const MAX_FRAME_BYTES: usize = 128 * 1024;

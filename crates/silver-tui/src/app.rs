@@ -136,7 +136,7 @@ impl App {
             internal_rx: Some(internal_rx),
             should_quit: false,
         };
-        app.system(Level::Info, "Welcome to Silver Message.");
+        app.system(Level::Info, "Welcome to Silver Messenger.");
         if fresh_identity {
             app.system(
                 Level::Info,
@@ -470,7 +470,7 @@ impl App {
                                 peer,
                                 text,
                                 learned: None,
-                                result: Err("they have not published a key yet (they need to run Silver Message once)".into()),
+                                result: Err("they have not published a key yet (they need to run Silver Messenger once)".into()),
                             })
                             .await;
                         return;

@@ -1,6 +1,6 @@
 [package]
 name = "silver-client"
-description = "Client core for Silver Message: relay connection, local store, encrypt/decrypt (no UI)"
+description = "Client core for Silver Messenger: relay connection, local store, encrypt/decrypt (no UI)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

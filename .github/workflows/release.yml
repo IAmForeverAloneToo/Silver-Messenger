@@ -63,7 +63,7 @@ jobs:
             v*) version="$GITHUB_REF_NAME" ;;
             *)  version="dev-${GITHUB_SHA::7}" ;;
           esac
-          name="silver-message-${version}-${{ matrix.target }}"
+          name="silver-messenger-${version}-${{ matrix.target }}"
           mkdir -p "dist/$name"
           ext=""
           case "${{ matrix.target }}" in *windows*) ext=".exe" ;; esac

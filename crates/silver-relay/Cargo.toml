@@ -1,6 +1,6 @@
 [package]
 name = "silver-relay"
-description = "Self-hosted store-and-forward relay for Silver Message (sees only encrypted blobs)"
+description = "Self-hosted store-and-forward relay for Silver Messenger (sees only encrypted blobs)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -1,4 +1,4 @@
-//! The Silver Message relay.
+//! The Silver Messenger relay.
 //!
 //! The relay is deliberately dumb: it authenticates clients by challenge
 //! signature, stores signed public-key bundles, and queues opaque

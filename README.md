@@ -1,4 +1,4 @@
-# Silver Message
+# Silver Messenger
 
 End-to-end encrypted messaging in your terminal. Written in Rust; runs on
 Windows, Linux and macOS.
@@ -22,7 +22,7 @@ The repository is a Cargo workspace with four crates:
 ## Quick start
 
 Ready-made binaries for Windows, macOS and Linux are on the
-[releases page](https://github.com/IAmForeverAloneToo/Silver-Messanger/releases)
+[releases page](https://github.com/IAmForeverAloneToo/Silver-Messenger/releases)
 (unpack and run `silver`). To build from source you need a Rust toolchain
 (https://rustup.rs). Then, from the repository root:
 
@@ -74,9 +74,9 @@ silver-relay --listen <ADDR>   default 0.0.0.0:7777                         (env
 RUST_LOG=debug silver-relay    relay log level
 ```
 
-Default data directory: `~/.local/share/silver-message` on Linux,
-`~/Library/Application Support/silver-message` on macOS,
-`%APPDATA%\silver-message\data` on Windows.
+Default data directory: `~/.local/share/silver-messenger` on Linux,
+`~/Library/Application Support/silver-messenger` on macOS,
+`%APPDATA%\silver-messenger\data` on Windows.
 
 ## Deploying a relay
 
@@ -97,11 +97,11 @@ repository. The same workflow can show status and logs or restart the relay.
 is public:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/IAmForeverAloneToo/Silver-Messanger/main/deploy/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/IAmForeverAloneToo/Silver-Messenger/main/deploy/install.sh | bash
 ```
 
 This installs build tools and Rust, clones the repository into
-`/opt/silver-messanger`, and builds the relay on the server. Re-running it
+`/opt/silver-messenger`, and builds the relay on the server. Re-running it
 updates to the latest `main`. With a `silver-relay` binary and
 `silver-relay.service` placed next to it, the same script installs those
 instead and needs no compiler.

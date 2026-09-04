@@ -4,7 +4,7 @@ use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-/// Self-hosted Silver Message relay. Stores and forwards encrypted envelopes;
+/// Self-hosted Silver Messenger relay. Stores and forwards encrypted envelopes;
 /// never sees plaintext.
 #[derive(Parser, Debug)]
 #[command(name = "silver-relay", version, about)]
