@@ -59,6 +59,12 @@ Can:
   the signatures. A signed prekey older than three weeks is not used at
   all: the sender falls back to a message without forward secrecy and says
   so, rather than start a session its peer could never read.
+- Strip the ML-KEM keys from a bundle (a relay older than 0.7.0 does this
+  without meaning to), so that the session starts with the classical
+  handshake instead of the post-quantum one. It cannot substitute an
+  ML-KEM key, one-time ones included: all of them are signed. The client
+  shows which handshake a session got (`forward secret` against `forward
+  secret, post-quantum`) and `/session` says why.
 - See that a file was sent and roughly how big it is (to the nearest
   64 KiB between clients from 0.6.0, exactly otherwise): the encrypted
   chunks are put and fetched on anonymous connections, but a blob of a
@@ -217,9 +223,16 @@ without comparing safety numbers out of band.
   chunk to a whole 64 KiB; receipts leave after a random delay. Both
   connections can go through a SOCKS5 proxy such as Tor, one circuit per
   connection.
+- **Post-quantum handshake** (0.7.0 on): the session key also depends on
+  an ML-KEM-768 secret encapsulated to a signed key the recipient
+  published, so a recording of today's traffic cannot be opened by a
+  future quantum computer that breaks X25519, and a flaw in ML-KEM alone
+  leaves the session as strong as before. The ratchet steps after the
+  handshake are still X25519 only.
 
-Deliberately absent so far: deniability (messages are signed), cover
-traffic, post-quantum key agreement.
+Deliberately absent so far: deniability (messages are signed; the
+decision and the path away from it are recorded in `PROTOCOL.md`
+section 9) and cover traffic.
 
 ## Trust decisions a user makes
 

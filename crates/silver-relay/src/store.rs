@@ -11,15 +11,24 @@ use std::path::Path;
 use anyhow::Context;
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use silver_protocol::prekey::OneTimePrekey;
-use silver_protocol::{DhPublic, Envelope, KeyBundle, UserId};
+use silver_protocol::{DhPublic, Envelope, KeyBundle, SignedPqPrekey, UserId};
 
-/// `owner -> bundle JSON` (the signed prekey included, one-time keys not).
+/// A deposit of one-time keys: `(owner, key id) -> encoded public key` for
+/// keys not yet handed out.
+type DepositTable = TableDefinition<'static, (&'static [u8], u32), &'static [u8]>;
+/// `(owner, key id)` for keys handed out that the owner may still list on
+/// its next publish; forgotten once the owner stops listing them.
+type UsedTable = TableDefinition<'static, (&'static [u8], u32), ()>;
+
+/// `owner -> bundle JSON` (the signed prekeys included, one-time keys not).
 const BUNDLES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("bundles");
-/// `(owner, prekey id) -> public key` for one-time prekeys not yet handed out.
-const ONE_TIME: TableDefinition<(&[u8], u32), &[u8]> = TableDefinition::new("one_time_prekeys");
-/// `(owner, prekey id)` for one-time prekeys handed out that the owner may
-/// still list on its next publish; forgotten once the owner stops listing them.
-const ONE_TIME_USED: TableDefinition<(&[u8], u32), ()> = TableDefinition::new("one_time_used");
+/// One-time X25519 prekeys, the raw 32-byte public key each.
+const ONE_TIME: DepositTable = TableDefinition::new("one_time_prekeys");
+const ONE_TIME_USED: UsedTable = TableDefinition::new("one_time_used");
+/// One-time ML-KEM keys (protocol v3), each stored as the JSON of its
+/// signed form so it is handed out signature and all.
+const PQ_ONE_TIME: DepositTable = TableDefinition::new("pq_one_time_prekeys");
+const PQ_ONE_TIME_USED: UsedTable = TableDefinition::new("pq_one_time_used");
 /// `(recipient, sequence) -> stored entry`; the sequence gives delivery order.
 const MAILBOX: TableDefinition<(&[u8], u64), &[u8]> = TableDefinition::new("mailbox");
 /// `envelope id -> (recipient, sequence)` so acknowledgements are O(log n).
@@ -164,6 +173,8 @@ impl Store {
             txn.open_table(BUNDLES)?;
             txn.open_table(ONE_TIME)?;
             txn.open_table(ONE_TIME_USED)?;
+            txn.open_table(PQ_ONE_TIME)?;
+            txn.open_table(PQ_ONE_TIME_USED)?;
             txn.open_table(MAILBOX)?;
             txn.open_table(BY_ID)?;
             txn.open_table(USAGE)?;
@@ -307,12 +318,70 @@ impl Store {
         user: &UserId,
         keys: &[OneTimePrekey],
     ) -> anyhow::Result<()> {
+        let keys: Vec<(u32, Vec<u8>)> = keys.iter().map(|k| (k.id, k.public.0.to_vec())).collect();
+        self.replace_deposit((ONE_TIME, ONE_TIME_USED), user, &keys)
+    }
+
+    /// Hand out one of `user`'s one-time prekeys, never to be handed out
+    /// again. `None` when there are none left.
+    pub fn take_one_time_prekey(&self, user: &UserId) -> anyhow::Result<Option<OneTimePrekey>> {
+        self.take_from_deposit((ONE_TIME, ONE_TIME_USED), user)?
+            .map(|(id, public)| {
+                let bytes: [u8; 32] = public
+                    .as_slice()
+                    .try_into()
+                    .context("stored one-time prekey has the wrong length")?;
+                Ok(OneTimePrekey {
+                    id,
+                    public: DhPublic(bytes),
+                })
+            })
+            .transpose()
+    }
+
+    /// How many one-time prekeys `user` has left, and the ids handed out
+    /// that the user has not dropped from its list yet.
+    pub fn one_time_status(&self, user: &UserId) -> anyhow::Result<(u32, Vec<u32>)> {
+        self.deposit_status((ONE_TIME, ONE_TIME_USED), user)
+    }
+
+    /// The same three operations for one-time ML-KEM keys.
+    pub fn set_pq_one_time_prekeys(
+        &self,
+        user: &UserId,
+        keys: &[SignedPqPrekey],
+    ) -> anyhow::Result<()> {
+        let keys = keys
+            .iter()
+            .map(|k| Ok((k.id, serde_json::to_vec(k)?)))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        self.replace_deposit((PQ_ONE_TIME, PQ_ONE_TIME_USED), user, &keys)
+    }
+
+    pub fn take_pq_one_time_prekey(&self, user: &UserId) -> anyhow::Result<Option<SignedPqPrekey>> {
+        self.take_from_deposit((PQ_ONE_TIME, PQ_ONE_TIME_USED), user)?
+            .map(|(_, json)| {
+                serde_json::from_slice(&json).context("stored one-time ML-KEM key is unreadable")
+            })
+            .transpose()
+    }
+
+    pub fn pq_one_time_status(&self, user: &UserId) -> anyhow::Result<(u32, Vec<u32>)> {
+        self.deposit_status((PQ_ONE_TIME, PQ_ONE_TIME_USED), user)
+    }
+
+    fn replace_deposit(
+        &self,
+        (deposit, used_keys): (DepositTable, UsedTable),
+        user: &UserId,
+        keys: &[(u32, Vec<u8>)],
+    ) -> anyhow::Result<()> {
         let user = user.as_bytes().as_slice();
-        let listed: HashSet<u32> = keys.iter().map(|k| k.id).collect();
+        let listed: HashSet<u32> = keys.iter().map(|(id, _)| *id).collect();
         let txn = self.db.begin_write()?;
         {
-            let mut table = txn.open_table(ONE_TIME)?;
-            let mut used = txn.open_table(ONE_TIME_USED)?;
+            let mut table = txn.open_table(deposit)?;
+            let mut used = txn.open_table(used_keys)?;
             let mut stale = Vec::new();
             for item in table.range((user, 0u32)..=(user, u32::MAX))? {
                 let (key, _) = item?;
@@ -335,57 +404,51 @@ impl Store {
             for id in stale_used {
                 used.remove((user, id))?;
             }
-            for key in keys {
-                if used.get((user, key.id))?.is_some() || table.get((user, key.id))?.is_some() {
+            for (id, encoded) in keys {
+                if used.get((user, *id))?.is_some() || table.get((user, *id))?.is_some() {
                     continue;
                 }
-                table.insert((user, key.id), key.public.0.as_slice())?;
+                table.insert((user, *id), encoded.as_slice())?;
             }
         }
         txn.commit()?;
         Ok(())
     }
 
-    /// Hand out one of `user`'s one-time prekeys, never to be handed out
-    /// again. `None` when there are none left.
-    pub fn take_one_time_prekey(&self, user: &UserId) -> anyhow::Result<Option<OneTimePrekey>> {
+    fn take_from_deposit(
+        &self,
+        (deposit, used): (DepositTable, UsedTable),
+        user: &UserId,
+    ) -> anyhow::Result<Option<(u32, Vec<u8>)>> {
         let user = user.as_bytes().as_slice();
         let txn = self.db.begin_write()?;
         let taken = {
-            let mut table = txn.open_table(ONE_TIME)?;
+            let mut table = txn.open_table(deposit)?;
             let first = table
                 .range((user, 0u32)..=(user, u32::MAX))?
                 .next()
                 .transpose()?
                 .map(|(key, value)| (key.value().1, value.value().to_vec()));
-            match first {
-                Some((id, public)) => {
-                    table.remove((user, id))?;
-                    txn.open_table(ONE_TIME_USED)?.insert((user, id), ())?;
-                    let bytes: [u8; 32] = public
-                        .as_slice()
-                        .try_into()
-                        .context("stored one-time prekey has the wrong length")?;
-                    Some(OneTimePrekey {
-                        id,
-                        public: DhPublic(bytes),
-                    })
-                }
-                None => None,
+            if let Some((id, _)) = &first {
+                table.remove((user, *id))?;
+                txn.open_table(used)?.insert((user, *id), ())?;
             }
+            first
         };
         txn.commit()?;
         Ok(taken)
     }
 
-    /// How many one-time prekeys `user` has left, and the ids handed out
-    /// that the user has not dropped from its list yet.
-    pub fn one_time_status(&self, user: &UserId) -> anyhow::Result<(u32, Vec<u32>)> {
+    fn deposit_status(
+        &self,
+        (deposit, used_keys): (DepositTable, UsedTable),
+        user: &UserId,
+    ) -> anyhow::Result<(u32, Vec<u32>)> {
         let user = user.as_bytes().as_slice();
         let txn = self.db.begin_read()?;
         let mut remaining = 0u32;
         for item in txn
-            .open_table(ONE_TIME)?
+            .open_table(deposit)?
             .range((user, 0u32)..=(user, u32::MAX))?
         {
             item?;
@@ -393,7 +456,7 @@ impl Store {
         }
         let mut used = Vec::new();
         for item in txn
-            .open_table(ONE_TIME_USED)?
+            .open_table(used_keys)?
             .range((user, 0u32)..=(user, u32::MAX))?
         {
             let (key, _) = item?;
@@ -580,7 +643,39 @@ fn decode_entry(bytes: &[u8]) -> anyhow::Result<(u64, Envelope)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use silver_protocol::{Content, Identity, seal};
+    use silver_protocol::{Content, Identity, PqPrekeySecret, seal};
+
+    #[test]
+    fn one_time_ml_kem_keys_are_handed_out_once_signature_and_all() {
+        let store = Store::in_memory().unwrap();
+        let bob = Identity::generate();
+        let me = bob.user_id();
+        let keys: Vec<_> = (1..=3)
+            .map(|i| PqPrekeySecret::generate(i, 0).signed_by(&bob))
+            .collect();
+        store.set_pq_one_time_prekeys(&me, &keys).unwrap();
+        assert_eq!(store.pq_one_time_status(&me).unwrap(), (3, vec![]));
+        // The classical deposit is a different one.
+        assert_eq!(store.one_time_status(&me).unwrap(), (0, vec![]));
+
+        let first = store.take_pq_one_time_prekey(&me).unwrap().unwrap();
+        assert_eq!(first, keys[0]);
+        assert!(first.verify(&me).is_ok());
+        assert_eq!(store.pq_one_time_status(&me).unwrap(), (2, vec![1]));
+        // Relisting the handed-out key does not bring it back; dropping it
+        // from the list is the client acknowledging the handout.
+        store.set_pq_one_time_prekeys(&me, &keys).unwrap();
+        assert_eq!(store.pq_one_time_status(&me).unwrap(), (2, vec![1]));
+        store.set_pq_one_time_prekeys(&me, &keys[1..]).unwrap();
+        assert_eq!(store.pq_one_time_status(&me).unwrap(), (2, vec![]));
+        assert_eq!(store.take_pq_one_time_prekey(&me).unwrap().unwrap().id, 2);
+        assert_eq!(store.take_pq_one_time_prekey(&me).unwrap().unwrap().id, 3);
+        assert!(store.take_pq_one_time_prekey(&me).unwrap().is_none());
+        // A client that stops publishing ML-KEM keys leaves none behind.
+        store.set_pq_one_time_prekeys(&me, &keys).unwrap();
+        store.set_pq_one_time_prekeys(&me, &[]).unwrap();
+        assert_eq!(store.pq_one_time_status(&me).unwrap(), (0, vec![]));
+    }
 
     fn envelope(from: &Identity, to: &Identity, text: &str) -> Envelope {
         seal(

@@ -22,13 +22,10 @@ fn sessions() -> &'static (Session, Session) {
             dh_secret: [4; 32],
         });
         let signed = PrekeySecret::generate(1, 0);
-        let bundle = bob.key_bundle_with(Prekeys {
-            signed: signed.signed_by(&bob),
-            one_time: Vec::new(),
-        });
+        let bundle = bob.key_bundle_with(Prekeys::classical(signed.signed_by(&bob), Vec::new()));
         let (alice_session, init) = Session::initiate(&alice, &bundle).unwrap();
         let bob_session =
-            Session::respond(&bob, &alice.user_id(), &signed, None, &init).unwrap();
+            Session::respond(&bob, &alice.user_id(), &signed, None, None, &init).unwrap();
         (alice_session, bob_session)
     })
 }

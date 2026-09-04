@@ -15,6 +15,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use crate::ProtocolError;
 use crate::encoding::b64_array;
 use crate::identity::{DhPublic, Identity, UserId};
+use crate::pq::SignedPqPrekey;
 
 pub const SIGNED_PREKEY_DOMAIN: &[u8] = b"silver-messenger/v2/signed-prekey";
 
@@ -62,11 +63,44 @@ pub struct Prekeys {
     pub signed: SignedPrekey,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub one_time: Vec<OneTimePrekey>,
+    /// The signed ML-KEM-768 key (protocol v3). Clients before 0.7.0 publish
+    /// none and are talked to with a classical handshake.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pq_signed: Option<SignedPqPrekey>,
+    /// One-time ML-KEM-768 keys, handled like `one_time`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pq_one_time: Vec<SignedPqPrekey>,
 }
 
 impl Prekeys {
+    /// The classical prekeys only.
+    pub fn classical(signed: SignedPrekey, one_time: Vec<OneTimePrekey>) -> Self {
+        Self {
+            signed,
+            one_time,
+            pq_signed: None,
+            pq_one_time: Vec::new(),
+        }
+    }
+
+    /// Check every signature: the signed prekey and each ML-KEM key.
     pub fn verify(&self, owner: &UserId) -> Result<(), ProtocolError> {
-        self.signed.verify(owner)
+        self.signed.verify(owner)?;
+        for pq in self.pq_signed.iter().chain(&self.pq_one_time) {
+            pq.verify(owner)?;
+        }
+        Ok(())
+    }
+
+    /// Whether a session started from these keys is post-quantum.
+    pub fn supports_post_quantum(&self) -> bool {
+        self.pq_key().is_some()
+    }
+
+    /// The ML-KEM key a handshake encapsulates to: a one-time key if the
+    /// relay handed one out, otherwise the signed one.
+    pub fn pq_key(&self) -> Option<&SignedPqPrekey> {
+        self.pq_one_time.first().or(self.pq_signed.as_ref())
     }
 }
 

@@ -27,7 +27,9 @@
 //! Twenty one-time prekeys are kept on deposit at the relay, topped up when
 //! the relay reports fewer than ten. The private half of a one-time prekey
 //! is deleted when a session uses it, or a month after the relay handed it
-//! out without a session following.
+//! out without a session following. The ML-KEM keys of the post-quantum
+//! handshake follow the same rules with a smaller deposit (ten, topped up
+//! below five): each is 1.2 KB rather than 32 bytes.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -36,7 +38,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use silver_protocol::prekey::Prekeys;
 use silver_protocol::{
-    Identity, InitHeader, KeyBundle, PrekeySecret, ProtocolError, RatchetBody, Session, UserId,
+    Identity, InitHeader, KeyBundle, PqPrekeySecret, PrekeySecret, ProtocolError, RatchetBody,
+    Session, UserId,
 };
 use zeroize::Zeroizing;
 
@@ -46,6 +49,10 @@ use crate::store::Store;
 pub const ONE_TIME_TARGET: usize = 20;
 /// Deposit level at which more are generated.
 pub const ONE_TIME_MIN: u32 = 10;
+/// One-time ML-KEM keys kept on deposit.
+pub const PQ_ONE_TIME_TARGET: usize = 10;
+/// Deposit level at which more ML-KEM keys are generated.
+pub const PQ_ONE_TIME_MIN: u32 = 5;
 pub const SIGNED_PREKEY_ROTATION: Duration = Duration::from_secs(7 * 24 * 3600);
 pub const SIGNED_PREKEY_RETENTION: Duration = Duration::from_secs(21 * 24 * 3600);
 pub const ONE_TIME_RETENTION: Duration = Duration::from_secs(30 * 24 * 3600);
@@ -77,13 +84,23 @@ pub enum SessionError {
     Storage(#[from] anyhow::Error),
 }
 
+/// A one-time key on deposit at the relay.
 #[derive(Serialize, Deserialize)]
-struct OneTimeSecret {
-    key: PrekeySecret,
+struct Deposited<K> {
+    key: K,
     /// When the relay reported handing this key out, if it has.
     #[serde(default)]
     handed_out_at_ms: Option<u64>,
 }
+
+impl<K> Deposited<K> {
+    fn on_deposit(&self) -> bool {
+        self.handed_out_at_ms.is_none()
+    }
+}
+
+type OneTimeSecret = Deposited<PrekeySecret>;
+type PqOneTimeSecret = Deposited<PqPrekeySecret>;
 
 #[derive(Default, Serialize, Deserialize)]
 pub(crate) struct PrekeyFile {
@@ -92,6 +109,11 @@ pub(crate) struct PrekeyFile {
     signed: Vec<PrekeySecret>,
     #[serde(default)]
     one_time: Vec<OneTimeSecret>,
+    /// The signed ML-KEM keys, newest first; empty before 0.7.0.
+    #[serde(default)]
+    pq_signed: Vec<PqPrekeySecret>,
+    #[serde(default)]
+    pq_one_time: Vec<PqOneTimeSecret>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -126,6 +148,9 @@ pub struct SessionInfo {
     pub initiated_by_us: bool,
     /// We started it and have not heard back on it yet.
     pub awaiting_reply: bool,
+    /// The handshake mixed in an ML-KEM secret, so a quantum computer that
+    /// breaks X25519 still cannot open a recording of this session.
+    pub post_quantum: bool,
 }
 
 pub struct SessionStore {
@@ -169,52 +194,56 @@ impl SessionStore {
         identity: &Identity,
         now_ms: u64,
     ) -> anyhow::Result<Prekeys> {
-        let rotation = SIGNED_PREKEY_ROTATION.as_millis() as u64;
-        let due = self
-            .prekeys
-            .signed
-            .first()
-            .is_none_or(|s| now_ms.saturating_sub(s.created_at_ms) >= rotation);
-        if due {
-            let id = self.fresh_id();
-            self.prekeys
-                .signed
-                .insert(0, PrekeySecret::generate(id, now_ms));
-        }
-        let retention = SIGNED_PREKEY_RETENTION.as_millis() as u64;
-        self.prekeys.signed.truncate(
-            1.max(
-                self.prekeys
-                    .signed
-                    .iter()
-                    .take_while(|s| now_ms.saturating_sub(s.created_at_ms) < retention)
-                    .count(),
-            ),
+        let id = self.fresh_id();
+        rotate(
+            &mut self.prekeys.signed,
+            |s| s.created_at_ms,
+            || PrekeySecret::generate(id, now_ms),
+            now_ms,
+        );
+        let id = self.fresh_id();
+        rotate(
+            &mut self.prekeys.pq_signed,
+            |s| s.created_at_ms,
+            || PqPrekeySecret::generate(id, now_ms),
+            now_ms,
         );
         self.top_up_one_time(now_ms);
+        self.top_up_pq_one_time(now_ms);
         self.persist_prekeys()?;
         Ok(self.public_prekeys(identity))
     }
 
-    /// Note what the relay reported after a publish. Returns whether the
+    /// Note what the relay reported after a publish. Returns whether a
     /// deposit ran low enough that fresh keys were made and a new publish
-    /// is needed.
+    /// is needed. A relay from before 0.7.0 reports nothing about ML-KEM
+    /// keys (`None`); it does not keep them, so nothing is done about them.
     pub fn apply_prekey_status(
         &mut self,
         one_time_remaining: u32,
         consumed: &[u32],
+        pq_one_time_remaining: Option<u32>,
+        pq_consumed: &[u32],
         now_ms: u64,
     ) -> anyhow::Result<bool> {
         let mut changed = false;
         for secret in &mut self.prekeys.one_time {
-            if consumed.contains(&secret.key.id) && secret.handed_out_at_ms.is_none() {
+            if consumed.contains(&secret.key.id) && secret.on_deposit() {
                 secret.handed_out_at_ms = Some(now_ms);
                 changed = true;
             }
         }
-        let republish = one_time_remaining < ONE_TIME_MIN;
+        for secret in &mut self.prekeys.pq_one_time {
+            if pq_consumed.contains(&secret.key.id) && secret.on_deposit() {
+                secret.handed_out_at_ms = Some(now_ms);
+                changed = true;
+            }
+        }
+        let republish = one_time_remaining < ONE_TIME_MIN
+            || pq_one_time_remaining.is_some_and(|left| left < PQ_ONE_TIME_MIN);
         if republish {
             self.top_up_one_time(now_ms);
+            self.top_up_pq_one_time(now_ms);
             changed = true;
         }
         if changed {
@@ -224,21 +253,24 @@ impl SessionStore {
     }
 
     fn top_up_one_time(&mut self, now_ms: u64) {
-        let retention = ONE_TIME_RETENTION.as_millis() as u64;
-        self.prekeys.one_time.retain(|o| {
-            o.handed_out_at_ms
-                .is_none_or(|at| now_ms.saturating_sub(at) < retention)
-        });
-        let deposited = self
-            .prekeys
-            .one_time
-            .iter()
-            .filter(|o| o.handed_out_at_ms.is_none())
-            .count();
+        forget_stale(&mut self.prekeys.one_time, now_ms);
+        let deposited = self.one_time_prekeys_deposited();
         for _ in deposited..ONE_TIME_TARGET {
             let id = self.fresh_id();
-            self.prekeys.one_time.push(OneTimeSecret {
+            self.prekeys.one_time.push(Deposited {
                 key: PrekeySecret::generate(id, now_ms),
+                handed_out_at_ms: None,
+            });
+        }
+    }
+
+    fn top_up_pq_one_time(&mut self, now_ms: u64) {
+        forget_stale(&mut self.prekeys.pq_one_time, now_ms);
+        let deposited = self.pq_one_time_prekeys_deposited();
+        for _ in deposited..PQ_ONE_TIME_TARGET {
+            let id = self.fresh_id();
+            self.prekeys.pq_one_time.push(Deposited {
+                key: PqPrekeySecret::generate(id, now_ms),
                 handed_out_at_ms: None,
             });
         }
@@ -251,7 +283,9 @@ impl SessionStore {
             let id: u32 = rand::random();
             let taken = id == 0
                 || self.prekeys.signed.iter().any(|s| s.id == id)
-                || self.prekeys.one_time.iter().any(|o| o.key.id == id);
+                || self.prekeys.one_time.iter().any(|o| o.key.id == id)
+                || self.prekeys.pq_signed.iter().any(|s| s.id == id)
+                || self.prekeys.pq_one_time.iter().any(|o| o.key.id == id);
             if !taken {
                 return id;
             }
@@ -265,8 +299,20 @@ impl SessionStore {
                 .prekeys
                 .one_time
                 .iter()
-                .filter(|o| o.handed_out_at_ms.is_none())
+                .filter(|o| o.on_deposit())
                 .map(|o| o.key.one_time())
+                .collect(),
+            pq_signed: self
+                .prekeys
+                .pq_signed
+                .first()
+                .map(|k| k.signed_by(identity)),
+            pq_one_time: self
+                .prekeys
+                .pq_one_time
+                .iter()
+                .filter(|o| o.on_deposit())
+                .map(|o| o.key.signed_by(identity))
                 .collect(),
         }
     }
@@ -276,7 +322,16 @@ impl SessionStore {
         self.prekeys
             .one_time
             .iter()
-            .filter(|o| o.handed_out_at_ms.is_none())
+            .filter(|o| o.on_deposit())
+            .count()
+    }
+
+    /// One-time ML-KEM keys still on deposit as far as this client knows.
+    pub fn pq_one_time_prekeys_deposited(&self) -> usize {
+        self.prekeys
+            .pq_one_time
+            .iter()
+            .filter(|o| o.on_deposit())
             .count()
     }
 
@@ -292,6 +347,7 @@ impl SessionStore {
             established_at_ms: s.established_at_ms,
             initiated_by_us: s.initiator == self.me,
             awaiting_reply: s.pending_init.is_some(),
+            post_quantum: s.session.is_post_quantum(),
         })
     }
 
@@ -408,15 +464,40 @@ impl SessionStore {
             None => None,
         };
         let one_time = one_time_index.map(|i| self.prekeys.one_time[i].key.clone());
-        let mut session = Session::respond(identity, &from, &signed, one_time.as_ref(), init)?;
+        // The ML-KEM key named is a one-time key, or the signed one.
+        let (pq_one_time_index, pq) = match init.pq_prekey_id {
+            None => (None, None),
+            Some(id) => {
+                if let Some(i) = self.prekeys.pq_one_time.iter().position(|o| o.key.id == id) {
+                    (Some(i), Some(self.prekeys.pq_one_time[i].key.clone()))
+                } else if let Some(key) = self.prekeys.pq_signed.iter().find(|s| s.id == id) {
+                    (None, Some(key.clone()))
+                } else {
+                    return Err(SessionError::UnknownPrekey(id));
+                }
+            }
+        };
+        let mut session = Session::respond(
+            identity,
+            &from,
+            &signed,
+            one_time.as_ref(),
+            pq.as_ref(),
+            init,
+        )?;
         if *session.id() != body.session {
             return Err(SessionError::SessionMismatch);
         }
         let plaintext = session.decrypt(&body.message)?;
 
-        // The handshake worked: the one-time key has served its purpose.
+        // The handshake worked: the one-time keys have served their purpose.
         if let Some(i) = one_time_index {
             self.prekeys.one_time.remove(i);
+        }
+        if let Some(i) = pq_one_time_index {
+            self.prekeys.pq_one_time.remove(i);
+        }
+        if one_time_index.is_some() || pq_one_time_index.is_some() {
             self.persist_prekeys()?;
         }
         let me = self.me;
@@ -478,7 +559,43 @@ impl SessionStore {
             None => Ok(()),
         }
     }
+}
 
+/// Rotate a list of signed keys, newest first: a fresh one when the newest
+/// is [`SIGNED_PREKEY_ROTATION`] old (or there is none), then drop those
+/// older than [`SIGNED_PREKEY_RETENTION`], always keeping the newest.
+fn rotate<K>(
+    keys: &mut Vec<K>,
+    created_at_ms: impl Fn(&K) -> u64,
+    fresh: impl FnOnce() -> K,
+    now_ms: u64,
+) {
+    let rotation = SIGNED_PREKEY_ROTATION.as_millis() as u64;
+    if keys
+        .first()
+        .is_none_or(|k| now_ms.saturating_sub(created_at_ms(k)) >= rotation)
+    {
+        keys.insert(0, fresh());
+    }
+    let retention = SIGNED_PREKEY_RETENTION.as_millis() as u64;
+    let keep = keys
+        .iter()
+        .take_while(|k| now_ms.saturating_sub(created_at_ms(k)) < retention)
+        .count();
+    keys.truncate(keep.max(1));
+}
+
+/// Drop one-time keys the relay handed out [`ONE_TIME_RETENTION`] ago
+/// without a session following.
+fn forget_stale<K>(deposit: &mut Vec<Deposited<K>>, now_ms: u64) {
+    let retention = ONE_TIME_RETENTION.as_millis() as u64;
+    deposit.retain(|o| {
+        o.handed_out_at_ms
+            .is_none_or(|at| now_ms.saturating_sub(at) < retention)
+    });
+}
+
+impl SessionStore {
     fn persist_sessions(&self) -> anyhow::Result<()> {
         let Some(store) = &self.store else {
             return Ok(());
@@ -545,9 +662,10 @@ mod tests {
                 .sessions
                 .prekeys_for_publish(&self.identity, now)
                 .unwrap();
-            // What a relay hands out: one one-time key.
+            // What a relay hands out: one one-time key of each kind.
             let mut one = prekeys.clone();
             one.one_time.truncate(1);
+            one.pq_one_time.truncate(1);
             self.identity.key_bundle_with(one)
         }
 
@@ -577,9 +695,18 @@ mod tests {
 
         // Handed-out keys leave the published list but stay usable.
         let consumed: Vec<u32> = first.one_time[..3].iter().map(|k| k.id).collect();
-        assert!(!p.sessions.apply_prekey_status(17, &consumed, 2000).unwrap());
+        let full = Some(PQ_ONE_TIME_TARGET as u32);
+        assert!(
+            !p.sessions
+                .apply_prekey_status(17, &consumed, full, &[], 2000)
+                .unwrap()
+        );
         assert_eq!(p.sessions.one_time_prekeys_deposited(), 17);
-        assert!(p.sessions.apply_prekey_status(5, &[], 3000).unwrap());
+        assert!(
+            p.sessions
+                .apply_prekey_status(5, &[], full, &[], 3000)
+                .unwrap()
+        );
         assert_eq!(p.sessions.one_time_prekeys_deposited(), ONE_TIME_TARGET);
         assert_eq!(p.sessions.prekeys.one_time.len(), ONE_TIME_TARGET + 3);
 
@@ -593,6 +720,119 @@ mod tests {
         p.sessions.prekeys_for_publish(&p.identity, month).unwrap();
         assert_eq!(p.sessions.prekeys.signed.len(), 1);
         assert_eq!(p.sessions.prekeys.one_time.len(), ONE_TIME_TARGET);
+    }
+
+    #[test]
+    fn ml_kem_keys_are_published_rotated_and_topped_up_like_the_classical_ones() {
+        let mut p = Party::new();
+        let first = p.sessions.prekeys_for_publish(&p.identity, 0).unwrap();
+        assert!(first.supports_post_quantum());
+        assert_eq!(first.pq_one_time.len(), PQ_ONE_TIME_TARGET);
+        assert!(first.verify(&p.identity.user_id()).is_ok());
+        let pq_signed_id = first.pq_signed.as_ref().unwrap().id;
+
+        let consumed: Vec<u32> = first.pq_one_time[..2].iter().map(|k| k.id).collect();
+        let classical_full = ONE_TIME_TARGET as u32;
+        assert!(
+            !p.sessions
+                .apply_prekey_status(classical_full, &[], Some(8), &consumed, 1000)
+                .unwrap()
+        );
+        assert_eq!(p.sessions.pq_one_time_prekeys_deposited(), 8);
+        // Running low on ML-KEM keys alone asks for a new publish.
+        assert!(
+            p.sessions
+                .apply_prekey_status(classical_full, &[], Some(2), &[], 2000)
+                .unwrap()
+        );
+        assert_eq!(
+            p.sessions.pq_one_time_prekeys_deposited(),
+            PQ_ONE_TIME_TARGET
+        );
+        assert_eq!(p.sessions.prekeys.pq_one_time.len(), PQ_ONE_TIME_TARGET + 2);
+        // A relay that says nothing about ML-KEM keys (before 0.7.0) does
+        // not keep them, so its silence asks for nothing.
+        assert!(
+            !p.sessions
+                .apply_prekey_status(classical_full, &[], None, &[], 2500)
+                .unwrap()
+        );
+
+        let week = SIGNED_PREKEY_ROTATION.as_millis() as u64;
+        let rotated = p.sessions.prekeys_for_publish(&p.identity, week).unwrap();
+        assert_ne!(rotated.pq_signed.as_ref().unwrap().id, pq_signed_id);
+        assert_eq!(p.sessions.prekeys.pq_signed.len(), 2);
+        let month = ONE_TIME_RETENTION.as_millis() as u64 + 3000;
+        p.sessions.prekeys_for_publish(&p.identity, month).unwrap();
+        assert_eq!(p.sessions.prekeys.pq_signed.len(), 1);
+        assert_eq!(p.sessions.prekeys.pq_one_time.len(), PQ_ONE_TIME_TARGET);
+
+        // A prekey file from before 0.7.0 gets ML-KEM keys on its next publish.
+        let mut old = Party::new();
+        old.sessions.prekeys_for_publish(&old.identity, 0).unwrap();
+        old.sessions.prekeys.pq_signed.clear();
+        old.sessions.prekeys.pq_one_time.clear();
+        let upgraded = old.sessions.prekeys_for_publish(&old.identity, 1).unwrap();
+        assert!(upgraded.supports_post_quantum());
+        assert_eq!(upgraded.pq_one_time.len(), PQ_ONE_TIME_TARGET);
+    }
+
+    #[test]
+    fn sessions_are_post_quantum_when_the_peer_publishes_ml_kem_keys() {
+        let mut alice = Party::new();
+        let mut bob = Party::new();
+        let bob_bundle = bob.bundle(0);
+        assert!(bob_bundle.supports_post_quantum());
+        let before = bob.sessions.prekeys.pq_one_time.len();
+
+        let m1 = alice.send(&bob_bundle, "hello", 1);
+        assert!(m1.init.as_ref().unwrap().is_post_quantum());
+        let info = |p: &Party, peer: &Party| {
+            p.sessions
+                .session_info(&peer.identity.user_id())
+                .unwrap()
+                .post_quantum
+        };
+        assert!(info(&alice, &bob));
+        assert_eq!(bob.recv(&alice, &m1, 2), ("hello".into(), true));
+        assert_eq!(bob.sessions.prekeys.pq_one_time.len(), before - 1);
+        assert!(info(&bob, &alice));
+
+        // With no one-time ML-KEM key in the bundle, the signed one serves
+        // and nothing is consumed.
+        let mut signed_only = bob.bundle(3);
+        signed_only.prekeys.as_mut().unwrap().pq_one_time.clear();
+        let topped_up = bob.sessions.prekeys.pq_one_time.len();
+        let mut carol = Party::new();
+        let m = carol.send(&signed_only, "hi", 4);
+        assert_eq!(
+            m.init.as_ref().unwrap().pq_prekey_id,
+            Some(bob.sessions.prekeys.pq_signed[0].id)
+        );
+        assert_eq!(bob.recv(&carol, &m, 5), ("hi".into(), true));
+        assert_eq!(bob.sessions.prekeys.pq_one_time.len(), topped_up);
+        assert!(info(&bob, &carol));
+
+        // A peer that published no ML-KEM keys (a client before 0.7.0)
+        // gets a classical session, and both sides say so.
+        let mut classical = bob.bundle(6);
+        let prekeys = classical.prekeys.as_mut().unwrap();
+        prekeys.pq_signed = None;
+        prekeys.pq_one_time.clear();
+        let mut dave = Party::new();
+        let m = dave.send(&classical, "old", 7);
+        assert!(!m.init.as_ref().unwrap().is_post_quantum());
+        assert_eq!(bob.recv(&dave, &m, 8), ("old".into(), true));
+        assert!(!info(&bob, &dave) && !info(&dave, &bob));
+
+        // A handshake naming an ML-KEM key this client never had.
+        let mut stranger = Party::new();
+        assert!(matches!(
+            stranger
+                .sessions
+                .decrypt(&stranger.identity, alice.identity.user_id(), &m1, 9),
+            Err(SessionError::UnknownPrekey(_))
+        ));
     }
 
     #[test]

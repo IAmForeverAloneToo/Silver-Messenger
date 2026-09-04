@@ -259,7 +259,7 @@ sends, so a message cannot drive the terminal.
         Scorecard run on every push. An opt-in `silver --check-release`
         tells a user when a newer version exists; it never runs by
         itself. (SLSA v1.0, OpenSSF Scorecard.)
-34. [ ] **Post-quantum key agreement** (L). Protocol v3: the initial
+34. [x] **Post-quantum key agreement** (L). Protocol v3: the initial
         handshake becomes a hybrid of X3DH and ML-KEM-768 (PQXDH), with
         post-quantum prekeys published and rotated like the classical
         ones, so a recording of today's traffic cannot be opened by a

@@ -28,6 +28,27 @@ pub mod b64 {
     }
 }
 
+/// `#[serde(default, with = "encoding::b64_opt")]` for `Option<Vec<u8>>`
+/// fields.
+pub mod b64_opt {
+    use super::STANDARD;
+    use base64::Engine as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &Option<Vec<u8>>, s: S) -> Result<S::Ok, S::Error> {
+        match bytes {
+            Some(bytes) => s.serialize_some(&STANDARD.encode(bytes)),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<u8>>, D::Error> {
+        Option::<String>::deserialize(d)?
+            .map(|s| STANDARD.decode(s).map_err(serde::de::Error::custom))
+            .transpose()
+    }
+}
+
 /// `#[serde(with = "encoding::b64_array")]` for `[u8; N]` fields.
 pub mod b64_array {
     use super::STANDARD;

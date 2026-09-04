@@ -64,6 +64,19 @@ relay-bound login), so an older peer reads a newer one and vice versa.
   blob-chunk, session, invite-link, file-name and stored-record parsers
   run in CI, alongside stable-toolchain tests that throw random bytes at
   the same parsers and assert they never panic.
+- **Post-quantum handshake (protocol v3).** Clients publish ML-KEM-768
+  keys (FIPS 203) next to their X25519 prekeys: a signed medium-term key
+  rotated weekly and one-time keys the relay hands out once, all signed
+  by the identity key. A session's handshake encapsulates a secret to one
+  of them and mixes it into the session key with the Diffie–Hellman
+  values (PQXDH-style), so a recording of today's traffic cannot be opened
+  by a future quantum computer, and a flaw in ML-KEM alone changes
+  nothing. The chat title says `forward secret, post-quantum` when it
+  applies; a peer or relay from before 0.7.0 gets the classical handshake
+  and `/session` says so. The relay keeps the new keys, reports them in
+  `prekey_status` and advertises `pq_prekeys`. Deniability was considered
+  and decided against for now; the reasoning and the path to it are in
+  `docs/PROTOCOL.md` section 9.
 - **Releases you can check.** Binaries are built with `cargo auditable`
   from locked dependencies, with build paths and timestamps removed, so a
   rebuild of the tagged commit gives the same bytes (CI rebuilds twice on

@@ -53,6 +53,10 @@ hmac = "0.12"
 sha2 = "0.10"
 rand = "0.8"
 zeroize = { version = "1", features = ["derive"] }
+# ML-KEM-768 (FIPS 203) for the post-quantum half of the handshake. Uses the
+# rand_core 0.10 generation internally; keys are made from seeds we draw
+# ourselves, so nothing else has to move.
+ml-kem = { version = "0.3", features = ["zeroize", "getrandom"] }
 argon2 = "0.6"
 rpassword = "7"
 

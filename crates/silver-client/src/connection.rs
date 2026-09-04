@@ -972,12 +972,23 @@ async fn session(
                             }
                         }
                     }
-                    ServerFrame::PrekeyStatus { one_time_remaining, consumed } => {
+                    ServerFrame::PrekeyStatus {
+                        one_time_remaining,
+                        consumed,
+                        pq_one_time_remaining,
+                        pq_consumed,
+                    } => {
                         let republish = match &setup.sessions {
                             Some(sessions) => sessions
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner())
-                                .apply_prekey_status(one_time_remaining, &consumed, now_ms())
+                                .apply_prekey_status(
+                                    one_time_remaining,
+                                    &consumed,
+                                    pq_one_time_remaining,
+                                    &pq_consumed,
+                                    now_ms(),
+                                )
                                 .unwrap_or_else(|e| {
                                     warn!("could not record prekey status: {e:#}");
                                     false

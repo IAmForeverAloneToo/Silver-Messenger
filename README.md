@@ -339,11 +339,17 @@ it does not, is in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
   encrypted under a key derived for it alone and discarded afterwards, and
   each change of direction in the conversation performs a fresh
   Diffie–Hellman step. A stolen device or key cannot decrypt messages that
-  were already read, and a compromised chain heals at the next step. The
-  chat title says `forward secret` once a session exists; `/session`
-  explains the state. A recipient without prekeys (a client older than
-  0.3.0, or anyone behind an older relay) is sent the plain v1 body
-  instead, so everyone keeps talking during the upgrade.
+  were already read, and a compromised chain heals at the next step. From
+  0.7.0 the handshake is a hybrid (PQXDH-style): the recipient also
+  publishes ML-KEM-768 keys (FIPS 203), the sender encapsulates a secret
+  to one of them, and the session key depends on the Diffie–Hellman values
+  *and* that secret, so a recording of today's traffic stays closed to a
+  future quantum computer. The chat title says `forward secret` once a
+  session exists, `forward secret, post-quantum` when the handshake was
+  hybrid; `/session` explains the state. A recipient without prekeys (a
+  client older than 0.3.0, or anyone behind an older relay) is sent the
+  plain v1 body instead, and one without ML-KEM keys gets the classical
+  handshake, so everyone keeps talking during the upgrade.
 * **Anonymous submission**: a relay from 0.3.0 on accepts messages on
   connections that never authenticate, and the client uses one such
   connection (with TLS session resumption off) for everything it sends. The
@@ -408,9 +414,10 @@ it does not, is in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
   connection; it shows a pending mark (`⋯`) until the relay accepts it, and a
   failure mark (`✗`) if the relay refuses it for good.
 
-What it does **not** do: deniability (messages are signed), cover
-traffic, post-quantum key agreement. The ordered plan is in
-[ROADMAP.md](ROADMAP.md).
+What it does **not** do: deniability (messages are signed; the decision is
+recorded in [docs/PROTOCOL.md](docs/PROTOCOL.md) section 9), cover
+traffic, post-quantum ratchet steps after the handshake. The ordered plan
+is in [ROADMAP.md](ROADMAP.md).
 
 ## Development
 

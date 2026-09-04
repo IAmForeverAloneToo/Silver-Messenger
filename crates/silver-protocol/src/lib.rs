@@ -29,9 +29,14 @@
 //!   everything after the handshake; the sealed layer above it keeps the
 //!   sender hidden from the relay. A recipient without prekeys is sent a v1
 //!   body instead, so old and new clients interoperate.
+//! * **Post-quantum handshake** (v3) – a recipient that also publishes
+//!   [`pq::SignedPqPrekey`]s (ML-KEM-768) gets a hybrid handshake: the
+//!   initiator encapsulates a secret to one of them and mixes it into the
+//!   session key next to the Diffie–Hellman outputs, so a recording of the
+//!   traffic stays closed even to a quantum computer that breaks X25519.
 //!
-//! What is deliberately not provided: deniability (messages are signed),
-//! padding of message sizes, and cover traffic.
+//! What is deliberately not provided: deniability (messages are signed)
+//! and cover traffic.
 
 pub mod blob;
 pub mod bundle;
@@ -39,6 +44,7 @@ pub mod encoding;
 pub mod envelope;
 mod error;
 pub mod identity;
+pub mod pq;
 pub mod prekey;
 pub mod session;
 pub mod verify;
@@ -52,6 +58,7 @@ pub use envelope::{
 };
 pub use error::ProtocolError;
 pub use identity::{DhPublic, Identity, IdentitySecrets, UserId};
+pub use pq::{KemPublic, PqPrekeySecret, SignedPqPrekey};
 pub use prekey::{OneTimePrekey, PrekeySecret, Prekeys, SignedPrekey};
 pub use session::{InitHeader, RatchetHeader, RatchetMessage, Session, SessionId};
 pub use verify::safety_number;

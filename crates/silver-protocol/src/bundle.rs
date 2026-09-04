@@ -42,6 +42,13 @@ impl KeyBundle {
         self.prekeys.is_some()
     }
 
+    /// Whether a session started from this bundle is post-quantum.
+    pub fn supports_post_quantum(&self) -> bool {
+        self.prekeys
+            .as_ref()
+            .is_some_and(Prekeys::supports_post_quantum)
+    }
+
     /// The same bundle without its prekeys.
     pub fn without_prekeys(&self) -> Self {
         Self {
@@ -55,6 +62,7 @@ impl KeyBundle {
 mod tests {
     use super::*;
     use crate::Identity;
+    use crate::pq::PqPrekeySecret;
     use crate::prekey::{PrekeySecret, Prekeys};
 
     #[test]
@@ -82,15 +90,37 @@ mod tests {
     fn prekeys_are_covered_by_verification() {
         let id = Identity::generate();
         let signed = PrekeySecret::generate(1, 5);
-        let bundle = id.key_bundle_with(Prekeys {
-            signed: signed.signed_by(&id),
-            one_time: vec![PrekeySecret::generate(2, 5).one_time()],
-        });
+        let mut bundle = id.key_bundle_with(Prekeys::classical(
+            signed.signed_by(&id),
+            vec![PrekeySecret::generate(2, 5).one_time()],
+        ));
         assert!(bundle.verify().is_ok());
         assert!(bundle.supports_sessions());
+        assert!(!bundle.supports_post_quantum());
 
         let mut forged = bundle.clone();
         forged.prekeys.as_mut().unwrap().signed = signed.signed_by(&Identity::generate());
+        assert_eq!(forged.verify(), Err(ProtocolError::InvalidSignature));
+
+        // ML-KEM keys are covered too, the one-time ones included.
+        let prekeys = bundle.prekeys.as_mut().unwrap();
+        prekeys.pq_signed = Some(PqPrekeySecret::generate(3, 5).signed_by(&id));
+        prekeys.pq_one_time = vec![PqPrekeySecret::generate(4, 5).signed_by(&id)];
+        assert!(bundle.verify().is_ok());
+        assert!(bundle.supports_post_quantum());
+        let mut forged = bundle.clone();
+        forged.prekeys.as_mut().unwrap().pq_one_time[0] =
+            PqPrekeySecret::generate(4, 5).signed_by(&Identity::generate());
+        assert_eq!(forged.verify(), Err(ProtocolError::InvalidSignature));
+        let mut forged = bundle.clone();
+        forged
+            .prekeys
+            .as_mut()
+            .unwrap()
+            .pq_signed
+            .as_mut()
+            .unwrap()
+            .id = 5;
         assert_eq!(forged.verify(), Err(ProtocolError::InvalidSignature));
 
         let json = serde_json::to_string(&bundle).unwrap();
@@ -109,10 +139,10 @@ mod tests {
             signature: [u8; 64],
         }
         let id = Identity::generate();
-        let bundle = id.key_bundle_with(Prekeys {
-            signed: PrekeySecret::generate(1, 0).signed_by(&id),
-            one_time: Vec::new(),
-        });
+        let bundle = id.key_bundle_with(Prekeys::classical(
+            PrekeySecret::generate(1, 0).signed_by(&id),
+            Vec::new(),
+        ));
         let old: OldBundle =
             serde_json::from_str(&serde_json::to_string(&bundle).unwrap()).unwrap();
         assert_eq!(old.user_id, bundle.user_id);

@@ -30,11 +30,14 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::ProtocolError;
 use crate::bundle::KeyBundle;
-use crate::encoding::{b64, b64_array};
+use crate::encoding::{b64, b64_array, b64_opt};
 use crate::identity::{DhPublic, Identity, UserId};
+use crate::pq::{KEM_SECRET_LEN, PqPrekeySecret};
 use crate::prekey::PrekeySecret;
 
 const X3DH_INFO: &[u8] = b"silver-messenger/v2/x3dh";
+/// The hybrid handshake: the same inputs plus an ML-KEM shared secret.
+const PQXDH_INFO: &[u8] = b"silver-messenger/v3/pqxdh";
 const SESSION_ID_DOMAIN: &[u8] = b"silver-messenger/v2/session-id";
 const ROOT_INFO: &[u8] = b"silver-messenger/v2/ratchet-root";
 const MESSAGE_INFO: &[u8] = b"silver-messenger/v2/ratchet-message";
@@ -59,6 +62,21 @@ pub struct InitHeader {
     pub signed_prekey_id: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub one_time_prekey_id: Option<u32>,
+    /// Which of the responder's ML-KEM keys `kem_ciphertext` was made for
+    /// (protocol v3); absent from a classical handshake.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pq_prekey_id: Option<u32>,
+    /// The ML-KEM ciphertext the responder decapsulates to get its half of
+    /// the post-quantum secret.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "b64_opt")]
+    pub kem_ciphertext: Option<Vec<u8>>,
+}
+
+impl InitHeader {
+    /// Whether this handshake carries the post-quantum secret.
+    pub fn is_post_quantum(&self) -> bool {
+        self.kem_ciphertext.is_some()
+    }
 }
 
 /// The unencrypted part of a ratchet message: which ratchet key it was sent
@@ -122,6 +140,9 @@ pub struct Session {
     n_recv: u32,
     pn: u32,
     skipped: Vec<SkippedKey>,
+    /// The handshake mixed in an ML-KEM secret.
+    #[serde(default)]
+    post_quantum: bool,
 }
 
 impl Session {
@@ -139,7 +160,22 @@ impl Session {
         let dh2 = ephemeral.diffie_hellman(&peer.dh_public.as_x25519());
         let dh3 = ephemeral.diffie_hellman(&spk);
         let dh4 = opk.map(|o| ephemeral.diffie_hellman(&o.public.as_x25519()));
-        let secret = x3dh_secret(&dh1, &dh2, &dh3, dh4.as_ref())?;
+        // Post-quantum half, when the peer published ML-KEM keys: a secret
+        // only the holder of that key can recover from the ciphertext.
+        let kem = match prekeys.pq_key() {
+            Some(key) => {
+                let (ciphertext, secret) = key.public.encapsulate()?;
+                Some((key.id, ciphertext, secret))
+            }
+            None => None,
+        };
+        let secret = x3dh_secret(
+            &dh1,
+            &dh2,
+            &dh3,
+            dh4.as_ref(),
+            kem.as_ref().map(|(_, _, secret)| &**secret),
+        )?;
         let ad = x3dh_ad(
             &me.user_id(),
             &me.dh_public(),
@@ -170,24 +206,33 @@ impl Session {
             n_recv: 0,
             pn: 0,
             skipped: Vec::new(),
+            post_quantum: kem.is_some(),
+        };
+        let (pq_prekey_id, kem_ciphertext) = match kem {
+            Some((id, ciphertext, _)) => (Some(id), Some(ciphertext)),
+            None => (None, None),
         };
         let header = InitHeader {
             identity_dh: me.dh_public(),
             ephemeral: ephemeral_public,
             signed_prekey_id: prekeys.signed.id,
             one_time_prekey_id: opk.map(|o| o.id),
+            pq_prekey_id,
+            kem_ciphertext,
         };
         Ok((session, header))
     }
 
     /// Derive the session an initiator described in `init`, using our own
     /// private prekeys. `one_time` must be given exactly when the header
-    /// names one.
+    /// names one, and `pq` exactly when the header carries an ML-KEM
+    /// ciphertext, with the id the header names.
     pub fn respond(
         me: &Identity,
         initiator: &UserId,
         signed: &PrekeySecret,
         one_time: Option<&PrekeySecret>,
+        pq: Option<&PqPrekeySecret>,
         init: &InitHeader,
     ) -> Result<Self, ProtocolError> {
         if init.one_time_prekey_id.is_some() != one_time.is_some() {
@@ -195,13 +240,24 @@ impl Session {
                 "one-time prekey given does not match the header".into(),
             ));
         }
+        let kem = match (&init.kem_ciphertext, init.pq_prekey_id, pq) {
+            (None, None, None) => None,
+            (Some(ciphertext), Some(id), Some(secret)) if secret.id == id => {
+                Some(secret.decapsulate(ciphertext)?)
+            }
+            _ => {
+                return Err(ProtocolError::Malformed(
+                    "post-quantum prekey given does not match the header".into(),
+                ));
+            }
+        };
         let spk = signed.x25519();
         let ephemeral = init.ephemeral.as_x25519();
         let dh1 = spk.diffie_hellman(&init.identity_dh.as_x25519());
         let dh2 = me.dh_secret().diffie_hellman(&ephemeral);
         let dh3 = spk.diffie_hellman(&ephemeral);
         let dh4 = one_time.map(|o| o.x25519().diffie_hellman(&ephemeral));
-        let secret = x3dh_secret(&dh1, &dh2, &dh3, dh4.as_ref())?;
+        let secret = x3dh_secret(&dh1, &dh2, &dh3, dh4.as_ref(), kem.as_deref())?;
         let ad = x3dh_ad(initiator, &init.identity_dh, &me.user_id(), &me.dh_public());
         let id = session_id(&init.ephemeral, &signed.public());
 
@@ -218,11 +274,18 @@ impl Session {
             n_recv: 0,
             pn: 0,
             skipped: Vec::new(),
+            post_quantum: kem.is_some(),
         })
     }
 
     pub fn id(&self) -> &SessionId {
         &self.id
+    }
+
+    /// Whether the handshake mixed in an ML-KEM secret, so that breaking
+    /// X25519 alone does not open the session.
+    pub fn is_post_quantum(&self) -> bool {
+        self.post_quantum
     }
 
     /// Whether this side can send yet. A responder cannot until it has
@@ -394,11 +457,15 @@ pub fn session_id(ephemeral: &DhPublic, signed_prekey: &DhPublic) -> SessionId {
     id
 }
 
+/// The session secret from the handshake's Diffie–Hellman outputs and, in
+/// the hybrid (v3) handshake, the ML-KEM shared secret. Without `kem` this
+/// is exactly the v2 derivation, so classical peers are unaffected.
 fn x3dh_secret(
     dh1: &SharedSecret,
     dh2: &SharedSecret,
     dh3: &SharedSecret,
     dh4: Option<&SharedSecret>,
+    kem: Option<&[u8; KEM_SECRET_LEN]>,
 ) -> Result<Key32, ProtocolError> {
     for dh in [dh1, dh2, dh3].into_iter().chain(dh4) {
         if !dh.was_contributory() {
@@ -407,7 +474,7 @@ fn x3dh_secret(
     }
     // X3DH prepends 32 bytes of 0xFF for X25519 so the input cannot be
     // confused with an encoded point.
-    let mut ikm = Zeroizing::new(Vec::with_capacity(32 * 5));
+    let mut ikm = Zeroizing::new(Vec::with_capacity(32 * 6));
     ikm.extend_from_slice(&[0xFF; 32]);
     ikm.extend_from_slice(dh1.as_bytes());
     ikm.extend_from_slice(dh2.as_bytes());
@@ -415,9 +482,16 @@ fn x3dh_secret(
     if let Some(dh4) = dh4 {
         ikm.extend_from_slice(dh4.as_bytes());
     }
+    let info = match kem {
+        Some(secret) => {
+            ikm.extend_from_slice(secret);
+            PQXDH_INFO
+        }
+        None => X3DH_INFO,
+    };
     let hk = Hkdf::<Sha256>::new(Some(&[0u8; 32]), &ikm);
     let mut out = Key32([0u8; 32]);
-    hk.expand(X3DH_INFO, &mut out.0)
+    hk.expand(info, &mut out.0)
         .expect("32 bytes is a valid HKDF-SHA256 output length");
     Ok(out)
 }
@@ -515,10 +589,22 @@ mod tests {
     use super::*;
     use crate::prekey::Prekeys;
 
+    /// What a peer publishes: `Classical` is a client before 0.7.0.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Keys {
+        Classical,
+        /// ML-KEM keys, the signed one only (one-time keys ran out).
+        PqSigned,
+        /// ML-KEM keys with a one-time key handed out.
+        PqOneTime,
+    }
+
     struct Peer {
         identity: Identity,
         signed: PrekeySecret,
         one_time: PrekeySecret,
+        pq_signed: PqPrekeySecret,
+        pq_one_time: PqPrekeySecret,
     }
 
     impl Peer {
@@ -527,33 +613,145 @@ mod tests {
                 identity: Identity::generate(),
                 signed: PrekeySecret::generate(1, 0),
                 one_time: PrekeySecret::generate(100, 0),
+                pq_signed: PqPrekeySecret::generate(200, 0),
+                pq_one_time: PqPrekeySecret::generate(300, 0),
             }
         }
 
         fn bundle(&self, with_one_time: bool) -> KeyBundle {
+            self.bundle_with(with_one_time, Keys::Classical)
+        }
+
+        fn bundle_with(&self, with_one_time: bool, keys: Keys) -> KeyBundle {
             let one_time = if with_one_time {
                 vec![self.one_time.one_time()]
             } else {
                 Vec::new()
             };
-            self.identity.key_bundle_with(Prekeys {
-                signed: self.signed.signed_by(&self.identity),
-                one_time,
-            })
+            let mut prekeys = Prekeys::classical(self.signed.signed_by(&self.identity), one_time);
+            if keys != Keys::Classical {
+                prekeys.pq_signed = Some(self.pq_signed.signed_by(&self.identity));
+            }
+            if keys == Keys::PqOneTime {
+                prekeys.pq_one_time = vec![self.pq_one_time.signed_by(&self.identity)];
+            }
+            self.identity.key_bundle_with(prekeys)
+        }
+
+        fn pq_secret(&self, id: u32) -> Option<&PqPrekeySecret> {
+            [&self.pq_signed, &self.pq_one_time]
+                .into_iter()
+                .find(|k| k.id == id)
         }
 
         fn respond(&self, initiator: &UserId, init: &InitHeader) -> Session {
             let one_time = init.one_time_prekey_id.map(|_| &self.one_time);
-            Session::respond(&self.identity, initiator, &self.signed, one_time, init).unwrap()
+            let pq = init.pq_prekey_id.and_then(|id| self.pq_secret(id));
+            Session::respond(&self.identity, initiator, &self.signed, one_time, pq, init).unwrap()
         }
     }
 
     fn handshake(with_one_time: bool) -> (Session, Session, InitHeader) {
+        handshake_with(with_one_time, Keys::Classical)
+    }
+
+    fn handshake_with(with_one_time: bool, keys: Keys) -> (Session, Session, InitHeader) {
         let alice = Identity::generate();
         let bob = Peer::new();
-        let (alice_session, init) = Session::initiate(&alice, &bob.bundle(with_one_time)).unwrap();
+        let (alice_session, init) =
+            Session::initiate(&alice, &bob.bundle_with(with_one_time, keys)).unwrap();
         let bob_session = bob.respond(&alice.user_id(), &init);
         (alice_session, bob_session, init)
+    }
+
+    #[test]
+    fn a_post_quantum_handshake_uses_the_one_time_key_first() {
+        for (keys, with_one_time) in [
+            (Keys::PqOneTime, true),
+            (Keys::PqOneTime, false),
+            (Keys::PqSigned, true),
+            (Keys::PqSigned, false),
+        ] {
+            let (mut a, mut b, init) = handshake_with(with_one_time, keys);
+            assert_eq!(a.id(), b.id());
+            assert!(a.is_post_quantum() && b.is_post_quantum());
+            assert!(init.is_post_quantum());
+            assert_eq!(
+                init.pq_prekey_id,
+                Some(if keys == Keys::PqOneTime { 300 } else { 200 })
+            );
+            assert_eq!(
+                init.kem_ciphertext.as_ref().map(Vec::len),
+                Some(crate::pq::KEM_CIPHERTEXT_LEN)
+            );
+            let m = a.encrypt(b"pq hello").unwrap();
+            assert_eq!(b.decrypt(&m).unwrap().as_slice(), b"pq hello");
+            let r = b.encrypt(b"pq hi").unwrap();
+            assert_eq!(a.decrypt(&r).unwrap().as_slice(), b"pq hi");
+        }
+        // A classical handshake says so, and its header is the v2 one: no
+        // post-quantum fields for an older responder to trip over.
+        let (a, b, init) = handshake(true);
+        assert!(!a.is_post_quantum() && !b.is_post_quantum() && !init.is_post_quantum());
+        let json = serde_json::to_string(&init).unwrap();
+        assert!(!json.contains("pq_prekey_id") && !json.contains("kem_ciphertext"));
+    }
+
+    #[test]
+    fn a_tampered_or_mismatched_post_quantum_handshake_fails_cleanly() {
+        let alice = Identity::generate();
+        let bob = Peer::new();
+        let bundle = bob.bundle_with(true, Keys::PqOneTime);
+        let (mut a, init) = Session::initiate(&alice, &bundle).unwrap();
+        let m = a.encrypt(b"x").unwrap();
+
+        // A damaged ciphertext gives the responder a different secret: the
+        // handshake completes but nothing decrypts.
+        let mut damaged = init.clone();
+        damaged.kem_ciphertext.as_mut().unwrap()[10] ^= 0x01;
+        let mut b = bob.respond(&alice.user_id(), &damaged);
+        assert_eq!(b.decrypt(&m), Err(ProtocolError::DecryptFailed));
+        // The wrong ML-KEM key, likewise.
+        let mut wrong = Session::respond(
+            &bob.identity,
+            &alice.user_id(),
+            &bob.signed,
+            Some(&bob.one_time),
+            Some(&PqPrekeySecret::generate(300, 0)),
+            &init,
+        )
+        .unwrap();
+        assert_eq!(wrong.decrypt(&m), Err(ProtocolError::DecryptFailed));
+        // The header and the keys given must agree.
+        let mismatch = |pq: Option<&PqPrekeySecret>, init: &InitHeader| {
+            Session::respond(
+                &bob.identity,
+                &alice.user_id(),
+                &bob.signed,
+                Some(&bob.one_time),
+                pq,
+                init,
+            )
+            .is_err()
+        };
+        assert!(mismatch(None, &init));
+        assert!(mismatch(Some(&bob.pq_signed), &init));
+        let mut short = init.clone();
+        short.kem_ciphertext.as_mut().unwrap().truncate(50);
+        assert!(mismatch(Some(&bob.pq_one_time), &short));
+        let mut classical = init.clone();
+        classical.kem_ciphertext = None;
+        classical.pq_prekey_id = None;
+        assert!(mismatch(Some(&bob.pq_one_time), &classical));
+
+        // A bundle whose ML-KEM key is not the owner's is refused outright.
+        let mut forged = bundle.clone();
+        forged.prekeys.as_mut().unwrap().pq_one_time[0] =
+            PqPrekeySecret::generate(300, 0).signed_by(&Identity::generate());
+        assert_eq!(
+            Session::initiate(&alice, &forged).err(),
+            Some(ProtocolError::InvalidSignature)
+        );
     }
 
     #[test]
@@ -645,7 +843,15 @@ mod tests {
         let bob = Peer::new();
         let (_, init) = Session::initiate(&alice, &bob.bundle(true)).unwrap();
         assert!(
-            Session::respond(&bob.identity, &alice.user_id(), &bob.signed, None, &init).is_err()
+            Session::respond(
+                &bob.identity,
+                &alice.user_id(),
+                &bob.signed,
+                None,
+                None,
+                &init
+            )
+            .is_err()
         );
         // The wrong one-time key derives a different session: messages fail.
         let other = PrekeySecret::generate(101, 0);
@@ -654,6 +860,7 @@ mod tests {
             &alice.user_id(),
             &bob.signed,
             Some(&other),
+            None,
             &init,
         )
         .unwrap();

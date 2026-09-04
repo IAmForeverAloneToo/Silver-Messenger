@@ -423,12 +423,12 @@ async fn one_time_prekeys_are_not_handed_out_faster_than_the_policy_says() {
     let mut alice_ws = open(&url, None).await;
     let alice = authenticate(&mut alice_ws).await;
     let signed = PrekeySecret::generate(1, 0);
-    let bundle = alice.key_bundle_with(Prekeys {
-        signed: signed.signed_by(&alice),
-        one_time: (2..7)
+    let bundle = alice.key_bundle_with(Prekeys::classical(
+        signed.signed_by(&alice),
+        (2..7)
             .map(|id| PrekeySecret::generate(id, 0).one_time())
             .collect(),
-    });
+    ));
     send(
         &mut alice_ws,
         &ClientFrame::Publish {
@@ -455,10 +455,7 @@ async fn one_time_prekeys_are_not_handed_out_faster_than_the_policy_says() {
     send(
         &mut bob_ws,
         &ClientFrame::Publish {
-            bundle: bob.key_bundle_with(Prekeys {
-                signed: bob_signed.signed_by(&bob),
-                one_time: Vec::new(),
-            }),
+            bundle: bob.key_bundle_with(Prekeys::classical(bob_signed.signed_by(&bob), Vec::new())),
             invite: None,
         },
     )

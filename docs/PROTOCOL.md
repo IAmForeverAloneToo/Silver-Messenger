@@ -6,11 +6,14 @@ without reading the source; where the source and this document disagree,
 the source is the bug. Byte encodings, domain strings and constants are
 given exactly.
 
-Two protocol versions coexist. **v1** is the sealed-envelope format of the
-first release; **v2** adds prekeys and forward-secret sessions *inside* the
-same envelope, so relays and v1 clients cannot tell the two apart from the
-outside. A client speaks v2 to a peer that has published prekeys and v1 to
-one that has not.
+Three protocol versions coexist. **v1** is the sealed-envelope format of
+the first release; **v2** adds prekeys and forward-secret sessions *inside*
+the same envelope, so relays and v1 clients cannot tell the two apart from
+the outside; **v3** makes the session handshake a hybrid of X3DH and
+ML-KEM-768 (PQXDH-style), which changes only the bundle's prekeys, the
+`init` header and the session-key derivation. A client speaks v3 to a peer
+whose bundle carries ML-KEM keys, v2 to one with X25519 prekeys only, and
+v1 to one that has published no prekeys.
 
 Notation: `||` is concatenation, `BE` is big-endian, `b64` is standard
 padded base64, `b58` is Bitcoin-alphabet base58. All JSON is UTF-8 text; a
@@ -50,7 +53,9 @@ What a relay stores for a user and serves on lookup:
   "signature": "<b64 64 bytes>",
   "prekeys": {                              // v2 clients only
     "signed":   { "id": 123, "public": "<b64>", "created_at_ms": 0, "signature": "<b64>" },
-    "one_time": [ { "id": 456, "public": "<b64>" } ]
+    "one_time": [ { "id": 456, "public": "<b64>" } ],
+    "pq_signed":   { "id": 789,  "public": "<b64 1184 bytes>", "created_at_ms": 0, "signature": "<b64>" },   // v3 clients only
+    "pq_one_time": [ { "id": 1011, "public": "<b64 1184 bytes>", "created_at_ms": 0, "signature": "<b64>" } ]
   }
 }
 ```
@@ -63,12 +68,25 @@ What a relay stores for a user and serves on lookup:
 * One-time prekeys are not signed. A relay cannot use a substituted one to
   read anything (section 5), only to deny the extra forward secrecy it
   brings.
+* `pq_signed` and each entry of `pq_one_time` are ML-KEM-768 encapsulation
+  keys (FIPS 203 `ek`, 1184 bytes), with `signature =
+  sign("silver-messenger/v3/pq-prekey", id (4 BE) || public (1184) ||
+  created_at_ms (8 BE))`. Unlike X25519 one-time keys these *are* signed:
+  a substituted ML-KEM key would hand whoever planted it the post-quantum
+  half of the secret. A reader rejects a key of any other length before
+  checking the signature. `pq_signed` is rotated and retained like
+  `signed` (section 8); `pq_one_time` is handled like `one_time`, with at
+  most 50 on deposit.
 * On a `publish`, `one_time` lists every one-time key the client still
   holds (at most 200). On a `lookup_result` it holds at most one, chosen
   and then forgotten by the relay, and only for clients that themselves
-  published prekeys on that connection.
-* Prekey ids are 32-bit, non-zero, unique per user among live keys; this
-  implementation picks them at random.
+  published prekeys on that connection. `pq_one_time` follows the same
+  rule.
+* Prekey ids are 32-bit, non-zero, unique per user among live keys of every
+  kind; this implementation picks them at random.
+* A relay without the `pq_prekeys` feature (7.3) drops `pq_signed` and
+  `pq_one_time` when it re-serialises the bundle, so sessions through it
+  are v2. Clients show which handshake a session got.
 
 ## 3. Envelope (the sealed-sender layer)
 
@@ -139,7 +157,8 @@ why a sender only uses the latter two towards peers that advertised them.
 { "v": 2,
   "session": "<b64 16 bytes>",
   "init": { "identity_dh": "<b64 IKdh_A>", "ephemeral": "<b64 EK_A>",
-            "signed_prekey_id": 123, "one_time_prekey_id": 456 },   // optional
+            "signed_prekey_id": 123, "one_time_prekey_id": 456,
+            "pq_prekey_id": 1011, "kem_ciphertext": "<b64 1088 bytes>" },   // optional; the pq_ pair is v3
   "message": { "header": { "dh": "<b64>", "pn": 0, "n": 3 },
                "ciphertext": "<b64>" } }
 ```
@@ -148,7 +167,10 @@ why a sender only uses the latter two towards peers that advertised them.
 (4.1), so everything a v1 message carries, including `seq` and `epoch`, is
 carried unchanged one layer deeper. `init` is present on every message the
 initiator sends until it has received a message on the session; a responder
-that already has the session ignores it.
+that already has the session ignores it. `pq_prekey_id` and
+`kem_ciphertext` are present together or not at all; `v` stays 2, since a
+v2 responder can never be asked to answer a v3 handshake (it publishes no
+ML-KEM keys) and everything else about the body is the same.
 
 ### 4.3 Capabilities
 
@@ -222,7 +244,7 @@ cuts the decrypted bytes to `size` before checking `sha256`. The relay
 then sees file sizes in 64 KiB steps only. A recipient without the
 capability requires the decrypted length to equal `size` exactly.
 
-## 5. Session establishment (X3DH)
+## 5. Session establishment (X3DH, and PQXDH from v3)
 
 `A` starts a session with `B` from `B`'s bundle, which must carry prekeys.
 
@@ -232,19 +254,53 @@ DH1     = X25519(IKdh_A.secret, SPK_B)
 DH2     = X25519(EK.secret,     IKdh_B)
 DH3     = X25519(EK.secret,     SPK_B)
 DH4     = X25519(EK.secret,     OPK_B)            only if the bundle carried one
+```
+
+**v2**, when the bundle carries no ML-KEM key:
+
+```
 SK      = HKDF-SHA256(salt = 32 zero bytes,
             ikm  = 0xFF * 32 || DH1 || DH2 || DH3 [|| DH4],
             info = "silver-messenger/v2/x3dh")     -> 32 bytes
+```
+
+**v3**, when it does. `PQK_B` is the first entry of `pq_one_time` if the
+relay handed one out, otherwise `pq_signed`; its id goes in `pq_prekey_id`
+and `CT` in `kem_ciphertext`:
+
+```
+CT, SS  = ML-KEM-768.Encaps(PQK_B)                CT 1088 bytes, SS 32 bytes
+SK      = HKDF-SHA256(salt = 32 zero bytes,
+            ikm  = 0xFF * 32 || DH1 || DH2 || DH3 [|| DH4] || SS,
+            info = "silver-messenger/v3/pqxdh")    -> 32 bytes
+```
+
+Both:
+
+```
 AD      = IK_A.public || IKdh_A.public || IK_B.public || IKdh_B.public     (4 × 32 bytes)
 session = SHA-256("silver-messenger/v2/session-id" || 0x00 || EK.public || SPK_B)[0..16]
 ```
 
 `B` computes the same `DH1..DH4` with its private `SPK_B` and `OPK_B` (the
 latter looked up by `one_time_prekey_id`, and deleted once the first
-message decrypts), the same `SK`, `AD` and `session`. A header naming a
-one-time key `B` no longer has, or a signed prekey it has rotated out, is
-undecryptable; `B` keeps the previous signed prekey for three weeks after
-rotating it. `EK` is discarded by `A` after deriving `SK`.
+message decrypts) and, in v3, `SS = ML-KEM-768.Decaps(dk, CT)` with the
+decapsulation key expanded from the 64-byte seed of the key `pq_prekey_id`
+names (a one-time ML-KEM key is deleted with the X25519 one); then the
+same `SK`, `AD` and `session`. A header naming a one-time key `B` no longer
+has, or a signed prekey it has rotated out, is undecryptable; `B` keeps
+the previous signed prekeys of both kinds for three weeks after rotating
+them. `EK` and `SS` are discarded by `A` after deriving `SK`. A `CT` that
+was tampered with decapsulates to a different `SS` (ML-KEM rejects
+implicitly), so the first message fails to decrypt and `B` keeps nothing.
+
+Why hybrid: `SK` depends on the X25519 values *and* on `SS`, so breaking
+either scheme alone opens nothing. A recording of today's traffic cannot
+be read by a future quantum computer, which breaks X25519 but not ML-KEM;
+a flaw found in ML-KEM leaves the session as strong as v2. What v3 does
+not do yet is refresh the post-quantum secret after the handshake: the
+Double Ratchet's steps are X25519 only, so an attacker who breaks X25519
+*and* learns `SK` later is in the same place as against v2.
 
 ## 6. Double Ratchet
 
@@ -375,10 +431,14 @@ be linked through a resumed session.
 | `prekeys` | Section 7.1 prekey handling: `prekey_status`, one-time keys on lookup. |
 | `anonymous_send` | Section 7.2. |
 | `blobs` | Section 7.5: the relay stores encrypted file chunks. Absent when the operator set the largest blob to 0. |
+| `pq_prekeys` | The relay keeps `pq_signed` and `pq_one_time` (section 2), hands out one-time ML-KEM keys on lookup and reports them in `prekey_status` (`pq_one_time_remaining`, `pq_consumed`). |
 
 A relay without the field is a v1 relay: it stores bundles as v1 (dropping
 `prekeys`, since it re-serialises what it parsed), so clients behind it
-speak v1 to everyone.
+speak v1 to everyone. A relay with `prekeys` but not `pq_prekeys` drops the
+ML-KEM keys the same way, so clients behind it speak v2. `prekey_status`
+from such a relay carries no `pq_one_time_remaining`, and a client takes
+its absence as "not kept here" rather than "none left".
 
 ### 7.4 Limits and abuse controls
 
@@ -423,9 +483,12 @@ without the key from the same message.
 
 ## 8. Client behaviour that affects interoperability
 
-* **Choosing v1 or v2.** A client with a session store sends a ratchet body
-  when the recipient's bundle carries prekeys, and a plain body otherwise.
-  It must accept both kinds from anyone.
+* **Choosing v1, v2 or v3.** A client with a session store sends a ratchet
+  body when the recipient's bundle carries prekeys, and a plain body
+  otherwise; the handshake is v3 when the bundle carries `pq_signed`
+  (section 5) and v2 otherwise. It must accept every kind from anyone, and
+  a responder must answer both handshakes, since an initiator behind an
+  older relay sees no ML-KEM keys.
 * **Starting a session.** A fresh lookup precedes the first message of a
   session, so the handshake uses a current signed prekey and a one-time key
   that has not been handed out before. A pinned bundle is used only when
@@ -448,6 +511,12 @@ without the key from the same message.
 * **Prekey rotation.** The signed prekey is replaced after seven days and
   kept for three weeks; a one-time key's private half is deleted when a
   session uses it or thirty days after the relay reported handing it out.
+  The ML-KEM keys follow the same rules: `pq_signed` rotates and is kept
+  like `signed`, and one-time ML-KEM keys are deleted like X25519 ones.
+  This implementation keeps twenty one-time X25519 keys on deposit,
+  topped up when the relay reports fewer than ten, and ten ML-KEM ones,
+  topped up below five; a client whose prekey file predates ML-KEM keys
+  adds them on its next publish, so an upgrade needs no reinstall.
 * **Sequence numbers.** `seq`/`epoch` in the inner plain body are checked
   exactly as for v1 messages.
 * **Capabilities.** A client records the `caps` of every message it
@@ -482,7 +551,22 @@ without the key from the same message.
 
 ## 9. What the protocol does not do
 
-Messages are signed, so they are not deniable. Sizes are padded to steps
+**Deniability: decided against, for now.** Every body is signed by the
+sender's identity key inside the sealed envelope (section 3), so a
+recipient can prove to a third party who wrote what. Inside a session the
+Double Ratchet's AEAD already authenticates the sender to the recipient,
+since only the two of them hold the keys, and the handshake itself is
+deniable (X3DH, and PQXDH the same way: either party could have computed
+every value in it). The inner signature is therefore redundant for
+authentication in v2/v3 and could go, which would make session messages
+deniable the way Signal's are. It stays because v1 bodies have nothing else
+authenticating them, because stored history and receipts are keyed on the
+verified sender, and because dropping it is a body-format change better
+made once the v1 fallback can be retired. The intended path is a v4 ratchet
+body without the inner signature at that point; until then the threat
+model says "not deniable" and means it.
+
+Sizes are padded to steps
 (160 bytes for messages, 64 KiB for files between clients that support
 it) rather than to one size, and there is no cover traffic, so a relay or
 network observer still sees when messages and blobs travel and roughly

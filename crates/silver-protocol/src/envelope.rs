@@ -626,10 +626,8 @@ mod tests {
         let alice = Identity::generate();
         let bob = Identity::generate();
         let signed = PrekeySecret::generate(1, 0);
-        let bob_bundle = bob.key_bundle_with(Prekeys {
-            signed: signed.signed_by(&bob),
-            one_time: Vec::new(),
-        });
+        let bob_bundle =
+            bob.key_bundle_with(Prekeys::classical(signed.signed_by(&bob), Vec::new()));
         let (mut alice_session, init) = Session::initiate(&alice, &bob_bundle).unwrap();
         let inner = Body::plain(text("ratcheted"), 9, Sequence { epoch: 3, seq: 1 })
             .encode()
@@ -652,7 +650,7 @@ mod tests {
         };
         assert_eq!(ratchet.init, Some(init.clone()));
         let mut bob_session =
-            Session::respond(&bob, &alice.user_id(), &signed, None, &init).unwrap();
+            Session::respond(&bob, &alice.user_id(), &signed, None, None, &init).unwrap();
         let plain = bob_session.decrypt(&ratchet.message).unwrap();
         let Body::Plain {
             content, sequence, ..

@@ -712,7 +712,7 @@ async fn clients_with_prekeys_talk_over_forward_secret_sessions() {
     assert!(
         bob_c
             .session_info(&alice.user_id())
-            .is_some_and(|s| !s.initiated_by_us)
+            .is_some_and(|s| !s.initiated_by_us && s.post_quantum)
     );
 
     // Bob answers on the same session.
@@ -731,7 +731,7 @@ async fn clients_with_prekeys_talk_over_forward_secret_sessions() {
     assert!(
         alice_c
             .session_info(&bob.user_id())
-            .is_some_and(|s| s.initiated_by_us && !s.awaiting_reply)
+            .is_some_and(|s| s.initiated_by_us && !s.awaiting_reply && s.post_quantum)
     );
 
     // Both envelopes went in on connections that never authenticated.

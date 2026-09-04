@@ -213,6 +213,7 @@ impl RecentIds {
 }
 
 /// Results of background work spawned by the UI.
+#[allow(clippy::large_enum_variant)] // a looked-up bundle carries ML-KEM keys
 enum Internal {
     LookupDone {
         user_id: UserId,
@@ -605,8 +606,12 @@ impl App {
 
     /// How messages with this contact are protected, for the pane title.
     pub fn encryption_label(&self, contact: &Contact) -> Option<&'static str> {
-        if self.client.session_info(&contact.user_id).is_some() {
-            Some("forward secret")
+        if let Some(info) = self.client.session_info(&contact.user_id) {
+            Some(if info.post_quantum {
+                "forward secret, post-quantum"
+            } else {
+                "forward secret"
+            })
         } else if contact
             .bundle
             .as_ref()
@@ -1866,13 +1871,18 @@ impl App {
         let name = contact.display_name();
         let line = match self.client.session_info(&contact.user_id) {
             Some(info) => format!(
-                "Messages with {name} are forward secret: each one is encrypted under a key used once and then discarded. The session was started by {} at {}{}.",
+                "Messages with {name} are forward secret: each one is encrypted under a key used once and then discarded. The session was started by {} at {}{}. {}",
                 if info.initiated_by_us { "you" } else { "them" },
                 crate::ui::clock(info.established_at_ms),
                 if info.awaiting_reply {
                     "; it completes when they answer"
                 } else {
                     ""
+                },
+                if info.post_quantum {
+                    "Its handshake also used ML-KEM-768, so a recording of it stays closed even to a quantum computer."
+                } else {
+                    "Its handshake was classical (X25519 only): their client or the relay predates the post-quantum handshake of 0.7.0. It becomes post-quantum by itself when the next session starts after they update."
                 }
             ),
             None => match &contact.bundle {
@@ -2390,11 +2400,20 @@ impl App {
                 initiated_by_us,
             } => {
                 let name = self.contact_name(&peer);
+                let post_quantum = self
+                    .client
+                    .session_info(&peer)
+                    .is_some_and(|s| s.post_quantum);
                 self.system(
                     Level::Info,
                     format!(
-                        "Forward-secret session with {name} started by {}. From here each message is encrypted under a key that is used once and then discarded.",
-                        if initiated_by_us { "you" } else { "them" }
+                        "Forward-secret session with {name} started by {}. From here each message is encrypted under a key that is used once and then discarded.{}",
+                        if initiated_by_us { "you" } else { "them" },
+                        if post_quantum {
+                            " The handshake also used ML-KEM-768, so it is post-quantum."
+                        } else {
+                            ""
+                        }
                     ),
                 );
             }

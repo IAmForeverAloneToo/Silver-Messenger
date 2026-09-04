@@ -36,10 +36,17 @@ pub mod feature {
     /// The relay stores encrypted file chunks (`BlobPut`/`BlobGet`), on
     /// anonymous connections too.
     pub const BLOBS: &str = "blobs";
+    /// The relay keeps the ML-KEM keys of the post-quantum handshake
+    /// (protocol v3) and hands out one-time ones. A relay without this
+    /// drops them from bundles, and sessions through it stay classical.
+    pub const PQ_PREKEYS: &str = "pq_prekeys";
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+// A bundle with ML-KEM keys is a few hundred bytes larger than any other
+// frame; frames are few and short-lived, so boxing it would buy nothing.
+#[allow(clippy::large_enum_variant)]
 pub enum ClientFrame {
     /// Prove ownership of `user_id` by signing the server's challenge nonce.
     /// With `host` (the relay's host name as the client connected to it,
@@ -112,6 +119,7 @@ pub enum ErrorCode {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)] // as for ClientFrame
 pub enum ServerFrame {
     Challenge {
         #[serde(with = "b64_array")]
@@ -136,6 +144,12 @@ pub enum ServerFrame {
         one_time_remaining: u32,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         consumed: Vec<u32>,
+        /// The same for one-time ML-KEM keys; a relay from before 0.7.0
+        /// says nothing about them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pq_one_time_remaining: Option<u32>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pq_consumed: Vec<u32>,
     },
     LookupResult {
         user_id: UserId,
@@ -334,8 +348,21 @@ mod tests {
         let status = ServerFrame::PrekeyStatus {
             one_time_remaining: 3,
             consumed: vec![7, 9],
+            pq_one_time_remaining: Some(1),
+            pq_consumed: vec![11],
         };
         assert_eq!(ServerFrame::decode(&status.encode()).unwrap(), status);
+        // A relay from before 0.7.0 says nothing about ML-KEM keys.
+        let old = r#"{"type":"prekey_status","one_time_remaining":3,"consumed":[7,9]}"#;
+        assert_eq!(
+            ServerFrame::decode(old).unwrap(),
+            ServerFrame::PrekeyStatus {
+                one_time_remaining: 3,
+                consumed: vec![7, 9],
+                pq_one_time_remaining: None,
+                pq_consumed: Vec::new(),
+            }
+        );
     }
 
     #[test]

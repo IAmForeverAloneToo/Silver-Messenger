@@ -61,6 +61,9 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
 pub const DEFAULT_MESSAGE_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// One-time prekeys a client may have on deposit at once.
 pub const MAX_ONE_TIME_PREKEYS: usize = 200;
+/// One-time ML-KEM keys a client may have on deposit at once; fewer, as
+/// each is 1.2 KB and a publish has to fit in one frame.
+pub const MAX_PQ_ONE_TIME_PREKEYS: usize = 50;
 
 /// Abuse controls applied per connection, plus the registration policy.
 #[derive(Clone, Debug)]
@@ -314,6 +317,8 @@ type Rejection = (ErrorCode, &'static str);
 struct PrekeyReport {
     one_time_remaining: u32,
     consumed: Vec<u32>,
+    pq_one_time_remaining: u32,
+    pq_consumed: Vec<u32>,
 }
 
 impl RelayState {
@@ -526,7 +531,7 @@ impl RelayState {
 
     /// What this relay can do beyond protocol v1.
     pub fn features(&self) -> Vec<String> {
-        let mut features = vec![feature::PREKEYS.to_owned()];
+        let mut features = vec![feature::PREKEYS.to_owned(), feature::PQ_PREKEYS.to_owned()];
         if self.policy.anonymous_sends_per_minute > 0 {
             features.push(feature::ANONYMOUS_SEND.to_owned());
         }
@@ -784,21 +789,40 @@ impl RelayState {
         {
             return Err((ErrorCode::TooLarge, "too many one-time prekeys"));
         }
+        let pq_one_time = bundle
+            .prekeys
+            .as_mut()
+            .map(|p| std::mem::take(&mut p.pq_one_time));
+        if pq_one_time
+            .as_ref()
+            .is_some_and(|k| k.len() > MAX_PQ_ONE_TIME_PREKEYS)
+        {
+            return Err((ErrorCode::TooLarge, "too many one-time ML-KEM prekeys"));
+        }
         let storage = |e: anyhow::Error| {
             error!("storing bundle: {e:#}");
             (ErrorCode::Internal, "storage error")
         };
         self.store.put_bundle(&bundle).map_err(storage)?;
-        let Some(keys) = one_time else {
+        let (Some(keys), Some(pq_keys)) = (one_time, pq_one_time) else {
             return Ok(None);
         };
         self.store
             .set_one_time_prekeys(me, &keys)
             .map_err(storage)?;
+        // An empty list here is a client that publishes no ML-KEM keys
+        // (or stopped): whatever it deposited before is dropped with it.
+        self.store
+            .set_pq_one_time_prekeys(me, &pq_keys)
+            .map_err(storage)?;
         let (one_time_remaining, consumed) = self.store.one_time_status(me).map_err(storage)?;
+        let (pq_one_time_remaining, pq_consumed) =
+            self.store.pq_one_time_status(me).map_err(storage)?;
         Ok(Some(PrekeyReport {
             one_time_remaining,
             consumed,
+            pq_one_time_remaining,
+            pq_consumed,
         }))
     }
 
@@ -815,6 +839,10 @@ impl RelayState {
             match self.store.take_one_time_prekey(user) {
                 Ok(taken) => prekeys.one_time = taken.into_iter().collect(),
                 Err(e) => error!("taking one-time prekey: {e:#}"),
+            }
+            match self.store.take_pq_one_time_prekey(user) {
+                Ok(taken) => prekeys.pq_one_time = taken.into_iter().collect(),
+                Err(e) => error!("taking one-time ML-KEM prekey: {e:#}"),
             }
         }
         Some(bundle)
@@ -1200,6 +1228,8 @@ fn handle_frame(
                         replies.push(ServerFrame::PrekeyStatus {
                             one_time_remaining: report.one_time_remaining,
                             consumed: report.consumed,
+                            pq_one_time_remaining: Some(report.pq_one_time_remaining),
+                            pq_consumed: report.pq_consumed,
                         });
                     }
                     replies
