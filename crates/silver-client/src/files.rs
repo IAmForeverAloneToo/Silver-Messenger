@@ -9,6 +9,107 @@ use silver_protocol::Content;
 use silver_protocol::blob::{
     BlobKey, CHUNK_BYTES, MAX_FILE_BYTES, chunk_count, new_blob_id, open_chunk, seal_chunk,
 };
+use unicode_normalization::UnicodeNormalization;
+
+/// Longest file name saved, in characters.
+const MAX_NAME_CHARS: usize = 120;
+
+/// Extensions the operating system runs as a program or script when a
+/// file is "opened", rather than showing it in a viewer.
+const RUNNABLE: &[&str] = &[
+    // Windows programs, installers and shell objects
+    "exe",
+    "com",
+    "msi",
+    "msix",
+    "msixbundle",
+    "appx",
+    "appxbundle",
+    "bat",
+    "cmd",
+    "scr",
+    "pif",
+    "cpl",
+    "hta",
+    "reg",
+    "lnk",
+    "url",
+    "inf",
+    "dll",
+    "sys",
+    "drv",
+    "ocx",
+    "msc",
+    "msp",
+    "mst",
+    "gadget",
+    "application",
+    "xbap",
+    "diagcab",
+    "settingcontent-ms",
+    "library-ms",
+    "website",
+    // Windows scripts
+    "vb",
+    "vbs",
+    "vbe",
+    "vbscript",
+    "js",
+    "jse",
+    "wsf",
+    "wsh",
+    "ws",
+    "sct",
+    "shb",
+    "shs",
+    "ps1",
+    "psm1",
+    "psd1",
+    "ps1xml",
+    "psc1",
+    // interpreters that register themselves as openers
+    "py",
+    "pyw",
+    "pyc",
+    "pl",
+    "rb",
+    "php",
+    "jar",
+    "jnlp",
+    // Unix and macOS
+    "sh",
+    "bash",
+    "zsh",
+    "ksh",
+    "csh",
+    "fish",
+    "command",
+    "tool",
+    "action",
+    "workflow",
+    "app",
+    "desktop",
+    "run",
+    "appimage",
+    "elf",
+    "deb",
+    "rpm",
+    "pkg",
+    "mpkg",
+    "dmg",
+    "apk",
+    "ipa",
+    "terminal",
+    "scpt",
+    "applescript",
+    "webloc",
+    // certificates: opening one offers to install it
+    "cer",
+    "crt",
+    "der",
+    "p12",
+    "pfx",
+];
 
 /// What a [`Content::File`] message says about a file. Serialized as the
 /// message content itself, so a file waiting to be fetched can sit in the
@@ -57,9 +158,10 @@ impl FileInfo {
         }
     }
 
-    /// `name (1.2 MiB)`.
+    /// `name (1.2 MiB)`, with the name as it would be saved: the sender's
+    /// spelling is never shown raw.
     pub fn label(&self) -> String {
-        format!("{} ({})", self.name, human_size(self.size))
+        format!("{} ({})", sanitize_name(&self.name), human_size(self.size))
     }
 
     /// What a sender could have lied about, checked before a single chunk
@@ -171,10 +273,8 @@ pub fn save(dir: &Path, name: &str, bytes: &[u8], quota: Option<u64>) -> anyhow:
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     check_quota(dir, bytes.len() as u64, quota)?;
     let name = sanitize_name(name);
-    let (stem, ext) = match name.rsplit_once('.') {
-        Some((stem, ext)) if !stem.is_empty() => (stem.to_owned(), format!(".{ext}")),
-        _ => (name.clone(), String::new()),
-    };
+    let (stem, ext) = split_extension(&name);
+    let (stem, ext) = (stem.to_owned(), ext.to_owned());
     // The name is claimed by creating the file exclusively, so two fetches
     // finishing at the same moment cannot pick the same one.
     let mut candidate = dir.join(&name);
@@ -191,6 +291,8 @@ pub fn save(dir: &Path, name: &str, bytes: &[u8], quota: Option<u64>) -> anyhow:
                     let _ = std::fs::remove_file(&candidate);
                     return Err(e).with_context(|| format!("writing {}", candidate.display()));
                 }
+                drop(file);
+                mark_of_the_web(&candidate);
                 return Ok(candidate);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -235,22 +337,116 @@ pub fn check_quota(dir: &Path, incoming: u64, quota: Option<u64>) -> anyhow::Res
     Ok(())
 }
 
-/// A file name safe to create locally: no directories, no control
-/// characters, nothing hidden, at most 120 characters.
+/// On Windows, tag a saved file as a download (the "mark of the web") so
+/// Explorer, SmartScreen and Defender treat it like one from a browser.
+#[cfg(windows)]
+fn mark_of_the_web(path: &Path) {
+    let stream = format!("{}:Zone.Identifier", path.display());
+    let _ = std::fs::write(stream, "[ZoneTransfer]\r\nZoneId=3\r\n");
+}
+
+#[cfg(not(windows))]
+fn mark_of_the_web(_path: &Path) {}
+
+/// Why `path` should not be handed to the system's opener, if it should
+/// not: it would run rather than be shown.
+pub fn refuse_to_open(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_string_lossy();
+    let (_, ext) = split_extension(&name);
+    let ext = ext.trim_start_matches('.').to_ascii_lowercase();
+    RUNNABLE.contains(&ext.as_str()).then(|| {
+        format!(
+            ".{ext} files run as programs when opened; if you trust it, open it from the downloads folder yourself"
+        )
+    })
+}
+
+/// `photo.jpg` → (`photo`, `.jpg`); a name without a short extension
+/// after a non-empty stem is all stem.
+fn split_extension(name: &str) -> (&str, &str) {
+    match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() && ext.chars().count() <= 16 => {
+            (stem, &name[stem.len()..])
+        }
+        _ => (name, ""),
+    }
+}
+
+/// Characters that show nothing but change how a name reads or sorts:
+/// Unicode format characters (bidi overrides and embeddings, zero-width
+/// joiners and spaces, soft hyphens, byte-order marks, tag characters)
+/// and the line and paragraph separators.
+fn is_invisible(c: char) -> bool {
+    matches!(
+        u32::from(c),
+        0x00AD
+            | 0x061C
+            | 0x06DD
+            | 0x070F
+            | 0x08E2
+            | 0x180E
+            | 0xFEFF
+            | 0x0600..=0x0605
+            | 0x200B..=0x200F
+            | 0x2028..=0x202E
+            | 0x2060..=0x2064
+            | 0x2066..=0x206F
+            | 0xFFF9..=0xFFFB
+            | 0x110BD
+            | 0x110CD
+            | 0x13430..=0x1343F
+            | 0x1BCA0..=0x1BCA3
+            | 0x1D173..=0x1D17A
+            | 0xE0001
+            | 0xE0020..=0xE007F
+    )
+}
+
+/// Names Windows keeps for devices, judged on the part before the first
+/// dot: `CON`, `con.txt` and `COM1.tar.gz` all are.
+fn is_reserved_device_name(name: &str) -> bool {
+    let head = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+    match head.as_str() {
+        "CON" | "PRN" | "AUX" | "NUL" => true,
+        _ => {
+            head.len() == 4
+                && (head.starts_with("COM") || head.starts_with("LPT"))
+                && matches!(head.as_bytes()[3], b'1'..=b'9')
+        }
+    }
+}
+
+/// A file name safe to create locally and honest on screen: no
+/// directories, no control or invisible characters, composed the one way
+/// (NFC), nothing hidden, nothing Windows would refuse or trim, at most
+/// 120 characters with the extension kept.
 pub fn sanitize_name(name: &str) -> String {
-    let base = name
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(name)
-        .chars()
-        .filter(|c| !c.is_control() && !matches!(c, ':' | '*' | '?' | '"' | '<' | '>' | '|'))
-        .take(120)
-        .collect::<String>();
-    let trimmed = base.trim().trim_start_matches('.').to_owned();
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    let cleaned: String = base
+        .nfc()
+        .filter(|c| {
+            !c.is_control()
+                && !is_invisible(*c)
+                && !matches!(c, ':' | '*' | '?' | '"' | '<' | '>' | '|')
+        })
+        .collect();
+    let trimmed = cleaned
+        .trim()
+        .trim_start_matches('.')
+        .trim_end_matches(['.', ' ']);
     if trimmed.is_empty() {
-        "file".to_owned()
+        return "file".to_owned();
+    }
+    let (stem, ext) = split_extension(trimmed);
+    let room = MAX_NAME_CHARS.saturating_sub(ext.chars().count()).max(1);
+    let stem: String = stem.chars().take(room).collect();
+    let stem = stem.trim_end_matches(['.', ' ']);
+    let stem = if stem.is_empty() { "file" } else { stem };
+    let name = format!("{stem}{ext}");
+    if is_reserved_device_name(&name) {
+        format!("_{name}")
     } else {
-        trimmed
+        name
     }
 }
 
@@ -365,6 +561,76 @@ mod tests {
         save(&downloads, "two.bin", &[0u8; 400], Some(1000)).unwrap();
         save(&downloads, "three.bin", &[0u8; 5000], None).unwrap();
         assert_eq!(dir_size(&downloads), 6000);
+    }
+
+    #[test]
+    fn names_that_mislead_are_straightened() {
+        // A right-to-left override would show "photoexe.png" for a program.
+        assert_eq!(sanitize_name("photo\u{202e}gnp.exe"), "photognp.exe");
+        assert_eq!(sanitize_name("in\u{200b}voice\u{feff}.pdf"), "invoice.pdf");
+        assert_eq!(sanitize_name("caf\u{65}\u{301}.txt"), "caf\u{e9}.txt");
+        assert_eq!(sanitize_name("CON"), "_CON");
+        assert_eq!(sanitize_name("con.txt"), "_con.txt");
+        assert_eq!(sanitize_name("Com1.tar.gz"), "_Com1.tar.gz");
+        assert_eq!(sanitize_name("lpt10.txt"), "lpt10.txt");
+        assert_eq!(sanitize_name("console.log"), "console.log");
+        assert_eq!(sanitize_name("name. . ."), "name");
+        assert_eq!(sanitize_name("name.txt "), "name.txt");
+        assert_eq!(sanitize_name("..."), "file");
+        let long = format!("{}.jpeg", "a".repeat(300));
+        let got = sanitize_name(&long);
+        assert!(
+            got.ends_with(".jpeg") && got.chars().count() == MAX_NAME_CHARS,
+            "{got}"
+        );
+        let info = FileInfo {
+            name: "re\u{202e}fdp.exe".into(),
+            size: 10,
+            blob: String::new(),
+            key: BlobKey::generate(),
+            chunks: 1,
+            sha256: [0; 32],
+        };
+        assert_eq!(info.label(), "refdp.exe (10 B)");
+    }
+
+    #[test]
+    fn programs_are_not_handed_to_the_opener() {
+        for name in [
+            "a.exe",
+            "b.EXE",
+            "invoice.pdf.exe",
+            "run.sh",
+            "x.py",
+            "y.lnk",
+            "z.msi",
+            "w.jar",
+            "v.bat",
+            "u.desktop",
+            "t.Ps1",
+        ] {
+            assert!(refuse_to_open(Path::new(name)).is_some(), "{name}");
+        }
+        for name in [
+            "a.pdf",
+            "b.png",
+            "c.tar.gz",
+            "noext",
+            "d.docx",
+            "e.txt",
+            "photo.bin",
+        ] {
+            assert!(refuse_to_open(Path::new(name)).is_none(), "{name}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn saved_files_carry_the_mark_of_the_web() {
+        let dir = tempfile::tempdir().unwrap();
+        let saved = save(dir.path(), "from-the-net.txt", b"hello", None).unwrap();
+        let zone = std::fs::read_to_string(format!("{}:Zone.Identifier", saved.display())).unwrap();
+        assert!(zone.contains("ZoneId=3"), "{zone}");
     }
 
     #[test]

@@ -39,6 +39,20 @@ def main():
     time.sleep(0.5)
     Term.pump_all()
     assert a.has("Opening ") or a.has("Could not open"), "/open"
+    # A program is never handed to the opener, from /open or a double click.
+    prog = os.path.join(docs, "setup.exe")
+    open(prog, "wb").write(b"MZ junk")
+    b.type(f"/send {prog}\r")
+    assert a.wait("[file] setup.exe (7 B) · /get to fetch"), "program waits"
+    a.type("/get\r")
+    assert a.wait(f"[file] setup.exe (7 B) {G.arrow} "), "program saved"
+    a.type("/open\r")
+    assert a.wait("Not opening setup.exe"), "/open refuses a program"
+    time.sleep(0.6)
+    y, x = a.row_of("[file] setup.exe")
+    a.click(x + 3, y)
+    a.click(x + 3, y)
+    assert a.wait("Not opening setup.exe"), "double click refuses a program"
     # Dragging the divider resizes the chat list; the width is remembered.
     assert a.sc.display[0][25] == "┐", a.sc.display[0]
     a.press(25, 6)

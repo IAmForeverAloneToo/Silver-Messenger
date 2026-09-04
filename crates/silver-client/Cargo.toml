@@ -27,6 +27,7 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 directories = { workspace = true }
+unicode-normalization = { workspace = true }
 
 [dev-dependencies]
 rcgen = { workspace = true }

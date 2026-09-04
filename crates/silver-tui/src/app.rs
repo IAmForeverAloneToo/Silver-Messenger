@@ -2331,8 +2331,17 @@ impl App {
         }
     }
 
-    /// Open a received file with whatever the system uses for its kind.
+    /// Open a received file with whatever the system uses for its kind,
+    /// unless that would run it.
     fn open_file(&mut self, path: &std::path::Path) {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if let Some(why) = silver_client::files::refuse_to_open(path) {
+            self.toast(format!("Not opening {name}: {why}."));
+            return;
+        }
         match open::that_detached(path) {
             Ok(()) => self.toast(format!("Opening {}", path.display())),
             Err(e) => self.toast(format!("Could not open {}: {e}", path.display())),

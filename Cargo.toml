@@ -64,6 +64,7 @@ uuid = { version = "1", features = ["v4"] }
 # tui
 ratatui = "0.30"
 unicode-width = "0.2"
+unicode-normalization = "0.1"
 qrcode = { version = "0.14", default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
