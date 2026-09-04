@@ -947,7 +947,9 @@ mod tests {
     #[tokio::test]
     async fn nothing_a_peer_sends_reaches_the_terminal_raw() {
         use crate::app::{ChatLine, Connection};
-        use ratatui::{Terminal, TerminalOptions, Viewport, backend::CrosstermBackend, layout::Rect};
+        use ratatui::{
+            Terminal, TerminalOptions, Viewport, backend::CrosstermBackend, layout::Rect,
+        };
         use silver_client::{Client, ConnectOptions, Contact, ContactRequest, HeldMessage, Store};
         use silver_protocol::{Identity, Sequence};
         use std::io::Write;

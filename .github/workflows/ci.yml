@@ -71,6 +71,10 @@ jobs:
     # file, so every cargo/rustc call in this job uses nightly.
     env:
       RUSTUP_TOOLCHAIN: nightly
+      # The prebuilt cargo-fuzz is a static musl binary and takes its own
+      # build triple as the default target; musl has no std installed here
+      # and cannot use the address sanitizer, so the target is named.
+      FUZZ_TARGET_TRIPLE: x86_64-unknown-linux-gnu
     strategy:
       fail-fast: false
       matrix:
@@ -84,7 +88,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fuzz
-      - run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=60 -max_len=4096
+      - run: cargo fuzz run --target $FUZZ_TARGET_TRIPLE ${{ matrix.target }} -- -max_total_time=60 -max_len=4096
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
