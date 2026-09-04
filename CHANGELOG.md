@@ -4,7 +4,12 @@ Notable changes to Silver Messenger. Versions follow [semantic
 versioning](https://semver.org); while the major version is 0, a minor bump
 means behaviour or the wire protocol changed in a way worth reading about.
 
-## Unreleased
+## 0.7.0 - 2026-09-04
+
+Phase 7 of the roadmap: running a relay well. The relay terminates TLS
+itself, reports metrics, takes administration over a local socket, keeps
+backups and a schema version, ships as a container image, and comes with
+an operator's guide.
 
 ### Added
 
