@@ -57,6 +57,8 @@ jobs:
             target: x86_64-apple-darwin
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -76,9 +78,11 @@ jobs:
       - name: Install musl toolchain
         if: contains(matrix.target, 'musl')
         run: |
+          # musl-gcc wraps the runner's own compiler, so each Linux target
+          # builds on a runner of its architecture.
           sudo apt-get update -qq
           sudo apt-get install -y -qq musl-tools
-          echo "CC_x86_64_unknown_linux_musl=musl-gcc" >> "$GITHUB_ENV"
+          echo "CC_$(echo '${{ matrix.target }}' | tr - _)=musl-gcc" >> "$GITHUB_ENV"
 
       - name: Build
         shell: bash
@@ -216,3 +220,78 @@ jobs:
           files: dist/*
           body_path: notes.md
           generate_release_notes: true
+
+  image:
+    # The relay's container image for amd64 and arm64, built from the very
+    # binaries the release publishes (deploy/Dockerfile, BINARY_FROM=prebuilt)
+    # on an empty base, pushed to GitHub's registry as
+    # ghcr.io/<owner>/silver-relay:<version> and :latest, with a build
+    # provenance attestation on the image digest. Timestamps are rewritten
+    # to the commit's, so a rebuild of the same release gives the same
+    # layers.
+    name: Container image
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.tag != ''
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          pattern: "*-unknown-linux-musl"
+          merge-multiple: true
+
+      - name: Unpack the Linux binaries
+        id: prepare
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          for pair in amd64:x86_64 arm64:aarch64; do
+            arch="${pair%%:*}"
+            name="silver-messenger-${TAG}-${pair##*:}-unknown-linux-musl"
+            mkdir -p "prebuilt/linux/$arch"
+            tar xzf "dist/$name.tar.gz" -C "prebuilt/linux/$arch" --strip-components=1 "$name/silver-relay"
+          done
+          find prebuilt -type f -exec sha256sum {} +
+          # GitHub's registry wants the owner in lower case.
+          echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/silver-relay" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "epoch=$(git log -1 --format=%ct)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        env:
+          SOURCE_DATE_EPOCH: ${{ steps.prepare.outputs.epoch }}
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          build-args: BINARY_FROM=prebuilt
+          tags: |
+            ${{ steps.prepare.outputs.image }}:${{ steps.prepare.outputs.version }}
+            ${{ steps.prepare.outputs.image }}:latest
+          # The attestation below stands in for BuildKit's own, which would
+          # add unreproducible manifests to the image.
+          provenance: false
+          sbom: false
+          outputs: type=image,push=true,oci-mediatypes=true,rewrite-timestamp=true
+
+      - name: Build provenance attestation
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.prepare.outputs.image }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true

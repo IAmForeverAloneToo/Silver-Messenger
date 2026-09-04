@@ -306,7 +306,7 @@ container story. Operations come before reach.
         rotate the invite token, ban an address or an id. Nothing an
         administrator can do reveals a message or a social graph beyond
         what the store already holds.
-39. [ ] **Lifecycle** (M). A schema version in the database with
+39. [x] **Lifecycle** (M). A schema version in the database with
         migrations run at start, `silver-relay backup` and `restore`
         that take and load a consistent snapshot, an upgrade guide, and
         a reproducible container image for the usual architectures with

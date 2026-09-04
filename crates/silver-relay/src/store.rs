@@ -20,35 +20,81 @@ type DepositTable = TableDefinition<'static, (&'static [u8], u32), &'static [u8]
 /// its next publish; forgotten once the owner stops listing them.
 type UsedTable = TableDefinition<'static, (&'static [u8], u32), ()>;
 
+// The tables. A backup ([`crate::backup`]) walks every one of them, so a
+// table added here is added there too.
+
 /// `owner -> bundle JSON` (the signed prekeys included, one-time keys not).
-const BUNDLES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("bundles");
+pub(crate) const BUNDLES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("bundles");
 /// One-time X25519 prekeys, the raw 32-byte public key each.
-const ONE_TIME: DepositTable = TableDefinition::new("one_time_prekeys");
-const ONE_TIME_USED: UsedTable = TableDefinition::new("one_time_used");
+pub(crate) const ONE_TIME: DepositTable = TableDefinition::new("one_time_prekeys");
+pub(crate) const ONE_TIME_USED: UsedTable = TableDefinition::new("one_time_used");
 /// One-time ML-KEM keys (protocol v3), each stored as the JSON of its
 /// signed form so it is handed out signature and all.
-const PQ_ONE_TIME: DepositTable = TableDefinition::new("pq_one_time_prekeys");
-const PQ_ONE_TIME_USED: UsedTable = TableDefinition::new("pq_one_time_used");
+pub(crate) const PQ_ONE_TIME: DepositTable = TableDefinition::new("pq_one_time_prekeys");
+pub(crate) const PQ_ONE_TIME_USED: UsedTable = TableDefinition::new("pq_one_time_used");
 /// `(recipient, sequence) -> stored entry`; the sequence gives delivery order.
-const MAILBOX: TableDefinition<(&[u8], u64), &[u8]> = TableDefinition::new("mailbox");
+pub(crate) const MAILBOX: TableDefinition<(&[u8], u64), &[u8]> = TableDefinition::new("mailbox");
 /// `envelope id -> (recipient, sequence)` so acknowledgements are O(log n).
-const BY_ID: TableDefinition<&str, (&[u8], u64)> = TableDefinition::new("by_id");
+pub(crate) const BY_ID: TableDefinition<&str, (&[u8], u64)> = TableDefinition::new("by_id");
 /// `recipient -> (message count, total bytes)` for quota checks.
-const USAGE: TableDefinition<&[u8], (u64, u64)> = TableDefinition::new("usage");
-const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
+pub(crate) const USAGE: TableDefinition<&[u8], (u64, u64)> = TableDefinition::new("usage");
+/// Counters and the schema version.
+pub(crate) const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
 const NEXT_SEQ: &str = "next_seq";
 /// `"address:<ip>"` or `"identity:<id>"` -> [`Ban`] JSON, set by the
 /// administrator and enforced until removed.
-const BANS: TableDefinition<&str, &[u8]> = TableDefinition::new("bans");
+pub(crate) const BANS: TableDefinition<&str, &[u8]> = TableDefinition::new("bans");
 /// Settings the administrator changed while the relay ran, which win over
 /// the command line at the next start: the invite token, for one.
-const ADMIN: TableDefinition<&str, &str> = TableDefinition::new("admin");
+pub(crate) const ADMIN: TableDefinition<&str, &str> = TableDefinition::new("admin");
 /// `blob id -> BlobMeta JSON` for encrypted file chunks on deposit.
-const BLOBS: TableDefinition<&str, &[u8]> = TableDefinition::new("blobs");
+pub(crate) const BLOBS: TableDefinition<&str, &[u8]> = TableDefinition::new("blobs");
 /// `(blob id, chunk index) -> ciphertext`.
-const BLOB_CHUNKS: TableDefinition<(&str, u32), &[u8]> = TableDefinition::new("blob_chunks");
+pub(crate) const BLOB_CHUNKS: TableDefinition<(&str, u32), &[u8]> =
+    TableDefinition::new("blob_chunks");
 /// Bytes of chunks stored in total, for the storage cap.
 const BLOB_BYTES: &str = "blob_bytes";
+
+/// The layout of the tables, stamped into the database. It moves when a
+/// change needs more than opening a table that was not there before, with
+/// a step in [`migrate`] to bring older databases along; a database
+/// stamped with a higher version was written by a newer relay and is
+/// refused rather than misread.
+pub const SCHEMA_VERSION: u64 = 1;
+pub(crate) const SCHEMA: &str = "schema";
+
+/// The database was written by a newer relay than this one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SchemaTooNew {
+    pub found: u64,
+    pub supported: u64,
+}
+
+impl std::fmt::Display for SchemaTooNew {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the database has schema version {}, newer than the {} this silver-relay {} knows; run the relay that wrote it, or restore a backup taken by this version",
+            self.found,
+            self.supported,
+            env!("CARGO_PKG_VERSION")
+        )
+    }
+}
+
+impl std::error::Error for SchemaTooNew {}
+
+/// One step of the schema, from `from` to `from + 1`. The caller has
+/// opened, and so created, every table already; a version whose only
+/// change is a new table has nothing left to do here.
+pub(crate) fn migrate(_txn: &redb::WriteTransaction, from: u64) -> anyhow::Result<()> {
+    match from {
+        // 0 is the unstamped layout of 0.6.0 and before; 1 added the bans
+        // and admin tables.
+        0 => Ok(()),
+        other => anyhow::bail!("no migration from schema version {other}"),
+    }
+}
 
 /// Limits applied to each recipient's mailbox.
 #[derive(Clone, Copy, Debug)]
@@ -153,7 +199,7 @@ pub enum BlobPut {
 }
 
 pub struct Store {
-    db: Database,
+    pub(crate) db: Database,
 }
 
 impl Store {
@@ -190,25 +236,88 @@ impl Store {
         }
     }
 
+    /// Create the tables that are missing, bring an older layout up to
+    /// [`SCHEMA_VERSION`] and stamp it, or refuse a newer one. All in one
+    /// transaction: a refused database is left exactly as it was.
     fn init(db: Database) -> anyhow::Result<Self> {
         let txn = db.begin_write()?;
-        {
-            txn.open_table(BUNDLES)?;
-            txn.open_table(ONE_TIME)?;
-            txn.open_table(ONE_TIME_USED)?;
-            txn.open_table(PQ_ONE_TIME)?;
-            txn.open_table(PQ_ONE_TIME_USED)?;
-            txn.open_table(MAILBOX)?;
-            txn.open_table(BY_ID)?;
-            txn.open_table(USAGE)?;
-            txn.open_table(META)?;
-            txn.open_table(BLOBS)?;
-            txn.open_table(BLOB_CHUNKS)?;
-            txn.open_table(BANS)?;
-            txn.open_table(ADMIN)?;
+        // A database with no tables at all is new. One with tables but no
+        // version was written before 0.7.0, when the layout was not
+        // stamped: that is version 0.
+        let fresh = txn.list_tables()?.next().is_none();
+        Self::open_tables(&txn)?;
+        let stamped = txn.open_table(META)?.get(SCHEMA)?.map(|g| g.value());
+        let from = match stamped {
+            Some(found) if found > SCHEMA_VERSION => {
+                return Err(SchemaTooNew {
+                    found,
+                    supported: SCHEMA_VERSION,
+                }
+                .into());
+            }
+            Some(found) => found,
+            None if fresh => SCHEMA_VERSION,
+            None => 0,
+        };
+        for version in from..SCHEMA_VERSION {
+            migrate(&txn, version)?;
+        }
+        if stamped != Some(SCHEMA_VERSION) {
+            txn.open_table(META)?.insert(SCHEMA, SCHEMA_VERSION)?;
         }
         txn.commit()?;
+        if from < SCHEMA_VERSION {
+            tracing::info!("database schema brought from version {from} to {SCHEMA_VERSION}");
+        }
         Ok(Self { db })
+    }
+
+    /// Open every table, which creates the ones not there yet.
+    pub(crate) fn open_tables(txn: &redb::WriteTransaction) -> anyhow::Result<()> {
+        txn.open_table(BUNDLES)?;
+        txn.open_table(ONE_TIME)?;
+        txn.open_table(ONE_TIME_USED)?;
+        txn.open_table(PQ_ONE_TIME)?;
+        txn.open_table(PQ_ONE_TIME_USED)?;
+        txn.open_table(MAILBOX)?;
+        txn.open_table(BY_ID)?;
+        txn.open_table(USAGE)?;
+        txn.open_table(META)?;
+        txn.open_table(BLOBS)?;
+        txn.open_table(BLOB_CHUNKS)?;
+        txn.open_table(BANS)?;
+        txn.open_table(ADMIN)?;
+        Ok(())
+    }
+
+    /// The layout the database is stamped with.
+    pub fn schema_version(&self) -> anyhow::Result<u64> {
+        let txn = self.db.begin_read()?;
+        Ok(txn
+            .open_table(META)?
+            .get(SCHEMA)?
+            .map(|g| g.value())
+            .unwrap_or(0))
+    }
+
+    /// Pretend the database was written by another relay: `None` for one
+    /// from before the layout was stamped.
+    #[cfg(test)]
+    pub(crate) fn stamp_schema(&self, version: Option<u64>) -> anyhow::Result<()> {
+        let txn = self.db.begin_write()?;
+        {
+            let mut meta = txn.open_table(META)?;
+            match version {
+                Some(v) => {
+                    meta.insert(SCHEMA, v)?;
+                }
+                None => {
+                    meta.remove(SCHEMA)?;
+                }
+            }
+        }
+        txn.commit()?;
+        Ok(())
     }
 
     // --- administration --------------------------------------------------------
@@ -865,6 +974,56 @@ mod tests {
             store.remove_user(&bob.user_id()).unwrap(),
             Removed::default()
         );
+    }
+
+    #[test]
+    fn a_new_database_is_stamped_and_an_unstamped_one_is_brought_along() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("relay.redb");
+        let bob = Identity::generate();
+        {
+            let store = Store::open(&path).unwrap();
+            assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+            store.put_bundle(&bob.key_bundle()).unwrap();
+            // As 0.6.0 left it: tables, data, no version.
+            store.stamp_schema(None).unwrap();
+            assert_eq!(store.schema_version().unwrap(), 0);
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+        assert!(store.bundle(&bob.user_id()).unwrap().is_some());
+        assert!(Store::in_memory().unwrap().schema_version().unwrap() == SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn a_database_from_a_newer_relay_is_refused_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("relay.redb");
+        let bob = Identity::generate();
+        {
+            let store = Store::open(&path).unwrap();
+            store.put_bundle(&bob.key_bundle()).unwrap();
+            store.stamp_schema(Some(SCHEMA_VERSION + 1)).unwrap();
+        }
+        let err = Store::open(&path).err().expect("refused");
+        assert_eq!(
+            err.downcast_ref::<SchemaTooNew>(),
+            Some(&SchemaTooNew {
+                found: SCHEMA_VERSION + 1,
+                supported: SCHEMA_VERSION
+            })
+        );
+        assert!(err.to_string().contains("newer"), "{err}");
+        // Still as the newer relay left it, for that relay to open.
+        let db = Database::open(&path).unwrap();
+        let txn = db.begin_read().unwrap();
+        let version = txn
+            .open_table(META)
+            .unwrap()
+            .get(SCHEMA)
+            .unwrap()
+            .map(|g| g.value());
+        assert_eq!(version, Some(SCHEMA_VERSION + 1));
     }
 
     #[test]

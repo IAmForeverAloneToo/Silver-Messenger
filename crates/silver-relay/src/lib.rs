@@ -19,6 +19,7 @@
 
 pub mod acme;
 pub mod admin;
+pub mod backup;
 pub mod metrics;
 pub mod store;
 pub mod tls;
@@ -52,7 +53,10 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-pub use store::{Ban, BlobLimits, BlobMeta, BlobPut, Enqueue, Limits, Removed, Stats, Store};
+pub use store::{
+    Ban, BlobLimits, BlobMeta, BlobPut, Enqueue, Limits, Removed, SCHEMA_VERSION, SchemaTooNew,
+    Stats, Store,
+};
 
 /// The admin setting that holds an invite token changed at runtime; an
 /// empty value means "no token needed", chosen over the command line.
@@ -503,6 +507,10 @@ impl RelayState {
 
     pub fn policy(&self) -> &Policy {
         &self.policy
+    }
+
+    pub(crate) fn store(&self) -> &Store {
+        &self.store
     }
 
     fn addresses(&self) -> std::sync::MutexGuard<'_, HashMap<IpAddr, AddressState>> {

@@ -351,6 +351,34 @@ command line. None of it shows a message or a key: the store holds only
 ciphertext and public keys, and the listing shows what the relay already
 knows about each identity.
 
+**Backups and upgrades.** `silver-relay backup relay.backup` writes one
+consistent snapshot of the whole database, through the admin socket while
+the relay runs or straight from the data directory while it is stopped, in
+a format of the relay's own that is checked against its checksum before
+the file gets its name. `silver-relay restore relay.backup --data-dir
+/var/lib/silver-relay` loads it into a stopped relay (`--replace` moves an
+existing database aside first). A backup holds what the database holds,
+ciphertext and public keys and bans, so keep it as private and encrypt it
+before it leaves the host. The database carries a schema version: an
+upgrade brings an older layout along at the first start, and a relay
+refuses a newer one rather than misread it.
+[docs/UPGRADING.md](docs/UPGRADING.md) has the procedure, the rollback and
+the version notes.
+
+**In a container.** Each release publishes
+`ghcr.io/iamforeveralonetoo/silver-relay` for amd64 and arm64: the release's
+own static binary and a CA bundle on an empty base, running as an
+unprivileged user, with a build provenance attestation that `gh
+attestation verify oci://ghcr.io/iamforeveralonetoo/silver-relay:<version>
+--owner IAmForeverAloneToo` checks. `deploy/compose.yml` runs it with the
+built-in TLS on port 443, a read-only filesystem and no capabilities:
+`SILVER_DOMAIN=relay.example.org docker compose -f deploy/compose.yml up
+-d`, then `docker compose -f deploy/compose.yml exec relay silver-relay
+admin status` for administration and `... silver-relay backup
+/var/lib/silver-relay/relay.backup` for a backup on the data volume.
+`deploy/Dockerfile` builds the same image from source, with the release's
+flags, so it matches.
+
 **Pinning the relay's key.** To trust one key rather than every
 certificate authority on the machine, pin it: `silver --print-pin` shows
 the pin of the key the relay presents right now, and `silver --pin

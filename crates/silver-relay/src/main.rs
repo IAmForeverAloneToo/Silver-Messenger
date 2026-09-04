@@ -189,6 +189,132 @@ enum Command {
         #[command(subcommand)]
         action: AdminAction,
     },
+    /// Write a backup of the whole database to FILE: through the admin
+    /// socket while the relay runs, or straight from the data directory
+    /// while it is stopped. The file is checked before it gets its name.
+    /// It holds what the database holds, so keep it as private.
+    Backup {
+        /// Where to write the backup; created readable by its owner only.
+        file: PathBuf,
+        /// The running relay's admin socket. Without this flag the default
+        /// socket is used when it exists, and the database is read directly
+        /// otherwise.
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        /// The data directory, for a backup with the relay stopped.
+        /// Defaults as for the relay itself.
+        #[arg(long, env = "SILVER_RELAY_DATA")]
+        data_dir: Option<PathBuf>,
+    },
+    /// Load a backup into the data directory, with the relay stopped. The
+    /// file is checked first; a database already there is refused unless
+    /// --replace moves it aside.
+    Restore {
+        /// The backup to load, as `silver-relay backup` wrote it.
+        file: PathBuf,
+        /// The data directory. Defaults as for the relay itself.
+        #[arg(long, env = "SILVER_RELAY_DATA")]
+        data_dir: Option<PathBuf>,
+        /// Move an existing database aside (to relay.redb.before-restore-<time>)
+        /// and restore over it.
+        #[arg(long)]
+        replace: bool,
+    },
+}
+
+/// The data directory as the relay resolves it: the flag, else systemd's
+/// STATE_DIRECTORY, else ./silver-relay-data.
+fn data_dir(given: Option<PathBuf>) -> PathBuf {
+    given
+        .or_else(|| std::env::var_os("STATE_DIRECTORY").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("./silver-relay-data"))
+}
+
+#[cfg(unix)]
+async fn live_backup(
+    socket: &std::path::Path,
+    file: &std::path::Path,
+) -> anyhow::Result<(silver_relay::backup::Header, silver_relay::backup::Summary)> {
+    silver_relay::admin::download(socket, file).await
+}
+
+#[cfg(not(unix))]
+async fn live_backup(
+    socket: &std::path::Path,
+    _file: &std::path::Path,
+) -> anyhow::Result<(silver_relay::backup::Header, silver_relay::backup::Summary)> {
+    anyhow::bail!(
+        "{} is a Unix socket, which this system has none of; stop the relay and back up its data directory",
+        socket.display()
+    )
+}
+
+async fn run_backup(
+    file: PathBuf,
+    socket: Option<PathBuf>,
+    data_dir_flag: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    let explicit = socket.is_some();
+    let socket = socket.unwrap_or_else(|| PathBuf::from(silver_relay::admin::DEFAULT_SOCKET));
+    let (header, summary, source) = if socket.exists() {
+        let (header, summary) = live_backup(&socket, &file).await?;
+        (
+            header,
+            summary,
+            format!("the relay at {}", socket.display()),
+        )
+    } else if explicit {
+        anyhow::bail!(
+            "no relay is answering at {}; without --socket the database is read directly, which needs the relay stopped",
+            socket.display()
+        );
+    } else {
+        let dir = data_dir(data_dir_flag);
+        let source = format!("the database in {}", dir.display());
+        let dest = file.clone();
+        let (header, summary) = tokio::task::spawn_blocking(move || {
+            silver_relay::backup::offline(&dir, &dest, silver_protocol::now_ms())
+        })
+        .await??;
+        (header, summary, source)
+    };
+    println!(
+        "backup written to {}: {} identities, {} messages, {} files in {} records ({}), from {source}, schema version {}",
+        file.display(),
+        summary.identities,
+        summary.messages,
+        summary.blobs,
+        summary.records,
+        bytes_text(summary.bytes),
+        header.schema
+    );
+    Ok(())
+}
+
+fn run_restore(file: PathBuf, data_dir_flag: Option<PathBuf>, replace: bool) -> anyhow::Result<()> {
+    let dir = data_dir(data_dir_flag);
+    let restored =
+        silver_relay::backup::restore(&dir, &file, replace, silver_protocol::now_ms() / 1000)?;
+    println!(
+        "restored {} into {}: {} identities, {} messages, {} files in {} records; taken {} by silver-relay {}, schema version {}",
+        file.display(),
+        dir.display(),
+        restored.summary.identities,
+        restored.summary.messages,
+        restored.summary.blobs,
+        restored.summary.records,
+        ms_text(restored.header.taken_at_ms),
+        restored.header.relay,
+        restored.header.schema
+    );
+    if let Some(aside) = restored.replaced {
+        println!(
+            "the database that was there is at {}; delete it once the relay runs as expected",
+            aside.display()
+        );
+    }
+    println!("start the relay to serve it");
+    Ok(())
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -448,7 +574,12 @@ impl Transport {
                 .filter(|d| !d.is_empty())
                 .collect(),
             directory: args.acme_directory.clone(),
-            contact: args.acme_email.clone(),
+            // An empty SILVER_RELAY_ACME_EMAIL (a container's unset
+            // variable) means none.
+            contact: args
+                .acme_email
+                .clone()
+                .filter(|email| !email.trim().is_empty()),
             cache,
             root: args.acme_root.clone(),
         }))
@@ -457,11 +588,26 @@ impl Transport {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
-    if let Some(Command::Admin { socket, action }) = args.command {
-        // One line on stderr and a failing exit status, as a command-line
-        // tool should; not the debug rendering a crashed relay gets.
-        if let Err(e) = run_admin(socket, action).await {
+    let mut args = Args::parse();
+    // The subcommands: one line on stderr and a failing exit status when
+    // they fail, as a command-line tool should; not the debug rendering a
+    // crashed relay gets.
+    let outcome = match args.command.take() {
+        Some(Command::Admin { socket, action }) => Some(run_admin(socket, action).await),
+        Some(Command::Backup {
+            file,
+            socket,
+            data_dir,
+        }) => Some(run_backup(file, socket, data_dir).await),
+        Some(Command::Restore {
+            file,
+            data_dir,
+            replace,
+        }) => Some(run_restore(file, data_dir, replace)),
+        None => None,
+    };
+    if let Some(outcome) = outcome {
+        if let Err(e) = outcome {
             eprintln!("error: {e:#}");
             std::process::exit(1);
         }
@@ -519,24 +665,20 @@ async fn main() -> anyhow::Result<()> {
     if policy.anonymous_sends_per_minute == 0 {
         info!("anonymous submission is off; senders submit on their own connection");
     }
-    let data_dir = (!args.ephemeral).then(|| {
-        args.data_dir
-            .clone()
-            .or_else(|| std::env::var_os("STATE_DIRECTORY").map(PathBuf::from))
-            .unwrap_or_else(|| PathBuf::from("./silver-relay-data"))
-    });
+    let data_dir = (!args.ephemeral).then(|| data_dir(args.data_dir.clone()));
     let transport = Transport::from_args(&args, data_dir.as_ref())?;
     let state = if args.ephemeral {
         info!("running with in-memory state; nothing is persisted");
         RelayState::with_store_and_policy(silver_relay::Store::in_memory()?, limits, policy.clone())
     } else {
         let dir = data_dir.clone().expect("a data directory unless ephemeral");
-        let path = dir.join("relay.redb");
+        let path = silver_relay::backup::database_path(&dir);
         let state = RelayState::open_with(&path, limits, policy.clone())?;
         let stats = state.stats();
         info!(
-            "database {} ({} bundles, {} messages in {} mailboxes)",
+            "database {} (schema version {}; {} bundles, {} messages in {} mailboxes)",
             path.display(),
+            silver_relay::SCHEMA_VERSION,
             stats.bundles,
             stats.messages,
             stats.mailboxes

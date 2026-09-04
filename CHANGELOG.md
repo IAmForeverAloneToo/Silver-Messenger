@@ -43,6 +43,20 @@ means behaviour or the wire protocol changed in a way worth reading about.
   banned identity at login. The installer configures the socket and the
   unit gives it a private runtime directory. Nothing an administrator can
   do shows a message or a key.
+- **Lifecycle.** The database carries a schema version: a relay brings an
+  older layout along at its first start and refuses a newer one rather
+  than misread it. `silver-relay backup` writes one consistent snapshot of
+  the whole database, through the admin socket while the relay runs or
+  from the data directory while it is stopped, in a format of the relay's
+  own that is checked against its checksum before the file gets its name;
+  `silver-relay restore` loads one into a stopped relay, moving an
+  existing database aside with `--replace`. `docs/UPGRADING.md` says how
+  to upgrade, roll back and move a relay. Each release now publishes a
+  container image, `ghcr.io/iamforeveralonetoo/silver-relay` for amd64 and
+  arm64 (the release's own static binary on an empty base, unprivileged,
+  with a provenance attestation), `deploy/compose.yml` runs it with the
+  built-in TLS, and `deploy/Dockerfile` builds it from source. Releases
+  include Linux arm64 binaries.
 
 ## 0.6.0 - 2026-09-04
 

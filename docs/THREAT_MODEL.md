@@ -76,7 +76,9 @@ Can:
   edit (evict an identity, ban an address or an identity, change the
   invite token) is over a Unix socket on the host that only root and the
   relay's user can open; there is no administration over the network,
-  and nothing it offers shows a message or a key.
+  and nothing it offers shows a message or a key. A backup taken over the
+  same socket holds what the database holds and no more, and is the
+  operator's to keep as private as the database.
 - Serve a *stale* key bundle for a user, or withhold one-time prekeys so a
   session starts without one. It cannot serve a forged bundle or signed
   prekey: both are signed by the user's identity key and clients verify

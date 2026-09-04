@@ -26,3 +26,6 @@ fuzz/artifacts
 fuzz/corpus
 
 tests/tui/__pycache__/
+
+# Release binaries staged for a container build (deploy/Dockerfile)
+prebuilt/

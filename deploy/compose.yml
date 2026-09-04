@@ -1,0 +1,47 @@
+# The relay in a container, serving TLS itself on port 443 with a
+# certificate it obtains and renews from Let's Encrypt for SILVER_DOMAIN,
+# which must point at this host. Start it with:
+#
+#   SILVER_DOMAIN=relay.example.org SILVER_EMAIL=you@example.org \
+#     docker compose -f deploy/compose.yml up -d
+#
+# Clients then connect with `silver --relay wss://relay.example.org/ws`.
+# Administration and backups go through the same binary in the container:
+#
+#   docker compose -f deploy/compose.yml exec relay silver-relay admin status
+#   docker compose -f deploy/compose.yml exec relay \
+#     silver-relay backup /var/lib/silver-relay/relay.backup
+#
+# The database and the ACME account live on the `data` volume; the rest of
+# the container's filesystem is read-only. The relay runs as user 1000 with
+# no capabilities; Docker lets a container's process bind port 443 without
+# any (net.ipv4.ip_unprivileged_port_start is 0 inside containers).
+
+services:
+  relay:
+    image: ghcr.io/iamforeveralonetoo/silver-relay:0.7.0
+    restart: unless-stopped
+    ports:
+      - "443:443"
+      # Prometheus metrics, for a collector on this host only:
+      # - "127.0.0.1:9107:9107"
+    environment:
+      SILVER_RELAY_LISTEN: 0.0.0.0:443
+      SILVER_RELAY_ACME_DOMAIN: ${SILVER_DOMAIN:?set SILVER_DOMAIN to the name that points at this host}
+      # Where the certificate authority may write about the certificate.
+      SILVER_RELAY_ACME_EMAIL: ${SILVER_EMAIL:-}
+      # Let only people who have this token register new identities:
+      # SILVER_RELAY_INVITE_TOKEN: change-me
+      # SILVER_RELAY_METRICS_LISTEN: 0.0.0.0:9107
+      RUST_LOG: info
+    volumes:
+      - data:/var/lib/silver-relay
+    read_only: true
+    tmpfs:
+      - /run/silver-relay:uid=1000,gid=1000,mode=0700
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  data:

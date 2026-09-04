@@ -6,20 +6,26 @@
 //! What it offers is what an operator needs and no more: the counters and
 //! the store's numbers, the identities under their log pseudonyms with
 //! mailbox sizes and prekey deposits, eviction, bans on addresses and
-//! identities, and the invite token. Nothing here reads a message or a
-//! key: the store holds only ciphertext and public keys, and the listing
-//! shows what the relay already knows about each identity.
+//! identities, the invite token, and a backup of the store. Nothing here
+//! reads a message or a key: the store holds only ciphertext and public
+//! keys, and the listing shows what the relay already knows about each
+//! identity.
 
+use std::io::{self, Write};
 use std::path::Path;
 use std::sync::Arc;
 
 use axum::Router;
+use axum::body::{Body, Bytes};
 use axum::extract::{Path as UrlPath, State};
-use axum::http::StatusCode;
-use axum::response::Json;
+use axum::http::{StatusCode, header};
+use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
+use silver_protocol::now_ms;
+use tracing::warn;
 
+use crate::backup;
 use crate::tls::{self, CertStore};
 use crate::{BanRow, BanTarget, CounterSnapshot, IdentityRow, RelayState, Removed, Stats};
 
@@ -30,6 +36,8 @@ pub const DEFAULT_SOCKET: &str = "/run/silver-relay/admin.sock";
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Status {
     pub version: String,
+    /// The database layout ([`crate::SCHEMA_VERSION`]).
+    pub schema: u64,
     pub uptime_secs: u64,
     pub online: usize,
     pub counters: CounterSnapshot,
@@ -74,6 +82,7 @@ fn internal(e: anyhow::Error) -> Failure {
 fn status(state: &RelayState, tls: Option<&CertStore>) -> Status {
     Status {
         version: env!("CARGO_PKG_VERSION").to_owned(),
+        schema: state.store().schema_version().unwrap_or(0),
         uptime_secs: state.uptime().as_secs(),
         online: state.online_count(),
         counters: state.counters(),
@@ -206,6 +215,59 @@ async fn reset_invite(State(a): State<AdminState>) -> Result<Json<InviteToken>, 
     }))
 }
 
+/// Bytes a backup is handed over in.
+const CHUNK: usize = 64 * 1024;
+
+/// A `Write` that hands chunks to the response body. It runs on a blocking
+/// thread, so waiting for the reader is allowed.
+struct ChannelWriter {
+    tx: tokio::sync::mpsc::Sender<io::Result<Bytes>>,
+    pending: Vec<u8>,
+}
+
+impl Write for ChannelWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.pending.extend_from_slice(buf);
+        if self.pending.len() >= CHUNK {
+            self.flush()?;
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let chunk = Bytes::from(std::mem::take(&mut self.pending));
+        self.tx
+            .blocking_send(Ok(chunk))
+            .map_err(|_| io::Error::other("the backup's reader went away"))
+    }
+}
+
+/// The whole store as a backup file, streamed. It is taken in one read
+/// transaction, so it is one moment's picture however long the transfer
+/// takes; the receiver checks the trailer before it calls the file a
+/// backup, so a transfer that breaks off leaves no half backup behind.
+async fn get_backup(State(a): State<AdminState>) -> Response {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<io::Result<Bytes>>(8);
+    let state = a.state.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut out = ChannelWriter {
+            tx: tx.clone(),
+            pending: Vec::with_capacity(CHUNK),
+        };
+        let written = backup::write(state.store(), &mut out, now_ms())
+            .and_then(|_| out.flush().map_err(Into::into));
+        if let Err(e) = written {
+            warn!("backup over the admin socket: {e:#}");
+            let _ = tx.blocking_send(Err(io::Error::other(format!("{e:#}"))));
+        }
+    });
+    let body = Body::from_stream(futures_util::stream::poll_fn(move |cx| rx.poll_recv(cx)));
+    ([(header::CONTENT_TYPE, "application/octet-stream")], body).into_response()
+}
+
 /// The routes, for the socket server and for tests.
 pub fn router(state: Arc<RelayState>, tls: Option<Arc<CertStore>>) -> Router {
     Router::new()
@@ -216,6 +278,7 @@ pub fn router(state: Arc<RelayState>, tls: Option<Arc<CertStore>>) -> Router {
         .route("/bans/{kind}/{key}", post(post_ban).delete(delete_ban))
         .route("/invite", post(post_invite).delete(delete_invite))
         .route("/invite/reset", post(reset_invite))
+        .route("/backup", get(get_backup))
         .with_state(AdminState { state, tls })
 }
 
@@ -249,6 +312,29 @@ pub async fn serve_unix(
     Ok(())
 }
 
+#[cfg(unix)]
+async fn connect(socket: &Path) -> anyhow::Result<tokio::net::UnixStream> {
+    use anyhow::Context as _;
+    tokio::net::UnixStream::connect(socket)
+        .await
+        .with_context(|| {
+            format!(
+                "connecting to the admin socket {} (is the relay running with --admin-socket, and are you root or its user?)",
+                socket.display()
+            )
+        })
+}
+
+/// The status code in an HTTP response head.
+fn status_of(head: &[u8]) -> anyhow::Result<u16> {
+    use anyhow::Context as _;
+    String::from_utf8_lossy(head)
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .context("the relay sent something other than an HTTP response")
+}
+
 /// One request to the relay's admin socket: the status code and the body,
 /// as JSON when the relay sent JSON and as a string otherwise.
 #[cfg(unix)]
@@ -260,14 +346,7 @@ pub async fn request(
 ) -> anyhow::Result<(u16, serde_json::Value)> {
     use anyhow::Context as _;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut stream = tokio::net::UnixStream::connect(socket)
-        .await
-        .with_context(|| {
-            format!(
-                "connecting to the admin socket {} (is the relay running with --admin-socket, and are you root or its user?)",
-                socket.display()
-            )
-        })?;
+    let mut stream = connect(socket).await?;
     let request = format!(
         "{method} {path} HTTP/1.0\r\nHost: relay\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
@@ -275,17 +354,16 @@ pub async fn request(
     stream.write_all(request.as_bytes()).await?;
     let mut response = Vec::new();
     stream.read_to_end(&mut response).await?;
-    let text = String::from_utf8_lossy(&response);
-    let (head, body) = text
-        .split_once("\r\n\r\n")
+    let split = response
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
         .context("the relay sent something other than an HTTP response")?;
-    let status: u16 = head
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .context("the relay's response has no status")?;
-    let value =
-        serde_json::from_str(body).unwrap_or_else(|_| serde_json::Value::String(body.to_owned()));
+    let status = status_of(&response[..split])?;
+    let body = String::from_utf8_lossy(&response[split + 4..]).into_owned();
+    let value = match serde_json::from_str(&body) {
+        Ok(value) => value,
+        Err(_) => serde_json::Value::String(body),
+    };
     Ok((status, value))
 }
 
@@ -296,5 +374,65 @@ pub async fn request(
     _path: &str,
     _body: &str,
 ) -> anyhow::Result<(u16, serde_json::Value)> {
+    anyhow::bail!("the admin socket is a Unix socket; this build has none")
+}
+
+/// Fetch a backup from the running relay into `dest`, through
+/// [`backup::to_file`]: written next to `dest`, checked, then named.
+#[cfg(unix)]
+pub async fn download(
+    socket: &Path,
+    dest: &Path,
+) -> anyhow::Result<(backup::Header, backup::Summary)> {
+    use anyhow::Context as _;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = connect(socket).await?;
+    stream
+        .write_all(b"GET /backup HTTP/1.0\r\nHost: relay\r\n\r\n")
+        .await?;
+    // The head, and whatever of the body arrived with it.
+    let mut head = Vec::new();
+    let split = loop {
+        let mut buf = [0u8; 4096];
+        let n = stream.read(&mut buf).await?;
+        anyhow::ensure!(n > 0, "the relay closed the connection before answering");
+        head.extend_from_slice(&buf[..n]);
+        if let Some(at) = head.windows(4).position(|w| w == b"\r\n\r\n") {
+            break at + 4;
+        }
+        anyhow::ensure!(
+            head.len() < 64 * 1024,
+            "the relay's response head is longer than a head can be"
+        );
+    };
+    let body_start = head.split_off(split);
+    let status = status_of(&head)?;
+    if status != 200 {
+        let mut rest = body_start;
+        stream.read_to_end(&mut rest).await?;
+        anyhow::bail!(
+            "the relay answered {status}: {}",
+            String::from_utf8_lossy(&rest).trim()
+        );
+    }
+    // The bulk is plain blocking I/O into the file, on a blocking thread.
+    let stream = stream.into_std()?;
+    stream.set_nonblocking(false)?;
+    let dest = dest.to_owned();
+    tokio::task::spawn_blocking(move || {
+        backup::to_file(&dest, |out| {
+            let mut source = io::Read::chain(io::Cursor::new(body_start), stream);
+            io::copy(&mut source, out).context("receiving the backup")?;
+            Ok(())
+        })
+    })
+    .await?
+}
+
+#[cfg(not(unix))]
+pub async fn download(
+    _socket: &Path,
+    _dest: &Path,
+) -> anyhow::Result<(backup::Header, backup::Summary)> {
     anyhow::bail!("the admin socket is a Unix socket; this build has none")
 }

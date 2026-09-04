@@ -1,0 +1,10 @@
+# What a container build does not need from the checkout.
+target
+fuzz/target
+fuzz/artifacts
+fuzz/corpus
+.git
+silver-relay-data
+*.redb
+*.backup
+tests/tui/__pycache__
