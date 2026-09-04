@@ -51,7 +51,32 @@ pub struct Envelope {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Content {
-    Text { body: String },
+    Text {
+        body: String,
+    },
+    /// Acknowledges the messages with these ids. Only sent to peers whose
+    /// messages advertised the `receipts` capability.
+    Receipt {
+        kind: ReceiptKind,
+        ids: Vec<String>,
+    },
+}
+
+/// How far a message got on the recipient's side. Ordered: read implies
+/// delivered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReceiptKind {
+    /// Decrypted and stored by the recipient's client.
+    Delivered,
+    /// Shown to the recipient.
+    Read,
+}
+
+/// Capability names a client may advertise in the bodies it sends.
+pub mod capability {
+    /// The client understands `Content::Receipt` and would like to get them.
+    pub const RECEIPTS: &str = "receipts";
 }
 
 /// Position of a message in the sender's stream to one recipient.
@@ -76,6 +101,9 @@ struct PlainBody {
     #[serde(default)]
     seq: u64,
     content: Content,
+    /// What the sending client understands beyond text; see [`capability`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    caps: Vec<String>,
 }
 
 /// The v2 body: a plain body encrypted again under a session.
@@ -97,6 +125,7 @@ pub enum Body {
         sent_at_ms: u64,
         sequence: Sequence,
         content: Content,
+        caps: Vec<String>,
     },
     Ratchet(RatchetBody),
 }
@@ -110,10 +139,21 @@ struct Version {
 
 impl Body {
     pub fn plain(content: Content, sent_at_ms: u64, sequence: Sequence) -> Self {
+        Self::plain_with_caps(content, sent_at_ms, sequence, &[])
+    }
+
+    /// A plain body that also advertises capabilities.
+    pub fn plain_with_caps(
+        content: Content,
+        sent_at_ms: u64,
+        sequence: Sequence,
+        caps: &[&str],
+    ) -> Self {
         Self::Plain {
             sent_at_ms,
             sequence,
             content,
+            caps: caps.iter().map(|c| (*c).to_owned()).collect(),
         }
     }
 
@@ -123,11 +163,13 @@ impl Body {
                 sent_at_ms,
                 sequence,
                 content,
+                caps,
             } => serde_json::to_vec(&PlainBody {
                 sent_at_ms: *sent_at_ms,
                 epoch: sequence.epoch,
                 seq: sequence.seq,
                 content: content.clone(),
+                caps: caps.clone(),
             }),
             Self::Ratchet(body) => serde_json::to_vec(body),
         }
@@ -151,6 +193,7 @@ impl Body {
                         seq: body.seq,
                     },
                     content: body.content,
+                    caps: body.caps,
                 })
             }
             2 => Ok(Self::Ratchet(
@@ -175,6 +218,8 @@ pub struct Message {
     /// Encrypted under a forward-secret session (protocol v2) rather than
     /// only the recipient's long-term key.
     pub forward_secret: bool,
+    /// Capabilities the sender advertised; see [`capability`].
+    pub caps: Vec<String>,
 }
 
 /// The sealed layer of an envelope, opened: who sent it and the raw body.
@@ -270,6 +315,7 @@ pub fn open(recipient: &Identity, envelope: &Envelope) -> Result<Message, Protoc
             sent_at_ms,
             sequence,
             content,
+            caps,
         } => Ok(Message {
             id: opened.id,
             from: opened.from,
@@ -278,6 +324,7 @@ pub fn open(recipient: &Identity, envelope: &Envelope) -> Result<Message, Protoc
             sequence,
             content,
             forward_secret: false,
+            caps,
         }),
         Body::Ratchet(_) => Err(ProtocolError::Malformed(
             "body is encrypted under a session".into(),

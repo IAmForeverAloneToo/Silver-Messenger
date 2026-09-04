@@ -71,6 +71,7 @@ fn body(ev: &ClientEvent) -> Option<(&silver_protocol::UserId, &str)> {
     match ev {
         ClientEvent::Message(m) => match &m.content {
             Content::Text { body } => Some((&m.from, body.as_str())),
+            _ => None,
         },
         _ => None,
     }
@@ -848,7 +849,9 @@ async fn handshakes_wait_in_the_mailbox_and_sessions_survive_restarts() {
             ClientEvent::SessionEstablished { .. } => established += 1,
             ClientEvent::Message(m) => {
                 assert!(m.forward_secret);
-                let Content::Text { body } = m.content;
+                let Content::Text { body } = m.content else {
+                    panic!("expected text");
+                };
                 texts.push(body);
             }
             _ => unreachable!(),

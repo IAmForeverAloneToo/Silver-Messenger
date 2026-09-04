@@ -27,6 +27,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
+use silver_protocol::envelope::ReceiptKind;
 use silver_protocol::{Identity, IdentitySecrets, KeyBundle, Sequence, UserId};
 
 use crate::sessions::{PrekeyFile, SessionsFile};
@@ -44,7 +45,7 @@ const BLOCKED_FILE: &str = "blocked.json";
 const HISTORY_DIR: &str = "history";
 
 /// Client-side configuration.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub relay_url: Option<String>,
@@ -63,6 +64,27 @@ pub struct Config {
     /// Invite token for relays that only register invited identities.
     #[serde(default)]
     pub invite_token: Option<String>,
+    /// Tell contacts when their messages have been shown. Delivery receipts
+    /// are always sent.
+    #[serde(default = "default_true")]
+    pub read_receipts: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            relay_url: None,
+            ca_cert: None,
+            proxy: None,
+            send_epoch: None,
+            invite_token: None,
+            read_receipts: true,
+        }
+    }
 }
 
 /// A known peer.
@@ -83,6 +105,10 @@ pub struct Contact {
     /// The user compared safety numbers with this contact out of band.
     #[serde(default)]
     pub verified: bool,
+    /// Capabilities their last message advertised; see
+    /// [`silver_protocol::envelope::capability`].
+    #[serde(default)]
+    pub caps: Vec<String>,
 }
 
 impl Contact {
@@ -94,7 +120,13 @@ impl Contact {
             sent_seq: 0,
             received: None,
             verified: false,
+            caps: Vec::new(),
         }
+    }
+
+    /// Whether their client advertised `capability`.
+    pub fn supports(&self, capability: &str) -> bool {
+        self.caps.iter().any(|c| c == capability)
     }
 
     /// Allocate the sequence for the next message to this contact.
@@ -128,6 +160,26 @@ pub struct HistoryEntry {
     pub direction: Direction,
     pub timestamp_ms: u64,
     pub text: String,
+    /// For sent messages: the furthest receipt the peer returned. Never
+    /// written to disk with the entry; applied from later receipt lines.
+    #[serde(skip)]
+    pub receipt: Option<ReceiptKind>,
+}
+
+/// A later line in a history file that updates earlier entries.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ReceiptLine {
+    receipt: ReceiptKind,
+    ids: Vec<String>,
+    at_ms: u64,
+}
+
+/// What one line of a history file can be.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum HistoryLine {
+    Entry(HistoryEntry),
+    Receipt(ReceiptLine),
 }
 
 /// A message from someone who is not a contact yet, held until the user
@@ -482,6 +534,26 @@ impl Store {
     // --- history ---------------------------------------------------------------
 
     pub fn append_history(&self, peer: &UserId, entry: &HistoryEntry) -> anyhow::Result<()> {
+        self.append_history_line(peer, &serde_json::to_string(entry)?)
+    }
+
+    /// Record that the peer returned a receipt for messages we sent.
+    pub fn append_receipt(
+        &self,
+        peer: &UserId,
+        receipt: ReceiptKind,
+        ids: &[String],
+        at_ms: u64,
+    ) -> anyhow::Result<()> {
+        let line = ReceiptLine {
+            receipt,
+            ids: ids.to_vec(),
+            at_ms,
+        };
+        self.append_history_line(peer, &serde_json::to_string(&line)?)
+    }
+
+    fn append_history_line(&self, peer: &UserId, json: &str) -> anyhow::Result<()> {
         self.ensure_unlocked()?;
         let name = history_name(peer);
         let path = self.root.join(&name);
@@ -490,16 +562,14 @@ impl Store {
             .append(true)
             .open(&path)
             .with_context(|| format!("opening {}", path.display()))?;
-        let mut line = encode_line(
-            self.cipher.as_deref(),
-            &name,
-            &serde_json::to_string(entry)?,
-        );
+        let mut line = encode_line(self.cipher.as_deref(), &name, json);
         line.push('\n');
         file.write_all(line.as_bytes())?;
         Ok(())
     }
 
+    /// The conversation with `peer`, receipts applied to the entries they
+    /// refer to.
     pub fn load_history(&self, peer: &UserId) -> anyhow::Result<Vec<HistoryEntry>> {
         self.ensure_unlocked()?;
         let name = history_name(peer);
@@ -509,15 +579,22 @@ impl Store {
         }
         let text =
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-        let mut entries = Vec::new();
+        let mut entries: Vec<HistoryEntry> = Vec::new();
         for line in text.lines() {
             if line.trim().is_empty() {
                 continue;
             }
             let parsed = decode_line(self.cipher.as_deref(), &name, line)
-                .and_then(|plain| serde_json::from_str::<HistoryEntry>(&plain).map_err(Into::into));
+                .and_then(|plain| serde_json::from_str::<HistoryLine>(&plain).map_err(Into::into));
             match parsed {
-                Ok(entry) => entries.push(entry),
+                Ok(HistoryLine::Entry(entry)) => entries.push(entry),
+                Ok(HistoryLine::Receipt(receipt)) => {
+                    for entry in entries.iter_mut().filter(|e| receipt.ids.contains(&e.id)) {
+                        if entry.receipt.is_none_or(|r| r < receipt.receipt) {
+                            entry.receipt = Some(receipt.receipt);
+                        }
+                    }
+                }
                 Err(e) => {
                     tracing::warn!("skipping unreadable history line in {name}: {e:#}")
                 }
@@ -629,7 +706,33 @@ mod tests {
             },
             timestamp_ms: i,
             text: format!("msg {i}"),
+            receipt: None,
         }
+    }
+
+    #[test]
+    fn receipts_are_applied_to_history_entries() {
+        let (store, _dir) = temp_store();
+        let peer = Identity::generate().user_id();
+        for i in 0..4 {
+            store.append_history(&peer, &entry(i)).unwrap();
+        }
+        store
+            .append_receipt(&peer, ReceiptKind::Delivered, &["0".into(), "2".into()], 10)
+            .unwrap();
+        store
+            .append_receipt(&peer, ReceiptKind::Read, &["2".into()], 11)
+            .unwrap();
+        // A later, lesser receipt does not downgrade.
+        store
+            .append_receipt(&peer, ReceiptKind::Delivered, &["2".into()], 12)
+            .unwrap();
+        let history = store.load_history(&peer).unwrap();
+        assert_eq!(history.len(), 4);
+        assert_eq!(history[0].receipt, Some(ReceiptKind::Delivered));
+        assert_eq!(history[1].receipt, None);
+        assert_eq!(history[2].receipt, Some(ReceiptKind::Read));
+        assert_eq!(history[3].receipt, None);
     }
 
     #[test]

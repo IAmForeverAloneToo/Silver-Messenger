@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use futures_util::{SinkExt, StreamExt};
 use silver_protocol::wire::{ClientFrame, ErrorCode, ServerFrame, auth_signature, feature};
 
+use crate::CAPABILITIES;
 use crate::outbox::Outbox;
 use crate::proxy::Proxy;
 use crate::sessions::{SessionError, SessionInfo, SharedSessions};
@@ -264,7 +265,19 @@ impl Client {
         text: String,
         sequence: Sequence,
     ) -> Result<Envelope, ClientError> {
-        let plain = Body::plain(Content::Text { body: text }, now_ms(), sequence).encode()?;
+        self.send_content_sequenced(to, Content::Text { body: text }, sequence)
+            .await
+    }
+
+    /// Seal any content for `to` and queue it. Every body advertises this
+    /// client's [`CAPABILITIES`].
+    pub async fn send_content_sequenced(
+        &self,
+        to: &KeyBundle,
+        content: Content,
+        sequence: Sequence,
+    ) -> Result<Envelope, ClientError> {
+        let plain = Body::plain_with_caps(content, now_ms(), sequence, CAPABILITIES).encode()?;
         let body = match &self.sessions {
             Some(sessions) if to.supports_sessions() => {
                 let ratchet = sessions.lock().unwrap_or_else(|e| e.into_inner()).encrypt(
@@ -311,6 +324,18 @@ impl Client {
         text: String,
         sequence: Sequence,
     ) -> Result<Delivery, ClientError> {
+        self.send_content(peer, pinned, Content::Text { body: text }, sequence)
+            .await
+    }
+
+    /// [`Client::send_message`] for any content.
+    pub async fn send_content(
+        &self,
+        peer: UserId,
+        pinned: Option<KeyBundle>,
+        content: Content,
+        sequence: Sequence,
+    ) -> Result<Delivery, ClientError> {
         let needs_fresh = match (&self.sessions, &pinned) {
             (_, None) => true,
             (None, Some(_)) => false,
@@ -345,7 +370,9 @@ impl Client {
             // Sessions were agreed with the old key; they cannot continue.
             self.forget_sessions(&peer);
         }
-        let envelope = self.send_text_sequenced(&bundle, text, sequence).await?;
+        let envelope = self
+            .send_content_sequenced(&bundle, content, sequence)
+            .await?;
         let forward_secret = self.session_info(&peer).is_some();
         Ok(Delivery {
             envelope,
@@ -813,6 +840,7 @@ async fn deliver(setup: &Setup, envelope: Envelope, ev_tx: &mpsc::Sender<ClientE
             sent_at_ms,
             sequence,
             content,
+            caps,
         }) => {
             let _ = ev_tx
                 .send(ClientEvent::Message(Message {
@@ -823,6 +851,7 @@ async fn deliver(setup: &Setup, envelope: Envelope, ev_tx: &mpsc::Sender<ClientE
                     sequence,
                     content,
                     forward_secret: false,
+                    caps,
                 }))
                 .await;
             return;
@@ -886,6 +915,7 @@ async fn deliver(setup: &Setup, envelope: Envelope, ev_tx: &mpsc::Sender<ClientE
             sent_at_ms,
             sequence,
             content,
+            caps,
         }) => {
             let _ = ev_tx
                 .send(ClientEvent::Message(Message {
@@ -896,6 +926,7 @@ async fn deliver(setup: &Setup, envelope: Envelope, ev_tx: &mpsc::Sender<ClientE
                     sequence,
                     content,
                     forward_secret,
+                    caps,
                 }))
                 .await;
         }

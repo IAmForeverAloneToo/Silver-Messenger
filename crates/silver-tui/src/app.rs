@@ -8,8 +8,9 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, Ke
 use silver_client::sequence::{self, SequenceCheck};
 use silver_client::{
     Client, ClientError, ClientEvent, Contact, ContactRequest, Delivery, Direction, HeldMessage,
-    HistoryEntry, Store,
+    HistoryEntry, ReceiptQueue, Store,
 };
+use silver_protocol::envelope::{ReceiptKind, capability};
 use silver_protocol::{Content, KeyBundle, Message, UserId, now_ms};
 use tokio::sync::mpsc;
 
@@ -41,6 +42,8 @@ pub struct ChatLine {
     pub delivered: bool,
     /// The relay refused this outgoing message for good.
     pub failed: bool,
+    /// For sent messages: the furthest receipt the peer returned.
+    pub receipt: Option<ReceiptKind>,
 }
 
 /// One row in the system pane.
@@ -59,7 +62,7 @@ enum Internal {
     },
     SendDone {
         peer: UserId,
-        text: String,
+        content: Content,
         result: Result<Delivery, String>,
     },
 }
@@ -75,8 +78,13 @@ pub struct App {
     pub requests: Vec<ContactRequest>,
     blocked: Vec<UserId>,
     pub threads: HashMap<UserId, Vec<ChatLine>>,
-    pub unread: HashMap<UserId, usize>,
+    /// Ids of messages received but not yet shown, per contact.
+    pub unread: HashMap<UserId, Vec<String>>,
     known_ids: HashSet<String>,
+    /// Receipts waiting to go out.
+    receipts: ReceiptQueue,
+    /// Whether to tell contacts when their messages were shown.
+    pub read_receipts: bool,
     pub system: Vec<SystemLine>,
     /// 0 is the system pane; `i >= 1` selects `contacts[i - 1]`.
     pub selected: usize,
@@ -107,6 +115,7 @@ impl App {
         let contacts = store.load_contacts()?;
         let requests = store.load_requests()?;
         let blocked = store.load_blocked()?;
+        let read_receipts = store.load_config()?.read_receipts;
         let pending: HashSet<String> = client.pending_ids().into_iter().collect();
         let mut threads = HashMap::new();
         let mut known_ids: HashSet<String> = requests
@@ -127,6 +136,7 @@ impl App {
                         text: h.text,
                         delivered,
                         failed: false,
+                        receipt: h.receipt,
                     }
                 })
                 .collect();
@@ -145,6 +155,8 @@ impl App {
             threads,
             unread: HashMap::new(),
             known_ids,
+            receipts: ReceiptQueue::default(),
+            read_receipts,
             system: Vec::new(),
             selected: 0,
             input: String::new(),
@@ -194,7 +206,10 @@ impl App {
                 Some(ev) = keys.recv() => self.handle_terminal_event(ev),
                 Some(ev) = events.recv() => self.handle_client_event(ev),
                 Some(ev) = internal_rx.recv() => self.handle_internal(ev),
-                _ = tick.tick() => self.expire_toast(),
+                _ = tick.tick() => {
+                    self.expire_toast();
+                    self.flush_receipts();
+                }
             }
             if self.should_quit {
                 break;
@@ -279,6 +294,11 @@ impl App {
                 return;
             }
         }
+    }
+
+    fn contact_supports(&self, user_id: &UserId, cap: &str) -> bool {
+        self.contact_index(user_id)
+            .is_some_and(|i| self.contacts[i].supports(cap))
     }
 
     // --- notices -----------------------------------------------------------
@@ -389,7 +409,12 @@ impl App {
         self.selected = index.min(self.pane_count() - 1);
         self.scroll = 0;
         if let Some(id) = self.selected_contact().map(|c| c.user_id) {
-            self.unread.remove(&id);
+            let shown = self.unread.remove(&id).unwrap_or_default();
+            if self.read_receipts && self.contact_supports(&id, capability::RECEIPTS) {
+                for message_id in shown {
+                    self.receipts.read(id, message_id);
+                }
+            }
         }
     }
 
@@ -424,6 +449,7 @@ impl App {
             "verify" => self.cmd_verify(&rest),
             "refresh" => self.cmd_refresh(),
             "session" => self.cmd_session(),
+            "receipts" => self.cmd_receipts(&rest),
             "accept" => self.cmd_accept(&rest),
             "block" => self.cmd_block(&rest),
             "unblock" => self.cmd_unblock(&rest),
@@ -444,6 +470,7 @@ impl App {
             "  /verify ok | no          mark the selected contact as verified, or not",
             "  /refresh                 fetch the selected contact's key again and report changes",
             "  /session                 show how messages with the selected contact are protected",
+            "  /receipts on|off         tell contacts when you have read their messages (default on)",
             "  /accept <n|user-id>      accept a contact request from the Requests pane",
             "  /block <n|user-id>       ignore a requester or contact from now on; /unblock <user-id> undoes it",
             "  /blocked                 list blocked ids",
@@ -509,6 +536,38 @@ impl App {
         };
         let user_id = contact.user_id;
         self.lookup_contact(user_id, None);
+    }
+
+    fn cmd_receipts(&mut self, args: &[&str]) {
+        let on = match args.first().map(|s| s.to_ascii_lowercase()).as_deref() {
+            None => {
+                let state = if self.read_receipts { "on" } else { "off" };
+                self.toast(format!(
+                    "Read receipts are {state} (delivery receipts are always sent). Usage: /receipts on|off"
+                ));
+                return;
+            }
+            Some("on") => true,
+            Some("off") => false,
+            Some(_) => {
+                self.toast("Usage: /receipts on|off");
+                return;
+            }
+        };
+        self.read_receipts = on;
+        let mut config = self.store.load_config().unwrap_or_default();
+        config.read_receipts = on;
+        if let Err(e) = self.store.save_config(&config) {
+            self.toast(format!("Could not save config: {e}"));
+        }
+        self.system(
+            Level::Info,
+            if on {
+                "Read receipts on: contacts see ✓✓ when you have looked at their messages."
+            } else {
+                "Read receipts off: contacts only learn that their messages arrived, not that you read them."
+            },
+        );
     }
 
     fn cmd_session(&mut self) {
@@ -674,8 +733,17 @@ impl App {
             self.toast("Select a contact first, or /add <user-id>.");
             return;
         };
+        let peer = self.contacts[index].user_id;
+        self.send_content_to(peer, Content::Text { body: text });
+    }
+
+    /// Number and send any content to a contact; the outcome arrives as
+    /// [`Internal::SendDone`].
+    fn send_content_to(&mut self, peer: UserId, content: Content) {
+        let Some(index) = self.contact_index(&peer) else {
+            return;
+        };
         let contact = &mut self.contacts[index];
-        let peer = contact.user_id;
         let pinned = contact.bundle.clone();
         let sequence = contact.next_sequence(self.send_epoch);
         self.persist_contacts();
@@ -683,11 +751,27 @@ impl App {
         let tx = self.internal_tx.clone();
         tokio::spawn(async move {
             let result = client
-                .send_message(peer, pinned, text.clone(), sequence)
+                .send_content(peer, pinned, content.clone(), sequence)
                 .await
                 .map_err(|e| e.to_string());
-            let _ = tx.send(Internal::SendDone { peer, text, result }).await;
+            let _ = tx
+                .send(Internal::SendDone {
+                    peer,
+                    content,
+                    result,
+                })
+                .await;
         });
+    }
+
+    /// Send the receipts whose batching delay has passed.
+    fn flush_receipts(&mut self) {
+        if self.receipts.is_empty() {
+            return;
+        }
+        for (peer, content) in self.receipts.take_due(Instant::now()) {
+            self.send_content_to(peer, content);
+        }
     }
 
     fn handle_internal(&mut self, ev: Internal) {
@@ -742,7 +826,11 @@ impl App {
                 },
                 Err(e) => self.toast(format!("Lookup failed: {e}")),
             },
-            Internal::SendDone { peer, text, result } => match result {
+            Internal::SendDone {
+                peer,
+                content,
+                result,
+            } => match result {
                 Ok(delivery) => {
                     if let Some(i) = self.contact_index(&peer) {
                         if delivery.key_changed {
@@ -752,25 +840,32 @@ impl App {
                             self.persist_contacts();
                         }
                     }
-                    self.record(
-                        peer,
-                        ChatLine {
-                            id: delivery.envelope.id,
-                            direction: Direction::Sent,
-                            timestamp_ms: now_ms(),
-                            text,
-                            delivered: false,
-                            failed: false,
-                        },
-                    );
-                    self.scroll = 0;
+                    if let Content::Text { body } = content {
+                        self.record(
+                            peer,
+                            ChatLine {
+                                id: delivery.envelope.id,
+                                direction: Direction::Sent,
+                                timestamp_ms: now_ms(),
+                                text: body,
+                                delivered: false,
+                                failed: false,
+                                receipt: None,
+                            },
+                        );
+                        self.scroll = 0;
+                    }
                 }
                 Err(e) => {
-                    self.toast(format!("Not sent: {e}"));
-                    self.system(
-                        Level::Warn,
-                        format!("Message to {} not sent: {e}", self.contact_name(&peer)),
-                    );
+                    if let Content::Text { .. } = content {
+                        self.toast(format!("Not sent: {e}"));
+                        self.system(
+                            Level::Warn,
+                            format!("Message to {} not sent: {e}", self.contact_name(&peer)),
+                        );
+                    } else {
+                        tracing::debug!("receipt to {peer} not sent: {e}");
+                    }
                 }
             },
         }
@@ -808,14 +903,20 @@ impl App {
                 if self.blocked.contains(&from) {
                     return;
                 }
-                if self.contact_index(&from).is_none() {
-                    self.hold_request(message);
+                let Some(index) = self.contact_index(&from) else {
+                    // Strangers get no receipts, and their receipts mean nothing.
+                    if matches!(message.content, Content::Text { .. }) {
+                        self.hold_request(message);
+                    }
                     return;
+                };
+                if self.contacts[index].caps != message.caps {
+                    self.contacts[index].caps = message.caps.clone();
+                    self.persist_contacts();
                 }
 
                 // Sequence numbers: drop replays, mention gaps and resets.
                 let name = self.contact_name(&from);
-                let index = self.contact_index(&from).expect("contact exists");
                 let check = sequence::check(self.contacts[index].received, message.sequence);
                 match check {
                     SequenceCheck::Replay => {
@@ -840,20 +941,36 @@ impl App {
                     self.persist_contacts();
                 }
 
-                let Content::Text { body } = message.content;
-                self.record(
-                    from,
-                    ChatLine {
-                        id: message.id,
-                        direction: Direction::Received,
-                        timestamp_ms: message.sent_at_ms,
-                        text: body,
-                        delivered: true,
-                        failed: false,
-                    },
-                );
-                if self.selected_contact().map(|c| c.user_id) != Some(from) {
-                    *self.unread.entry(from).or_default() += 1;
+                match message.content {
+                    Content::Text { body } => {
+                        let id = message.id.clone();
+                        self.record(
+                            from,
+                            ChatLine {
+                                id: message.id,
+                                direction: Direction::Received,
+                                timestamp_ms: message.sent_at_ms,
+                                text: body,
+                                delivered: true,
+                                failed: false,
+                                receipt: None,
+                            },
+                        );
+                        let shown = self.selected_contact().map(|c| c.user_id) == Some(from);
+                        let wants = self.contacts[index].supports(capability::RECEIPTS);
+                        if shown && wants && self.read_receipts {
+                            self.receipts.read(from, id.clone());
+                        } else if wants {
+                            self.receipts.delivered(from, id.clone());
+                        }
+                        if !shown {
+                            self.unread.entry(from).or_default().push(id);
+                        }
+                    }
+                    Content::Receipt { kind, ids } => {
+                        self.known_ids.insert(message.id);
+                        self.apply_receipt(from, kind, &ids);
+                    }
                 }
             }
             ClientEvent::SessionEstablished {
@@ -888,10 +1005,35 @@ impl App {
 
     // --- contact requests ------------------------------------------------------
 
+    /// A contact told us how far our messages got: update their marks and
+    /// remember it in the history.
+    fn apply_receipt(&mut self, from: UserId, kind: ReceiptKind, ids: &[String]) {
+        let mut applied = Vec::new();
+        if let Some(lines) = self.threads.get_mut(&from) {
+            for line in lines.iter_mut() {
+                if line.direction == Direction::Sent
+                    && ids.contains(&line.id)
+                    && line.receipt.is_none_or(|r| r < kind)
+                {
+                    line.receipt = Some(kind);
+                    applied.push(line.id.clone());
+                }
+            }
+        }
+        if applied.is_empty() {
+            return;
+        }
+        if let Err(e) = self.store.append_receipt(&from, kind, &applied, now_ms()) {
+            self.toast(format!("Could not save receipt: {e}"));
+        }
+    }
+
     /// Keep a message from an unknown sender until the user decides.
     fn hold_request(&mut self, message: Message) {
         let from = message.from;
-        let Content::Text { body } = message.content;
+        let Content::Text { body } = message.content else {
+            return;
+        };
         let held = HeldMessage {
             id: message.id.clone(),
             timestamp_ms: message.sent_at_ms,
@@ -967,6 +1109,7 @@ impl App {
                     text: held.text,
                     delivered: true,
                     failed: false,
+                    receipt: None,
                 },
             );
         }
@@ -1068,6 +1211,7 @@ impl App {
             direction: line.direction,
             timestamp_ms: line.timestamp_ms,
             text: line.text.clone(),
+            receipt: None,
         };
         if let Err(e) = self.store.append_history(&peer, &entry) {
             self.toast(format!("Could not save history: {e}"));

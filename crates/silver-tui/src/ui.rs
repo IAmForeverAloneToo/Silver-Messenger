@@ -8,6 +8,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 use silver_client::Direction;
+use silver_protocol::envelope::ReceiptKind;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Connection, Level};
@@ -69,7 +70,11 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
 
     lines.push(row("System".into(), None, app.selected == 0));
     for (i, contact) in app.contacts.iter().enumerate() {
-        let unread = app.unread.get(&contact.user_id).copied().filter(|n| *n > 0);
+        let unread = app
+            .unread
+            .get(&contact.user_id)
+            .map(|ids| ids.len())
+            .filter(|n| *n > 0);
         let label = if contact.verified {
             format!("✓ {}", contact.display_name())
         } else {
@@ -201,17 +206,27 @@ fn thread_rows(app: &App, peer: &silver_protocol::UserId, width: usize) -> Vec<L
             Direction::Sent => ("you".to_owned(), Style::default().fg(Color::Green)),
             Direction::Received => (peer_name.clone(), Style::default().fg(Color::Cyan)),
         };
-        let mark = match (line.direction, line.delivered, line.failed) {
-            (Direction::Sent, _, true) => " ✗",
-            (Direction::Sent, false, false) => " ⋯",
-            _ => "",
+        // ⋯ waiting for the relay, ✓ accepted by the relay, ✓✓ delivered to
+        // their device, ✓✓ in colour read, ✗ refused for good.
+        let (mark, mark_style) = match line.direction {
+            Direction::Sent if line.failed => (" ✗", Style::default().fg(Color::Red)),
+            Direction::Sent if !line.delivered => (" ⋯", dim()),
+            Direction::Sent => match line.receipt {
+                Some(ReceiptKind::Read) => (
+                    " ✓✓",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Some(ReceiptKind::Delivered) => (" ✓✓", dim()),
+                None => (" ✓", dim()),
+            },
+            Direction::Received => ("", Style::default()),
         };
         let prefix = vec![
             Span::styled(format!("{} ", clock(line.timestamp_ms)), dim()),
-            Span::styled(
-                format!("{name}{mark}"),
-                name_style.add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(name, name_style.add_modifier(Modifier::BOLD)),
+            Span::styled(mark, mark_style),
             Span::raw(": "),
         ];
         rows.extend(wrap_message(prefix, &line.text, Style::default(), width));

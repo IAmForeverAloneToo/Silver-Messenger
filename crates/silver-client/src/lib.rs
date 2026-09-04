@@ -11,6 +11,7 @@ pub mod backup;
 pub mod connection;
 mod outbox;
 pub mod proxy;
+pub mod receipts;
 pub mod sequence;
 pub mod sessions;
 pub mod store;
@@ -21,7 +22,12 @@ pub mod vault;
 pub use backup::{BackupPayload, export_backup, import_backup, read_backup};
 pub use connection::{Client, ClientError, ClientEvent, DEFAULT_RELAY_URL, Delivery};
 pub use proxy::Proxy;
+pub use receipts::ReceiptQueue;
 pub use sessions::{SessionError, SessionInfo, SessionStore, SharedSessions};
+
+/// What this client understands beyond plain text, advertised inside every
+/// body it sends; see [`silver_protocol::envelope::capability`].
+pub const CAPABILITIES: &[&str] = &[silver_protocol::envelope::capability::RECEIPTS];
 pub use silver_protocol as protocol;
 pub use store::{Config, Contact, ContactRequest, Direction, HeldMessage, HistoryEntry, Store};
 pub use tls::ConnectOptions;
