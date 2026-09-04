@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Silver Messenger terminal client.
 
 mod app;

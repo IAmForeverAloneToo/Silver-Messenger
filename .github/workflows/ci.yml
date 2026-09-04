@@ -61,3 +61,26 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y tmux
       - run: pip install pyte || pip install --break-system-packages pyte
       - run: TERMS=${{ matrix.term }} tests/tui/run.sh
+
+  fuzz:
+    name: fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [frames, envelope, blob_chunk, session, invite_link, file_name, stored]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=60 -max_len=4096
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-${{ matrix.target }}-crash
+          path: fuzz/artifacts

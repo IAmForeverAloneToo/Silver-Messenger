@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Client core for Silver Messenger: everything a front end needs except the UI.
 //!
 //! * [`Store`] – on-disk identity, contacts, config and message history.

@@ -6,6 +6,8 @@ members = [
     "crates/silver-client",
     "crates/silver-tui",
 ]
+# The fuzz targets need nightly and libfuzzer; they build on their own.
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.5.0"

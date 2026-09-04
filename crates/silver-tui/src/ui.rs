@@ -938,6 +938,117 @@ mod tests {
         }
     }
 
+    /// Everything a peer controls that reaches the screen (message text,
+    /// an alias, a held request, a file name) is drawn through the cell
+    /// buffer, which drops control characters, escape sequences and bidi
+    /// overrides. This pins that down against the real terminal backend.
+    #[tokio::test]
+    async fn nothing_a_peer_sends_reaches_the_terminal_raw() {
+        use crate::app::{ChatLine, Connection};
+        use ratatui::{Terminal, backend::CrosstermBackend};
+        use silver_client::{Client, ConnectOptions, Contact, ContactRequest, HeldMessage, Store};
+        use silver_protocol::{Identity, Sequence};
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct Shared(Arc<Mutex<Vec<u8>>>);
+        impl Write for Shared {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        const NASTY: &str = "x\x1b]2;pwned\x07y\x1b]52;c;cHduZWQ=\x07z\x1b[31mred\r\n\x08\u{202e}gnp.exe\u{200b}\t\x1b\\";
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let (identity, _) = store.load_or_create_identity().unwrap();
+        let url = "ws://127.0.0.1:1/ws".to_owned();
+        let (client, _events) =
+            Client::spawn(url.clone(), Arc::new(identity), ConnectOptions::default()).unwrap();
+        let mut app = App::new(
+            store,
+            client,
+            url,
+            false,
+            1,
+            crate::glyphs::UNICODE,
+            crate::theme::Theme::dark(),
+        )
+        .unwrap();
+        app.connection = Connection::Connected;
+        let peer = Identity::generate().user_id();
+        let mut contact = Contact::new(peer);
+        contact.alias = Some(NASTY.to_owned());
+        app.contacts.push(contact);
+        app.threads.insert(
+            peer,
+            vec![ChatLine {
+                id: "1".into(),
+                direction: Direction::Received,
+                timestamp_ms: 1_735_732_800_000,
+                text: NASTY.to_owned(),
+                delivered: true,
+                failed: false,
+                receipt: None,
+                file: None,
+                pending: None,
+            }],
+        );
+        app.requests.push(ContactRequest {
+            from: Identity::generate().user_id(),
+            first_seen_ms: 1_735_732_800_000,
+            messages: vec![HeldMessage {
+                id: "r1".into(),
+                timestamp_ms: 1_735_732_800_000,
+                text: NASTY.to_owned(),
+                sequence: Sequence::default(),
+                file: None,
+            }],
+        });
+        app.input = NASTY.to_owned();
+
+        let shared = Shared(Arc::new(Mutex::new(Vec::new())));
+        let mut terminal = Terminal::new(CrosstermBackend::new(shared.clone())).unwrap();
+        for pane in [1, 2, 0] {
+            app.selected = pane;
+            terminal.draw(|f| draw(f, &mut app)).unwrap();
+        }
+        app.help_open = true;
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let out = String::from_utf8_lossy(&shared.0.lock().unwrap()).into_owned();
+        assert!(
+            out.contains("pwned") && out.contains("red"),
+            "the text itself is shown"
+        );
+        for forbidden in [
+            "\x1b]2;", "\x1b]52;", "\x07", "\x1b[31m", "\r", "\x08", "\x1b\\",
+        ] {
+            assert!(
+                !out.contains(forbidden),
+                "{forbidden:?} reached the terminal"
+            );
+        }
+        for forbidden in ['\u{202e}', '\u{200b}', '\t'] {
+            let near = out.find(forbidden).map(|i| {
+                let start = out[..i].char_indices().rev().nth(30).map_or(0, |(j, _)| j);
+                let end = out[i..]
+                    .char_indices()
+                    .nth(30)
+                    .map_or(out.len(), |(j, _)| i + j);
+                out[start..end].to_owned()
+            });
+            assert!(
+                !out.contains(forbidden),
+                "{forbidden:?} reached the terminal near {near:?}"
+            );
+        }
+    }
+
     #[test]
     fn date_rules_name_today_and_yesterday() {
         let today = NaiveDate::from_ymd_opt(2026, 9, 4).unwrap();

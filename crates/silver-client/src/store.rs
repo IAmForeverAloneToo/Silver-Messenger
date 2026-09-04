@@ -193,10 +193,15 @@ impl Contact {
         }
     }
 
-    /// Alias if set, otherwise a short form of the id.
+    /// Alias if set, otherwise a short form of the id. The alias is reduced
+    /// to what can be seen even if the file on disk says otherwise: it
+    /// ends up in window titles and notifications, not only in the cell
+    /// buffer.
     pub fn display_name(&self) -> String {
         self.alias
-            .clone()
+            .as_deref()
+            .map(|alias| crate::files::printable(alias, 40))
+            .filter(|alias| !alias.is_empty())
             .unwrap_or_else(|| format!("{}…", self.user_id.short()))
     }
 }

@@ -160,6 +160,57 @@ impl Selection {
 
 /// Clicks closer together than this on the same cell count as one.
 const MULTI_CLICK: Duration = Duration::from_millis(450);
+/// Strangers waiting in the Requests pane, at most.
+const MAX_REQUESTS: usize = 50;
+/// Messages kept per waiting stranger, at most; older ones go first.
+const MAX_HELD_PER_SENDER: usize = 20;
+/// Characters kept of a held message.
+const MAX_HELD_CHARS: usize = 4000;
+/// Characters an alias may have.
+const MAX_ALIAS_CHARS: usize = 40;
+/// Message ids remembered for de-duplication.
+const KNOWN_IDS_CAP: usize = 20_000;
+/// How far ahead of this clock a peer's claimed send time may be.
+const FUTURE_SLACK_MS: u64 = 2 * 60 * 1000;
+
+/// A peer's claimed send time, kept from placing a message in the future.
+fn claimed_time(sent_at_ms: u64) -> u64 {
+    sent_at_ms.min(now_ms().saturating_add(FUTURE_SLACK_MS))
+}
+
+/// The most recent message ids, for telling a re-delivery from a new
+/// message without remembering every id ever seen.
+pub struct RecentIds {
+    set: HashSet<String>,
+    order: std::collections::VecDeque<String>,
+    cap: usize,
+}
+
+impl RecentIds {
+    pub fn new(cap: usize) -> Self {
+        Self {
+            set: HashSet::new(),
+            order: std::collections::VecDeque::new(),
+            cap: cap.max(1),
+        }
+    }
+
+    pub fn insert(&mut self, id: String) {
+        if !self.set.insert(id.clone()) {
+            return;
+        }
+        self.order.push_back(id);
+        while self.order.len() > self.cap {
+            if let Some(old) = self.order.pop_front() {
+                self.set.remove(&old);
+            }
+        }
+    }
+
+    pub fn contains(&self, id: &str) -> bool {
+        self.set.contains(id)
+    }
+}
 
 /// Results of background work spawned by the UI.
 enum Internal {
@@ -202,7 +253,9 @@ pub struct App {
     pub threads: HashMap<UserId, Vec<ChatLine>>,
     /// Ids of messages received but not yet shown, per contact.
     pub unread: HashMap<UserId, Vec<String>>,
-    known_ids: HashSet<String>,
+    known_ids: RecentIds,
+    /// The note that the Requests pane is full has been made.
+    requests_full_noted: bool,
     /// Receipts waiting to go out.
     receipts: ReceiptQueue,
     /// Whether to tell contacts when their messages were shown.
@@ -284,10 +337,13 @@ impl App {
         let notifier = Notifier::new(NotifyMode::parse(&config.notify).unwrap_or(NotifyMode::All));
         let pending: HashSet<String> = client.pending_ids().into_iter().collect();
         let mut threads = HashMap::new();
-        let mut known_ids: HashSet<String> = requests
+        let mut known_ids = RecentIds::new(KNOWN_IDS_CAP);
+        for id in requests
             .iter()
-            .flat_map(|r| r.messages.iter().map(|m| m.id.clone()))
-            .collect();
+            .flat_map(|r| r.messages.iter().map(|m| &m.id))
+        {
+            known_ids.insert(id.clone());
+        }
         for contact in &contacts {
             let lines: Vec<ChatLine> = store
                 .load_history(&contact.user_id)?
@@ -329,6 +385,7 @@ impl App {
             threads,
             unread: HashMap::new(),
             known_ids,
+            requests_full_noted: false,
             receipts: ReceiptQueue::default(),
             read_receipts,
             glyphs,
@@ -1837,7 +1894,13 @@ impl App {
             self.toast("Usage: /alias <name>");
             return;
         }
-        self.contacts[index].alias = Some(args.join(" "));
+        // Only what can be seen, and not a paragraph of it.
+        let alias = silver_client::files::printable(&args.join(" "), MAX_ALIAS_CHARS);
+        if alias.is_empty() {
+            self.toast("An alias needs at least one visible character.");
+            return;
+        }
+        self.contacts[index].alias = Some(alias);
         self.persist_contacts();
     }
 
@@ -2201,7 +2264,7 @@ impl App {
                     ChatLine {
                         id: message.id,
                         direction: Direction::Received,
-                        timestamp_ms: message.sent_at_ms,
+                        timestamp_ms: claimed_time(message.sent_at_ms),
                         text,
                         delivered: true,
                         failed: false,
@@ -2537,18 +2600,40 @@ impl App {
             }
             Content::Receipt { .. } => return,
         };
+        // Strangers get bounded room: so many senders, so much per sender.
+        let mut text: String = text.chars().take(MAX_HELD_CHARS).collect();
+        if text.chars().count() == MAX_HELD_CHARS {
+            text.push('…');
+        }
         let held = HeldMessage {
             id: message.id.clone(),
-            timestamp_ms: message.sent_at_ms,
+            timestamp_ms: claimed_time(message.sent_at_ms),
             text,
             sequence: message.sequence,
             file,
         };
         self.known_ids.insert(message.id);
-        let is_new = match self.requests.iter_mut().find(|r| r.from == from) {
-            Some(request) => {
+        let is_new = match self.requests.iter().position(|r| r.from == from) {
+            Some(i) => {
+                let request = &mut self.requests[i];
                 request.messages.push(held);
+                // The newest ones are kept: they are what /accept shows.
+                while request.messages.len() > MAX_HELD_PER_SENDER {
+                    request.messages.remove(0);
+                }
                 false
+            }
+            None if self.requests.len() >= MAX_REQUESTS => {
+                if !self.requests_full_noted {
+                    self.requests_full_noted = true;
+                    self.system(
+                        Level::Warn,
+                        format!(
+                            "{MAX_REQUESTS} people are waiting in the Requests pane; messages from anyone else are dropped until some are accepted or blocked."
+                        ),
+                    );
+                }
+                return;
             }
             None => {
                 self.requests.push(ContactRequest {

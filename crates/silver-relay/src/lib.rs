@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! The Silver Messenger relay.
 //!
 //! The relay is deliberately dumb: it authenticates clients by challenge

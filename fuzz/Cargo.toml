@@ -1,0 +1,68 @@
+# Fuzz targets for everything that parses bytes from the network or the
+# disk. Not a workspace member: libfuzzer needs nightly, and the normal
+# build must not. `cargo +nightly fuzz run <target>` from the repository
+# root; CI runs each target for a short while on every push.
+
+[package]
+name = "silver-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+silver-protocol = { path = "../crates/silver-protocol" }
+silver-client = { path = "../crates/silver-client" }
+
+[[bin]]
+name = "frames"
+path = "fuzz_targets/frames.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "envelope"
+path = "fuzz_targets/envelope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "blob_chunk"
+path = "fuzz_targets/blob_chunk.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "session"
+path = "fuzz_targets/session.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "invite_link"
+path = "fuzz_targets/invite_link.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "file_name"
+path = "fuzz_targets/file_name.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "stored"
+path = "fuzz_targets/stored.rs"
+test = false
+doc = false
+bench = false

@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Shared types and end-to-end cryptography for Silver Messenger.
 //!
 //! Everything a relay is allowed to see lives in [`wire`] and [`Envelope`].

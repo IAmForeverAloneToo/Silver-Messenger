@@ -116,10 +116,9 @@ impl Notifier {
 
 /// Keep a notification to printable text without the OSC separator.
 fn sanitize(text: &str) -> String {
-    text.chars()
-        .filter(|c| !c.is_control())
+    silver_client::files::printable(text, 120)
+        .chars()
         .map(|c| if c == ';' { ',' } else { c })
-        .take(120)
         .collect()
 }
 

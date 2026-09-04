@@ -402,6 +402,18 @@ fn is_invisible(c: char) -> bool {
     )
 }
 
+/// `text` without control or invisible characters, at most `max_chars`
+/// long: what a peer chose (an alias, a message shown in a notification)
+/// reduced to what a person can see.
+pub fn printable(text: &str, max_chars: usize) -> String {
+    text.chars()
+        .filter(|c| !c.is_control() && !is_invisible(*c))
+        .take(max_chars)
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
 /// Names Windows keeps for devices, judged on the part before the first
 /// dot: `CON`, `con.txt` and `COM1.tar.gz` all are.
 fn is_reserved_device_name(name: &str) -> bool {
@@ -419,30 +431,52 @@ fn is_reserved_device_name(name: &str) -> bool {
 /// A file name safe to create locally and honest on screen: no
 /// directories, no control or invisible characters, composed the one way
 /// (NFC), nothing hidden, nothing Windows would refuse or trim, at most
-/// 120 characters with the extension kept.
+/// 120 characters with the extension kept. Sanitizing the result again
+/// gives the result: the passes run until nothing changes, since cutting a
+/// long name can change which part counts as its extension.
 pub fn sanitize_name(name: &str) -> String {
+    let mut name = sanitize_pass(name);
+    for _ in 0..4 {
+        let again = sanitize_pass(&name);
+        if again == name {
+            break;
+        }
+        name = again;
+    }
+    name
+}
+
+fn sanitize_pass(name: &str) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    // Invisible characters go before composition: one sitting between a
+    // letter and its accent would otherwise keep them apart.
     let cleaned: String = base
-        .nfc()
+        .chars()
         .filter(|c| {
             !c.is_control()
                 && !is_invisible(*c)
                 && !matches!(c, ':' | '*' | '?' | '"' | '<' | '>' | '|')
         })
+        .collect::<String>()
+        .nfc()
         .collect();
-    let trimmed = cleaned
-        .trim()
-        .trim_start_matches('.')
-        .trim_end_matches(['.', ' ']);
+    let edge = |c: char| c == '.' || c.is_whitespace();
+    let trimmed = cleaned.trim_start_matches(edge).trim_end_matches(edge);
     if trimmed.is_empty() {
         return "file".to_owned();
     }
     let (stem, ext) = split_extension(trimmed);
-    let room = MAX_NAME_CHARS.saturating_sub(ext.chars().count()).max(1);
+    // One character is kept back for the device-name mark below, so the
+    // result never needs a second cut.
+    let room = (MAX_NAME_CHARS - 1)
+        .saturating_sub(ext.chars().count())
+        .max(1);
     let stem: String = stem.chars().take(room).collect();
-    let stem = stem.trim_end_matches(['.', ' ']);
+    let stem = stem.trim_end_matches(edge);
     let stem = if stem.is_empty() { "file" } else { stem };
     let name = format!("{stem}{ext}");
+    // Windows device names get a mark so the file is a file; judged on the
+    // finished name, since trimming the stem can be what makes it one.
     if is_reserved_device_name(&name) {
         format!("_{name}")
     } else {
@@ -577,12 +611,22 @@ mod tests {
         assert_eq!(sanitize_name("name. . ."), "name");
         assert_eq!(sanitize_name("name.txt "), "name.txt");
         assert_eq!(sanitize_name("..."), "file");
+        // Found by the fuzzer: the trailing space hid the device name once.
+        assert_eq!(sanitize_name("CON . `"), "_CON. `");
+        assert_eq!(sanitize_name("_CON. `"), "_CON. `");
         let long = format!("{}.jpeg", "a".repeat(300));
         let got = sanitize_name(&long);
         assert!(
-            got.ends_with(".jpeg") && got.chars().count() == MAX_NAME_CHARS,
+            got.ends_with(".jpeg") && got.chars().count() == MAX_NAME_CHARS - 1,
             "{got}"
         );
+        let long_device = format!("CON{}.txt", "x".repeat(300));
+        assert!(sanitize_name(&long_device).chars().count() <= MAX_NAME_CHARS);
+        // Found by the fuzzer: cutting the name turned its tail into an
+        // extension, which a second pass then trimmed differently.
+        let shifting = format!("a{} ..{}", "b".repeat(110), "c".repeat(20));
+        let once = sanitize_name(&shifting);
+        assert_eq!(sanitize_name(&once), once, "{once}");
         let info = FileInfo {
             name: "re\u{202e}fdp.exe".into(),
             size: 10,
@@ -592,6 +636,8 @@ mod tests {
             sha256: [0; 32],
         };
         assert_eq!(info.label(), "refdp.exe (10 B)");
+        assert_eq!(printable(" bob\u{202e}\x1b]2;x\x07 ", 40), "bob]2;x");
+        assert_eq!(printable(&"x".repeat(100), 8), "xxxxxxxx");
     }
 
     #[test]
