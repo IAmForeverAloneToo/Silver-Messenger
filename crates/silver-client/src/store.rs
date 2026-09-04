@@ -182,12 +182,21 @@ struct ReceiptLine {
     at_ms: u64,
 }
 
+/// A later line that replaces the text of an earlier entry, for example
+/// once a file it announced has been fetched and saved.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct TextLine {
+    update: String,
+    text: String,
+}
+
 /// What one line of a history file can be.
 #[derive(Serialize, Deserialize)]
 #[serde(untagged)]
 enum HistoryLine {
     Entry(HistoryEntry),
     Receipt(ReceiptLine),
+    Text(TextLine),
 }
 
 /// A message from someone who is not a contact yet, held until the user
@@ -561,6 +570,16 @@ impl Store {
         self.append_history_line(peer, &serde_json::to_string(&line)?)
     }
 
+    /// Replace the text of the entry `id` from now on; the original line
+    /// stays in the file.
+    pub fn append_text(&self, peer: &UserId, id: &str, text: &str) -> anyhow::Result<()> {
+        let line = TextLine {
+            update: id.to_owned(),
+            text: text.to_owned(),
+        };
+        self.append_history_line(peer, &serde_json::to_string(&line)?)
+    }
+
     fn append_history_line(&self, peer: &UserId, json: &str) -> anyhow::Result<()> {
         self.ensure_unlocked()?;
         let name = history_name(peer);
@@ -603,6 +622,11 @@ impl Store {
                         }
                     }
                 }
+                Ok(HistoryLine::Text(update)) => {
+                    if let Some(entry) = entries.iter_mut().rev().find(|e| e.id == update.update) {
+                        entry.text = update.text;
+                    }
+                }
                 Err(e) => {
                     tracing::warn!("skipping unreadable history line in {name}: {e:#}")
                 }
@@ -614,6 +638,11 @@ impl Store {
     /// Where the client keeps not-yet-accepted outgoing envelopes.
     pub fn outbox_path(&self) -> PathBuf {
         self.root.join(OUTBOX_FILE)
+    }
+
+    /// Where received files are saved.
+    pub fn downloads_dir(&self) -> PathBuf {
+        self.root.join("downloads")
     }
 }
 
@@ -741,6 +770,31 @@ mod tests {
         assert_eq!(history[1].receipt, None);
         assert_eq!(history[2].receipt, Some(ReceiptKind::Read));
         assert_eq!(history[3].receipt, None);
+    }
+
+    #[test]
+    fn text_updates_replace_an_entry_and_survive_reloading() {
+        let (store, _dir) = temp_store();
+        let peer = Identity::generate().user_id();
+        for i in 0..3 {
+            store.append_history(&peer, &entry(i)).unwrap();
+        }
+        store
+            .append_text(&peer, "1", "[file] a.txt → /home/me/a.txt")
+            .unwrap();
+        store.append_text(&peer, "9", "nobody").unwrap(); // unknown id: ignored
+        let history = store.load_history(&peer).unwrap();
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[0].text, "msg 0");
+        assert_eq!(history[1].text, "[file] a.txt → /home/me/a.txt");
+        assert_eq!(history[2].text, "msg 2");
+        // Receipts still land on the updated entry.
+        store
+            .append_receipt(&peer, ReceiptKind::Read, &["1".into()], 5)
+            .unwrap();
+        let history = store.load_history(&peer).unwrap();
+        assert_eq!(history[1].receipt, Some(ReceiptKind::Read));
+        assert_eq!(history[1].text, "[file] a.txt → /home/me/a.txt");
     }
 
     #[test]

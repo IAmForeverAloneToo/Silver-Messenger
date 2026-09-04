@@ -1029,3 +1029,119 @@ async fn submission_uses_the_authenticated_connection_when_it_must() {
     .await;
     assert_eq!(state.anonymous_submission_count(), 0);
 }
+
+// --- attachments --------------------------------------------------------------
+
+#[tokio::test]
+async fn files_travel_as_encrypted_blobs() {
+    let (url, state) = start_relay().await;
+    let alice = Arc::new(Identity::generate());
+    let bob = Arc::new(Identity::generate());
+    let (alice_c, mut alice_ev) =
+        Client::spawn(url.clone(), alice.clone(), with_sessions(&alice)).unwrap();
+    let (bob_c, mut bob_ev) = Client::spawn(url.clone(), bob.clone(), with_sessions(&bob)).unwrap();
+    connected(&mut alice_ev, "alice").await;
+    connected(&mut bob_ev, "bob").await;
+    assert!(alice_c.relay_supports(silver_protocol::wire::feature::BLOBS));
+
+    // Four chunks' worth of pseudo-random bytes.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("data.bin");
+    let data: Vec<u8> = (0..200_000u32)
+        .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+        .collect();
+    std::fs::write(&path, &data).unwrap();
+
+    let (ptx, mut prx) = mpsc::channel(64);
+    let info = alice_c.upload_file(&path, Some(ptx)).await.unwrap();
+    assert_eq!((info.chunks, info.size), (4, 200_000));
+    let mut last = None;
+    while let Ok(p) = prx.try_recv() {
+        last = Some(p);
+    }
+    assert_eq!(last.map(|p| (p.done, p.total)), Some((4, 4)));
+    assert_eq!(state.stats().blobs, 1);
+    // The relay holds ciphertext only.
+    let stored = state.stats().blob_bytes as usize;
+    assert!(stored > data.len() && stored < data.len() + 4 * 32);
+
+    alice_c
+        .send_content(
+            bob.user_id(),
+            None,
+            info.clone().into_content(),
+            Sequence::default(),
+        )
+        .await
+        .unwrap();
+    let got = wait_for(
+        &mut bob_ev,
+        "file message",
+        |e| matches!(e, ClientEvent::Message(m) if matches!(m.content, Content::File { .. })),
+    )
+    .await;
+    let ClientEvent::Message(m) = got else {
+        unreachable!()
+    };
+    let received = silver_client::FileInfo::from_content(&m.content).unwrap();
+    assert_eq!(received, info);
+    assert!(m.caps.iter().any(|c| c == "files"));
+
+    let saved = bob_c
+        .download_file(&received, &dir.path().join("downloads"), None)
+        .await
+        .unwrap();
+    assert_eq!(saved, dir.path().join("downloads").join("data.bin"));
+    assert_eq!(std::fs::read(&saved).unwrap(), data);
+    // Fetched again, it lands next to the first copy rather than over it.
+    let again = bob_c
+        .download_file(&received, &dir.path().join("downloads"), None)
+        .await
+        .unwrap();
+    assert_eq!(again, dir.path().join("downloads").join("data (2).bin"));
+
+    // A blob the relay does not have fails cleanly.
+    let mut missing = received.clone();
+    missing.blob = silver_protocol::blob::new_blob_id();
+    let err = bob_c
+        .download_file(&missing, dir.path(), None)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, silver_client::ClientError::Blob(_)), "{err}");
+    // A file the sender lied about is refused after fetching.
+    let mut lying = received.clone();
+    lying.sha256[0] ^= 1;
+    let err = bob_c
+        .download_file(&lying, dir.path(), None)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("hash"), "{err}");
+    // Neither the message nor the chunks went through the authenticated
+    // connections.
+    assert_eq!(state.anonymous_submission_count(), 1);
+}
+
+#[tokio::test]
+async fn a_relay_without_file_storage_says_so() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/ws", listener.local_addr().unwrap());
+    let state = RelayState::with_store_and_policy(
+        silver_relay::Store::in_memory().unwrap(),
+        Limits::default(),
+        silver_relay::Policy {
+            max_blob_mib: 0,
+            ..Default::default()
+        },
+    );
+    tokio::spawn(silver_relay::serve(listener, state, std::future::pending()));
+    let alice = Arc::new(Identity::generate());
+    let (alice_c, mut alice_ev) =
+        Client::spawn(url.clone(), alice.clone(), with_sessions(&alice)).unwrap();
+    connected(&mut alice_ev, "alice").await;
+    assert!(!alice_c.relay_supports(silver_protocol::wire::feature::BLOBS));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("note.txt");
+    std::fs::write(&path, b"hello").unwrap();
+    let err = alice_c.upload_file(&path, None).await.unwrap_err();
+    assert!(err.to_string().contains("does not store files"), "{err}");
+}

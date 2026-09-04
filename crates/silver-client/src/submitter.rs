@@ -1,19 +1,19 @@
 //! The anonymous submission connection.
 //!
-//! A relay that advertises anonymous submission accepts `Send` frames on a
-//! connection that never authenticates. Submitting on such a connection
-//! instead of the authenticated one means the relay cannot pair an
-//! envelope with the identity that sent it; it still sees the address the
-//! connection came from and when it was used (see docs/THREAT_MODEL.md).
+//! A relay that advertises anonymous submission accepts `Send` frames, and
+//! file chunks, on a connection that never authenticates. Submitting on
+//! such a connection instead of the authenticated one means the relay
+//! cannot pair an envelope or a file with the identity that sent or fetched
+//! it; it still sees the address the connection came from and when it was
+//! used (see docs/THREAT_MODEL.md).
 //!
 //! The submitter is a background task with its own reconnect loop. The
-//! main connection hands it envelopes and gets back `Sent`/`Rejected`
-//! answers, plus `Ready`/`Down` so it knows when to hand more over.
+//! main connection hands it frames and gets back the relay's answers, plus
+//! `Ready`/`Down` so it knows when to hand more over.
 
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use silver_protocol::Envelope;
 use silver_protocol::wire::{ClientFrame, ErrorCode, ServerFrame};
 use tokio::sync::mpsc;
 use tokio_tungstenite::Connector;
@@ -28,7 +28,7 @@ const KEEPALIVE: Duration = Duration::from_secs(30);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
 pub(crate) enum SubmitEvent {
-    /// Connected; envelopes handed over now will be submitted.
+    /// Connected; frames handed over now will be submitted.
     Ready,
     Sent {
         id: String,
@@ -38,7 +38,9 @@ pub(crate) enum SubmitEvent {
         code: ErrorCode,
         message: String,
     },
-    /// The connection dropped; envelopes handed over since `Ready` and not
+    /// A file chunk answer: `BlobAck`, `BlobRejected` or `BlobChunk`.
+    Blob(Box<ServerFrame>),
+    /// The connection dropped; frames handed over since `Ready` and not
     /// answered must be resent after the next `Ready`.
     Down {
         reason: String,
@@ -49,7 +51,7 @@ pub(crate) enum SubmitEvent {
 }
 
 pub(crate) struct Submitter {
-    tx: mpsc::Sender<Envelope>,
+    tx: mpsc::Sender<ClientFrame>,
     events: mpsc::Receiver<SubmitEvent>,
     pub(crate) ready: bool,
 }
@@ -66,9 +68,9 @@ impl Submitter {
         }
     }
 
-    /// Hand an envelope over. `false` if the task has stopped.
-    pub(crate) async fn submit(&self, envelope: Envelope) -> bool {
-        self.tx.send(envelope).await.is_ok()
+    /// Hand a frame over. `false` if the task has stopped.
+    pub(crate) async fn submit(&self, frame: ClientFrame) -> bool {
+        self.tx.send(frame).await.is_ok()
     }
 
     pub(crate) async fn next_event(&mut self) -> Option<SubmitEvent> {
@@ -80,7 +82,7 @@ async fn run(
     relay_url: String,
     connector: Connector,
     proxy: Option<Proxy>,
-    mut rx: mpsc::Receiver<Envelope>,
+    mut rx: mpsc::Receiver<ClientFrame>,
     events: mpsc::Sender<SubmitEvent>,
 ) {
     let mut backoff = Duration::from_secs(1);
@@ -117,9 +119,9 @@ async fn run(
     }
 }
 
-/// Resolves when the sender side of the channel is dropped. Envelopes that
+/// Resolves when the sender side of the channel is dropped. Frames that
 /// arrive meanwhile are left in the channel for the next session.
-async fn closed(rx: &mut mpsc::Receiver<Envelope>) {
+async fn closed(rx: &mut mpsc::Receiver<ClientFrame>) {
     loop {
         if rx.is_closed() {
             return;
@@ -138,7 +140,7 @@ async fn session(
     relay_url: &str,
     connector: Connector,
     proxy: Option<&Proxy>,
-    rx: &mut mpsc::Receiver<Envelope>,
+    rx: &mut mpsc::Receiver<ClientFrame>,
     events: &mpsc::Sender<SubmitEvent>,
 ) -> anyhow::Result<Exit> {
     let ws = tokio::time::timeout(
@@ -163,13 +165,12 @@ async fn session(
 
     loop {
         tokio::select! {
-            envelope = rx.recv() => match envelope {
+            frame = rx.recv() => match frame {
                 None => {
                     let _ = sink.close().await;
                     return Ok(Exit::Closed);
                 }
-                Some(envelope) => {
-                    let frame = ClientFrame::Send { envelope };
+                Some(frame) => {
                     if sink.send(WsMessage::Text(frame.encode().into())).await.is_err() {
                         return Ok(Exit::Dropped("send failed".into()));
                     }
@@ -186,6 +187,9 @@ async fn session(
                     Ok(ServerFrame::Rejected { id, code, message }) => {
                         SubmitEvent::Rejected { id, code, message }
                     }
+                    Ok(frame @ (ServerFrame::BlobAck { .. }
+                        | ServerFrame::BlobRejected { .. }
+                        | ServerFrame::BlobChunk { .. })) => SubmitEvent::Blob(Box::new(frame)),
                     Ok(ServerFrame::Error { code: ErrorCode::Unauthenticated, message }) => {
                         warn!("relay refused anonymous submission: {message}");
                         return Ok(Exit::Refused);

@@ -28,6 +28,12 @@ const BY_ID: TableDefinition<&str, (&[u8], u64)> = TableDefinition::new("by_id")
 const USAGE: TableDefinition<&[u8], (u64, u64)> = TableDefinition::new("usage");
 const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
 const NEXT_SEQ: &str = "next_seq";
+/// `blob id -> BlobMeta JSON` for encrypted file chunks on deposit.
+const BLOBS: TableDefinition<&str, &[u8]> = TableDefinition::new("blobs");
+/// `(blob id, chunk index) -> ciphertext`.
+const BLOB_CHUNKS: TableDefinition<(&str, u32), &[u8]> = TableDefinition::new("blob_chunks");
+/// Bytes of chunks stored in total, for the storage cap.
+const BLOB_BYTES: &str = "blob_bytes";
 
 /// Limits applied to each recipient's mailbox.
 #[derive(Clone, Copy, Debug)]
@@ -61,6 +67,57 @@ pub struct Stats {
     pub mailboxes: u64,
     pub messages: u64,
     pub bytes: u64,
+    pub blobs: u64,
+    pub blob_bytes: u64,
+}
+
+/// Caps on encrypted file storage.
+#[derive(Clone, Copy, Debug)]
+pub struct BlobLimits {
+    /// Largest blob, in bytes of ciphertext.
+    pub max_blob_bytes: u64,
+    /// Ciphertext bytes the relay keeps in total.
+    pub max_total_bytes: u64,
+}
+
+impl Default for BlobLimits {
+    fn default() -> Self {
+        Self {
+            max_blob_bytes: 16 * 1024 * 1024 + 256 * 16,
+            max_total_bytes: 1024 * 1024 * 1024,
+        }
+    }
+}
+
+/// What the relay knows about a blob.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BlobMeta {
+    pub total: u32,
+    pub received: u32,
+    pub bytes: u64,
+    pub created_at_ms: u64,
+}
+
+impl BlobMeta {
+    pub fn is_complete(&self) -> bool {
+        self.received == self.total
+    }
+}
+
+/// Outcome of storing a chunk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlobPut {
+    Stored {
+        complete: bool,
+    },
+    /// This chunk is already there; nothing changed.
+    Duplicate,
+    /// `total` or `index` do not fit the blob as first announced.
+    Mismatch,
+    /// The blob would exceed the per-blob cap.
+    TooLarge,
+    /// The relay's blob storage is full.
+    StorageFull,
 }
 
 pub struct Store {
@@ -94,9 +151,115 @@ impl Store {
             txn.open_table(BY_ID)?;
             txn.open_table(USAGE)?;
             txn.open_table(META)?;
+            txn.open_table(BLOBS)?;
+            txn.open_table(BLOB_CHUNKS)?;
         }
         txn.commit()?;
         Ok(Self { db })
+    }
+
+    // --- blobs ---------------------------------------------------------------
+
+    /// Store one chunk of a blob, creating the blob on its first chunk.
+    pub fn put_blob_chunk(
+        &self,
+        blob: &str,
+        index: u32,
+        total: u32,
+        data: &[u8],
+        now_ms: u64,
+        limits: BlobLimits,
+    ) -> anyhow::Result<BlobPut> {
+        let txn = self.db.begin_write()?;
+        let outcome = {
+            let mut blobs = txn.open_table(BLOBS)?;
+            let mut chunks = txn.open_table(BLOB_CHUNKS)?;
+            let mut meta_table = txn.open_table(META)?;
+            let mut meta: BlobMeta = match blobs.get(blob)? {
+                Some(guard) => serde_json::from_slice(guard.value())?,
+                None => BlobMeta {
+                    total,
+                    received: 0,
+                    bytes: 0,
+                    created_at_ms: now_ms,
+                },
+            };
+            let stored = meta_table.get(BLOB_BYTES)?.map(|g| g.value()).unwrap_or(0);
+            if meta.total != total || index >= total {
+                BlobPut::Mismatch
+            } else if chunks.get((blob, index))?.is_some() {
+                BlobPut::Duplicate
+            } else if meta.bytes + data.len() as u64 > limits.max_blob_bytes {
+                BlobPut::TooLarge
+            } else if stored + data.len() as u64 > limits.max_total_bytes {
+                BlobPut::StorageFull
+            } else {
+                chunks.insert((blob, index), data)?;
+                meta.received += 1;
+                meta.bytes += data.len() as u64;
+                blobs.insert(blob, serde_json::to_vec(&meta)?.as_slice())?;
+                meta_table.insert(BLOB_BYTES, stored + data.len() as u64)?;
+                BlobPut::Stored {
+                    complete: meta.is_complete(),
+                }
+            }
+        };
+        txn.commit()?;
+        Ok(outcome)
+    }
+
+    pub fn blob_meta(&self, blob: &str) -> anyhow::Result<Option<BlobMeta>> {
+        let txn = self.db.begin_read()?;
+        match txn.open_table(BLOBS)?.get(blob)? {
+            Some(guard) => Ok(Some(serde_json::from_slice(guard.value())?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn blob_chunk(&self, blob: &str, index: u32) -> anyhow::Result<Option<Vec<u8>>> {
+        let txn = self.db.begin_read()?;
+        Ok(txn
+            .open_table(BLOB_CHUNKS)?
+            .get((blob, index))?
+            .map(|g| g.value().to_vec()))
+    }
+
+    /// Delete blobs created before `cutoff_ms`, complete or not. Returns
+    /// how many.
+    pub fn expire_blobs(&self, cutoff_ms: u64) -> anyhow::Result<usize> {
+        let victims: Vec<(String, BlobMeta)> = {
+            let txn = self.db.begin_read()?;
+            let table = txn.open_table(BLOBS)?;
+            let mut victims = Vec::new();
+            for item in table.iter()? {
+                let (key, value) = item?;
+                let meta: BlobMeta = serde_json::from_slice(value.value())?;
+                if meta.created_at_ms < cutoff_ms {
+                    victims.push((key.value().to_owned(), meta));
+                }
+            }
+            victims
+        };
+        if victims.is_empty() {
+            return Ok(0);
+        }
+        let txn = self.db.begin_write()?;
+        {
+            let mut blobs = txn.open_table(BLOBS)?;
+            let mut chunks = txn.open_table(BLOB_CHUNKS)?;
+            let mut meta_table = txn.open_table(META)?;
+            let mut stored = meta_table.get(BLOB_BYTES)?.map(|g| g.value()).unwrap_or(0);
+            for (blob, meta) in &victims {
+                for index in 0..meta.total {
+                    chunks.remove((blob.as_str(), index))?;
+                }
+                blobs.remove(blob.as_str())?;
+                stored = stored.saturating_sub(meta.bytes);
+            }
+            meta_table.insert(BLOB_BYTES, stored)?;
+        }
+        txn.commit()?;
+        Ok(victims.len())
     }
 
     pub fn put_bundle(&self, bundle: &KeyBundle) -> anyhow::Result<()> {
@@ -347,9 +510,17 @@ impl Store {
     pub fn stats(&self) -> anyhow::Result<Stats> {
         let txn = self.db.begin_read()?;
         let bundles = txn.open_table(BUNDLES)?.len()?;
+        let blobs = txn.open_table(BLOBS)?.len()?;
+        let blob_bytes = txn
+            .open_table(META)?
+            .get(BLOB_BYTES)?
+            .map(|g| g.value())
+            .unwrap_or(0);
         let usage = txn.open_table(USAGE)?;
         let mut stats = Stats {
             bundles,
+            blobs,
+            blob_bytes,
             ..Stats::default()
         };
         for item in usage.iter()? {
@@ -473,6 +644,73 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn blob_chunks_are_stored_once_capped_and_expired() {
+        let store = Store::in_memory().unwrap();
+        let limits = BlobLimits {
+            max_blob_bytes: 10,
+            max_total_bytes: 15,
+        };
+        let id = "a".repeat(32);
+        assert_eq!(
+            store
+                .put_blob_chunk(&id, 0, 2, b"12345", 1, limits)
+                .unwrap(),
+            BlobPut::Stored { complete: false }
+        );
+        assert_eq!(
+            store
+                .put_blob_chunk(&id, 0, 2, b"12345", 1, limits)
+                .unwrap(),
+            BlobPut::Duplicate
+        );
+        assert_eq!(
+            store.put_blob_chunk(&id, 1, 3, b"1", 1, limits).unwrap(),
+            BlobPut::Mismatch
+        );
+        assert_eq!(
+            store.put_blob_chunk(&id, 2, 2, b"1", 1, limits).unwrap(),
+            BlobPut::Mismatch
+        );
+        assert_eq!(
+            store
+                .put_blob_chunk(&id, 1, 2, b"123456", 1, limits)
+                .unwrap(),
+            BlobPut::TooLarge
+        );
+        assert_eq!(
+            store
+                .put_blob_chunk(&id, 1, 2, b"12345", 1, limits)
+                .unwrap(),
+            BlobPut::Stored { complete: true }
+        );
+        let meta = store.blob_meta(&id).unwrap().unwrap();
+        assert!(meta.is_complete() && meta.bytes == 10);
+        assert_eq!(store.blob_chunk(&id, 1).unwrap().unwrap(), b"12345");
+        assert!(store.blob_chunk(&id, 2).unwrap().is_none());
+        // The relay-wide cap counts every blob.
+        let other = "b".repeat(32);
+        assert_eq!(
+            store
+                .put_blob_chunk(&other, 0, 1, b"123456", 2, limits)
+                .unwrap(),
+            BlobPut::StorageFull
+        );
+        assert_eq!(
+            store
+                .put_blob_chunk(&other, 0, 1, b"12345", 2, limits)
+                .unwrap(),
+            BlobPut::Stored { complete: true }
+        );
+        let stats = store.stats().unwrap();
+        assert_eq!((stats.blobs, stats.blob_bytes), (2, 15));
+        // Expiry frees the space.
+        assert_eq!(store.expire_blobs(2).unwrap(), 1);
+        assert!(store.blob_meta(&id).unwrap().is_none());
+        assert!(store.blob_chunk(&id, 0).unwrap().is_none());
+        assert_eq!(store.stats().unwrap().blob_bytes, 5);
     }
 
     #[test]

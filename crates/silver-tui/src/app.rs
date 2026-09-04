@@ -1,6 +1,8 @@
 //! Application state, key handling and command dispatch.
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use ratatui::DefaultTerminal;
@@ -9,8 +11,8 @@ use ratatui::crossterm::event::{
 };
 use silver_client::sequence::{self, SequenceCheck};
 use silver_client::{
-    Client, ClientError, ClientEvent, Contact, ContactRequest, Delivery, Direction, HeldMessage,
-    HistoryEntry, InviteLink, ReceiptQueue, Store,
+    Client, ClientError, ClientEvent, Contact, ContactRequest, Delivery, Direction, FileInfo,
+    HeldMessage, HistoryEntry, InviteLink, Progress, ReceiptQueue, Store,
 };
 use silver_protocol::envelope::{ReceiptKind, capability};
 use silver_protocol::{Content, KeyBundle, Message, UserId, now_ms};
@@ -71,7 +73,21 @@ enum Internal {
     SendDone {
         peer: UserId,
         content: Content,
-        result: Result<Delivery, String>,
+        result: Result<Box<Delivery>, String>,
+    },
+    /// A transfer moved on; shown as a toast.
+    Progress { text: String },
+    /// A file is on the relay (or could not be put there).
+    Uploaded {
+        peer: UserId,
+        result: Result<FileInfo, String>,
+    },
+    /// A received file was fetched and saved (or not).
+    Downloaded {
+        peer: UserId,
+        id: String,
+        label: String,
+        result: Result<PathBuf, String>,
     },
 }
 
@@ -619,6 +635,7 @@ impl App {
             "block" => self.cmd_block(&rest),
             "unblock" => self.cmd_unblock(&rest),
             "blocked" => self.cmd_blocked(),
+            "send" | "file" | "attach" => self.cmd_send(&rest),
             "relay" => self.cmd_relay(&rest),
             "quit" | "q" | "exit" => self.should_quit = true,
             other => self.toast(format!("Unknown command /{other}. Try /help.")),
@@ -641,6 +658,7 @@ impl App {
             "  /accept <n|user-id>      accept a contact request from the Requests pane",
             "  /block <n|user-id>       ignore a requester or contact from now on; /unblock <user-id> undoes it",
             "  /blocked                 list blocked ids",
+            "  /send <path>             send a file (up to 16 MiB) to the selected contact; received files land in <data-dir>/downloads",
             "  /search <text>           find messages in the selected chat (or all chats from System)",
             "  /me                      show your own id",
             "  /relay <ws-url>          change the relay (takes effect on next start)",
@@ -1064,7 +1082,7 @@ impl App {
                 .send(Internal::SendDone {
                     peer,
                     content,
-                    result,
+                    result: result.map(Box::new),
                 })
                 .await;
         });
@@ -1146,15 +1164,25 @@ impl App {
                             self.persist_contacts();
                         }
                     }
-                    if let Content::Text { body } = content {
+                    let text = match &content {
+                        Content::Text { body } => Some(body.clone()),
+                        Content::File { .. } => FileInfo::from_content(&content)
+                            .map(|i| format!("[file] {}", i.label())),
+                        Content::Receipt { .. } => None,
+                    };
+                    if let Some(text) = text {
+                        // The relay may have answered before this event was
+                        // handled; a line born delivered shows no pending mark.
+                        let id = delivery.envelope.id;
+                        let delivered = !self.client.pending_ids().contains(&id);
                         self.record(
                             peer,
                             ChatLine {
-                                id: delivery.envelope.id,
+                                id,
                                 direction: Direction::Sent,
                                 timestamp_ms: now_ms(),
-                                text: body,
-                                delivered: false,
+                                text,
+                                delivered,
                                 failed: false,
                                 receipt: None,
                             },
@@ -1163,17 +1191,56 @@ impl App {
                     }
                 }
                 Err(e) => {
-                    if let Content::Text { .. } = content {
+                    if matches!(content, Content::Receipt { .. }) {
+                        tracing::debug!("receipt to {peer} not sent: {e}");
+                    } else {
                         self.toast(format!("Not sent: {e}"));
                         self.system(
                             Level::Warn,
                             format!("Message to {} not sent: {e}", self.contact_name(&peer)),
                         );
-                    } else {
-                        tracing::debug!("receipt to {peer} not sent: {e}");
                     }
                 }
             },
+            Internal::Progress { text } => self.toast(text),
+            Internal::Uploaded { peer, result } => match result {
+                Ok(info) => {
+                    self.toast(format!("Sent {}", info.label()));
+                    self.send_content_to(peer, info.into_content());
+                }
+                Err(e) => {
+                    self.toast(format!("File not sent: {e}"));
+                    self.system(
+                        Level::Warn,
+                        format!("File to {} not sent: {e}", self.contact_name(&peer)),
+                    );
+                }
+            },
+            Internal::Downloaded {
+                peer,
+                id,
+                label,
+                result,
+            } => {
+                let text = match &result {
+                    Ok(path) => format!("[file] {label} → {}", path.display()),
+                    Err(e) => format!("[file] {label} ✗ {e}"),
+                };
+                self.set_line_text(&peer, &id, text.clone());
+                if let Err(e) = self.store.append_text(&peer, &id, &text) {
+                    self.toast(format!("Could not save history: {e}"));
+                }
+                match result {
+                    Ok(path) => self.toast(format!("Saved {}", path.display())),
+                    Err(e) => self.system(
+                        Level::Warn,
+                        format!(
+                            "Could not fetch {label} from {}: {e}",
+                            self.contact_name(&peer)
+                        ),
+                    ),
+                }
+            }
         }
     }
 
@@ -1202,6 +1269,7 @@ impl App {
                 self.toast(format!("Not delivered: {reason}"));
             }
             ClientEvent::Message(message) => {
+                let message = *message;
                 if self.known_ids.contains(&message.id) {
                     return; // relay re-delivered something we already have
                 }
@@ -1211,7 +1279,7 @@ impl App {
                 }
                 let Some(index) = self.contact_index(&from) else {
                     // Strangers get no receipts, and their receipts mean nothing.
-                    if matches!(message.content, Content::Text { .. }) {
+                    if !matches!(message.content, Content::Receipt { .. }) {
                         self.hold_request(message);
                     }
                     return;
@@ -1247,39 +1315,46 @@ impl App {
                     self.persist_contacts();
                 }
 
-                match message.content {
-                    Content::Text { body } => {
-                        let id = message.id.clone();
-                        self.record(
-                            from,
-                            ChatLine {
-                                id: message.id,
-                                direction: Direction::Received,
-                                timestamp_ms: message.sent_at_ms,
-                                text: body,
-                                delivered: true,
-                                failed: false,
-                                receipt: None,
-                            },
-                        );
-                        let shown = self.selected_contact().map(|c| c.user_id) == Some(from);
-                        if !shown || !self.focused {
-                            self.notifier.announce(&format!("New message from {name}"));
-                        }
-                        let wants = self.contacts[index].supports(capability::RECEIPTS);
-                        if shown && wants && self.read_receipts {
-                            self.receipts.read(from, id.clone());
-                        } else if wants {
-                            self.receipts.delivered(from, id.clone());
-                        }
-                        if !shown {
-                            self.unread.entry(from).or_default().push(id);
-                        }
+                let (text, file) = match message.content {
+                    Content::Text { body } => (body, None),
+                    Content::File { .. } => {
+                        let info = FileInfo::from_content(&message.content).expect("file content");
+                        (format!("[file] {}", info.label()), Some(info))
                     }
                     Content::Receipt { kind, ids } => {
                         self.known_ids.insert(message.id);
                         self.apply_receipt(from, kind, &ids);
+                        return;
                     }
+                };
+                let id = message.id.clone();
+                self.record(
+                    from,
+                    ChatLine {
+                        id: message.id,
+                        direction: Direction::Received,
+                        timestamp_ms: message.sent_at_ms,
+                        text,
+                        delivered: true,
+                        failed: false,
+                        receipt: None,
+                    },
+                );
+                let shown = self.selected_contact().map(|c| c.user_id) == Some(from);
+                if !shown || !self.focused {
+                    self.notifier.announce(&format!("New message from {name}"));
+                }
+                let wants = self.contacts[index].supports(capability::RECEIPTS);
+                if shown && wants && self.read_receipts {
+                    self.receipts.read(from, id.clone());
+                } else if wants {
+                    self.receipts.delivered(from, id.clone());
+                }
+                if !shown {
+                    self.unread.entry(from).or_default().push(id.clone());
+                }
+                if let Some(info) = file {
+                    self.start_download(from, id, info);
                 }
             }
             ClientEvent::SessionEstablished {
@@ -1337,16 +1412,114 @@ impl App {
         }
     }
 
+    /// Fetch a file a contact sent, updating its line as it goes.
+    fn start_download(&mut self, peer: UserId, id: String, info: FileInfo) {
+        let label = info.label();
+        self.set_line_text(&peer, &id, format!("[file] {label} · receiving…"));
+        let client = self.client.clone();
+        let tx = self.internal_tx.clone();
+        let dir = self.store.downloads_dir();
+        let (ptx, prx) = mpsc::channel::<Progress>(16);
+        tokio::spawn(async move {
+            let result = with_progress(
+                &tx,
+                prx,
+                &format!("Receiving {label}"),
+                client.download_file(&info, &dir, Some(ptx)),
+            )
+            .await
+            .map_err(|e| e.to_string());
+            let _ = tx
+                .send(Internal::Downloaded {
+                    peer,
+                    id,
+                    label,
+                    result,
+                })
+                .await;
+        });
+    }
+
+    fn set_line_text(&mut self, peer: &UserId, id: &str, text: String) {
+        if let Some(line) = self
+            .threads
+            .get_mut(peer)
+            .and_then(|lines| lines.iter_mut().rev().find(|l| l.id == id))
+        {
+            line.text = text;
+        }
+    }
+
+    /// Send a file to the selected contact: upload it, then a message that
+    /// says where it is and how to read it.
+    fn cmd_send(&mut self, args: &[&str]) {
+        let Some(index) = self.selected_contact_index() else {
+            self.toast("Select a contact first.");
+            return;
+        };
+        if args.is_empty() {
+            self.toast("Usage: /send <path to file>");
+            return;
+        }
+        let contact = &self.contacts[index];
+        let (peer, name) = (contact.user_id, contact.display_name());
+        if !contact.supports(capability::FILES) {
+            self.system(
+                Level::Warn,
+                format!(
+                    "{name}'s client has not shown that it can receive files. They need Silver Messenger 0.4.0 or later and to have written to you since updating."
+                ),
+            );
+            self.toast(format!("{name} cannot receive files yet; see System."));
+            return;
+        }
+        if !self
+            .client
+            .relay_supports(silver_protocol::wire::feature::BLOBS)
+        {
+            self.system(
+                Level::Warn,
+                "The relay does not store files; it needs Silver Messenger 0.4.0 or later.",
+            );
+            self.toast("The relay is too old for files; see System.");
+            return;
+        }
+        let path = expand_home(&args.join(" "));
+        let client = self.client.clone();
+        let tx = self.internal_tx.clone();
+        let (ptx, prx) = mpsc::channel::<Progress>(16);
+        self.toast(format!("Sending {}…", path.display()));
+        tokio::spawn(async move {
+            let result = with_progress(
+                &tx,
+                prx,
+                &format!("Sending {}", path.display()),
+                client.upload_file(&path, Some(ptx)),
+            )
+            .await
+            .map_err(|e| e.to_string());
+            let _ = tx.send(Internal::Uploaded { peer, result }).await;
+        });
+    }
+
     /// Keep a message from an unknown sender until the user decides.
     fn hold_request(&mut self, message: Message) {
         let from = message.from;
-        let Content::Text { body } = message.content else {
-            return;
+        let text = match message.content {
+            Content::Text { body } => body,
+            Content::File { .. } => {
+                let info = FileInfo::from_content(&message.content).expect("file content");
+                format!(
+                    "[file] {} (files from people you have not accepted are not fetched; ask them to send it again once you have)",
+                    info.label()
+                )
+            }
+            Content::Receipt { .. } => return,
         };
         let held = HeldMessage {
             id: message.id.clone(),
             timestamp_ms: message.sent_at_ms,
-            text: body,
+            text,
             sequence: message.sequence,
         };
         self.known_ids.insert(message.id);
@@ -1530,6 +1703,46 @@ impl App {
         self.known_ids.insert(line.id.clone());
         self.threads.entry(peer).or_default().push(line);
     }
+}
+
+/// Drive a transfer while showing its progress as "`label`: N%" toasts. The
+/// transfer's outcome is returned only once the reports made before it were
+/// shown, so a stale percentage never lands on top of the final word.
+async fn with_progress<T>(
+    tx: &mpsc::Sender<Internal>,
+    mut reports: mpsc::Receiver<Progress>,
+    label: &str,
+    work: impl Future<Output = T>,
+) -> T {
+    let mut work = std::pin::pin!(work);
+    let mut open = true;
+    loop {
+        tokio::select! {
+            result = &mut work => return result,
+            report = reports.recv(), if open => match report {
+                Some(p) => {
+                    let percent = p.done * 100 / p.total.max(1);
+                    let _ = tx
+                        .send(Internal::Progress {
+                            text: format!("{label}: {percent}%"),
+                        })
+                        .await;
+                }
+                None => open = false,
+            },
+        }
+    }
+}
+
+/// `~/x` as the user's home directory plus `x`.
+fn expand_home(path: &str) -> PathBuf {
+    let path = path.trim();
+    if let Some(rest) = path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")) {
+        if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    PathBuf::from(path)
 }
 
 /// Crossterm's reader blocks, so it gets a thread of its own.

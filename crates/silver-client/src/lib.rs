@@ -9,6 +9,7 @@
 
 pub mod backup;
 pub mod connection;
+pub mod files;
 pub mod invite;
 mod outbox;
 pub mod proxy;
@@ -21,7 +22,8 @@ pub mod tls;
 pub mod vault;
 
 pub use backup::{BackupPayload, export_backup, import_backup, read_backup};
-pub use connection::{Client, ClientError, ClientEvent, DEFAULT_RELAY_URL, Delivery};
+pub use connection::{Client, ClientError, ClientEvent, DEFAULT_RELAY_URL, Delivery, Progress};
+pub use files::{FileInfo, human_size};
 pub use invite::InviteLink;
 pub use proxy::Proxy;
 pub use receipts::ReceiptQueue;
@@ -29,7 +31,10 @@ pub use sessions::{SessionError, SessionInfo, SessionStore, SharedSessions};
 
 /// What this client understands beyond plain text, advertised inside every
 /// body it sends; see [`silver_protocol::envelope::capability`].
-pub const CAPABILITIES: &[&str] = &[silver_protocol::envelope::capability::RECEIPTS];
+pub const CAPABILITIES: &[&str] = &[
+    silver_protocol::envelope::capability::RECEIPTS,
+    silver_protocol::envelope::capability::FILES,
+];
 pub use silver_protocol as protocol;
 pub use store::{Config, Contact, ContactRequest, Direction, HeldMessage, HistoryEntry, Store};
 pub use tls::ConnectOptions;

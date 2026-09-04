@@ -32,6 +32,7 @@
 //! What is deliberately not provided: deniability (messages are signed),
 //! padding of message sizes, and cover traffic.
 
+pub mod blob;
 pub mod bundle;
 pub mod encoding;
 pub mod envelope;
@@ -42,6 +43,7 @@ pub mod session;
 pub mod verify;
 pub mod wire;
 
+pub use blob::BlobKey;
 pub use bundle::KeyBundle;
 pub use envelope::{
     Body, Content, Envelope, MAX_BODY_BYTES, MAX_CIPHERTEXT_BYTES, Message, Opened, RatchetBody,

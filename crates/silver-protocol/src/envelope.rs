@@ -21,6 +21,7 @@ use x25519_dalek::{EphemeralSecret, PublicKey};
 use zeroize::Zeroizing;
 
 use crate::ProtocolError;
+use crate::blob::BlobKey;
 use crate::bundle::KeyBundle;
 use crate::encoding::{b64, b64_array};
 use crate::identity::{DhPublic, Identity, UserId};
@@ -60,6 +61,17 @@ pub enum Content {
         kind: ReceiptKind,
         ids: Vec<String>,
     },
+    /// A file parked on the relay as an encrypted blob; everything needed
+    /// to fetch and read it. Only sent to peers that advertised `files`.
+    File {
+        name: String,
+        size: u64,
+        blob: String,
+        key: BlobKey,
+        chunks: u32,
+        #[serde(with = "b64_array")]
+        sha256: [u8; 32],
+    },
 }
 
 /// How far a message got on the recipient's side. Ordered: read implies
@@ -77,6 +89,8 @@ pub enum ReceiptKind {
 pub mod capability {
     /// The client understands `Content::Receipt` and would like to get them.
     pub const RECEIPTS: &str = "receipts";
+    /// The client understands `Content::File` and fetches blobs.
+    pub const FILES: &str = "files";
 }
 
 /// Position of a message in the sender's stream to one recipient.

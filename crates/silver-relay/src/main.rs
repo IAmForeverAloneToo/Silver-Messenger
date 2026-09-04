@@ -57,6 +57,15 @@ struct Args {
     /// 0 turns them off.
     #[arg(long, env = "SILVER_RELAY_ANONYMOUS_SENDS_PER_MINUTE", default_value_t = Policy::default().anonymous_sends_per_minute)]
     anonymous_sends_per_minute: u32,
+
+    /// Largest encrypted file to store, in MiB; 0 turns file transfer off.
+    #[arg(long, env = "SILVER_RELAY_MAX_BLOB_MIB", default_value_t = Policy::default().max_blob_mib)]
+    max_blob_mib: u32,
+
+    /// Encrypted file bytes to keep in total, in MiB. Files expire with
+    /// messages after --message-ttl-days.
+    #[arg(long, env = "SILVER_RELAY_BLOB_STORAGE_MIB", default_value_t = Policy::default().blob_storage_mib)]
+    blob_storage_mib: u32,
 }
 
 #[tokio::main]
@@ -77,6 +86,9 @@ async fn main() -> anyhow::Result<()> {
         lookups_per_minute: args.lookups_per_minute,
         invite_token: args.invite_token.filter(|t| !t.trim().is_empty()),
         anonymous_sends_per_minute: args.anonymous_sends_per_minute,
+        max_blob_mib: args.max_blob_mib,
+        blob_storage_mib: args.blob_storage_mib,
+        ..Policy::default()
     };
     if policy.invite_token.is_some() {
         info!("registration requires an invite token");

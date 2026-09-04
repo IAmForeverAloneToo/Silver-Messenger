@@ -30,6 +30,7 @@ use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use rand::RngCore;
 use rand::rngs::OsRng;
+use silver_protocol::blob::{MAX_CHUNK_CIPHERTEXT, MAX_CHUNKS, is_valid_blob_id};
 use silver_protocol::wire::{
     ClientFrame, ErrorCode, MAX_FRAME_BYTES, ServerFrame, feature, verify_auth,
 };
@@ -38,7 +39,7 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-pub use store::{Enqueue, Limits, Stats, Store};
+pub use store::{BlobLimits, BlobMeta, BlobPut, Enqueue, Limits, Stats, Store};
 
 pub const DEFAULT_LISTEN: &str = "0.0.0.0:7777";
 
@@ -70,6 +71,13 @@ pub struct Policy {
     /// Envelopes a connection that never authenticates may submit per
     /// minute. Zero refuses such connections altogether.
     pub anonymous_sends_per_minute: u32,
+    /// Largest encrypted file the relay stores, in MiB. Zero turns file
+    /// storage off.
+    pub max_blob_mib: u32,
+    /// Encrypted file bytes the relay keeps in total, in MiB.
+    pub blob_storage_mib: u32,
+    /// File chunks (64 KiB each) one connection may put or get per minute.
+    pub blob_chunks_per_minute: u32,
 }
 
 impl Default for Policy {
@@ -79,6 +87,19 @@ impl Default for Policy {
             lookups_per_minute: 30,
             invite_token: None,
             anonymous_sends_per_minute: 30,
+            max_blob_mib: 16,
+            blob_storage_mib: 1024,
+            blob_chunks_per_minute: 600,
+        }
+    }
+}
+
+impl Policy {
+    fn blob_limits(&self) -> BlobLimits {
+        BlobLimits {
+            // Each chunk carries a 16-byte authentication tag.
+            max_blob_bytes: u64::from(self.max_blob_mib) * 1024 * 1024 + u64::from(MAX_CHUNKS) * 16,
+            max_total_bytes: u64::from(self.blob_storage_mib) * 1024 * 1024,
         }
     }
 }
@@ -120,6 +141,7 @@ impl Bucket {
 struct Conn {
     sends: Bucket,
     lookups: Bucket,
+    blobs: Bucket,
     /// The client published prekeys, so it speaks protocol v2: it gets
     /// prekey status reports and one-time prekeys with its lookups.
     prekeys: bool,
@@ -130,6 +152,7 @@ impl Conn {
         Self {
             sends: Bucket::per_minute(policy.sends_per_minute),
             lookups: Bucket::per_minute(policy.lookups_per_minute),
+            blobs: Bucket::per_minute(policy.blob_chunks_per_minute),
             prekeys: false,
         }
     }
@@ -241,19 +264,157 @@ impl RelayState {
         if self.policy.anonymous_sends_per_minute > 0 {
             features.push(feature::ANONYMOUS_SEND.to_owned());
         }
+        if self.policy.max_blob_mib > 0 {
+            features.push(feature::BLOBS.to_owned());
+        }
         features
     }
 
-    /// Delete unacknowledged envelopes older than `ttl`. Returns how many.
-    pub fn expire(&self, ttl: Duration) -> usize {
+    /// Delete unacknowledged envelopes and file blobs older than `ttl`.
+    /// Returns how many of each.
+    pub fn expire(&self, ttl: Duration) -> (usize, usize) {
         let cutoff = now_ms().saturating_sub(ttl.as_millis() as u64);
-        match self.store.expire(cutoff) {
-            Ok(n) => n,
+        let messages = self.store.expire(cutoff).unwrap_or_else(|e| {
+            error!("expiring messages: {e:#}");
+            0
+        });
+        let blobs = self.store.expire_blobs(cutoff).unwrap_or_else(|e| {
+            error!("expiring blobs: {e:#}");
+            0
+        });
+        (messages, blobs)
+    }
+
+    /// Store one chunk of an encrypted file; the reply for the uploader.
+    fn put_blob(
+        &self,
+        blob: String,
+        index: u32,
+        total: u32,
+        data: &[u8],
+        bucket: &mut Bucket,
+    ) -> ServerFrame {
+        if self.policy.max_blob_mib == 0 {
+            return blob_rejected(
+                &blob,
+                ErrorCode::Forbidden,
+                "this relay does not store files",
+            );
+        }
+        if !is_valid_blob_id(&blob) {
+            return blob_rejected(
+                &blob,
+                ErrorCode::Malformed,
+                "blob id must be 32 hex characters",
+            );
+        }
+        if total == 0 || total > MAX_CHUNKS || data.len() > MAX_CHUNK_CIPHERTEXT {
+            return blob_rejected(&blob, ErrorCode::TooLarge, "chunk or file too large");
+        }
+        if !bucket.try_take() {
+            return blob_rejected(&blob, ErrorCode::RateLimited, "too many chunks; slow down");
+        }
+        match self.store.put_blob_chunk(
+            &blob,
+            index,
+            total,
+            data,
+            now_ms(),
+            self.policy.blob_limits(),
+        ) {
+            Ok(BlobPut::Stored { complete }) => ServerFrame::BlobAck {
+                blob,
+                index,
+                complete,
+            },
+            Ok(BlobPut::Duplicate) => {
+                let complete = self
+                    .store
+                    .blob_meta(&blob)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|m| m.is_complete());
+                ServerFrame::BlobAck {
+                    blob,
+                    index,
+                    complete,
+                }
+            }
+            Ok(BlobPut::Mismatch) => blob_rejected(
+                &blob,
+                ErrorCode::Malformed,
+                "chunk does not fit the file as first announced",
+            ),
+            Ok(BlobPut::TooLarge) => blob_rejected(
+                &blob,
+                ErrorCode::TooLarge,
+                "the file is larger than this relay allows",
+            ),
+            Ok(BlobPut::StorageFull) => blob_rejected(
+                &blob,
+                ErrorCode::StorageFull,
+                "the relay has no room for more files right now",
+            ),
             Err(e) => {
-                error!("expiring messages: {e:#}");
-                0
+                error!("storing blob chunk: {e:#}");
+                blob_rejected(&blob, ErrorCode::Internal, "storage error")
             }
         }
+    }
+
+    /// Every chunk of a complete blob, or one rejection.
+    fn get_blob(&self, blob: &str, bucket: &mut Bucket) -> Vec<ServerFrame> {
+        if !is_valid_blob_id(blob) {
+            return vec![blob_rejected(
+                blob,
+                ErrorCode::Malformed,
+                "blob id must be 32 hex characters",
+            )];
+        }
+        let meta = match self.store.blob_meta(blob) {
+            Ok(Some(meta)) if meta.is_complete() => meta,
+            Ok(_) => {
+                return vec![blob_rejected(
+                    blob,
+                    ErrorCode::NotFound,
+                    "no such file on this relay (it may have expired)",
+                )];
+            }
+            Err(e) => {
+                error!("reading blob: {e:#}");
+                return vec![blob_rejected(blob, ErrorCode::Internal, "storage error")];
+            }
+        };
+        let mut frames = Vec::with_capacity(meta.total as usize);
+        for index in 0..meta.total {
+            if !bucket.try_take() {
+                return vec![blob_rejected(
+                    blob,
+                    ErrorCode::RateLimited,
+                    "too many chunks; slow down",
+                )];
+            }
+            match self.store.blob_chunk(blob, index) {
+                Ok(Some(data)) => frames.push(ServerFrame::BlobChunk {
+                    blob: blob.to_owned(),
+                    index,
+                    total: meta.total,
+                    data,
+                }),
+                Ok(None) => {
+                    return vec![blob_rejected(
+                        blob,
+                        ErrorCode::NotFound,
+                        "file is incomplete",
+                    )];
+                }
+                Err(e) => {
+                    error!("reading blob chunk: {e:#}");
+                    return vec![blob_rejected(blob, ErrorCode::Internal, "storage error")];
+                }
+            }
+        }
+        frames
     }
 
     fn online(&self) -> std::sync::MutexGuard<'_, HashMap<UserId, Session>> {
@@ -411,12 +572,22 @@ impl RelayState {
     }
 }
 
-/// Periodically delete envelopes older than `ttl`, forever.
+fn blob_rejected(blob: &str, code: ErrorCode, message: &str) -> ServerFrame {
+    ServerFrame::BlobRejected {
+        blob: blob.to_owned(),
+        code,
+        message: message.to_owned(),
+    }
+}
+
+/// Periodically delete envelopes and blobs older than `ttl`, forever.
 pub async fn expire_periodically(state: Arc<RelayState>, ttl: Duration, every: Duration) {
     loop {
-        let removed = state.expire(ttl);
-        if removed > 0 {
-            info!("expired {removed} unacknowledged envelopes older than {ttl:?}");
+        let (messages, blobs) = state.expire(ttl);
+        if messages > 0 || blobs > 0 {
+            info!(
+                "expired {messages} unacknowledged envelopes and {blobs} files older than {ttl:?}"
+            );
         }
         tokio::time::sleep(every).await;
     }
@@ -483,10 +654,12 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>) {
             }
             user_id
         }
-        Ok(Some(Ok(ClientFrame::Send { envelope })))
-            if state.policy.anonymous_sends_per_minute > 0 =>
-        {
-            anonymous_session(sink, stream, &state, envelope).await;
+        Ok(Some(Ok(
+            frame @ (ClientFrame::Send { .. }
+            | ClientFrame::BlobPut { .. }
+            | ClientFrame::BlobGet { .. }),
+        ))) if state.policy.anonymous_sends_per_minute > 0 => {
+            anonymous_session(sink, stream, &state, frame).await;
             return;
         }
         Ok(Some(Ok(_))) => {
@@ -558,18 +731,19 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>) {
     info!(%user, session_id, "client disconnected");
 }
 
-/// A connection that only submits envelopes and never says who it is. It
-/// gets its own, stricter rate limit and nothing else: no mailbox, no
-/// lookups, no bundle.
+/// A connection that only submits envelopes and moves file chunks, and
+/// never says who it is. It gets its own, stricter rate limits and nothing
+/// else: no mailbox, no lookups, no bundle.
 async fn anonymous_session(
     mut sink: Sink,
     mut stream: Stream,
     state: &RelayState,
-    first: Envelope,
+    first: ClientFrame,
 ) {
     debug!("anonymous submission session opened");
     let mut bucket = Bucket::per_minute(state.policy.anonymous_sends_per_minute);
-    let mut next = Some(ClientFrame::Send { envelope: first });
+    let mut blobs = Bucket::per_minute(state.policy.blob_chunks_per_minute);
+    let mut next = Some(first);
     loop {
         let frame = match next.take() {
             Some(frame) => frame,
@@ -587,19 +761,28 @@ async fn anonymous_session(
                 None => break,
             },
         };
-        let reply = match frame {
+        let replies = match frame {
             ClientFrame::Send { envelope } => {
                 state.anonymous_submissions.fetch_add(1, Ordering::Relaxed);
-                state.submit(envelope, &mut bucket, None)
+                vec![state.submit(envelope, &mut bucket, None)]
             }
-            ClientFrame::Ping => ServerFrame::Pong,
-            _ => ServerFrame::error(
+            ClientFrame::BlobPut {
+                blob,
+                index,
+                total,
+                data,
+            } => vec![state.put_blob(blob, index, total, &data, &mut blobs)],
+            ClientFrame::BlobGet { blob } => state.get_blob(&blob, &mut blobs),
+            ClientFrame::Ping => vec![ServerFrame::Pong],
+            _ => vec![ServerFrame::error(
                 ErrorCode::Unauthenticated,
-                "this connection only accepts send and ping",
-            ),
+                "this connection only accepts send, file chunks and ping",
+            )],
         };
-        if send(&mut sink, &reply).await.is_err() {
-            return;
+        for reply in replies {
+            if send(&mut sink, &reply).await.is_err() {
+                return;
+            }
         }
     }
     debug!("anonymous submission session closed");
@@ -653,6 +836,13 @@ fn handle_frame(
             state.ack(me, &id);
             Vec::new()
         }
+        ClientFrame::BlobPut {
+            blob,
+            index,
+            total,
+            data,
+        } => vec![state.put_blob(blob, index, total, &data, &mut conn.blobs)],
+        ClientFrame::BlobGet { blob } => state.get_blob(&blob, &mut conn.blobs),
         ClientFrame::Ping => vec![ServerFrame::Pong],
     }
 }

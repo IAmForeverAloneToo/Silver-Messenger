@@ -1,6 +1,7 @@
 //! Background relay connection with reconnect, auth and envelope handling.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -8,6 +9,7 @@ use futures_util::{SinkExt, StreamExt};
 use silver_protocol::wire::{ClientFrame, ErrorCode, ServerFrame, auth_signature, feature};
 
 use crate::CAPABILITIES;
+use crate::files::{self, FileInfo};
 use crate::outbox::Outbox;
 use crate::proxy::Proxy;
 use crate::sessions::{SessionError, SessionInfo, SharedSessions};
@@ -44,7 +46,7 @@ pub enum ClientEvent {
     /// after `retry_in`.
     Disconnected { reason: String, retry_in: Duration },
     /// A decrypted, signature-verified incoming message.
-    Message(Message),
+    Message(Box<Message>),
     /// A forward-secret session with `peer` came into being.
     SessionEstablished { peer: UserId, initiated_by_us: bool },
     /// An envelope from `from` was authentic but its session-encrypted body
@@ -83,6 +85,10 @@ pub enum ClientError {
     Session(#[from] SessionError),
     #[error("they have not published a key yet (they need to run Silver Messenger once)")]
     NoKey,
+    #[error("{0}")]
+    File(String),
+    #[error("file transfer failed: {0}")]
+    Blob(String),
     #[error("timed out waiting for relay")]
     Timeout,
     #[error("client task has stopped")]
@@ -98,7 +104,61 @@ enum Command {
         user_id: UserId,
         reply: oneshot::Sender<Result<Option<KeyBundle>, ClientError>>,
     },
+    /// Put every chunk of an encrypted file on the relay.
+    Upload {
+        blob: String,
+        chunks: Vec<Vec<u8>>,
+        progress: Option<mpsc::Sender<Progress>>,
+        reply: oneshot::Sender<Result<(), ClientError>>,
+    },
+    /// Fetch every chunk of an encrypted file from the relay.
+    Download {
+        blob: String,
+        total: u32,
+        progress: Option<mpsc::Sender<Progress>>,
+        reply: oneshot::Sender<Result<Vec<Vec<u8>>, ClientError>>,
+    },
     Shutdown,
+}
+
+/// How far a file transfer has got, in chunks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Progress {
+    pub done: u32,
+    pub total: u32,
+}
+
+/// Chunks in flight per upload before waiting for acknowledgements.
+const UPLOAD_WINDOW: usize = 4;
+/// Longest a file transfer may take before it is given up.
+const TRANSFER_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+struct Upload {
+    chunks: Vec<Vec<u8>>,
+    /// Chunks handed to the transport so far.
+    sent: usize,
+    acked: usize,
+    progress: Option<mpsc::Sender<Progress>>,
+    reply: oneshot::Sender<Result<(), ClientError>>,
+}
+
+struct Download {
+    chunks: Vec<Option<Vec<u8>>>,
+    received: usize,
+    /// The request has not gone out yet (the anonymous connection was not
+    /// ready); sent on `Ready`.
+    requested: bool,
+    progress: Option<mpsc::Sender<Progress>>,
+    reply: oneshot::Sender<Result<Vec<Vec<u8>>, ClientError>>,
+}
+
+fn report(progress: &Option<mpsc::Sender<Progress>>, done: usize, total: usize) {
+    if let Some(tx) = progress {
+        let _ = tx.try_send(Progress {
+            done: done as u32,
+            total: total as u32,
+        });
+    }
 }
 
 /// What [`Client::send_message`] did.
@@ -382,6 +442,74 @@ impl Client {
         })
     }
 
+    /// Encrypt the file at `path` and park it on the relay. The returned
+    /// description is what to send the recipient (as `Content::File`);
+    /// `progress` gets a note per chunk acknowledged.
+    pub async fn upload_file(
+        &self,
+        path: &Path,
+        progress: Option<mpsc::Sender<Progress>>,
+    ) -> Result<FileInfo, ClientError> {
+        if !self.relay_supports(feature::BLOBS) {
+            return Err(ClientError::Blob(
+                "the relay does not store files (it needs Silver Messenger 0.4.0 or later)".into(),
+            ));
+        }
+        let path = path.to_path_buf();
+        let (info, chunks) = tokio::task::spawn_blocking(move || files::prepare(&path))
+            .await
+            .map_err(|e| ClientError::File(e.to_string()))?
+            .map_err(|e| ClientError::File(e.to_string()))?;
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::Upload {
+                blob: info.blob.clone(),
+                chunks,
+                progress,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| ClientError::Stopped)?;
+        tokio::time::timeout(TRANSFER_TIMEOUT, rx)
+            .await
+            .map_err(|_| ClientError::Timeout)?
+            .map_err(|_| ClientError::NotConnected)??;
+        Ok(info)
+    }
+
+    /// Fetch the file `info` describes, check it, and save it into `dir`
+    /// under its own name (never overwriting). Returns where it went.
+    pub async fn download_file(
+        &self,
+        info: &FileInfo,
+        dir: &Path,
+        progress: Option<mpsc::Sender<Progress>>,
+    ) -> Result<PathBuf, ClientError> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::Download {
+                blob: info.blob.clone(),
+                total: info.chunks,
+                progress,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| ClientError::Stopped)?;
+        let chunks = tokio::time::timeout(TRANSFER_TIMEOUT, rx)
+            .await
+            .map_err(|_| ClientError::Timeout)?
+            .map_err(|_| ClientError::NotConnected)??;
+        let info = info.clone();
+        let dir = dir.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let bytes = files::assemble(&info, &chunks)?;
+            files::save(&dir, &info.name, &bytes)
+        })
+        .await
+        .map_err(|e| ClientError::File(e.to_string()))?
+        .map_err(|e| ClientError::File(e.to_string()))
+    }
+
     fn upgrade_check_due(&self, peer: &UserId) -> bool {
         let mut checks = self
             .upgrade_checks
@@ -470,6 +598,12 @@ async fn run(
                     Some(Command::Lookup { reply, .. }) => {
                         let _ = reply.send(Err(ClientError::NotConnected));
                     }
+                    Some(Command::Upload { reply, .. }) => {
+                        let _ = reply.send(Err(ClientError::NotConnected));
+                    }
+                    Some(Command::Download { reply, .. }) => {
+                        let _ = reply.send(Err(ClientError::NotConnected));
+                    }
                 },
             }
         }
@@ -548,6 +682,8 @@ async fn session(
 
     // --- steady state ------------------------------------------------------
     let mut lookups: Lookups = HashMap::new();
+    let mut uploads: HashMap<String, Upload> = HashMap::new();
+    let mut downloads: HashMap<String, Download> = HashMap::new();
     let mut keepalive = tokio::time::interval(KEEPALIVE);
     keepalive.tick().await; // first tick fires immediately; skip it
     // Set when the relay rate-limited us; the outbox is resent at that time.
@@ -596,6 +732,32 @@ async fn session(
                     }
                     lookups.entry(user_id).or_default().push(reply);
                 }
+                Some(Command::Upload { blob, chunks, progress, reply }) => {
+                    if !published {
+                        let _ = reply.send(Err(ClientError::NotConnected));
+                        continue;
+                    }
+                    uploads.insert(blob.clone(), Upload { chunks, sent: 0, acked: 0, progress, reply });
+                    if !pump_upload(&mut sink, &mut submission, &blob, &mut uploads).await {
+                        return Ok(Exit::Disconnected("send failed".into()));
+                    }
+                }
+                Some(Command::Download { blob, total, progress, reply }) => {
+                    if !published {
+                        let _ = reply.send(Err(ClientError::NotConnected));
+                        continue;
+                    }
+                    downloads.insert(blob.clone(), Download {
+                        chunks: vec![None; total as usize],
+                        received: 0,
+                        requested: false,
+                        progress,
+                        reply,
+                    });
+                    if !request_downloads(&mut sink, &mut submission, &mut downloads).await {
+                        return Ok(Exit::Disconnected("send failed".into()));
+                    }
+                }
             },
             _ = keepalive.tick() => {
                 if sink.send(text(&ClientFrame::Ping)).await.is_err() {
@@ -607,8 +769,15 @@ async fn session(
                     if let Submission::Anonymous(s) = &mut submission {
                         s.ready = true;
                     }
-                    if !flush_outbox(&mut sink, &mut submission, outbox).await {
+                    if !flush_outbox(&mut sink, &mut submission, outbox).await
+                        || !resume_transfers(&mut sink, &mut submission, &mut uploads, &mut downloads).await
+                    {
                         return Ok(Exit::Disconnected("resend failed".into()));
+                    }
+                }
+                Some(SubmitEvent::Blob(frame)) => {
+                    if !handle_blob_frame(*frame, &mut sink, &mut submission, &mut uploads, &mut downloads).await {
+                        return Ok(Exit::Disconnected("send failed".into()));
                     }
                 }
                 Some(SubmitEvent::Down { reason }) => {
@@ -620,7 +789,9 @@ async fn session(
                 Some(SubmitEvent::Refused) | None => {
                     warn!("submitting on the authenticated connection instead");
                     submission = Submission::Authenticated;
-                    if !flush_outbox(&mut sink, &mut submission, outbox).await {
+                    if !flush_outbox(&mut sink, &mut submission, outbox).await
+                        || !resume_transfers(&mut sink, &mut submission, &mut uploads, &mut downloads).await
+                    {
                         return Ok(Exit::Disconnected("resend failed".into()));
                     }
                 }
@@ -654,6 +825,13 @@ async fn session(
                     ServerFrame::LookupResult { user_id, bundle } => {
                         for reply in lookups.remove(&user_id).unwrap_or_default() {
                             let _ = reply.send(Ok(bundle.clone()));
+                        }
+                    }
+                    frame @ (ServerFrame::BlobAck { .. }
+                    | ServerFrame::BlobRejected { .. }
+                    | ServerFrame::BlobChunk { .. }) => {
+                        if !handle_blob_frame(frame, &mut sink, &mut submission, &mut uploads, &mut downloads).await {
+                            return Ok(Exit::Disconnected("send failed".into()));
                         }
                     }
                     ServerFrame::Error { code, message } if !published => {
@@ -743,22 +921,190 @@ fn publish_frame(setup: &Setup) -> anyhow::Result<ClientFrame> {
     })
 }
 
+/// What became of a frame handed to [`send_frame`].
+#[derive(PartialEq, Eq)]
+enum Handed {
+    /// Written to a connection.
+    Sent,
+    /// The anonymous connection is not ready; try again on `Ready`.
+    Waiting,
+    /// The authenticated connection is broken.
+    Broken,
+}
+
+/// Hand a frame to the relay on whichever connection submits.
+async fn send_frame(sink: &mut WsSink, submission: &mut Submission, frame: ClientFrame) -> Handed {
+    match submission {
+        Submission::Anonymous(submitter) => {
+            if !submitter.ready {
+                return Handed::Waiting;
+            }
+            if submitter.submit(frame).await {
+                Handed::Sent
+            } else {
+                // The task is gone; fall back for good.
+                *submission = Submission::Authenticated;
+                Handed::Waiting // resent on the next flush
+            }
+        }
+        Submission::Authenticated => {
+            if sink.send(text(&frame)).await.is_ok() {
+                Handed::Sent
+            } else {
+                Handed::Broken
+            }
+        }
+    }
+}
+
 /// Hand one envelope to the relay on whichever connection submits. `false`
 /// means the authenticated connection is broken.
 async fn submit(sink: &mut WsSink, submission: &mut Submission, envelope: Envelope) -> bool {
-    match submission {
-        Submission::Anonymous(submitter) => {
-            if submitter.ready && !submitter.submit(envelope).await {
-                // The task is gone; fall back for good.
-                *submission = Submission::Authenticated;
-                return true; // the outbox holds it; resent on the next flush
-            }
-            true // not ready: submitted when `Ready` arrives
+    send_frame(sink, submission, ClientFrame::Send { envelope }).await != Handed::Broken
+}
+
+/// Send the next chunks of an upload, keeping [`UPLOAD_WINDOW`] in flight.
+/// `false` means the authenticated connection is broken.
+async fn pump_upload(
+    sink: &mut WsSink,
+    submission: &mut Submission,
+    blob: &str,
+    uploads: &mut HashMap<String, Upload>,
+) -> bool {
+    let Some(upload) = uploads.get_mut(blob) else {
+        return true;
+    };
+    let total = upload.chunks.len();
+    while upload.sent < total && upload.sent - upload.acked < UPLOAD_WINDOW {
+        let frame = ClientFrame::BlobPut {
+            blob: blob.to_owned(),
+            index: upload.sent as u32,
+            total: total as u32,
+            data: upload.chunks[upload.sent].clone(),
+        };
+        match send_frame(sink, submission, frame).await {
+            Handed::Sent => upload.sent += 1,
+            Handed::Waiting => return true,
+            Handed::Broken => return false,
         }
-        Submission::Authenticated => sink
-            .send(text(&ClientFrame::Send { envelope }))
-            .await
-            .is_ok(),
+    }
+    true
+}
+
+/// Send `BlobGet` for downloads that have not asked yet.
+async fn request_downloads(
+    sink: &mut WsSink,
+    submission: &mut Submission,
+    downloads: &mut HashMap<String, Download>,
+) -> bool {
+    for (blob, download) in downloads.iter_mut().filter(|(_, d)| !d.requested) {
+        let frame = ClientFrame::BlobGet { blob: blob.clone() };
+        match send_frame(sink, submission, frame).await {
+            Handed::Sent => download.requested = true,
+            Handed::Waiting => return true,
+            Handed::Broken => return false,
+        }
+    }
+    true
+}
+
+/// After the submitting connection changed, push transfers along again.
+/// Chunks sent but not acknowledged are sent once more; the relay ignores
+/// the duplicates.
+async fn resume_transfers(
+    sink: &mut WsSink,
+    submission: &mut Submission,
+    uploads: &mut HashMap<String, Upload>,
+    downloads: &mut HashMap<String, Download>,
+) -> bool {
+    let blobs: Vec<String> = uploads.keys().cloned().collect();
+    for blob in blobs {
+        if let Some(upload) = uploads.get_mut(&blob) {
+            upload.sent = upload.acked;
+        }
+        if !pump_upload(sink, submission, &blob, uploads).await {
+            return false;
+        }
+    }
+    for download in downloads.values_mut() {
+        if download.received == 0 {
+            download.requested = false;
+        }
+    }
+    request_downloads(sink, submission, downloads).await
+}
+
+/// Apply a relay answer about a blob to the transfer it belongs to.
+async fn handle_blob_frame(
+    frame: ServerFrame,
+    sink: &mut WsSink,
+    submission: &mut Submission,
+    uploads: &mut HashMap<String, Upload>,
+    downloads: &mut HashMap<String, Download>,
+) -> bool {
+    match frame {
+        ServerFrame::BlobAck { blob, complete, .. } => {
+            let Some(upload) = uploads.get_mut(&blob) else {
+                return true;
+            };
+            upload.acked += 1;
+            let total = upload.chunks.len();
+            report(&upload.progress, upload.acked, total);
+            if complete || upload.acked >= total {
+                if let Some(upload) = uploads.remove(&blob) {
+                    let _ = upload.reply.send(Ok(()));
+                }
+                return true;
+            }
+            pump_upload(sink, submission, &blob, uploads).await
+        }
+        ServerFrame::BlobRejected {
+            blob,
+            code,
+            message,
+        } => {
+            let error = || ClientError::Blob(format!("{message} ({code:?})"));
+            if let Some(upload) = uploads.remove(&blob) {
+                let _ = upload.reply.send(Err(error()));
+            }
+            if let Some(download) = downloads.remove(&blob) {
+                let _ = download.reply.send(Err(error()));
+            }
+            true
+        }
+        ServerFrame::BlobChunk {
+            blob,
+            index,
+            total,
+            data,
+        } => {
+            let Some(download) = downloads.get_mut(&blob) else {
+                return true;
+            };
+            let expected = download.chunks.len();
+            if total as usize != expected || index as usize >= expected {
+                if let Some(download) = downloads.remove(&blob) {
+                    let _ = download.reply.send(Err(ClientError::Blob(
+                        "the relay's chunk count does not match the message".into(),
+                    )));
+                }
+                return true;
+            }
+            let slot = &mut download.chunks[index as usize];
+            if slot.is_none() {
+                *slot = Some(data);
+                download.received += 1;
+            }
+            report(&download.progress, download.received, expected);
+            if download.received == expected {
+                if let Some(download) = downloads.remove(&blob) {
+                    let chunks = download.chunks.into_iter().flatten().collect();
+                    let _ = download.reply.send(Ok(chunks));
+                }
+            }
+            true
+        }
+        _ => true,
     }
 }
 
@@ -843,7 +1189,7 @@ async fn deliver(setup: &Setup, envelope: Envelope, ev_tx: &mpsc::Sender<ClientE
             caps,
         }) => {
             let _ = ev_tx
-                .send(ClientEvent::Message(Message {
+                .send(ClientEvent::Message(Box::new(Message {
                     id,
                     from,
                     to: opened.to,
@@ -852,7 +1198,7 @@ async fn deliver(setup: &Setup, envelope: Envelope, ev_tx: &mpsc::Sender<ClientE
                     content,
                     forward_secret: false,
                     caps,
-                }))
+                })))
                 .await;
             return;
         }
@@ -918,7 +1264,7 @@ async fn deliver(setup: &Setup, envelope: Envelope, ev_tx: &mpsc::Sender<ClientE
             caps,
         }) => {
             let _ = ev_tx
-                .send(ClientEvent::Message(Message {
+                .send(ClientEvent::Message(Box::new(Message {
                     id,
                     from,
                     to: opened.to,
@@ -927,7 +1273,7 @@ async fn deliver(setup: &Setup, envelope: Envelope, ev_tx: &mpsc::Sender<ClientE
                     content,
                     forward_secret,
                     caps,
-                }))
+                })))
                 .await;
         }
         Ok(Body::Ratchet(_)) => {

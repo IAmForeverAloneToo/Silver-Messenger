@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ProtocolError;
 use crate::bundle::KeyBundle;
-use crate::encoding::b64_array;
+use crate::encoding::{b64, b64_array};
 use crate::envelope::Envelope;
 use crate::identity::{Identity, UserId};
 
@@ -27,6 +27,9 @@ pub mod feature {
     /// The relay accepts `Send` frames on connections that never
     /// authenticated, so a sender need not reveal itself to submit.
     pub const ANONYMOUS_SEND: &str = "anonymous_send";
+    /// The relay stores encrypted file chunks (`BlobPut`/`BlobGet`), on
+    /// anonymous connections too.
+    pub const BLOBS: &str = "blobs";
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +63,19 @@ pub enum ClientFrame {
     Ack {
         id: String,
     },
+    /// Store chunk `index` of `total` of an encrypted file under `blob`
+    /// (a client-chosen random id). Accepted on anonymous connections.
+    BlobPut {
+        blob: String,
+        index: u32,
+        total: u32,
+        #[serde(with = "b64")]
+        data: Vec<u8>,
+    },
+    /// Ask for every chunk of `blob`, answered with `BlobChunk` frames.
+    BlobGet {
+        blob: String,
+    },
     Ping,
 }
 
@@ -76,6 +92,10 @@ pub enum ErrorCode {
     RateLimited,
     /// This relay only registers identities that present an invite token.
     InviteRequired,
+    /// No such blob, or it was never completed.
+    NotFound,
+    /// The relay has no room for more file chunks.
+    StorageFull,
     Internal,
 }
 
@@ -119,6 +139,26 @@ pub enum ServerFrame {
     },
     Deliver {
         envelope: Envelope,
+    },
+    /// A chunk was stored; `complete` once the blob has all of them.
+    BlobAck {
+        blob: String,
+        index: u32,
+        complete: bool,
+    },
+    /// A `BlobPut` or `BlobGet` for this blob failed.
+    BlobRejected {
+        blob: String,
+        code: ErrorCode,
+        message: String,
+    },
+    /// One chunk in answer to `BlobGet`; `total` says how many to expect.
+    BlobChunk {
+        blob: String,
+        index: u32,
+        total: u32,
+        #[serde(with = "b64")]
+        data: Vec<u8>,
     },
     Pong,
     Error {
