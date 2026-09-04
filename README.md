@@ -39,11 +39,14 @@ cargo run --release --bin silver -- --relay ws://relay.example.org:7777/ws
 On first start the client generates an identity and shows your **user id** in
 the System pane. Share it with the person you want to talk to (any channel
 works; the id *is* your public key, so comparing it out of band is the same as
-verifying a fingerprint). Then:
+verifying a fingerprint). `/invite` shows it as a link
+(`silver://add/<id>?relay=…`) and as a QR code that a phone can scan, so
+nobody has to type 44 characters. Then:
 
 ```
-/add <their-user-id> alice     # fetches their key from the relay and opens a chat
-hello!                         # anything not starting with / is sent to the selected chat
+/add <their-user-id or link> alice   # fetches their key from the relay and opens a chat
+hello!                               # anything not starting with / is sent to the selected chat
+/send ~/photo.jpg                    # sends a file (up to 16 MiB), encrypted like a message
 ```
 
 A message from someone who is not a contact yet lands in the **Requests**
@@ -51,26 +54,42 @@ pane rather than in a chat; `/accept <n>` turns it into a contact (and moves
 the held messages into the chat), `/block <n>` drops everything from that id
 from then on. `/alias <name>` gives a contact a friendly name.
 
+Sent messages carry a mark: `⋯` waiting for the relay, `✓` accepted by the
+relay, `✓✓` delivered to the contact's device, `✓✓` in colour read, `✗`
+refused. Received files are saved under their own name in
+`<data-dir>/downloads` (never overwriting) and the chat line says where.
+
 ### Commands and keys
 
-| Command                     | Effect                                                       |
-| --------------------------- | ------------------------------------------------------------ |
-| `/add <user-id> [alias]`    | Add a contact by id                                          |
-| `/alias <name>`             | Name the selected contact                                    |
-| `/remove`                   | Forget the selected contact (history file stays on disk)     |
-| `/verify`                   | Show the safety number to compare with the selected contact  |
-| `/verify ok` / `/verify no` | Mark the selected contact as verified, or clear the mark     |
-| `/refresh`                  | Fetch the selected contact's key again and report any change |
-| `/session`                  | Show how messages with the selected contact are protected    |
-| `/accept <n>`               | Accept a contact request from the Requests pane              |
-| `/block <n or id>`          | Drop everything from that id from now on                     |
-| `/unblock <id>`, `/blocked` | Undo a block; list blocked ids                               |
-| `/me`                       | Show your own id                                             |
-| `/relay <ws-url>`           | Change the relay (used on next start)                        |
-| `/help`, `/quit`            |                                                              |
+| Command                         | Effect                                                       |
+| ------------------------------- | ------------------------------------------------------------ |
+| `/add <user-id or link> [alias]` | Add a contact by id or invite link                           |
+| `/invite`                       | Show your invite link and a QR code of it                    |
+| `/alias <name>`                 | Name the selected contact                                    |
+| `/remove`                       | Forget the selected contact (history file stays on disk)     |
+| `/verify`                       | Show the safety number to compare with the selected contact  |
+| `/verify ok` / `/verify no`     | Mark the selected contact as verified, or clear the mark     |
+| `/refresh`                      | Fetch the selected contact's key again and report any change |
+| `/session`                      | Show how messages with the selected contact are protected    |
+| `/send <path>`                  | Send a file to the selected contact (also `/file`, `/attach`) |
+| `/search <text>`                | Find messages in the selected chat, or in all chats from System |
+| `/receipts on\|off`             | Tell contacts when you have read their messages (default on) |
+| `/notify all\|bell\|off`        | Bell and desktop notification, bell only, or nothing         |
+| `/accept <n>`                   | Accept a contact request from the Requests pane              |
+| `/block <n or id>`              | Drop everything from that id from now on                     |
+| `/unblock <id>`, `/blocked`     | Undo a block; list blocked ids                               |
+| `/me`                           | Show your own id                                             |
+| `/relay <ws-url>`               | Change the relay (used on next start)                        |
+| `/help`, `/quit`                |                                                              |
 
-Keys: `Tab` / `Shift-Tab` or `Up` / `Down` switch chats, `PgUp` / `PgDn`
-scroll, `Esc` clears the input line, `Ctrl-C` quits.
+Keys: `Tab` / `Shift-Tab` or `Alt-Up` / `Alt-Down` switch chats, `Up` /
+`Down` recall earlier lines, `Alt-Enter` starts a new line in a message,
+`PgUp` / `PgDn` or the mouse wheel scroll and `Ctrl-Home` / `Ctrl-End` jump,
+`Esc` clears the input line, `Ctrl-C` quits. Pasting keeps line breaks.
+New messages in chats you are not looking at ring the bell, raise a desktop
+notification where the terminal can (WezTerm, kitty, foot, iTerm2, rxvt and
+others; the notification never contains the message), and put the unread
+count in the window title; `/notify` adjusts that.
 
 ### Options
 
@@ -81,6 +100,8 @@ silver --ca-cert <PEM>     extra trusted root certificates for wss://; remembere
 silver --proxy <URL>       HTTP CONNECT proxy to reach the relay through; remembered (env SILVER_PROXY, else HTTPS_PROXY)
 silver --invite <TOKEN>    invite token for a relay that only registers invited identities; remembered (env SILVER_INVITE)
 silver --print-id          print your user id and exit
+silver --print-invite      print your invite link (silver://add/<id>?relay=…) and exit
+silver --no-mouse          leave the mouse to the terminal: no wheel scrolling, but text selects without Shift (env SILVER_NO_MOUSE)
 silver --set-passphrase    encrypt keys, contacts and history under a passphrase (asked at every start)
 silver --remove-passphrase store everything unencrypted again
 SILVER_PASSPHRASE=…        supplies the passphrase non-interactively (scripts, tests)
@@ -99,13 +120,17 @@ silver-relay --sends-per-minute <N>   messages one connection may submit per min
 silver-relay --lookups-per-minute <N> key lookups per connection per minute, default 30   (env SILVER_RELAY_LOOKUPS_PER_MINUTE)
 silver-relay --invite-token <T>       only register new identities that present T   (env SILVER_RELAY_INVITE_TOKEN)
 silver-relay --anonymous-sends-per-minute <N>  messages an unauthenticated connection may submit per minute, default 30; 0 turns anonymous submission off (env SILVER_RELAY_ANONYMOUS_SENDS_PER_MINUTE)
+silver-relay --max-blob-mib <N>       largest encrypted file to store, default 16; 0 turns file transfer off (env SILVER_RELAY_MAX_BLOB_MIB)
+silver-relay --blob-storage-mib <N>   encrypted file bytes to keep in total, default 1024 (env SILVER_RELAY_BLOB_STORAGE_MIB)
 silver-relay --ephemeral              keep everything in memory only
 RUST_LOG=debug silver-relay           relay log level
 ```
 
 Default data directory: `~/.local/share/silver-messenger` on Linux,
 `~/Library/Application Support/silver-messenger` on macOS,
-`%APPDATA%\silver-messenger\data` on Windows.
+`%APPDATA%\silver-messenger\data` on Windows. Received files go to
+`downloads/` inside it; they are ordinary files, not encrypted at rest even
+when a passphrase is set.
 
 ## Deploying a relay
 
@@ -190,11 +215,27 @@ it does not, is in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
   relay therefore cannot pair an envelope with the identity that submitted
   it; it still sees the address and the timing. `--submit-authenticated`
   turns this off for networks that allow one connection only.
+* **Capabilities, receipts and files**: every encrypted body lists what the
+  sending client understands beyond text (`receipts`, `files`), so a client
+  never sends a peer something it cannot read and old clients keep working.
+  A delivery receipt goes back when a message has been decrypted and
+  stored, a read receipt when it has been shown (`/receipts off` keeps
+  those to yourself); both are ordinary encrypted messages, batched so a
+  full mailbox costs one, and never sent to strangers. A file is encrypted
+  on the sender's machine under a fresh per-file key (XChaCha20-Poly1305 in
+  64 KiB chunks, each bound to the file id and its position), the
+  ciphertext is parked on the relay in chunks over the anonymous connection,
+  and the key, name, size and SHA-256 travel to the recipient inside a
+  normal message. The recipient fetches the chunks, decrypts, checks the
+  hash, and saves the file. The relay holds bytes it cannot read, for a
+  recipient it cannot name, and deletes them with the message expiry.
+  Files from people you have not accepted are listed with their request
+  but never fetched.
 * **Abuse controls**: strangers who know your id can write to you, but their
   messages wait in the Requests pane until you accept or block them. The
-  relay limits each connection to 60 messages and 30 key lookups per minute,
-  caps every mailbox, and can be told to register only identities that
-  present an invite token.
+  relay limits each connection to 60 messages, 30 key lookups and 600 file
+  chunks per minute, caps every mailbox and its total file storage, and can
+  be told to register only identities that present an invite token.
 * **Encryption at rest**: with a passphrase set, every file in the data
   directory (identity keys, prekeys, sessions, contacts, history, outbox,
   config) is encrypted
@@ -254,7 +295,9 @@ The end-to-end tests in `crates/silver-client/tests/e2e.rs` start a relay
 on a random port, connect two clients, and check both directions, offline
 queueing, reconnection after the relay goes away, forward-secret sessions
 (including handshakes that wait in the mailbox, restarts, a peer that lost
-its session state, and a peer without prekeys), and anonymous submission.
+its session state, and a peer without prekeys), anonymous submission,
+capabilities and receipts, and file transfer (chunking, progress, a missing
+blob, a tampered hash, a relay without file storage).
 
 ## License
 

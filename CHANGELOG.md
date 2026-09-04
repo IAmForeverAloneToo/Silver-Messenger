@@ -4,6 +4,58 @@ Notable changes to Silver Messenger. Versions follow [semantic
 versioning](https://semver.org); while the major version is 0, a minor bump
 means behaviour or the wire protocol changed in a way worth reading about.
 
+## Unreleased
+
+Everyday messaging: receipts, files, notifications, invite links and a more
+comfortable terminal. Clients and relays interoperate with 0.3.0 peers;
+receipts and files are only exchanged with clients that have shown they
+understand them, and files need a relay from this version.
+
+### Added
+
+- Delivery and read receipts, sent as ordinary encrypted messages and
+  shown as marks on sent lines: `⋯` waiting for the relay, `✓` accepted,
+  `✓✓` delivered to the contact's device, `✓✓` in colour read. A chat open
+  in a window without focus does not count as read until focus returns.
+  `/receipts off` keeps read receipts to yourself; receipts are never sent
+  to people you have not accepted. Every message now lists the sender's capabilities
+  inside the encrypted body, so nothing is sent to a client that cannot
+  read it.
+- File transfer: `/send <path>` (also `/file`, `/attach`) encrypts a file
+  of up to 16 MiB under a fresh per-file key, parks the ciphertext on the
+  relay in 64 KiB chunks over the anonymous connection, and sends the key,
+  name, size and SHA-256 to the contact inside a normal message. The
+  recipient's client fetches, decrypts, checks and saves the file under
+  its own name in `<data-dir>/downloads`, never overwriting, and the chat
+  line says where it went, also after a restart. Progress is shown while
+  sending and receiving. Files from people you have not accepted are
+  listed with their request and never fetched.
+- Relay: encrypted file chunks (`blob_put`, `blob_get`), a `blobs` feature
+  flag, `--max-blob-mib` (16; 0 turns files off) and `--blob-storage-mib`
+  (1024); chunks are rate limited per connection and expire with messages.
+- Invite links (`silver://add/<id>?relay=…`): `/invite` shows yours with a
+  QR code drawn in the terminal, `/add` accepts a link and warns when it
+  names another relay, `--print-invite` prints it for scripts.
+- Notifications: the terminal bell, a desktop notification raised through
+  the terminal (WezTerm, kitty, foot, iTerm2, rxvt-unicode and others; it
+  never contains the message) and the unread count in the window title.
+  `/notify all|bell|off` chooses; a burst of messages makes one noise.
+- Terminal polish: date separators between days, mouse-wheel and
+  `PgUp`/`PgDn` scrolling with `Ctrl-Home`/`Ctrl-End`, `Up`/`Down` recall
+  of earlier lines and commands, `Alt-Enter` for multi-line messages,
+  bracketed paste that keeps line breaks, `/search <text>` across the
+  selected chat or all chats, `Alt-Up`/`Alt-Down` to switch chats,
+  `--no-mouse` to leave the mouse to the terminal.
+
+### Changed
+
+- `config.json` gains `read_receipts` and `notify`. History files gain
+  receipt and text-update lines, which older clients skip.
+- `docs/PROTOCOL.md` specifies capabilities, receipts, files and the blob
+  frames; the threat model covers what receipts and file storage reveal.
+- A message line born after the relay already answered no longer shows a
+  pending mark until the next restart.
+
 ## 0.3.0 - 2026-09-04
 
 Forward secrecy. Clients and relays from this version interoperate with

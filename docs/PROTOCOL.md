@@ -112,14 +112,17 @@ a plain body, 2 for a ratchet body. Other values are rejected.
 
 ```json
 { "sent_at_ms": 1700000000000, "epoch": 8271, "seq": 12,
-  "content": { "type": "text", "body": "hello" } }
+  "content": { "type": "text", "body": "hello" },
+  "caps": ["receipts", "files"] }
 ```
 
 `seq` counts messages from this sender to this recipient from 1; `epoch` is
 a random 64-bit value fixed for one installation, so a reinstall (which
 restarts `seq`) is distinguishable from a replay. `seq = 0` means the sender
-does not number messages. `content.type` is `text` today; unknown types are
-rejected by this implementation.
+does not number messages. `caps` (absent or empty on clients before 0.4.0)
+is described in 4.3. `content.type` is one of `text`, `receipt` (4.4) and
+`file` (4.5); unknown types are rejected by this implementation, which is
+why a sender only uses the latter two towards peers that advertised them.
 
 ### 4.2 Ratchet body (v2)
 
@@ -137,6 +140,67 @@ rejected by this implementation.
 carried unchanged one layer deeper. `init` is present on every message the
 initiator sends until it has received a message on the session; a responder
 that already has the session ignores it.
+
+### 4.3 Capabilities
+
+`caps` lists, inside the encrypted body, what the sending client
+understands beyond `text`. A recipient remembers the most recent list per
+peer and sends a content type only to peers whose last message carried the
+matching capability. The list is protected like the rest of the body, so
+the relay does not learn which clients have which features.
+
+| Capability | Meaning |
+| --- | --- |
+| `receipts` | Understands `receipt` content and wants to be sent it. |
+| `files` | Understands `file` content and can fetch blobs (section 7.5). |
+
+### 4.4 Receipts
+
+```json
+{ "type": "receipt", "kind": "delivered", "ids": ["<envelope id>", "..."] }
+```
+
+`kind` is `delivered` (the messages with these ids were decrypted and
+stored) or `read` (they were shown to the user); `read` implies
+`delivered`. `ids` are envelope ids the recipient of the receipt sent. A
+receipt is an ordinary body, numbered with `seq` like any other, and is
+carried in a session when one exists. This implementation batches ids for
+400 ms and sends one receipt per peer and kind, sends `delivered` for every
+stored message and `read` only while the user has not turned read receipts
+off, and never sends receipts to a sender it has not accepted as a
+contact. Receipts from strangers are ignored.
+
+### 4.5 Files
+
+A file travels as encrypted chunks parked on the relay (a *blob*, section
+7.5) plus a message that says how to fetch and open them:
+
+```json
+{ "type": "file", "name": "photo.jpg", "size": 150000,
+  "blob": "<32 hex characters>", "key": { "key": "<b64 32 bytes>", "nonce": "<b64 24 bytes>" },
+  "chunks": 3, "sha256": "<b64 32 bytes>" }
+```
+
+The sender picks a random 16-byte blob id (shown as 32 lowercase hex
+characters), a random 32-byte key and a random 24-byte file nonce, and
+splits the plaintext into chunks of 65 536 bytes (`chunks = ceil(size /
+65536)`, at least 1; an empty file is one empty chunk). Chunk `i` of `n`
+is encrypted as
+
+```
+nonce_i     = nonce with its last four bytes XORed with i (4 BE)
+aad_i       = "silver-messenger/v1/blob-chunk" || blob (ASCII) || i (4 BE) || n (4 BE)
+ciphertext  = XChaCha20-Poly1305(key, nonce_i, chunk_i, aad = aad_i)
+```
+
+so a chunk cannot be moved, reordered or re-counted without the tag
+failing. `sha256` is the digest of the whole plaintext; the recipient
+verifies it and the announced `size` after decrypting, and rejects the file
+otherwise. `name` is the sender's file name with path separators and
+control characters removed; recipients must still treat it as untrusted
+when choosing where to save. Files are at most 16 MiB (256 chunks). The
+key is used for one file only and travels inside the session-encrypted
+body, so the relay stores ciphertext it has no key for.
 
 ## 5. Session establishment (X3DH)
 
@@ -214,6 +278,8 @@ first.
 | `lookup` | `user_id` | |
 | `send` | `envelope` | |
 | `ack` | `id` | The envelope with this id was received and stored; the relay may drop it. |
+| `blob_put` | `blob`, `index`, `total`, `data` (b64) | Store chunk `index` of `total` of blob `blob` (section 7.5). |
+| `blob_get` | `blob` | Ask for every chunk of a blob. |
 | `ping` | | |
 
 ### Relay → client
@@ -228,11 +294,15 @@ first.
 | `sent` | `id` | The envelope is queued for delivery. |
 | `rejected` | `id`, `code`, `message` | The envelope was not queued. `rate_limited` means try again later; any other code is final. |
 | `deliver` | `envelope` | Delivered in mailbox order; acknowledge with `ack`. |
+| `blob_ack` | `blob`, `index`, `complete` | The chunk is stored (or was already); `complete` once every chunk is. |
+| `blob_rejected` | `blob`, `code`, `message` | A `blob_put` or `blob_get` for this blob failed. `rate_limited` means try again later; `not_found` on a `blob_get` means the blob is unknown, incomplete or expired. |
+| `blob_chunk` | `blob`, `index`, `total`, `data` (b64) | One chunk in answer to `blob_get`; `total` says how many to expect. |
 | `pong` | | |
-| `error` | `code`, `message` | Answers a frame other than `send`, or reports a broken connection state. |
+| `error` | `code`, `message` | Answers a frame other than `send`, `blob_put` and `blob_get`, or reports a broken connection state. |
 
 Error codes: `unauthenticated`, `bad_signature`, `malformed`, `too_large`,
-`forbidden`, `mailbox_full`, `rate_limited`, `invite_required`, `internal`.
+`forbidden`, `mailbox_full`, `rate_limited`, `invite_required`,
+`not_found`, `storage_full`, `internal`.
 
 ### 7.1 Authenticated connection
 
@@ -255,13 +325,14 @@ Lookups from other connections get the bundle with `one_time` empty.
 ### 7.2 Anonymous submission connection
 
 On a relay advertising `anonymous_send`, a connection may answer the
-`challenge` with a `send` frame instead of `auth`. The connection then
-accepts only `send` and `ping`, answered with `sent`/`rejected` and `pong`,
-under its own rate limit (30 per minute by default). It never learns who
-the sender is. A client uses one such connection for all its submissions
-and its authenticated connection for everything else; for TLS the
-submission connection disables session resumption so the two cannot be
-linked through a resumed session.
+`challenge` with a `send`, `blob_put` or `blob_get` frame instead of
+`auth`. The connection then accepts only those three and `ping`, answered
+as on an authenticated connection, under its own rate limits (30 `send`
+and 600 chunks per minute by default). It never learns who the sender is.
+A client uses one such connection for all its submissions, uploads and
+downloads, and its authenticated connection for everything else; for TLS
+the submission connection disables session resumption so the two cannot
+be linked through a resumed session.
 
 ### 7.3 Features
 
@@ -269,6 +340,7 @@ linked through a resumed session.
 | --- | --- |
 | `prekeys` | Section 7.1 prekey handling: `prekey_status`, one-time keys on lookup. |
 | `anonymous_send` | Section 7.2. |
+| `blobs` | Section 7.5: the relay stores encrypted file chunks. Absent when the operator set the largest blob to 0. |
 
 A relay without the field is a v1 relay: it stores bundles as v1 (dropping
 `prekeys`, since it re-serialises what it parsed), so clients behind it
@@ -276,11 +348,40 @@ speak v1 to everyone.
 
 ### 7.4 Limits and abuse controls
 
-Per authenticated connection: 60 `send` and 30 `lookup` per minute (token
-buckets of that burst size). Per anonymous connection: 30 `send` per
+Per authenticated connection: 60 `send`, 30 `lookup` and 600 blob chunks
+(`blob_put` or chunks answered to `blob_get`) per minute (token buckets of
+that burst size). Per anonymous connection: 30 `send` and 600 chunks per
 minute. Per recipient: 1000 queued envelopes or 32 MiB, whichever first;
-unacknowledged envelopes expire after 30 days. Relay operators can change
-all of these and can require an invite token for first registrations.
+unacknowledged envelopes expire after 30 days. Blobs: at most 16 MiB of
+plaintext each (the relay allows 16 MiB plus the 256 chunk tags of
+ciphertext), 1 GiB in total, and each expires 30 days after its first
+chunk arrived, on the same schedule as messages. Relay operators can
+change all of these and can require an invite token for first
+registrations.
+
+### 7.5 Blob storage
+
+A blob is a sequence of `total` ciphertext chunks (4.5) under a 32-hex-
+character id, stored by whoever puts it and served to whoever asks for it
+by id: the relay does not know, and does not ask, who either party is. The
+id is 128 random bits and travels only inside encrypted messages, so
+knowing it is the capability to fetch the ciphertext, which is useless
+without the key from the same message.
+
+* The first `blob_put` for an id fixes `total`; a later chunk with a
+  different `total`, or `index >= total`, is rejected as `malformed`. Each
+  chunk is at most 65 552 bytes.
+* A chunk already stored is acknowledged again, not stored twice, so a
+  client may resend after a reconnect.
+* A chunk that would push the blob past the largest allowed size is
+  rejected as `too_large`; one that would push the relay past its total
+  storage as `storage_full`; on a relay that stores no blobs at all as
+  `forbidden`.
+* `blob_get` on a blob whose chunks have not all arrived, or that is
+  unknown or expired, answers `not_found`. Otherwise every chunk is sent
+  as `blob_chunk` in index order.
+* Chunks and the message that names them expire independently; a client
+  that fetches late may find the message but not the blob.
 
 ## 8. Client behaviour that affects interoperability
 
@@ -307,10 +408,28 @@ all of these and can require an invite token for first registrations.
   session uses it or thirty days after the relay reported handing it out.
 * **Sequence numbers.** `seq`/`epoch` in the inner plain body are checked
   exactly as for v1 messages.
+* **Capabilities.** A client records the `caps` of every message it
+  accepts from a contact and sends `receipt` and `file` content only to
+  contacts whose last list carried the capability. It advertises its own
+  in every body it sends, receipts included.
+* **Receipts.** Sent only to accepted contacts; batched for 400 ms; `read`
+  only for messages shown while the window has focus, and only while the
+  user allows it. Receipt bodies are not themselves acknowledged.
+* **Files.** Sent only when the recipient advertised `files` and the relay
+  advertises `blobs`. The upload finishes (every chunk acknowledged)
+  before the `file` message is sent, so a recipient never asks for an
+  incomplete blob. Up to four chunks are in flight; after a reconnect,
+  chunks not yet acknowledged are put again. A recipient fetches a file
+  as soon as the message is decrypted, but only from accepted contacts; a
+  file announced by a stranger is shown with the request and fetched
+  never, so acceptance later means asking the sender to send it again.
+  Saved files never overwrite: a name already taken gets ` (2)`, ` (3)`
+  and so on before the extension.
 
 ## 9. What the protocol does not do
 
 Messages are signed, so they are not deniable. Sizes are not padded and
-there is no cover traffic, so a relay or network observer sees message
-sizes and timing. Group messaging, receipts and attachments are not
-defined yet.
+there is no cover traffic, so a relay or network observer sees message and
+blob sizes and timing, including that a small message (a receipt) tends to
+follow a delivery, and that a blob is fetched shortly after a message is
+delivered. Group messaging is not defined yet.

@@ -61,16 +61,16 @@ Tick items off as they land on `main`.
 
 ## Phase 4: everyday messaging
 
-13. [ ] **Delivery and read receipts** (S). Encrypted message types; the
+13. [x] **Delivery and read receipts** (S). Encrypted message types; the
         relay learns nothing new.
-14. [ ] **TUI polish** (M). Date separators, mouse and keyboard scrolling,
+14. [x] **TUI polish** (M). Date separators, mouse and keyboard scrolling,
         input history, multi-line composing, bracketed paste, `/search`.
-15. [ ] **Notifications** (S). Terminal bell, desktop notifications, unread
+15. [x] **Notifications** (S). Terminal bell, desktop notifications, unread
         count in the window title.
-16. [ ] **Invite links and QR codes** (S). `silver://add/<id>` and a QR
+16. [x] **Invite links and QR codes** (S). `silver://add/<id>` and a QR
         rendered in the terminal, so ids are shared without copy-pasting
         44 characters.
-17. [ ] **Attachments** (M). Encrypted files, chunked or via a relay blob
+17. [x] **Attachments** (M). Encrypted files, chunked or via a relay blob
         endpoint, with a size cap and progress display.
 
 ## Phase 5: beyond one relay

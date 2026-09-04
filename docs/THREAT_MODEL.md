@@ -15,6 +15,8 @@ honest before adding features. The wire format itself is specified in
 | Long-term Diffie–Hellman key (X25519) | `identity.json` on the client | Opens the sealed layer of every envelope ever addressed to you; with the session state, reads v2 messages |
 | Prekeys and session state | `prekeys.json`, `sessions.json` on the client | Current ratchet keys: reads messages in flight and the ones not yet ratcheted past |
 | Contact list and history | `contacts.json`, `history/`, `outbox.json` on the client | Who you talk to and what was said |
+| Received files | `downloads/` on the client, as ordinary files | Attachments people sent you; not covered by the passphrase |
+| Files in transit | Encrypted chunks in the relay database for up to 30 days | Ciphertext only; the key is in the message |
 | Social graph and timing | Relay memory and database, network path | Who talks to whom, when, how much |
 
 ## Actors
@@ -50,10 +52,20 @@ Can:
   session starts without one. It cannot serve a forged bundle or signed
   prekey: both are signed by the user's identity key and clients verify
   the signatures.
+- See that a file was sent and how big it is: the encrypted chunks are put
+  and fetched on anonymous connections, but a blob of a certain size
+  arriving from one address, a message delivered to a recipient, and a
+  fetch of that blob shortly after from another address line up in time.
+  It can also drop or withhold a blob, in which case the recipient sees a
+  failed fetch. It cannot alter one: every chunk is authenticated under a
+  key it does not have and bound to its position.
+- Guess from sizes and timing that a small message going back right after
+  a delivery is a receipt, and so that the recipient's client is running.
 
 Cannot:
 
-- Read message content, sequence numbers or timestamps inside the body.
+- Read message content, sequence numbers, timestamps, capabilities or
+  receipts inside the body, or the content and name of a file.
 - Forge a message from anyone: every body is signed by the sender's identity
   key and the signature is checked on the recipient.
 - Impersonate a user to the relay: authentication is a signature over a
@@ -81,16 +93,25 @@ prekeys (sessions then start without one, which costs the first message
 some forward secrecy until the signed prekey rotates). Cannot learn who
 your contacts are from the relay. Their messages are decrypted but held in
 the Requests pane until you accept them, and a blocked id is dropped on
-arrival. On the relay, each connection is limited to 60 messages and 30
-lookups per minute (30 messages for anonymous connections), mailboxes are
+arrival. A file they announce is never fetched, and they get no receipts,
+so they cannot tell whether you are there. On the relay, each connection
+is limited to 60 messages, 30 lookups and 600 file chunks per minute (30
+messages for anonymous connections), mailboxes and file storage are
 capped, and an operator can require an invite token to register at all.
-Flooding a mailbox to its cap remains possible for anyone with the id.
+Flooding a mailbox to its cap remains possible for anyone with the id, as
+is filling the relay's shared file storage from any connection, which
+then refuses everyone's files until chunks expire.
 
 ### Malicious contact
 
-Can send you anything, including messages that claim any timestamp. Cannot
-forge messages from someone else. Cannot learn your other contacts. Cannot
-decrypt messages between you and others.
+Can send you anything, including messages that claim any timestamp, and
+files with any name and content; the client strips path separators from
+the name and never overwrites, but what is inside the file is for you and
+your other software to judge. Learns when their messages reached your
+client and, unless you turn read receipts off, when you looked at them,
+which says when you are at the keyboard. Cannot forge messages from
+someone else. Cannot learn your other contacts. Cannot decrypt messages
+between you and others.
 
 ### Device thief
 
@@ -102,7 +123,10 @@ were already received and ratcheted past if those were recorded in transit:
 the message keys are gone. With a passphrase set, every file is encrypted
 under a key that only the passphrase unlocks (Argon2id, 64 MiB and 3
 passes, then XChaCha20-Poly1305), so the thief is left guessing the
-passphrase offline; a weak passphrase is the remaining risk. Memory of a
+passphrase offline; a weak passphrase is the remaining risk. Received
+files in `downloads/` are the exception: they are saved as ordinary files
+so other programs can open them, and stay readable without the
+passphrase. Memory of a
 running, unlocked client still holds the keys. There is no way to revoke an
 identity; the only remedy is to tell your contacts out of band and start a
 new one. A backup file (`--export-backup`) is encrypted under its own
@@ -153,6 +177,14 @@ without comparing safety numbers out of band.
   read that identity's mailbox. Submission needs no authentication at all.
 - **Sequence numbers**: a per-conversation counter and a per-installation
   random epoch inside the body. Replays are dropped, gaps reported.
+- **Receipts and capabilities** (0.4.0 on): both live inside the encrypted
+  body, so the relay sees neither which clients have which features nor
+  which messages were read.
+- **Files** (0.4.0 on): a random per-file key and nonce; each 64 KiB chunk
+  is XChaCha20-Poly1305 with the blob id, chunk index and chunk count as
+  associated data, and the whole file's SHA-256 travels with the key
+  inside the message. The relay stores ciphertext under a random id that
+  only the message reveals.
 
 Deliberately absent so far: deniability (messages are signed), padding of
 message sizes, cover traffic, post-quantum key agreement.
