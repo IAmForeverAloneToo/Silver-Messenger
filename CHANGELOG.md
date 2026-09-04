@@ -4,7 +4,7 @@ Notable changes to Silver Messenger. Versions follow [semantic
 versioning](https://semver.org); while the major version is 0, a minor bump
 means behaviour or the wire protocol changed in a way worth reading about.
 
-## Unreleased
+## 0.5.0 - 2026-09-04
 
 A terminal client that feels native. Nothing on the wire changed; clients
 and relays interoperate with 0.4.0 peers. `Ctrl-C` no longer quits on its
