@@ -23,10 +23,44 @@ The repository is a Cargo workspace with four crates:
 
 ## Quick start
 
-Ready-made binaries for Windows, macOS and Linux are on the
-[releases page](https://github.com/IAmForeverAloneToo/Silver-Messenger/releases)
-(unpack and run `silver`). To build from source you need a Rust toolchain
-(https://rustup.rs). Then, from the repository root:
+### From the release binaries
+
+Download the archive for your system from the
+[releases page](https://github.com/IAmForeverAloneToo/Silver-Messenger/releases):
+
+| System  | Archive                                                                 |
+| ------- | ----------------------------------------------------------------------- |
+| Windows | `silver-messenger-<version>-x86_64-pc-windows-msvc.zip`                 |
+| macOS   | `…-aarch64-apple-darwin.tar.gz` (Apple Silicon), `…-x86_64-apple-darwin.tar.gz` (Intel) |
+| Linux   | `…-x86_64-unknown-linux-musl.tar.gz` (static; runs on any distribution) |
+
+Unpack it. Inside are the client `silver` (`silver.exe` on Windows), the
+relay `silver-relay`, and the docs. Open a terminal in that folder and
+point the client at a relay once:
+
+```
+.\silver.exe --relay wss://relay.example.org/ws     # Windows, in PowerShell or Windows Terminal
+./silver --relay wss://relay.example.org/ws         # macOS and Linux
+```
+
+The relay is remembered, so from then on `silver` alone is enough (on
+Windows, double-clicking `silver.exe` works too). A data directory from an
+earlier version is picked up as it is.
+
+**Windows:** use [Windows Terminal](https://aka.ms/terminal) (preinstalled
+on Windows 11, in the Microsoft Store on Windows 10) rather than the
+classic console window. Its fonts have the check marks, and selection, copy
+and paste behave as you expect. In the classic console the client draws
+ASCII marks (`v`, `vv`, `x`, `..`) by itself; `/marks` changes that, and
+`--no-mouse` hands selection and right-click paste back to the console.
+
+**macOS:** the binaries are not notarised yet, so the first start may be
+refused. Right-click `silver` and choose Open once, or run
+`xattr -d com.apple.quarantine silver`.
+
+### From source
+
+You need a Rust toolchain (https://rustup.rs). From the repository root:
 
 ```sh
 # 1. Run a relay somewhere both parties can reach (defaults to 0.0.0.0:7777)
@@ -35,6 +69,8 @@ cargo run --release --bin silver-relay
 # 2. Each person runs the client, pointing it at the relay once
 cargo run --release --bin silver -- --relay ws://relay.example.org:7777/ws
 ```
+
+### First steps
 
 On first start the client generates an identity and shows your **user id** in
 the System pane. Share it with the person you want to talk to (any channel
@@ -75,6 +111,7 @@ refused. Received files are saved under their own name in
 | `/search <text>`                | Find messages in the selected chat, or in all chats from System |
 | `/receipts on\|off`             | Tell contacts when you have read their messages (default on) |
 | `/notify all\|bell\|off`        | Bell and desktop notification, bell only, or nothing         |
+| `/marks ascii\|unicode\|auto`   | Draw the marks in ASCII if your terminal shows boxes for them |
 | `/accept <n>`                   | Accept a contact request from the Requests pane              |
 | `/block <n or id>`              | Drop everything from that id from now on                     |
 | `/unblock <id>`, `/blocked`     | Undo a block; list blocked ids                               |
@@ -102,6 +139,7 @@ silver --invite <TOKEN>    invite token for a relay that only registers invited 
 silver --print-id          print your user id and exit
 silver --print-invite      print your invite link (silver://add/<id>?relay=…) and exit
 silver --no-mouse          leave the mouse to the terminal: no wheel scrolling, but text selects without Shift (env SILVER_NO_MOUSE)
+silver --ascii             draw marks in ASCII (v, vv, x, ..); chosen by itself in the classic Windows console (env SILVER_ASCII)
 silver --set-passphrase    encrypt keys, contacts and history under a passphrase (asked at every start)
 silver --remove-passphrase store everything unencrypted again
 SILVER_PASSPHRASE=…        supplies the passphrase non-interactively (scripts, tests)

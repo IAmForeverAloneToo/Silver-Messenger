@@ -1,6 +1,7 @@
 //! Silver Messenger terminal client.
 
 mod app;
+mod glyphs;
 mod notify;
 mod qr;
 mod ui;
@@ -94,6 +95,12 @@ struct Args {
     /// text can be selected without holding Shift).
     #[arg(long, env = "SILVER_NO_MOUSE")]
     no_mouse: bool,
+
+    /// Draw marks in ASCII (v, vv, x, ..) for terminals whose fonts lack
+    /// the Unicode ones, such as the classic Windows console. Chosen by
+    /// itself where the terminal is known; /marks changes it for good.
+    #[arg(long, env = "SILVER_ASCII")]
+    ascii: bool,
 }
 
 #[tokio::main]
@@ -226,8 +233,20 @@ async fn main() -> anyhow::Result<()> {
             .init();
     }
 
+    let marks = if args.ascii {
+        glyphs::Marks::Ascii
+    } else {
+        glyphs::Marks::parse(&config.marks).unwrap_or(glyphs::Marks::Auto)
+    };
     let (client, events) = Client::spawn(relay_url.clone(), Arc::new(identity), options)?;
-    let app = app::App::new(store, client, relay_url, created, send_epoch)?;
+    let app = app::App::new(
+        store,
+        client,
+        relay_url,
+        created,
+        send_epoch,
+        glyphs::Glyphs::for_marks(marks),
+    )?;
 
     let terminal = ratatui::init();
     let mut stdout = std::io::stdout();

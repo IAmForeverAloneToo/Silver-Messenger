@@ -18,6 +18,7 @@ use silver_protocol::envelope::{ReceiptKind, capability};
 use silver_protocol::{Content, KeyBundle, Message, UserId, now_ms};
 use tokio::sync::mpsc;
 
+use crate::glyphs::{Glyphs, Marks};
 use crate::notify::{Notifier, NotifyMode};
 use crate::{qr, ui};
 
@@ -109,6 +110,8 @@ pub struct App {
     receipts: ReceiptQueue,
     /// Whether to tell contacts when their messages were shown.
     pub read_receipts: bool,
+    /// The symbols the interface draws with.
+    pub glyphs: Glyphs,
     notifier: Notifier,
     pub system: Vec<SystemLine>,
     /// 0 is the system pane; `i >= 1` selects `contacts[i - 1]`.
@@ -143,6 +146,7 @@ impl App {
         relay_url: String,
         fresh_identity: bool,
         send_epoch: u64,
+        glyphs: Glyphs,
     ) -> anyhow::Result<Self> {
         let me = client.user_id();
         let contacts = store.load_contacts()?;
@@ -192,6 +196,7 @@ impl App {
             known_ids,
             receipts: ReceiptQueue::default(),
             read_receipts,
+            glyphs,
             notifier,
             system: Vec::new(),
             selected: 0,
@@ -642,6 +647,7 @@ impl App {
             "session" => self.cmd_session(),
             "receipts" => self.cmd_receipts(&rest),
             "notify" => self.cmd_notify(&rest),
+            "marks" | "ascii" => self.cmd_marks(&rest),
             "search" | "find" => self.cmd_search(&rest),
             "accept" => self.cmd_accept(&rest),
             "block" => self.cmd_block(&rest),
@@ -667,6 +673,7 @@ impl App {
             "  /session                 show how messages with the selected contact are protected",
             "  /receipts on|off         tell contacts when you have read their messages (default on)",
             "  /notify all|bell|off     bell and desktop notification for new messages, bell only, or nothing",
+            "  /marks ascii|unicode|auto draw the check marks in ASCII if your terminal shows boxes instead",
             "  /accept <n|user-id>      accept a contact request from the Requests pane",
             "  /block <n|user-id>       ignore a requester or contact from now on; /unblock <user-id> undoes it",
             "  /blocked                 list blocked ids",
@@ -874,6 +881,48 @@ impl App {
         );
     }
 
+    fn cmd_marks(&mut self, args: &[&str]) {
+        let marks = match args.first() {
+            None => {
+                self.toast(format!(
+                    "Marks are drawn in {}. Usage: /marks ascii|unicode|auto",
+                    if self.glyphs.ascii {
+                        "ASCII"
+                    } else {
+                        "Unicode"
+                    }
+                ));
+                return;
+            }
+            Some(arg) => match Marks::parse(arg) {
+                Some(marks) => marks,
+                None => {
+                    self.toast("Usage: /marks ascii|unicode|auto");
+                    return;
+                }
+            },
+        };
+        self.glyphs = Glyphs::for_marks(marks);
+        let mut config = self.store.load_config().unwrap_or_default();
+        config.marks = marks.as_str().to_owned();
+        if let Err(e) = self.store.save_config(&config) {
+            self.toast(format!("Could not save config: {e}"));
+        }
+        let g = self.glyphs;
+        self.system(
+            Level::Info,
+            format!(
+                "Marks: {} pending, {} accepted by the relay, {} delivered, {} in colour read, {} refused ({}; remembered).",
+                g.pending,
+                g.accepted,
+                g.delivered,
+                g.delivered,
+                g.failed,
+                marks.as_str()
+            ),
+        );
+    }
+
     fn cmd_receipts(&mut self, args: &[&str]) {
         let on = match args.first().map(|s| s.to_ascii_lowercase()).as_deref() {
             None => {
@@ -896,14 +945,15 @@ impl App {
         if let Err(e) = self.store.save_config(&config) {
             self.toast(format!("Could not save config: {e}"));
         }
-        self.system(
-            Level::Info,
-            if on {
-                "Read receipts on: contacts see ✓✓ when you have looked at their messages."
-            } else {
-                "Read receipts off: contacts only learn that their messages arrived, not that you read them."
-            },
-        );
+        let line = if on {
+            format!(
+                "Read receipts on: contacts see {} in colour when you have looked at their messages.",
+                self.glyphs.delivered
+            )
+        } else {
+            "Read receipts off: contacts only learn that their messages arrived, not that you read them.".to_owned()
+        };
+        self.system(Level::Info, line);
     }
 
     fn cmd_session(&mut self) {
@@ -974,9 +1024,9 @@ impl App {
                 let number = silver_protocol::safety_number(&self.me, &peer);
                 let groups: Vec<&str> = number.split(' ').collect();
                 let status = if contact.verified {
-                    "verified ✓"
+                    format!("verified {}", self.glyphs.verified)
                 } else {
-                    "not verified yet"
+                    "not verified yet".to_owned()
                 };
                 self.system(
                     Level::Info,
@@ -994,8 +1044,9 @@ impl App {
             Some("ok") | Some("yes") => {
                 self.contacts[index].verified = true;
                 self.persist_contacts();
-                self.system(Level::Info, format!("Marked {name} as verified ✓"));
-                self.toast(format!("{name} verified ✓"));
+                let mark = self.glyphs.verified;
+                self.system(Level::Info, format!("Marked {name} as verified {mark}"));
+                self.toast(format!("{name} verified {mark}"));
             }
             Some("no") | Some("clear") => {
                 self.contacts[index].verified = false;
@@ -1235,8 +1286,8 @@ impl App {
                 result,
             } => {
                 let text = match &result {
-                    Ok(path) => format!("[file] {label} → {}", path.display()),
-                    Err(e) => format!("[file] {label} ✗ {e}"),
+                    Ok(path) => format!("[file] {label} {} {}", self.glyphs.arrow, path.display()),
+                    Err(e) => format!("[file] {label} {} {e}", self.glyphs.failed),
                 };
                 self.set_line_text(&peer, &id, text.clone());
                 if let Err(e) = self.store.append_text(&peer, &id, &text) {

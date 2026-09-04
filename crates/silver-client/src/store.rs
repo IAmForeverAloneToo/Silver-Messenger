@@ -71,6 +71,17 @@ pub struct Config {
     /// How to draw attention to new messages: `all`, `bell` or `off`.
     #[serde(default = "default_notify")]
     pub notify: String,
+    /// Symbols in the interface: `auto`, `unicode` or `ascii` (for
+    /// terminals whose fonts lack the check marks, such as the classic
+    /// Windows console).
+    #[serde(default = "default_marks")]
+    pub marks: String,
+    /// Colours: `dark`, `light` or `mono`.
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    /// Width of the chat list, in columns.
+    #[serde(default = "default_sidebar_width")]
+    pub sidebar_width: u16,
 }
 
 fn default_true() -> bool {
@@ -79,6 +90,18 @@ fn default_true() -> bool {
 
 fn default_notify() -> String {
     "all".to_owned()
+}
+
+fn default_marks() -> String {
+    "auto".to_owned()
+}
+
+fn default_theme() -> String {
+    "dark".to_owned()
+}
+
+fn default_sidebar_width() -> u16 {
+    26
 }
 
 impl Default for Config {
@@ -91,6 +114,9 @@ impl Default for Config {
             invite_token: None,
             read_receipts: true,
             notify: default_notify(),
+            marks: default_marks(),
+            theme: default_theme(),
+            sidebar_width: default_sidebar_width(),
         }
     }
 }

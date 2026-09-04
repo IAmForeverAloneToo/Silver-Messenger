@@ -80,7 +80,7 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
             .map(|ids| ids.len())
             .filter(|n| *n > 0);
         let label = if contact.verified {
-            format!("✓ {}", contact.display_name())
+            format!("{} {}", app.glyphs.verified, contact.display_name())
         } else {
             contact.display_name()
         };
@@ -115,7 +115,11 @@ fn draw_messages(frame: &mut Frame, app: &mut App, area: Rect) {
         Some(contact) => (
             format!(
                 " {}{} · {}{} ",
-                if contact.verified { "✓ " } else { "" },
+                if contact.verified {
+                    format!("{} ", app.glyphs.verified)
+                } else {
+                    String::new()
+                },
                 contact.display_name(),
                 contact.user_id,
                 app.encryption_label(contact)
@@ -135,7 +139,10 @@ fn draw_messages(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let mut block = Block::bordered().title(truncate(&title, width));
     if app.scroll > 0 {
-        block = block.title_bottom(Line::styled(format!(" ↓ {} more ", app.scroll), dim()));
+        block = block.title_bottom(Line::styled(
+            format!(" {} {} more ", app.glyphs.more_below, app.scroll),
+            dim(),
+        ));
     }
     frame.render_widget(Paragraph::new(visible).block(block), area);
 }
@@ -232,21 +239,28 @@ fn thread_rows(app: &App, peer: &silver_protocol::UserId, width: usize) -> Vec<L
             Direction::Received => (peer_name.clone(), Style::default().fg(Color::Cyan)),
         };
         // ⋯ waiting for the relay, ✓ accepted by the relay, ✓✓ delivered to
-        // their device, ✓✓ in colour read, ✗ refused for good.
+        // their device, ✓✓ in colour read, ✗ refused for good (or their
+        // ASCII stand-ins).
+        let g = app.glyphs;
         let (mark, mark_style) = match line.direction {
-            Direction::Sent if line.failed => (" ✗", Style::default().fg(Color::Red)),
-            Direction::Sent if !line.delivered => (" ⋯", dim()),
+            Direction::Sent if line.failed => (g.failed, Style::default().fg(Color::Red)),
+            Direction::Sent if !line.delivered => (g.pending, dim()),
             Direction::Sent => match line.receipt {
                 Some(ReceiptKind::Read) => (
-                    " ✓✓",
+                    g.delivered,
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Some(ReceiptKind::Delivered) => (" ✓✓", dim()),
-                None => (" ✓", dim()),
+                Some(ReceiptKind::Delivered) => (g.delivered, dim()),
+                None => (g.accepted, dim()),
             },
             Direction::Received => ("", Style::default()),
+        };
+        let mark = if mark.is_empty() {
+            String::new()
+        } else {
+            format!(" {mark}")
         };
         let prefix = vec![
             Span::styled(format!("{} ", clock(line.timestamp_ms)), dim()),
@@ -305,10 +319,11 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
+    let g = app.glyphs;
     let (dot, label, color) = match app.connection {
-        Connection::Connecting => ("◌", "connecting", Color::Yellow),
-        Connection::Connected => ("●", "connected", Color::Green),
-        Connection::Disconnected => ("○", "disconnected", Color::Red),
+        Connection::Connecting => (g.connecting, "connecting", Color::Yellow),
+        Connection::Connected => (g.connected, "connected", Color::Green),
+        Connection::Disconnected => (g.disconnected, "disconnected", Color::Red),
     };
     let mut spans = vec![
         Span::styled(format!(" {dot} {label} "), Style::default().fg(color)),
