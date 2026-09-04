@@ -26,7 +26,7 @@ Tick items off as they land on `main`.
 3. [x] **Per-conversation sequence numbers** (S). A counter inside the
        encrypted body so the client detects replays, gaps and reordering.
        Early because later protocol work builds on it.
-4. [ ] **v0.1.0 release, checksums, `cargo audit` and `cargo deny` in CI**
+4. [x] **v0.1.0 release, checksums, `cargo audit` and `cargo deny` in CI**
        (S). A tagged baseline before the trust-model changes.
 
 ## Phase 2: complete the trust model

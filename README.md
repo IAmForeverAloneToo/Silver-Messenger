@@ -166,10 +166,16 @@ a long-term key, and encrypted storage at rest. The ordered plan is in
 ## Development
 
 ```sh
-cargo test --workspace            # unit tests + an in-process relay end-to-end test
+cargo test --workspace            # unit tests + in-process relay end-to-end tests
 cargo clippy --workspace --all-targets
 cargo fmt --all
+cargo deny check                  # advisories, licenses, duplicate crates (deny.toml)
+cargo audit
 ```
+
+CI runs the same checks on every push, plus the test suite on Linux, macOS
+and Windows. Pushing a `v*` tag builds release archives for all platforms
+with a `SHA256SUMS` file and publishes them on the releases page.
 
 The end-to-end test in `crates/silver-client/tests/e2e.rs` starts a relay on
 a random port, connects two clients, and checks both directions, offline
