@@ -206,7 +206,16 @@ async fn client_reconnects_after_relay_restart() {
     ));
 
     // Bring it back on the same port; the client reconnects within backoff.
-    let listener = TcpListener::bind(addr).await.unwrap();
+    // The old runtime releases its socket asynchronously, so retry the bind.
+    let listener = loop {
+        match TcpListener::bind(addr).await {
+            Ok(l) => break l,
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(e) => panic!("rebind failed: {e}"),
+        }
+    };
     tokio::spawn(silver_relay::serve(
         listener,
         RelayState::new(),
