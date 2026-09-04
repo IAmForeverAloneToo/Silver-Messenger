@@ -39,7 +39,7 @@ Tick items off as they land on `main`.
        compare out of band; a verified mark on contacts.
 7. [x] **Encrypted local storage** (M). Keys and history under a passphrase
        (Argon2id, XChaCha20-Poly1305), optional OS keychain unlock.
-8. [ ] **Identity backup and restore** (S). Seed phrase or encrypted export,
+8. [x] **Identity backup and restore** (S). Seed phrase or encrypted export,
        so a lost machine is not a lost identity.
 9. [ ] **Contact requests and relay abuse controls** (M). First messages
        from strangers land in a pending list; relay rate limits, per-sender

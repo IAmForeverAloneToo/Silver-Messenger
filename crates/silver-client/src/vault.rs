@@ -208,6 +208,29 @@ fn open(key: &[u8; 32], aad: &[u8], bytes: &[u8]) -> Option<Zeroizing<Vec<u8>>> 
         .map(Zeroizing::new)
 }
 
+/// Encrypt `plaintext` directly under a passphrase (no vault involved), for
+/// self-contained files such as backups. Returns `nonce || ciphertext`.
+pub fn encrypt_with_passphrase(
+    passphrase: &str,
+    kdf: &Kdf,
+    aad: &[u8],
+    plaintext: &[u8],
+) -> anyhow::Result<Vec<u8>> {
+    let key = derive(kdf, passphrase)?;
+    Ok(seal(&key, aad, plaintext))
+}
+
+/// Inverse of [`encrypt_with_passphrase`].
+pub fn decrypt_with_passphrase(
+    passphrase: &str,
+    kdf: &Kdf,
+    aad: &[u8],
+    bytes: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+    let key = derive(kdf, passphrase)?;
+    open(&key, aad, bytes).ok_or(VaultError::WrongPassphrase)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

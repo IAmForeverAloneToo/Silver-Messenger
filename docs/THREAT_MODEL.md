@@ -89,7 +89,9 @@ file is encrypted under a key that only the passphrase unlocks (Argon2id,
 the passphrase offline; a weak passphrase is the remaining risk. Memory of a
 running, unlocked client still holds the keys. There is no way to revoke an
 identity; the only remedy is to tell your contacts out of band and start a
-new one. (Gap: roadmap item 8 for backup; revocation is not yet planned.)
+new one. A backup file (`--export-backup`) is encrypted under its own
+passphrase and holds the identity keys and contacts, so it deserves the same
+care as the data directory. (Revocation is not yet planned.)
 
 ### Compromised long-term Diffie–Hellman key
 

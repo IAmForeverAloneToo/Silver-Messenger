@@ -333,6 +333,16 @@ impl Store {
         Ok((identity, true))
     }
 
+    pub fn has_identity(&self) -> bool {
+        self.root.join(IDENTITY_FILE).exists()
+    }
+
+    /// Overwrite the identity, e.g. when restoring a backup.
+    pub fn save_identity(&self, identity: &Identity) -> anyhow::Result<()> {
+        let text = serde_json::to_string_pretty(&identity.to_secrets())?;
+        self.write_file(IDENTITY_FILE, text.as_bytes(), true)
+    }
+
     pub fn load_config(&self) -> anyhow::Result<Config> {
         self.read_json_or_default(CONFIG_FILE)
     }

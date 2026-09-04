@@ -49,6 +49,22 @@ struct Args {
     /// exit.
     #[arg(long)]
     remove_passphrase: bool,
+
+    /// Write an encrypted backup of your identity and contacts to this file
+    /// (asks for a passphrase for the file), then exit.
+    #[arg(long, value_name = "FILE")]
+    export_backup: Option<PathBuf>,
+
+    /// Restore identity and contacts from a backup file into the data
+    /// directory, then exit. Refuses to replace an existing identity unless
+    /// --force is given.
+    #[arg(long, value_name = "FILE")]
+    import_backup: Option<PathBuf>,
+
+    /// With --import-backup: replace the identity already in the data
+    /// directory.
+    #[arg(long)]
+    force: bool,
 }
 
 #[tokio::main]
@@ -90,9 +106,35 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if let Some(path) = args.import_backup {
+        let passphrase = backup_passphrase("Backup passphrase: ")?;
+        let payload = silver_client::read_backup(&path, &passphrase)?;
+        let user_id = silver_protocol::Identity::from_secrets(&payload.identity).user_id();
+        silver_client::import_backup(&store, payload, args.force)?;
+        println!("Restored identity {user_id} into {}.", data_dir.display());
+        return Ok(());
+    }
+
     let (identity, created) = store.load_or_create_identity()?;
     if created {
         offer_passphrase(&mut store)?;
+    }
+    if let Some(path) = args.export_backup {
+        let passphrase = match passphrase_from_env_backup() {
+            Some(p) => p,
+            None => {
+                println!("Choose a passphrase for the backup file; it is needed to restore it.");
+                new_passphrase()?
+            }
+        };
+        silver_client::export_backup(&store, &path, &passphrase)?;
+        println!(
+            "Backup of identity {} and {} contact(s) written to {}.",
+            identity.user_id(),
+            store.load_contacts()?.len(),
+            path.display()
+        );
+        return Ok(());
     }
     if args.print_id {
         println!("{}", identity.user_id());
@@ -150,6 +192,18 @@ async fn main() -> anyhow::Result<()> {
 /// scripts and tests.
 fn passphrase_from_env() -> Option<String> {
     std::env::var("SILVER_PASSPHRASE").ok()
+}
+
+/// `SILVER_BACKUP_PASSPHRASE` stands in for typing the backup passphrase.
+fn passphrase_from_env_backup() -> Option<String> {
+    std::env::var("SILVER_BACKUP_PASSPHRASE").ok()
+}
+
+fn backup_passphrase(prompt: &str) -> anyhow::Result<String> {
+    match passphrase_from_env_backup() {
+        Some(p) => Ok(p),
+        None => Ok(rpassword::prompt_password(prompt)?),
+    }
 }
 
 fn unlock(store: &mut Store) -> anyhow::Result<()> {

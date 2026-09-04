@@ -5,6 +5,7 @@
 //!   authenticates, publishes our key bundle, decrypts inbound envelopes and
 //!   reports everything as [`ClientEvent`]s.
 
+pub mod backup;
 pub mod connection;
 mod outbox;
 pub mod proxy;
@@ -13,6 +14,7 @@ pub mod store;
 pub mod tls;
 pub mod vault;
 
+pub use backup::{BackupPayload, export_backup, import_backup, read_backup};
 pub use connection::{Client, ClientError, ClientEvent, DEFAULT_RELAY_URL};
 pub use proxy::Proxy;
 pub use silver_protocol as protocol;

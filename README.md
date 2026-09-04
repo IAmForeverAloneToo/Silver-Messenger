@@ -77,6 +77,9 @@ silver --print-id          print your user id and exit
 silver --set-passphrase    encrypt keys, contacts and history under a passphrase (asked at every start)
 silver --remove-passphrase store everything unencrypted again
 SILVER_PASSPHRASE=…        supplies the passphrase non-interactively (scripts, tests)
+silver --export-backup <F> write an encrypted backup of identity and contacts to F (asks for a passphrase for it)
+silver --import-backup <F> restore identity and contacts from F; add --force to replace an existing identity
+SILVER_BACKUP_PASSPHRASE=… supplies the backup passphrase non-interactively
 SILVER_LOG=debug silver    write logs to <data-dir>/silver.log
 
 silver-relay --listen <ADDR>          default 0.0.0.0:7777                          (env SILVER_RELAY_LISTEN)
@@ -157,6 +160,11 @@ the machine.
   bound to its own name and history is encrypted line by line. A new
   identity offers to set a passphrase on first start; `--set-passphrase`
   and `--remove-passphrase` change it later.
+* **Backups**: `--export-backup` writes the identity keys and contact list
+  to one file encrypted under a passphrase of its own (Argon2id and
+  XChaCha20-Poly1305). `--import-backup` restores it onto a fresh
+  installation: same id, same contacts, and a new message-numbering epoch so
+  contacts see a reinstall rather than replays. History is not included.
 * **Safety numbers**: `/verify` shows twelve groups of five digits derived
   from both identity keys, identical on both sides. Two people who read them
   to each other confirm that nobody sits between them; `/verify ok` records
