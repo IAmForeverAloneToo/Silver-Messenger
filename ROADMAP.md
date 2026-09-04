@@ -73,21 +73,81 @@ Tick items off as they land on `main`.
 17. [x] **Attachments** (M). Encrypted files, chunked or via a relay blob
         endpoint, with a size cap and progress display.
 
-## Phase 5: beyond one relay
+## Phase 5: a terminal client that feels native
 
-18. [ ] **Relay metrics and admin tooling, built-in TLS** (S). Prometheus
+The first real use on Windows (0.4.0, in the classic console) showed that
+the client works but fights the terminal: the check marks do not render,
+text cannot be selected, copied or pasted, and everything needs the
+keyboard. Most of that has one cause: the client captures the mouse for
+wheel scrolling, which on Windows turns off the console's QuickEdit mode
+(its only selection and paste mechanism), and it draws marks in glyphs
+the console's default fonts do not have. This phase does nothing but make
+the client comfortable, on every terminal people actually use, before any
+more protocol work.
+
+18. [ ] **Windows first run** (S). Detect the classic console and
+        terminals without the glyphs and fall back to ASCII marks
+        (`..`, `v`, `vv`, `x`), with `--ascii` and a config key to force
+        either way; check box drawing, the date rule and the QR code
+        under the console's default fonts; make sure output is UTF-8 on
+        every Windows host; document Windows Terminal as the recommended
+        terminal and how to install it. First because it is what a new
+        Windows user hits in the first minute.
+19. [ ] **Clipboard that just works** (M). Paste from the system clipboard
+        on `Ctrl-V`, `Shift-Insert` and right click, read by the client
+        itself (arboard on Windows, macOS and X11/Wayland; OSC 52 over
+        SSH and in tmux) instead of relying on the terminal's paste path;
+        copy the selection or the last message with `Ctrl-C` and
+        `/copy`, the invite link with `/invite copy`; move quitting to
+        `Ctrl-Q` with a confirmation, with `Ctrl-C` quitting only when
+        there is nothing to copy. Second because it removes the reason
+        people reach for the terminal's own selection.
+20. [ ] **Text selection inside the client** (M). Drag with the mouse or
+        `Shift`+arrows in the message pane to select, with a visible
+        highlight; double click selects a word, triple click a message;
+        the selection copies to the clipboard and can be cleared with
+        `Esc`. The terminal's native selection (`Shift`+drag, or
+        `--no-mouse`) keeps working as the fallback.
+21. [ ] **Mouse navigation** (M). Click a chat, the Requests entry or
+        System in the sidebar to open it, click the message box to focus
+        it, click a scrollbar or drag it, click a file line to open the
+        file, drag the divider to resize the sidebar; the wheel keeps
+        scrolling. Everything stays reachable by keyboard.
+22. [ ] **Discoverability** (M). A help overlay on `F1` and `?`, a status
+        line that shows the keys that matter for the focused pane,
+        `Tab` completion and a suggestion popup for `/commands`, contact
+        names and file paths, usage hints when a command is mistyped,
+        unread badges in the sidebar, and a short guided first run in
+        the System pane. So nobody needs the README to get going.
+23. [ ] **Layout and rendering** (S). A narrow-terminal layout that
+        collapses the sidebar, light and dark palettes with `--theme` and
+        `NO_COLOR`, focus shown on pane borders, word-boundary wrapping
+        with hanging indents everywhere, an unread separator in the
+        chat, relative timestamps on hover-less terminals ("today",
+        "yesterday"), and clickable OSC 8 links for invite links and
+        saved file paths.
+24. [ ] **Terminal test matrix** (S). Run the pty smoke tests and a
+        snapshot test against xterm, Windows Terminal, the classic
+        console, tmux, macOS Terminal.app and iTerm2; record each
+        terminal's quirks in `docs/TERMINALS.md`; make the matrix part of
+        CI where the terminal can be driven headless. Last because it
+        keeps 18 to 23 from regressing.
+
+## Phase 6: beyond one relay
+
+25. [ ] **Relay metrics and admin tooling, built-in TLS** (S). Prometheus
         endpoint, mailbox inspection, ACME in the relay so Caddy is optional.
-19. [ ] **Relay-agnostic addresses** (M). Contacts as `id@relay` so people
+26. [ ] **Relay-agnostic addresses** (M). Contacts as `id@relay` so people
         on different self-hosted relays can talk.
-20. [ ] **Username registry** (M). Optional, signed claims on a relay.
+27. [ ] **Username registry** (M). Optional, signed claims on a relay.
         Decide the openness of the network before this one.
-21. [ ] **Group chats** (L). Sender keys, membership and invites.
-22. [ ] **Multiple devices** (L). Linked devices first, full identity sync
+28. [ ] **Group chats** (L). Sender keys, membership and invites.
+29. [ ] **Multiple devices** (L). Linked devices first, full identity sync
         later.
 
 ## Continuous
 
 - [ ] Fuzzing for the envelope and frame parsers, property tests for
-      seal/open, a TUI snapshot test
+      seal/open
 - [ ] Docker image for the relay; code signing for Windows and macOS
 - [ ] Contributor guide and FAQ for non-technical users
