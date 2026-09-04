@@ -1,7 +1,7 @@
 //! Rendering. Pure function of [`App`] state, except that it records the
 //! message pane's scroll range so key handling can clamp to it.
 
-use chrono::{Local, TimeZone};
+use chrono::{Local, NaiveDate, TimeZone};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -15,13 +15,17 @@ use crate::app::{App, Connection, Level};
 
 const SIDEBAR_WIDTH: u16 = 26;
 
+/// Rows the compose box may grow to before it scrolls.
+const INPUT_MAX_ROWS: u16 = 6;
+
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let [main, status] =
         Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).areas(frame.area());
     let [sidebar, chat] =
         Layout::horizontal([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(20)]).areas(main);
+    let input_rows = (app.input.split('\n').count() as u16).clamp(1, INPUT_MAX_ROWS);
     let [messages, input] =
-        Layout::vertical([Constraint::Min(3), Constraint::Length(3)]).areas(chat);
+        Layout::vertical([Constraint::Min(3), Constraint::Length(input_rows + 2)]).areas(chat);
 
     draw_sidebar(frame, app, sidebar);
     draw_messages(frame, app, messages);
@@ -201,7 +205,19 @@ fn thread_rows(app: &App, peer: &silver_protocol::UserId, width: usize) -> Vec<L
         .map(|c| c.display_name())
         .unwrap_or_default();
     let mut rows = Vec::new();
+    let mut last_day: Option<NaiveDate> = None;
     for line in lines {
+        // A separator whenever the calendar day changes.
+        let day = Local
+            .timestamp_millis_opt(line.timestamp_ms as i64)
+            .single()
+            .map(|t| t.date_naive());
+        if day != last_day {
+            if let Some(day) = day {
+                rows.push(separator(&day.format(" %A %-d %B %Y ").to_string(), width));
+            }
+            last_day = day;
+        }
         let (name, name_style) = match line.direction {
             Direction::Sent => ("you".to_owned(), Style::default().fg(Color::Green)),
             Direction::Received => (peer_name.clone(), Style::default().fg(Color::Cyan)),
@@ -236,28 +252,47 @@ fn thread_rows(app: &App, peer: &silver_protocol::UserId, width: usize) -> Vec<L
 
 fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
     let inner_width = area.width.saturating_sub(2) as usize;
+    let inner_height = area.height.saturating_sub(2) as usize;
     let title = if app.input.starts_with('/') {
         " Command "
+    } else if app.input.contains('\n') {
+        " Message (Alt-Enter for a new line, Enter sends) "
     } else {
         " Message "
     };
 
-    // Keep the cursor visible by scrolling the input horizontally.
-    let cursor_col: usize = app
-        .input
+    // Keep the cursor visible: scroll the box vertically to its line and
+    // that line horizontally to its column.
+    let lines: Vec<&str> = app.input.split('\n').collect();
+    let (cursor_line, cursor_chars) = app.cursor_line_col();
+    let top = (cursor_line + 1).saturating_sub(inner_height.max(1));
+    let cursor_col: usize = lines[cursor_line]
         .chars()
-        .take(app.cursor)
+        .take(cursor_chars)
         .map(|c| c.width().unwrap_or(0))
         .sum();
     let offset = cursor_col.saturating_sub(inner_width.saturating_sub(1));
-    let shown: String = skip_width(&app.input, offset);
+    let shown: Vec<Line> = lines
+        .iter()
+        .enumerate()
+        .skip(top)
+        .take(inner_height.max(1))
+        .map(|(i, text)| {
+            if i == cursor_line {
+                Line::from(skip_width(text, offset))
+            } else {
+                Line::from((*text).to_owned())
+            }
+        })
+        .collect();
 
     frame.render_widget(
         Paragraph::new(shown).block(Block::bordered().title(title)),
         area,
     );
     let x = area.x + 1 + (cursor_col - offset).min(inner_width.saturating_sub(1)) as u16;
-    frame.set_cursor_position(Position::new(x, area.y + 1));
+    let y = area.y + 1 + (cursor_line - top) as u16;
+    frame.set_cursor_position(Position::new(x, y));
 }
 
 fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
@@ -301,6 +336,31 @@ pub fn clock(timestamp_ms: u64) -> String {
         .single()
         .map(|t| t.format("%H:%M").to_string())
         .unwrap_or_else(|| "--:--".into())
+}
+
+/// Date and time, for lines shown outside their conversation.
+pub fn stamp(timestamp_ms: u64) -> String {
+    Local
+        .timestamp_millis_opt(timestamp_ms as i64)
+        .single()
+        .map(|t| t.format("%-d %b %H:%M").to_string())
+        .unwrap_or_else(|| "--:--".into())
+}
+
+/// A dim rule with `text` in the middle, `width` columns wide.
+fn separator(text: &str, width: usize) -> Line<'static> {
+    let text_width = text.width().min(width);
+    let left = width.saturating_sub(text_width) / 2;
+    let right = width.saturating_sub(text_width + left);
+    Line::styled(
+        format!(
+            "{}{}{}",
+            "─".repeat(left),
+            truncate(text, width),
+            "─".repeat(right)
+        ),
+        dim(),
+    )
 }
 
 /// Lay out `prefix` followed by word-wrapped `text`; continuation rows are

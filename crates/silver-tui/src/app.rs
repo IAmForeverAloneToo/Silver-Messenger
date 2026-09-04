@@ -4,7 +4,9 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use ratatui::DefaultTerminal;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+};
 use silver_client::sequence::{self, SequenceCheck};
 use silver_client::{
     Client, ClientError, ClientEvent, Contact, ContactRequest, Delivery, Direction, HeldMessage,
@@ -18,6 +20,9 @@ use crate::ui;
 
 const TOAST_TTL: Duration = Duration::from_secs(6);
 const SCROLL_STEP: usize = 5;
+const MOUSE_SCROLL_STEP: usize = 3;
+const HISTORY_LIMIT: usize = 200;
+const SEARCH_LIMIT: usize = 30;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Connection {
@@ -91,6 +96,14 @@ pub struct App {
     pub input: String,
     /// Cursor position in `input`, in chars.
     pub cursor: usize,
+    /// Lines sent or run before, oldest first, for Up/Down recall.
+    history: Vec<String>,
+    /// Which history entry the input currently shows, while recalling.
+    history_pos: Option<usize>,
+    /// What was being typed when recall started.
+    history_draft: String,
+    /// The terminal window has focus, as far as it tells us.
+    pub focused: bool,
     /// Rows scrolled up from the bottom of the message pane.
     pub scroll: usize,
     /// Set by the renderer so scrolling can be clamped.
@@ -161,6 +174,10 @@ impl App {
             selected: 0,
             input: String::new(),
             cursor: 0,
+            history: Vec::new(),
+            history_pos: None,
+            history_draft: String::new(),
+            focused: true,
             scroll: 0,
             max_scroll: 0,
             toast: None,
@@ -330,9 +347,20 @@ impl App {
     fn handle_terminal_event(&mut self, ev: Event) {
         match ev {
             Event::Key(key) if key.kind != KeyEventKind::Release => self.handle_key(key),
-            Event::Paste(text) => self.insert_str(&text),
+            Event::Paste(text) => self.insert_str(&text.replace("\r\n", "\n").replace('\r', "\n")),
+            Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::ScrollUp => self.scroll_by(MOUSE_SCROLL_STEP as isize),
+                MouseEventKind::ScrollDown => self.scroll_by(-(MOUSE_SCROLL_STEP as isize)),
+                _ => {}
+            },
+            Event::FocusGained => self.focused = true,
+            Event::FocusLost => self.focused = false,
             _ => {}
         }
+    }
+
+    fn scroll_by(&mut self, rows: isize) {
+        self.scroll = self.scroll.saturating_add_signed(rows).min(self.max_scroll);
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
@@ -343,25 +371,34 @@ impl App {
             KeyCode::Char('n') if ctrl => self.select_next(),
             KeyCode::Char('p') if ctrl => self.select_prev(),
             KeyCode::Char('u') if ctrl => self.clear_input(),
-            KeyCode::Char('a') if ctrl => self.cursor = 0,
-            KeyCode::Char('e') if ctrl => self.cursor = self.input.chars().count(),
-            KeyCode::Tab | KeyCode::Down => self.select_next(),
-            KeyCode::BackTab | KeyCode::Up => self.select_prev(),
-            KeyCode::Home => self.cursor = 0,
-            KeyCode::End => self.cursor = self.input.chars().count(),
+            KeyCode::Char('a') if ctrl => self.cursor = self.line_start(),
+            KeyCode::Char('e') if ctrl => self.cursor = self.line_end(),
+            KeyCode::Tab => self.select_next(),
+            KeyCode::BackTab => self.select_prev(),
+            KeyCode::Down if alt => self.select_next(),
+            KeyCode::Up if alt => self.select_prev(),
+            KeyCode::Up => self.input_up(),
+            KeyCode::Down => self.input_down(),
+            KeyCode::Home if ctrl => self.scroll = self.max_scroll,
+            KeyCode::End if ctrl => self.scroll = 0,
+            KeyCode::Home => self.cursor = self.line_start(),
+            KeyCode::End => self.cursor = self.line_end(),
             KeyCode::Left => self.cursor = self.cursor.saturating_sub(1),
             KeyCode::Right => self.cursor = (self.cursor + 1).min(self.input.chars().count()),
+            KeyCode::Enter if alt => self.insert_str("\n"),
             KeyCode::Backspace => {
                 if self.cursor > 0 {
                     self.cursor -= 1;
                     let at = self.byte_index(self.cursor);
                     self.input.remove(at);
+                    self.history_pos = None;
                 }
             }
             KeyCode::Delete => {
                 if self.cursor < self.input.chars().count() {
                     let at = self.byte_index(self.cursor);
                     self.input.remove(at);
+                    self.history_pos = None;
                 }
             }
             KeyCode::PageUp => self.scroll = (self.scroll + SCROLL_STEP).min(self.max_scroll),
@@ -372,6 +409,7 @@ impl App {
                 let at = self.byte_index(self.cursor);
                 self.input.insert(at, c);
                 self.cursor += 1;
+                self.history_pos = None;
             }
             _ => {}
         }
@@ -384,10 +422,117 @@ impl App {
             .map_or(self.input.len(), |(i, _)| i)
     }
 
+    /// Line and column (in chars) of the cursor within a multi-line input.
+    pub fn cursor_line_col(&self) -> (usize, usize) {
+        let mut line = 0;
+        let mut col = 0;
+        for c in self.input.chars().take(self.cursor) {
+            if c == '\n' {
+                line += 1;
+                col = 0;
+            } else {
+                col += 1;
+            }
+        }
+        (line, col)
+    }
+
+    /// Char index where the cursor's line starts.
+    fn line_start(&self) -> usize {
+        self.input
+            .chars()
+            .take(self.cursor)
+            .enumerate()
+            .filter(|(_, c)| *c == '\n')
+            .last()
+            .map_or(0, |(i, _)| i + 1)
+    }
+
+    /// Char index where the cursor's line ends.
+    fn line_end(&self) -> usize {
+        self.input
+            .chars()
+            .enumerate()
+            .skip(self.cursor)
+            .find(|(_, c)| *c == '\n')
+            .map_or(self.input.chars().count(), |(i, _)| i)
+    }
+
+    /// Put the cursor on `line` at `col` (clamped to the line's length).
+    fn move_cursor_to(&mut self, line: usize, col: usize) {
+        let mut index = 0;
+        for (i, text) in self.input.split('\n').enumerate() {
+            let len = text.chars().count();
+            if i == line {
+                self.cursor = index + col.min(len);
+                return;
+            }
+            index += len + 1;
+        }
+    }
+
+    /// Up: the previous line of a multi-line input, else the previous
+    /// history entry.
+    fn input_up(&mut self) {
+        let (line, col) = self.cursor_line_col();
+        if self.history_pos.is_none() && line > 0 {
+            self.move_cursor_to(line - 1, col);
+            return;
+        }
+        if self.history.is_empty() {
+            return;
+        }
+        let pos = match self.history_pos {
+            None => {
+                self.history_draft = self.input.clone();
+                self.history.len() - 1
+            }
+            Some(0) => return,
+            Some(p) => p - 1,
+        };
+        self.history_pos = Some(pos);
+        self.input = self.history[pos].clone();
+        self.cursor = self.input.chars().count();
+    }
+
+    /// Down: the next line of a multi-line input, else the next history
+    /// entry, and past the newest back to what was being typed.
+    fn input_down(&mut self) {
+        let (line, col) = self.cursor_line_col();
+        if self.history_pos.is_none() && line < self.input.matches('\n').count() {
+            self.move_cursor_to(line + 1, col);
+            return;
+        }
+        let Some(pos) = self.history_pos else {
+            return;
+        };
+        if pos + 1 < self.history.len() {
+            self.history_pos = Some(pos + 1);
+            self.input = self.history[pos + 1].clone();
+        } else {
+            self.history_pos = None;
+            self.input = std::mem::take(&mut self.history_draft);
+        }
+        self.cursor = self.input.chars().count();
+    }
+
+    fn remember(&mut self, line: &str) {
+        if self.history.last().is_none_or(|last| last != line) {
+            self.history.push(line.to_owned());
+            if self.history.len() > HISTORY_LIMIT {
+                self.history.remove(0);
+            }
+        }
+        self.history_pos = None;
+        self.history_draft.clear();
+    }
+
     fn insert_str(&mut self, text: &str) {
         let at = self.byte_index(self.cursor);
         self.input.insert_str(at, text);
         self.cursor += text.chars().count();
+        // Editing a recalled line makes it the current line.
+        self.history_pos = None;
     }
 
     fn clear_input(&mut self) {
@@ -424,6 +569,7 @@ impl App {
         if line.is_empty() {
             return;
         }
+        self.remember(&line);
         match line.strip_prefix('/') {
             Some(command) => self.run_command(command),
             None => self.send_message(line),
@@ -450,6 +596,7 @@ impl App {
             "refresh" => self.cmd_refresh(),
             "session" => self.cmd_session(),
             "receipts" => self.cmd_receipts(&rest),
+            "search" | "find" => self.cmd_search(&rest),
             "accept" => self.cmd_accept(&rest),
             "block" => self.cmd_block(&rest),
             "unblock" => self.cmd_unblock(&rest),
@@ -474,10 +621,12 @@ impl App {
             "  /accept <n|user-id>      accept a contact request from the Requests pane",
             "  /block <n|user-id>       ignore a requester or contact from now on; /unblock <user-id> undoes it",
             "  /blocked                 list blocked ids",
+            "  /search <text>           find messages in the selected chat (or all chats from System)",
             "  /me                      show your own id",
             "  /relay <ws-url>          change the relay (takes effect on next start)",
             "  /quit                    exit",
-            "Keys: Tab/Shift-Tab or Up/Down switch chats · PgUp/PgDn scroll · Esc clears input · Ctrl-C quits",
+            "Keys: Tab/Shift-Tab or Alt-Up/Down switch chats · Up/Down recall earlier lines · Alt-Enter new line",
+            "      PgUp/PgDn or mouse wheel scroll, Ctrl-Home/End jump · Esc clears input · Ctrl-C quits",
         ] {
             self.system(Level::Info, line);
         }
@@ -536,6 +685,63 @@ impl App {
         };
         let user_id = contact.user_id;
         self.lookup_contact(user_id, None);
+    }
+
+    fn cmd_search(&mut self, args: &[&str]) {
+        let needle = args.join(" ");
+        if needle.trim().is_empty() {
+            self.toast("Usage: /search <text>");
+            return;
+        }
+        let lower = needle.to_lowercase();
+        let (scope, label) = match self.selected_contact() {
+            Some(c) => (
+                vec![c.user_id],
+                format!("in the chat with {}", c.display_name()),
+            ),
+            None => (
+                self.contacts.iter().map(|c| c.user_id).collect(),
+                "in all chats".to_owned(),
+            ),
+        };
+        let mut hits: Vec<(u64, String)> = Vec::new();
+        for peer in scope {
+            let name = self.contact_name(&peer);
+            let Some(lines) = self.threads.get(&peer) else {
+                continue;
+            };
+            for line in lines {
+                if !line.text.to_lowercase().contains(&lower) {
+                    continue;
+                }
+                let who = match line.direction {
+                    Direction::Sent => format!("you → {name}"),
+                    Direction::Received => name.clone(),
+                };
+                hits.push((
+                    line.timestamp_ms,
+                    format!("{} {who}: {}", ui::stamp(line.timestamp_ms), line.text),
+                ));
+            }
+        }
+        hits.sort_by_key(|(at, _)| *at);
+        let total = hits.len();
+        let skipped = total.saturating_sub(SEARCH_LIMIT);
+        self.system(
+            Level::Info,
+            format!(
+                "Search for \"{needle}\" {label}: {total} match(es){}",
+                if skipped > 0 {
+                    format!(", newest {SEARCH_LIMIT} shown")
+                } else {
+                    String::new()
+                }
+            ),
+        );
+        for (_, text) in hits.into_iter().skip(skipped) {
+            self.system(Level::Info, text);
+        }
+        self.select(0);
     }
 
     fn cmd_receipts(&mut self, args: &[&str]) {

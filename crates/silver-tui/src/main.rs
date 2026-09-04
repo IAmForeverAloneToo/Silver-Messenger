@@ -10,6 +10,11 @@ use std::io::IsTerminal;
 
 use anyhow::{Context, bail};
 use clap::Parser;
+use ratatui::crossterm::event::{
+    DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    EnableFocusChange, EnableMouseCapture,
+};
+use ratatui::crossterm::execute;
 use silver_client::{
     Client, ConnectOptions, DEFAULT_RELAY_URL, Proxy, SessionStore, Store, VaultError,
 };
@@ -78,6 +83,11 @@ struct Args {
     /// the relay). Useful behind networks that allow one connection only.
     #[arg(long, env = "SILVER_SUBMIT_AUTHENTICATED")]
     submit_authenticated: bool,
+
+    /// Leave the mouse to the terminal (no wheel scrolling in the chat, but
+    /// text can be selected without holding Shift).
+    #[arg(long, env = "SILVER_NO_MOUSE")]
+    no_mouse: bool,
 }
 
 #[tokio::main]
@@ -209,7 +219,19 @@ async fn main() -> anyhow::Result<()> {
     let app = app::App::new(store, client, relay_url, created, send_epoch)?;
 
     let terminal = ratatui::init();
+    let mut stdout = std::io::stdout();
+    // Best effort: a terminal that lacks one of these just ignores it.
+    let _ = execute!(stdout, EnableBracketedPaste, EnableFocusChange);
+    if !args.no_mouse {
+        let _ = execute!(stdout, EnableMouseCapture);
+    }
     let result = app.run(terminal, events).await;
+    let _ = execute!(
+        stdout,
+        DisableMouseCapture,
+        DisableFocusChange,
+        DisableBracketedPaste
+    );
     ratatui::restore();
     result
 }
