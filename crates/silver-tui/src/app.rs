@@ -20,6 +20,7 @@ use silver_protocol::{Content, KeyBundle, Message, UserId, now_ms};
 use tokio::sync::mpsc;
 
 use crate::clipboard::{Clipboard, Copied};
+use crate::commands;
 use crate::glyphs::{Glyphs, Marks};
 use crate::notify::{Notifier, NotifyMode};
 use crate::{qr, ui};
@@ -108,6 +109,7 @@ pub struct View {
     pub start: usize,
     pub sidebar: Rect,
     pub input: Rect,
+    pub status: Rect,
 }
 
 impl Default for View {
@@ -119,8 +121,17 @@ impl Default for View {
             start: 0,
             sidebar: Rect::default(),
             input: Rect::default(),
+            status: Rect::default(),
         }
     }
+}
+
+/// Tab completion in progress: what was typed before the completed part,
+/// the candidates, and which one is shown.
+struct Completion {
+    stem: String,
+    candidates: Vec<String>,
+    index: usize,
 }
 
 /// A selection in the message pane, in (row, column) coordinates of
@@ -211,6 +222,11 @@ pub struct App {
     resizing: bool,
     /// The left button is down on the scrollbar.
     dragging_scrollbar: bool,
+    /// The help overlay is up.
+    pub help_open: bool,
+    /// Rows the help overlay is scrolled down; clamped by the renderer.
+    pub help_scroll: usize,
+    completion: Option<Completion>,
     notifier: Notifier,
     pub system: Vec<SystemLine>,
     /// 0 is the system pane; `i >= 1` selects `contacts[i - 1]`.
@@ -310,6 +326,9 @@ impl App {
             sidebar_width: config.sidebar_width.clamp(12, 60),
             resizing: false,
             dragging_scrollbar: false,
+            help_open: false,
+            help_scroll: 0,
+            completion: None,
             notifier,
             system: Vec::new(),
             selected: 0,
@@ -337,8 +356,18 @@ impl App {
         app.system(Level::Info, format!("Your id: {me}"));
         app.system(
             Level::Info,
-            "Share it with people who want to message you. Type /help for commands.",
+            "Share it with people who want to message you. F1 or /help lists every command and key.",
         );
+        if fresh_identity || (app.contacts.is_empty() && app.requests.is_empty()) {
+            for line in [
+                "Getting started:",
+                "  1. Share your id: /invite shows it as a link and a QR code, /copy id puts it on the clipboard.",
+                "  2. Add someone with /add <their id or link>, or accept their request in the Requests pane when they write first.",
+                "  3. Type to chat. /send <path> sends a file. Tab completes commands and paths; F1 shows everything.",
+            ] {
+                app.system(Level::Info, line);
+            }
+        }
         if !app.requests.is_empty() {
             let n = app.requests.len();
             app.system(
@@ -495,6 +524,12 @@ impl App {
             Event::Key(key) if key.kind != KeyEventKind::Release => self.handle_key(key),
             Event::Paste(text) => self.insert_str(&text.replace("\r\n", "\n").replace('\r', "\n")),
             Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::ScrollUp if self.help_open => {
+                    self.help_scroll = self.help_scroll.saturating_sub(MOUSE_SCROLL_STEP)
+                }
+                MouseEventKind::ScrollDown if self.help_open => {
+                    self.help_scroll += MOUSE_SCROLL_STEP
+                }
                 MouseEventKind::ScrollUp => self.scroll_by(MOUSE_SCROLL_STEP as isize),
                 MouseEventKind::ScrollDown => self.scroll_by(-(MOUSE_SCROLL_STEP as isize)),
                 MouseEventKind::Down(MouseButton::Right) => self.paste_from_clipboard(),
@@ -554,6 +589,20 @@ impl App {
     }
 
     fn mouse_down(&mut self, x: u16, y: u16) {
+        if self.help_open {
+            self.help_open = false;
+            self.help_scroll = 0;
+            return;
+        }
+        if self
+            .view
+            .status
+            .contains(ratatui::layout::Position::new(x, y))
+        {
+            // The status line always offers help.
+            self.help_open = true;
+            return;
+        }
         if self.on_divider(x, y) {
             self.resizing = true;
             return;
@@ -840,7 +889,25 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        if self.help_open {
+            // The help scrolls with the usual keys; any other key closes it.
+            match key.code {
+                KeyCode::Up => self.help_scroll = self.help_scroll.saturating_sub(1),
+                KeyCode::Down => self.help_scroll += 1,
+                KeyCode::PageUp => self.help_scroll = self.help_scroll.saturating_sub(SCROLL_STEP),
+                KeyCode::PageDown => self.help_scroll += SCROLL_STEP,
+                _ => {
+                    self.help_open = false;
+                    self.help_scroll = 0;
+                }
+            }
+            return;
+        }
+        if key.code != KeyCode::Tab {
+            self.completion = None;
+        }
         match key.code {
+            KeyCode::F(1) => self.help_open = true,
             KeyCode::Char('q') if ctrl => self.should_quit = true,
             KeyCode::Char('c') if ctrl => self.copy_or_quit(),
             KeyCode::Char('v') if ctrl => self.paste_from_clipboard(),
@@ -850,6 +917,7 @@ impl App {
             KeyCode::Char('u') if ctrl => self.clear_input(),
             KeyCode::Char('a') if ctrl => self.cursor = self.line_start(),
             KeyCode::Char('e') if ctrl => self.cursor = self.line_end(),
+            KeyCode::Tab if self.input.starts_with('/') => self.complete(),
             KeyCode::Tab => self.select_next(),
             KeyCode::BackTab => self.select_prev(),
             KeyCode::Down if alt => self.select_next(),
@@ -1193,43 +1261,135 @@ impl App {
             "open" => self.cmd_open(),
             "relay" => self.cmd_relay(&rest),
             "quit" | "q" | "exit" => self.should_quit = true,
-            other => self.toast(format!("Unknown command /{other}. Try /help.")),
+            other => match commands::closest(other) {
+                Some(meant) => self.toast(format!(
+                    "Unknown command /{other}. Did you mean /{meant}? F1 lists them all."
+                )),
+                None => self.toast(format!("Unknown command /{other}. F1 lists them all.")),
+            },
         }
     }
 
-    fn print_help(&mut self) {
-        for line in [
-            "Commands:",
-            "  /add <id or link> [alias] add a contact by id or invite link (looks up their key on the relay)",
-            "  /invite                  show your invite link and a QR code of it; /invite copy puts it on the clipboard",
-            "  /copy [id|link]          copy the last message of this chat, your id, or your invite link",
-            "  /alias <name>            name the selected contact",
-            "  /remove                  forget the selected contact (history stays on disk)",
-            "  /verify                  show the safety number to compare with the selected contact",
-            "  /verify ok | no          mark the selected contact as verified, or not",
-            "  /refresh                 fetch the selected contact's key again and report changes",
-            "  /session                 show how messages with the selected contact are protected",
-            "  /receipts on|off         tell contacts when you have read their messages (default on)",
-            "  /notify all|bell|off     bell and desktop notification for new messages, bell only, or nothing",
-            "  /marks ascii|unicode|auto draw the check marks in ASCII if your terminal shows boxes instead",
-            "  /accept <n|user-id>      accept a contact request from the Requests pane",
-            "  /block <n|user-id>       ignore a requester or contact from now on; /unblock <user-id> undoes it",
-            "  /blocked                 list blocked ids",
-            "  /send <path>             send a file (up to 16 MiB) to the selected contact; received files land in <data-dir>/downloads",
-            "  /open                    open the last file received in this chat (or double-click its line)",
-            "  /search <text>           find messages in the selected chat (or all chats from System)",
-            "  /me                      show your own id",
-            "  /relay <ws-url>          change the relay (takes effect on next start)",
-            "  /quit                    exit",
-            "Keys: Tab/Shift-Tab or Alt-Up/Down switch chats · Up/Down recall earlier lines · Alt-Enter new line",
-            "      PgUp/PgDn or mouse wheel scroll, Ctrl-Home/End jump · Esc clears input or the selection",
-            "      Mouse: click a chat in the list to open it, drag the divider to resize the list, drag the scrollbar",
-            "      Select text by dragging, double click a word, triple click a message, or Shift-Up/Down for messages",
-            "      Ctrl-V, Shift-Insert or right click paste · Ctrl-C copies the selection (twice: quit) · Ctrl-Q quits",
-        ] {
-            self.system(Level::Info, line);
+    // --- help, completion and hints -----------------------------------------
+
+    /// Tab in a command line: complete the command name, or a path
+    /// argument; repeated presses cycle through the candidates.
+    fn complete(&mut self) {
+        if self.cursor != self.input.chars().count() {
+            return; // only at the end of the line
         }
-        self.select(0);
+        if let Some(c) = &mut self.completion {
+            c.index = (c.index + 1) % c.candidates.len();
+            self.input = format!("{}{}", c.stem, c.candidates[c.index]);
+            self.cursor = self.input.chars().count();
+            return;
+        }
+        let Some(body) = self.input.strip_prefix('/') else {
+            return;
+        };
+        let (stem, candidates) = match body.split_once(' ') {
+            None => (
+                "/".to_owned(),
+                commands::matching(body)
+                    .iter()
+                    .map(|c| format!("{} ", c.name))
+                    .collect::<Vec<_>>(),
+            ),
+            Some((name, rest)) => match commands::find(name) {
+                Some(c) if c.path_arg => (
+                    format!("/{name} "),
+                    commands::complete_path(rest.trim_start()),
+                ),
+                _ => return,
+            },
+        };
+        match candidates.len() {
+            0 => self.toast("Nothing to complete."),
+            1 => {
+                self.input = format!("{stem}{}", candidates[0]);
+                self.cursor = self.input.chars().count();
+            }
+            _ => {
+                self.input = format!("{stem}{}", candidates[0]);
+                self.cursor = self.input.chars().count();
+                self.completion = Some(Completion {
+                    stem,
+                    candidates,
+                    index: 0,
+                });
+            }
+        }
+    }
+
+    /// What the status line says when there is no toast: the keys and
+    /// commands that matter right now.
+    pub fn status_hint(&self) -> String {
+        if self.help_open {
+            return "PgUp / PgDn or the wheel scroll the help · any other key closes it".to_owned();
+        }
+        if let Some(c) = &self.completion {
+            let mut out = String::new();
+            for (i, cand) in c.candidates.iter().enumerate() {
+                // Command names get their slash back; paths are shown as typed.
+                let shown = if c.stem == "/" {
+                    format!("/{}", cand.trim_end())
+                } else {
+                    cand.trim_end().to_owned()
+                };
+                let piece = if i == c.index {
+                    format!("[{shown}]")
+                } else {
+                    shown
+                };
+                if out.len() + piece.len() > 90 {
+                    out.push_str(" …");
+                    break;
+                }
+                if !out.is_empty() {
+                    out.push_str("  ");
+                }
+                out.push_str(&piece);
+            }
+            return format!("Tab cycles: {out}");
+        }
+        if self.selection.is_some() {
+            return "Ctrl-C copies the selection · Esc clears it".to_owned();
+        }
+        if let Some(body) = self.input.strip_prefix('/') {
+            let name = body.split_whitespace().next().unwrap_or("");
+            if let Some(c) = commands::find(name) {
+                return if c.args.is_empty() {
+                    format!("/{}: {}", c.name, c.help)
+                } else {
+                    format!("/{} {}: {}", c.name, c.args, c.help)
+                };
+            }
+            let matches = commands::matching(name);
+            return if matches.is_empty() {
+                match commands::closest(name) {
+                    Some(meant) => format!("No such command; did you mean /{meant}?"),
+                    None => "No such command; F1 lists them all.".to_owned(),
+                }
+            } else {
+                let names: Vec<String> = matches.iter().map(|c| format!("/{}", c.name)).collect();
+                format!("{} · Tab completes", names.join("  "))
+            };
+        }
+        if self.requests_pane_selected() {
+            return "/accept <n> · /block <n> · F1 help".to_owned();
+        }
+        if self.selected_contact().is_none() {
+            return if self.contacts.is_empty() {
+                "/add <id or link> · /invite shows yours · F1 help".to_owned()
+            } else {
+                "Tab or a click opens a chat · F1 help".to_owned()
+            };
+        }
+        "Enter sends · /send <path> a file · F1 help".to_owned()
+    }
+
+    fn print_help(&mut self) {
+        self.help_open = true;
     }
 
     fn invite_link(&self) -> InviteLink {
@@ -2150,7 +2310,7 @@ impl App {
             self.toast("The relay is too old for files; see System.");
             return;
         }
-        let path = expand_home(&args.join(" "));
+        let path = commands::expand_home(&args.join(" "));
         let client = self.client.clone();
         let tx = self.internal_tx.clone();
         let (ptx, prx) = mpsc::channel::<Progress>(16);
@@ -2399,17 +2559,6 @@ async fn with_progress<T>(
             },
         }
     }
-}
-
-/// `~/x` as the user's home directory plus `x`.
-fn expand_home(path: &str) -> PathBuf {
-    let path = path.trim();
-    if let Some(rest) = path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")) {
-        if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
-            return PathBuf::from(home).join(rest);
-        }
-    }
-    PathBuf::from(path)
 }
 
 /// Crossterm's reader blocks, so it gets a thread of its own.

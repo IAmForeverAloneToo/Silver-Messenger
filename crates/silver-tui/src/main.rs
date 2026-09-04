@@ -2,6 +2,7 @@
 
 mod app;
 mod clipboard;
+mod commands;
 mod glyphs;
 mod notify;
 mod qr;

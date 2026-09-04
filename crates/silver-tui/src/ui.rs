@@ -6,7 +6,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui::widgets::{Block, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use silver_client::Direction;
 use silver_protocol::UserId;
 use silver_protocol::envelope::ReceiptKind;
@@ -37,6 +37,72 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_status(frame, app, status);
     app.view.sidebar = sidebar;
     app.view.input = input;
+    app.view.status = status;
+    if app.help_open {
+        draw_help(frame, app);
+    }
+}
+
+/// The help overlay: every command and key, over the middle of the screen,
+/// scrolling when the terminal is too short for all of it.
+fn draw_help(frame: &mut Frame, app: &mut App) {
+    let area = frame.area();
+    let width = area.width.saturating_sub(4).clamp(20, 108).min(area.width);
+    let inner_width = width.saturating_sub(2) as usize;
+    let heading =
+        |t: &str| Line::styled(t.to_owned(), Style::default().add_modifier(Modifier::BOLD));
+    let mut text: Vec<Line> = vec![heading("Commands")];
+    for c in crate::commands::COMMANDS {
+        let head = if c.args.is_empty() {
+            format!("/{}", c.name)
+        } else {
+            format!("/{} {}", c.name, c.args)
+        };
+        // The description wraps under itself, not under the command.
+        text.extend(wrap_message(
+            vec![Span::styled(format!("  {head:<28} "), Style::default())],
+            c.help,
+            dim(),
+            inner_width,
+        ));
+    }
+    text.push(Line::from(""));
+    text.push(heading("Keys"));
+    for k in crate::commands::KEY_HELP {
+        text.extend(wrap_message(
+            vec![Span::raw("  ")],
+            k,
+            Style::default(),
+            inner_width,
+        ));
+    }
+    let total = text.len();
+    let height = (total as u16 + 2)
+        .clamp(3, area.height.saturating_sub(2).max(3))
+        .min(area.height);
+    let visible = height.saturating_sub(2) as usize;
+    app.help_scroll = app.help_scroll.min(total.saturating_sub(visible));
+    let rect = Rect::new(
+        area.width.saturating_sub(width) / 2,
+        area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, rect);
+    let mut block = Block::bordered().title(" Help · any other key closes ");
+    let below = total.saturating_sub(app.help_scroll + visible);
+    if below > 0 {
+        block = block.title_bottom(Line::styled(
+            format!(" {} {below} more (PgDn) ", app.glyphs.more_below),
+            dim(),
+        ));
+    }
+    let shown: Vec<Line> = text
+        .into_iter()
+        .skip(app.help_scroll)
+        .take(visible)
+        .collect();
+    frame.render_widget(Paragraph::new(shown).block(block), rect);
 }
 
 fn dim() -> Style {
@@ -197,6 +263,7 @@ fn draw_messages(frame: &mut Frame, app: &mut App, area: Rect) {
         start,
         sidebar: app.view.sidebar,
         input: app.view.input,
+        status: app.view.status,
     };
     highlight_selection(frame, app, inner, start, end);
 }
@@ -498,8 +565,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
             ));
         }
         None => {
-            spans.push(Span::styled(format!("  you: {}", app.me), dim()));
-            spans.push(Span::styled("  /help", dim()));
+            spans.push(Span::styled(format!("  {}", app.status_hint()), dim()));
         }
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);

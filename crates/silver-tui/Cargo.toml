@@ -27,3 +27,6 @@ qrcode = { workspace = true }
 arboard = { workspace = true }
 base64 = { workspace = true }
 open = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

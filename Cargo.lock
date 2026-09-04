@@ -2776,6 +2776,7 @@ dependencies = [
  "rpassword",
  "silver-client",
  "silver-protocol",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
