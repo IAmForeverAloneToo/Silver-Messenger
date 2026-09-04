@@ -61,6 +61,10 @@ pub type SharedSessions = Arc<Mutex<SessionStore>>;
 pub enum SessionError {
     #[error("they have not published prekeys, so no forward-secret session can be started")]
     NoPrekeys,
+    #[error(
+        "their signed prekey on the relay is {days} days old, older than clients keep the private half; a session against it could not be read"
+    )]
+    StalePrekeys { days: u64 },
     #[error("the message belongs to a session this client does not have")]
     UnknownSession,
     #[error("the message was started against prekey {0}, which this client no longer has")]
@@ -329,6 +333,16 @@ impl SessionStore {
         if !peer.supports_sessions() {
             return Err(SessionError::NoPrekeys);
         }
+        // A relay can serve a bundle as long as it likes; the owner keeps a
+        // signed prekey's private half for SIGNED_PREKEY_RETENTION only.
+        if let Some(signed) = peer.prekeys.as_ref().map(|p| &p.signed) {
+            let age_ms = now_ms.saturating_sub(signed.created_at_ms);
+            if age_ms > SIGNED_PREKEY_RETENTION.as_millis() as u64 {
+                return Err(SessionError::StalePrekeys {
+                    days: age_ms / (24 * 3600 * 1000),
+                });
+            }
+        }
         let (mut session, init) = Session::initiate(identity, peer)?;
         let message = session.encrypt(plaintext)?;
         let body = RatchetBody {
@@ -579,6 +593,33 @@ mod tests {
         p.sessions.prekeys_for_publish(&p.identity, month).unwrap();
         assert_eq!(p.sessions.prekeys.signed.len(), 1);
         assert_eq!(p.sessions.prekeys.one_time.len(), ONE_TIME_TARGET);
+    }
+
+    #[test]
+    fn a_stale_signed_prekey_starts_no_session() {
+        let mut alice = Party::new();
+        let mut bob = Party::new();
+        let day = 24 * 3600 * 1000;
+        let bundle = bob.bundle(10 * day);
+        // Three weeks on, the private half is gone from bob's side.
+        let later = 10 * day + SIGNED_PREKEY_RETENTION.as_millis() as u64 + day;
+        let err = alice
+            .sessions
+            .encrypt(&alice.identity, &bundle, &plain("hi"), later)
+            .unwrap_err();
+        assert!(
+            matches!(err, SessionError::StalePrekeys { days: 22 }),
+            "{err}"
+        );
+        assert!(!alice.sessions.has_session(&bob.identity.user_id()));
+        // A fresh bundle is fine.
+        let fresh = bob.bundle(later);
+        assert!(
+            alice
+                .sessions
+                .encrypt(&alice.identity, &fresh, &plain("hi"), later)
+                .is_ok()
+        );
     }
 
     #[test]

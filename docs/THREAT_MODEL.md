@@ -51,7 +51,9 @@ Can:
 - Serve a *stale* key bundle for a user, or withhold one-time prekeys so a
   session starts without one. It cannot serve a forged bundle or signed
   prekey: both are signed by the user's identity key and clients verify
-  the signatures.
+  the signatures. A signed prekey older than three weeks is not used at
+  all: the sender falls back to a message without forward secrecy and says
+  so, rather than start a session its peer could never read.
 - See that a file was sent and how big it is: the encrypted chunks are put
   and fetched on anonymous connections, but a blob of a certain size
   arriving from one address, a message delivered to a recipient, and a
@@ -69,7 +71,10 @@ Cannot:
 - Forge a message from anyone: every body is signed by the sender's identity
   key and the signature is checked on the recipient.
 - Impersonate a user to the relay: authentication is a signature over a
-  fresh nonce.
+  fresh nonce and, from 0.6.0 on, the relay's own host name, so a login
+  collected by one relay is worthless at another. (The older login without
+  the host is still accepted from older clients unless the operator turns
+  it off.)
 - Re-address an envelope to a different recipient: the recipient id is bound
   into both the associated data and the signature.
 - Replay an old envelope to its recipient undetected: envelope ids are
@@ -88,19 +93,22 @@ that inspects TLS with an installed root sees what the relay sees.
 ### Stranger who knows your id
 
 Can send you messages until your mailbox is full, can fetch your public
-key bundle, and by looking you up repeatedly can drain your one-time
-prekeys (sessions then start without one, which costs the first message
-some forward secrecy until the signed prekey rotates). Cannot learn who
+key bundle, and by looking you up repeatedly can take your one-time
+prekeys, though the relay hands out at most 30 an hour for one user;
+sessions then start without one, which costs the first message the
+fourth Diffie–Hellman term until the deposit is topped up. Cannot learn who
 your contacts are from the relay. Their messages are decrypted but held in
-the Requests pane until you accept them, and a blocked id is dropped on
-arrival. A file they announce is never fetched, and they get no receipts,
-so they cannot tell whether you are there. On the relay, each connection
-is limited to 60 messages, 30 lookups and 600 file chunks per minute (30
-messages for anonymous connections), mailboxes and file storage are
-capped, and an operator can require an invite token to register at all.
-Flooding a mailbox to its cap remains possible for anyone with the id, as
-is filling the relay's shared file storage from any connection, which
-then refuses everyone's files until chunks expire.
+the Requests pane until you accept them (at most 50 strangers, 20
+messages each), and a blocked id is dropped on arrival. A file they
+announce is never fetched while they are a stranger, and they get no
+receipts, so they cannot tell whether you are there. On the relay, each
+connection is limited to 60 messages, 30 lookups and 600 file chunks per
+minute (30 messages for anonymous connections); each address to 16
+connections, 20 new identities and 256 MiB of uploads an hour; mailboxes,
+file storage and the number of identities are capped, and an operator can
+require an invite token to register at all. Flooding a mailbox to its cap
+remains possible for anyone with the id; filling the relay's shared file
+storage now takes as many addresses as there are 256 MiB shares in it.
 
 ### Malicious contact
 

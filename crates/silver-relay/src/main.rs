@@ -105,6 +105,18 @@ struct Args {
     /// journal is not a record of who used it.
     #[arg(long, env = "SILVER_RELAY_LOG_IDS")]
     log_ids: bool,
+
+    /// Refuse the older login that signs the challenge alone; clients from
+    /// 0.6.0 on sign the relay's host too, so a hostile relay cannot
+    /// collect logins for this one. Off by default so older clients can
+    /// still connect.
+    #[arg(long, env = "SILVER_RELAY_REQUIRE_BOUND_AUTH")]
+    require_bound_auth: bool,
+
+    /// One-time prekeys handed out for one user per hour, at most; lookups
+    /// beyond that get the bundle without one.
+    #[arg(long, env = "SILVER_RELAY_ONE_TIME_PREKEYS_PER_USER_PER_HOUR", default_value_t = Policy::default().one_time_prekeys_per_user_per_hour)]
+    one_time_prekeys_per_user_per_hour: u32,
 }
 
 #[tokio::main]
@@ -135,8 +147,13 @@ async fn main() -> anyhow::Result<()> {
         blob_mib_per_address_per_hour: args.blob_mib_per_address_per_hour,
         trusted_proxies: args.trusted_proxy,
         log_ids: args.log_ids,
+        require_bound_auth: args.require_bound_auth,
+        one_time_prekeys_per_user_per_hour: args.one_time_prekeys_per_user_per_hour,
         ..Policy::default()
     };
+    if policy.require_bound_auth {
+        info!("only the bound login is accepted; clients before 0.6.0 cannot connect");
+    }
     if policy.log_ids {
         info!("user ids are written to the log as they are (--log-ids)");
     }

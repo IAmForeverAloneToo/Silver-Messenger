@@ -8,7 +8,10 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use silver_protocol::Identity;
 use silver_protocol::blob::{CHUNK_BYTES, new_blob_id};
-use silver_protocol::wire::{ClientFrame, ErrorCode, ServerFrame, auth_signature};
+use silver_protocol::prekey::{PrekeySecret, Prekeys};
+use silver_protocol::wire::{
+    ClientFrame, ErrorCode, ServerFrame, auth_signature, auth_signature_bound,
+};
 use silver_relay::{Limits, Policy, RelayState, Store};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
@@ -66,24 +69,37 @@ fn is_refusal(frame: &Option<ServerFrame>, code: ErrorCode) -> bool {
     matches!(frame, Some(ServerFrame::Error { code: c, .. }) if *c == code)
 }
 
-/// Answer the challenge as a fresh identity.
+/// Answer the challenge as a fresh identity, with the bound login.
 async fn authenticate(ws: &mut Ws) -> Identity {
     let identity = Identity::generate();
-    let Some(ServerFrame::Challenge { nonce }) = next(ws).await else {
+    let reply = login(ws, &identity, Some("127.0.0.1")).await;
+    let Some(ServerFrame::AuthOk { .. }) = reply else {
+        panic!("not authenticated: {reply:?}");
+    };
+    identity
+}
+
+/// Answer the challenge as `identity`, bound to `host` when given (the v2
+/// login) or over the nonce alone (v1); the relay's reply.
+async fn login(ws: &mut Ws, identity: &Identity, host: Option<&str>) -> Option<ServerFrame> {
+    let Some(ServerFrame::Challenge { nonce, bound }) = next(ws).await else {
         panic!("no challenge");
+    };
+    assert!(bound, "the relay offers the bound login");
+    let signature = match host {
+        Some(host) => auth_signature_bound(identity, host, &nonce),
+        None => auth_signature(identity, &nonce),
     };
     send(
         ws,
         &ClientFrame::Auth {
             user_id: identity.user_id(),
-            signature: auth_signature(&identity, &nonce),
+            signature,
+            host: host.map(str::to_owned),
         },
     )
     .await;
-    let Some(ServerFrame::AuthOk { .. }) = next(ws).await else {
-        panic!("not authenticated");
-    };
-    identity
+    next(ws).await
 }
 
 async fn publish(ws: &mut Ws, identity: &Identity) -> Option<ServerFrame> {
@@ -353,6 +369,128 @@ async fn uploads_per_address_are_limited() {
         next(&mut other).await,
         Some(ServerFrame::BlobAck { .. })
     ));
+}
+
+#[tokio::test]
+async fn a_login_holds_only_for_the_relay_it_was_made_for() {
+    let (url, _) = start(Policy::default()).await;
+    let identity = Identity::generate();
+    // Bound to the host the connection went to: accepted.
+    let mut ws = open(&url, None).await;
+    assert!(matches!(
+        login(&mut ws, &identity, Some("127.0.0.1:7777")).await,
+        Some(ServerFrame::AuthOk { .. })
+    ));
+    // Bound to another relay's host, as a relay in the middle would have
+    // to present: refused, whatever the signature says.
+    let mut ws = open(&url, None).await;
+    assert!(is_refusal(
+        &login(&mut ws, &identity, Some("other.example")).await,
+        ErrorCode::BadSignature
+    ));
+    // The v1 login is still taken by default, for older clients...
+    let mut ws = open(&url, None).await;
+    assert!(matches!(
+        login(&mut ws, &identity, None).await,
+        Some(ServerFrame::AuthOk { .. })
+    ));
+    // ...but not once the operator says so.
+    let (url, _) = start(Policy {
+        require_bound_auth: true,
+        ..Policy::default()
+    })
+    .await;
+    let mut ws = open(&url, None).await;
+    assert!(is_refusal(
+        &login(&mut ws, &identity, None).await,
+        ErrorCode::Unauthenticated
+    ));
+    let mut ws = open(&url, None).await;
+    assert!(matches!(
+        login(&mut ws, &identity, Some("127.0.0.1")).await,
+        Some(ServerFrame::AuthOk { .. })
+    ));
+}
+
+#[tokio::test]
+async fn one_time_prekeys_are_not_handed_out_faster_than_the_policy_says() {
+    let (url, _) = start(Policy {
+        one_time_prekeys_per_user_per_hour: 2,
+        ..Policy::default()
+    })
+    .await;
+    // Alice deposits a signed prekey and five one-time keys.
+    let mut alice_ws = open(&url, None).await;
+    let alice = authenticate(&mut alice_ws).await;
+    let signed = PrekeySecret::generate(1, 0);
+    let bundle = alice.key_bundle_with(Prekeys {
+        signed: signed.signed_by(&alice),
+        one_time: (2..7)
+            .map(|id| PrekeySecret::generate(id, 0).one_time())
+            .collect(),
+    });
+    send(
+        &mut alice_ws,
+        &ClientFrame::Publish {
+            bundle,
+            invite: None,
+        },
+    )
+    .await;
+    assert!(matches!(
+        next(&mut alice_ws).await,
+        Some(ServerFrame::Published)
+    ));
+    assert!(matches!(
+        next(&mut alice_ws).await,
+        Some(ServerFrame::PrekeyStatus {
+            one_time_remaining: 5,
+            ..
+        })
+    ));
+    // Bob, a v2 client, looks her up again and again.
+    let mut bob_ws = open(&url, None).await;
+    let bob = authenticate(&mut bob_ws).await;
+    let bob_signed = PrekeySecret::generate(1, 0);
+    send(
+        &mut bob_ws,
+        &ClientFrame::Publish {
+            bundle: bob.key_bundle_with(Prekeys {
+                signed: bob_signed.signed_by(&bob),
+                one_time: Vec::new(),
+            }),
+            invite: None,
+        },
+    )
+    .await;
+    assert!(matches!(
+        next(&mut bob_ws).await,
+        Some(ServerFrame::Published)
+    ));
+    assert!(matches!(
+        next(&mut bob_ws).await,
+        Some(ServerFrame::PrekeyStatus { .. })
+    ));
+    let mut handed = Vec::new();
+    for _ in 0..4 {
+        send(
+            &mut bob_ws,
+            &ClientFrame::Lookup {
+                user_id: alice.user_id(),
+            },
+        )
+        .await;
+        let Some(ServerFrame::LookupResult {
+            bundle: Some(bundle),
+            ..
+        }) = next(&mut bob_ws).await
+        else {
+            panic!("no bundle");
+        };
+        handed.push(bundle.prekeys.unwrap().one_time.len());
+    }
+    // Two keys an hour: the third and fourth lookups get the bundle without one.
+    assert_eq!(handed, [1, 1, 0, 0]);
 }
 
 #[tokio::test]

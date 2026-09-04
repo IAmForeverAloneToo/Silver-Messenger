@@ -273,7 +273,7 @@ first.
 
 | `type` | Fields | Notes |
 | --- | --- | --- |
-| `auth` | `user_id`, `signature` | `signature = sign("silver-messenger/v1/relay-auth", nonce)` over the 32-byte challenge nonce. |
+| `auth` | `user_id`, `signature`, `host`? | With `host` (the relay's host name as the client connected to it, lower case, without port or IPv6 brackets): `signature = sign("silver-messenger/v2/relay-auth", host \|\| nonce)`, the bound login. Without: `sign("silver-messenger/v1/relay-auth", nonce)`, which a hostile relay could collect and present to another; accepted only while `--require-bound-auth` is off. |
 | `publish` | `bundle`, `invite`? | The client's own bundle (section 2). `invite` is a token for relays that only register invited identities. |
 | `lookup` | `user_id` | |
 | `send` | `envelope` | |
@@ -286,7 +286,7 @@ first.
 
 | `type` | Fields | Notes |
 | --- | --- | --- |
-| `challenge` | `nonce` (b64, 32 bytes) | First frame on every connection. |
+| `challenge` | `nonce` (b64, 32 bytes), `bound`? | First frame on every connection. `bound: true` says the relay takes the bound login; a client that sees it answers with `host`. Relays before 0.6.0 omit it. |
 | `auth_ok` | `user_id`, `features`? | `features` lists strings from section 7.3; absent on older relays. |
 | `published` | | |
 | `prekey_status` | `one_time_remaining`, `consumed`? | After `published`, only to clients whose bundle carried prekeys: how many one-time keys are on deposit and which ids were handed out since they were published. |
@@ -311,6 +311,14 @@ Error codes: `unauthenticated`, `bad_signature`, `malformed`, `too_large`,
 as soon as `auth` succeeds, so they may arrive before `published`. A newer
 connection for the same user replaces the older one, which is closed.
 
+With the bound login the relay checks that `host` is the host it was
+reached as (the `Host` header of the upgrade request, which a TLS front
+passes through, normalised the same way) before verifying the signature,
+so a relay in the middle cannot forward a challenge from another relay and
+use the answer there. The v1 login remains accepted for clients from before
+0.6.0 unless the operator turns it off; a later version will refuse it by
+default.
+
 On `publish` with prekeys the relay stores the signed prekey with the
 bundle and the one-time keys separately. It keeps, per user, the ids it
 has handed out; a handed-out id listed again is not stored again, and an
@@ -320,7 +328,13 @@ id no longer listed is forgotten on both sides. Clients top up when
 
 On `lookup` from a connection that published prekeys, the relay removes one
 one-time key from the target's deposit and attaches it to the result.
-Lookups from other connections get the bundle with `one_time` empty.
+Lookups from other connections get the bundle with `one_time` empty, and
+so do lookups beyond the relay's hand-out rate for that target (30 keys an
+hour by default), so nobody can empty a deposit by asking in a loop. A
+session started without a one-time key loses nothing but the fourth
+Diffie–Hellman term of its first message; there is no separate
+last-resort prekey, since the signed prekey already plays that part and
+the owner tops the deposit up on its next connection.
 
 ### 7.2 Anonymous submission connection
 
@@ -355,9 +369,13 @@ minute. Per recipient: 1000 queued envelopes or 32 MiB, whichever first;
 unacknowledged envelopes expire after 30 days. Blobs: at most 16 MiB of
 plaintext each (the relay allows 16 MiB plus the 256 chunk tags of
 ciphertext), 1 GiB in total, and each expires 30 days after its first
-chunk arrived, on the same schedule as messages. Relay operators can
-change all of these and can require an invite token for first
-registrations.
+chunk arrived, on the same schedule as messages. Per client address (the
+socket's peer, or what a trusted TLS front says in `X-Forwarded-For`): 16
+open connections, 20 new identities an hour and 256 MiB of `blob_put`
+data an hour; 4096 connections and 100 000 identities in total; a
+connection that sends nothing for two minutes is closed (clients `ping`
+every 30 seconds). Relay operators can change all of these and can
+require an invite token for first registrations.
 
 ### 7.5 Blob storage
 
@@ -391,7 +409,11 @@ without the key from the same message.
 * **Starting a session.** A fresh lookup precedes the first message of a
   session, so the handshake uses a current signed prekey and a one-time key
   that has not been handed out before. A pinned bundle is used only when
-  the relay cannot be reached.
+  the relay cannot be reached. A signed prekey whose `created_at_ms` is
+  more than three weeks old (the time its owner keeps the private half) is
+  not used: the message goes as a plain body instead and the user is told
+  that it went without forward secrecy, since a relay can serve a bundle
+  for as long as it likes but cannot make a session out of it readable.
 * **Repeating `init`.** The initiator includes `init` until it decrypts a
   message on that session.
 * **Several sessions.** Every session with a peer is kept for receiving;

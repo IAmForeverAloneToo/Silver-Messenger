@@ -11,7 +11,13 @@ use crate::encoding::{b64, b64_array};
 use crate::envelope::Envelope;
 use crate::identity::{Identity, UserId};
 
+/// Domain of the v1 relay login: a signature over the challenge nonce
+/// alone, which a hostile relay could collect and present elsewhere.
 pub const AUTH_DOMAIN: &[u8] = b"silver-messenger/v1/relay-auth";
+/// Domain of the v2 relay login: the signature also covers the host the
+/// client connected to, so an answer meant for one relay is useless at
+/// another.
+pub const AUTH_BOUND_DOMAIN: &[u8] = b"silver-messenger/v2/relay-auth";
 
 /// Largest WebSocket frame either side will accept.
 pub const MAX_FRAME_BYTES: usize = 128 * 1024;
@@ -36,10 +42,15 @@ pub mod feature {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientFrame {
     /// Prove ownership of `user_id` by signing the server's challenge nonce.
+    /// With `host` (the relay's host name as the client connected to it,
+    /// normalised by [`normalize_host`]) the signature is the v2 kind and
+    /// covers the host too; without it, the v1 kind over the nonce alone.
     Auth {
         user_id: UserId,
         #[serde(with = "b64_array")]
         signature: [u8; 64],
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
     },
     /// Publish (or refresh) our signed key bundle. A relay may require an
     /// invite token the first time an identity registers.
@@ -105,6 +116,10 @@ pub enum ServerFrame {
     Challenge {
         #[serde(with = "b64_array")]
         nonce: [u8; 32],
+        /// The relay understands the v2 login; a client that sees this
+        /// answers with `host` set. Older relays omit it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        bound: bool,
     },
     AuthOk {
         user_id: UserId,
@@ -194,18 +209,73 @@ impl ServerFrame {
     }
 }
 
-/// Sign a relay challenge nonce.
+/// Sign a relay challenge nonce (the v1 login).
 pub fn auth_signature(identity: &Identity, nonce: &[u8; 32]) -> [u8; 64] {
     identity.sign(AUTH_DOMAIN, nonce)
 }
 
-/// Verify a client's answer to a challenge.
+/// Verify a client's v1 answer to a challenge.
 pub fn verify_auth(
     user_id: &UserId,
     nonce: &[u8; 32],
     signature: &[u8; 64],
 ) -> Result<(), ProtocolError> {
     user_id.verify(AUTH_DOMAIN, nonce, signature)
+}
+
+/// What a v2 login signs: the host, then the nonce. The nonce has a fixed
+/// length, so the two cannot be confused for each other.
+fn bound_message(host: &str, nonce: &[u8; 32]) -> Vec<u8> {
+    let mut message = normalize_host(host).into_bytes();
+    message.extend_from_slice(nonce);
+    message
+}
+
+/// Sign a relay challenge for the relay at `host` (the v2 login).
+pub fn auth_signature_bound(identity: &Identity, host: &str, nonce: &[u8; 32]) -> [u8; 64] {
+    identity.sign(AUTH_BOUND_DOMAIN, &bound_message(host, nonce))
+}
+
+/// Verify a client's v2 answer to a challenge, given the host the relay
+/// was reached as.
+pub fn verify_auth_bound(
+    user_id: &UserId,
+    host: &str,
+    nonce: &[u8; 32],
+    signature: &[u8; 64],
+) -> Result<(), ProtocolError> {
+    user_id.verify(AUTH_BOUND_DOMAIN, &bound_message(host, nonce), signature)
+}
+
+/// A host name as it goes into a v2 login: lower case, no port, no IPv6
+/// brackets, no trailing dot. Both sides normalise, so `Relay.Example:443`
+/// in a URL and `relay.example:443` in a `Host` header agree.
+pub fn normalize_host(host: &str) -> String {
+    let host = host.trim();
+    let host = match host.strip_prefix('[') {
+        // [::1]:7777 or [::1]
+        Some(rest) => rest.split(']').next().unwrap_or(rest),
+        None => match host.rsplit_once(':') {
+            // one colon: a port; more: a bare IPv6 address
+            Some((name, port))
+                if !name.contains(':') && port.chars().all(|c| c.is_ascii_digit()) =>
+            {
+                name
+            }
+            _ => host,
+        },
+    };
+    host.trim_end_matches('.').to_ascii_lowercase()
+}
+
+/// The host part of a relay URL (`wss://user@relay.example:443/ws` gives
+/// `relay.example`), normalised; `None` when the URL has none.
+pub fn url_host(url: &str) -> Option<String> {
+    let rest = url.split("://").nth(1)?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host = authority.rsplit('@').next()?;
+    let host = normalize_host(host);
+    (!host.is_empty()).then_some(host)
 }
 
 #[cfg(test)]
@@ -276,5 +346,62 @@ mod tests {
         assert!(verify_auth(&id.user_id(), &nonce, &sig).is_ok());
         assert!(verify_auth(&id.user_id(), &[8u8; 32], &sig).is_err());
         assert!(verify_auth(&Identity::generate().user_id(), &nonce, &sig).is_err());
+    }
+
+    #[test]
+    fn a_bound_login_holds_only_at_its_relay() {
+        let id = Identity::generate();
+        let nonce = [7u8; 32];
+        let sig = auth_signature_bound(&id, "Relay.Example:443", &nonce);
+        assert!(verify_auth_bound(&id.user_id(), "relay.example", &nonce, &sig).is_ok());
+        assert!(verify_auth_bound(&id.user_id(), "relay.example:8443", &nonce, &sig).is_ok());
+        assert!(verify_auth_bound(&id.user_id(), "other.example", &nonce, &sig).is_err());
+        assert!(verify_auth_bound(&id.user_id(), "relay.example", &[8u8; 32], &sig).is_err());
+        // Neither kind of signature passes as the other.
+        assert!(verify_auth(&id.user_id(), &nonce, &sig).is_err());
+        let v1 = auth_signature(&id, &nonce);
+        assert!(verify_auth_bound(&id.user_id(), "relay.example", &nonce, &v1).is_err());
+    }
+
+    #[test]
+    fn hosts_normalise_the_same_from_urls_and_headers() {
+        assert_eq!(normalize_host("Relay.Example.ORG:443"), "relay.example.org");
+        assert_eq!(normalize_host("relay.example.org."), "relay.example.org");
+        assert_eq!(normalize_host("127.0.0.1:7777"), "127.0.0.1");
+        assert_eq!(normalize_host("[::1]:7777"), "::1");
+        assert_eq!(normalize_host("[fe80::1]"), "fe80::1");
+        assert_eq!(normalize_host("fe80::1"), "fe80::1");
+        assert_eq!(normalize_host(" relay "), "relay");
+        assert_eq!(
+            url_host("wss://Relay.Example.org:443/ws").as_deref(),
+            Some("relay.example.org")
+        );
+        assert_eq!(
+            url_host("ws://127.0.0.1:7777/ws").as_deref(),
+            Some("127.0.0.1")
+        );
+        assert_eq!(url_host("ws://[::1]:7777/ws?x=1").as_deref(), Some("::1"));
+        assert_eq!(url_host("ws://me@relay/ws").as_deref(), Some("relay"));
+        assert_eq!(url_host("relay/ws"), None);
+        assert_eq!(url_host("ws:///ws"), None);
+        // An old relay's challenge has no `bound`; a new one's says so.
+        let old = r#"{"type":"challenge","nonce":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}"#;
+        assert!(matches!(
+            ServerFrame::decode(old).unwrap(),
+            ServerFrame::Challenge { bound: false, .. }
+        ));
+        let new = ServerFrame::Challenge {
+            nonce: [0; 32],
+            bound: true,
+        }
+        .encode();
+        assert!(new.contains("\"bound\":true"));
+        let auth = ClientFrame::Auth {
+            user_id: Identity::generate().user_id(),
+            signature: [0; 64],
+            host: None,
+        }
+        .encode();
+        assert!(!auth.contains("host"));
     }
 }

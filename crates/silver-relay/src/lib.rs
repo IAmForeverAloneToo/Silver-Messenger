@@ -35,7 +35,8 @@ use rand::RngCore;
 use rand::rngs::OsRng;
 use silver_protocol::blob::{MAX_CHUNK_CIPHERTEXT, MAX_CHUNKS, is_valid_blob_id};
 use silver_protocol::wire::{
-    ClientFrame, ErrorCode, MAX_FRAME_BYTES, ServerFrame, feature, verify_auth,
+    ClientFrame, ErrorCode, MAX_FRAME_BYTES, ServerFrame, feature, normalize_host, verify_auth,
+    verify_auth_bound,
 };
 use silver_protocol::{Envelope, KeyBundle, MAX_CIPHERTEXT_BYTES, UserId, now_ms};
 use subtle::ConstantTimeEq;
@@ -104,6 +105,14 @@ pub struct Policy {
     /// still tells one client from another without being a record of who
     /// used the relay.
     pub log_ids: bool,
+    /// Refuse the v1 login (a signature over the nonce alone), which a
+    /// hostile relay could collect and replay here. Off, both kinds are
+    /// accepted so clients from before 0.6.0 can still connect.
+    pub require_bound_auth: bool,
+    /// One-time prekeys handed out for one user per hour, at most; lookups
+    /// beyond that get the bundle without one, so nobody can drain a
+    /// deposit by looking someone up in a loop.
+    pub one_time_prekeys_per_user_per_hour: u32,
 }
 
 impl Default for Policy {
@@ -124,6 +133,8 @@ impl Default for Policy {
             blob_mib_per_address_per_hour: 256,
             trusted_proxies: Vec::new(),
             log_ids: false,
+            require_bound_auth: false,
+            one_time_prekeys_per_user_per_hour: 30,
         }
     }
 }
@@ -275,6 +286,8 @@ pub struct RelayState {
     policy: Policy,
     online: Mutex<HashMap<UserId, Session>>,
     addresses: Mutex<HashMap<IpAddr, AddressState>>,
+    /// How many one-time prekeys each user has had handed out lately.
+    handouts: Mutex<HashMap<UserId, Bucket>>,
     connections: AtomicU32,
     counters: Counters,
     next_session: AtomicU64,
@@ -336,6 +349,7 @@ impl RelayState {
             policy,
             online: Mutex::new(HashMap::new()),
             addresses: Mutex::new(HashMap::new()),
+            handouts: Mutex::new(HashMap::new()),
             connections: AtomicU32::new(0),
             counters: Counters::default(),
             next_session: AtomicU64::new(0),
@@ -447,11 +461,27 @@ impl RelayState {
     }
 
     /// Forget addresses with nothing open that have been quiet for an hour
-    /// (their buckets are full again by then).
+    /// (their buckets are full again by then), and hand-out buckets that
+    /// are full again.
     pub fn sweep_addresses(&self) {
         let cutoff = Duration::from_secs(3600);
         self.addresses()
             .retain(|_, a| a.connections > 0 || a.last_seen.elapsed() < cutoff);
+        self.handouts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|_, b| b.last.elapsed() < cutoff);
+    }
+
+    /// Whether one more one-time prekey of `user`'s may be handed out now.
+    fn handout_allowed(&self, user: &UserId) -> bool {
+        let mut handouts = self.handouts.lock().unwrap_or_else(|e| e.into_inner());
+        handouts
+            .entry(*user)
+            .or_insert_with(|| {
+                Bucket::per_hour(f64::from(self.policy.one_time_prekeys_per_user_per_hour))
+            })
+            .try_take()
     }
 
     pub fn counters(&self) -> CounterSnapshot {
@@ -773,10 +803,15 @@ impl RelayState {
     }
 
     /// A bundle for a lookup by a v2 client: one one-time prekey attached,
-    /// if the owner has any left.
+    /// if the owner has any left and they are not being handed out faster
+    /// than the policy allows.
     fn bundle_with_one_time_prekey(&self, user: &UserId) -> Option<KeyBundle> {
         let mut bundle = self.bundle(user)?;
         if let Some(prekeys) = bundle.prekeys.as_mut() {
+            if !self.handout_allowed(user) {
+                debug!("one-time prekeys for one user are being asked for quickly; serving none");
+                return Some(bundle);
+            }
             match self.store.take_one_time_prekey(user) {
                 Ok(taken) => prekeys.one_time = taken.into_iter().collect(),
                 Err(e) => error!("taking one-time prekey: {e:#}"),
@@ -917,15 +952,27 @@ async fn ws_handler(
     headers: HeaderMap,
 ) -> impl IntoResponse {
     let addr = state.client_address(peer.ok().map(|p| p.0.ip()), &headers);
+    // What the client connected to, for the bound login; a TLS front
+    // passes the header through.
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(normalize_host)
+        .filter(|h| !h.is_empty());
     ws.max_message_size(MAX_FRAME_BYTES)
         .max_frame_size(MAX_FRAME_BYTES)
-        .on_upgrade(move |socket| handle_socket(socket, state, addr))
+        .on_upgrade(move |socket| handle_socket(socket, state, addr, host))
 }
 
 type Sink = SplitSink<WebSocket, Message>;
 type Stream = SplitStream<WebSocket>;
 
-async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, addr: IpAddr) {
+async fn handle_socket(
+    socket: WebSocket,
+    state: Arc<RelayState>,
+    addr: IpAddr,
+    our_host: Option<String>,
+) {
     let (mut sink, mut stream) = socket.split();
 
     // --- a place among the connections ----------------------------------
@@ -942,7 +989,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, addr: IpAddr) 
     // --- challenge / response -------------------------------------------
     let mut nonce = [0u8; 32];
     OsRng.fill_bytes(&mut nonce);
-    if send(&mut sink, &ServerFrame::Challenge { nonce })
+    if send(&mut sink, &ServerFrame::Challenge { nonce, bound: true })
         .await
         .is_err()
     {
@@ -951,13 +998,35 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, addr: IpAddr) 
 
     let first = tokio::time::timeout(AUTH_TIMEOUT, next_frame(&mut stream)).await;
     let user = match first {
-        Ok(Some(Ok(ClientFrame::Auth { user_id, signature }))) => {
-            if verify_auth(&user_id, &nonce, &signature).is_err() {
-                let _ = send(
-                    &mut sink,
-                    &ServerFrame::error(ErrorCode::BadSignature, "challenge signature invalid"),
-                )
-                .await;
+        Ok(Some(Ok(ClientFrame::Auth {
+            user_id,
+            signature,
+            host,
+        }))) => {
+            let verdict = match host {
+                // The bound login: the signature must cover the host the
+                // client reached us as, and that host must be ours.
+                Some(host) => {
+                    let host = normalize_host(&host);
+                    if our_host.as_deref() != Some(host.as_str()) {
+                        Err((
+                            ErrorCode::BadSignature,
+                            "the login names a host this relay was not reached as",
+                        ))
+                    } else {
+                        verify_auth_bound(&user_id, &host, &nonce, &signature)
+                            .map_err(|_| (ErrorCode::BadSignature, "challenge signature invalid"))
+                    }
+                }
+                None if state.policy.require_bound_auth => Err((
+                    ErrorCode::Unauthenticated,
+                    "this relay requires the bound login (a client from 0.6.0 on)",
+                )),
+                None => verify_auth(&user_id, &nonce, &signature)
+                    .map_err(|_| (ErrorCode::BadSignature, "challenge signature invalid")),
+            };
+            if let Err((code, message)) = verdict {
+                let _ = send(&mut sink, &ServerFrame::error(code, message)).await;
                 return;
             }
             user_id

@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
-use silver_protocol::wire::{ClientFrame, ErrorCode, ServerFrame, auth_signature, feature};
+use silver_protocol::wire::{
+    ClientFrame, ErrorCode, ServerFrame, auth_signature, auth_signature_bound, feature, url_host,
+};
 
 use crate::CAPABILITIES;
 use crate::files::{self, FileInfo};
@@ -390,22 +392,41 @@ impl Client {
         let plain = Body::plain_with_caps(content, now_ms(), sequence, CAPABILITIES).encode()?;
         let body = match &self.sessions {
             Some(sessions) if to.supports_sessions() => {
-                let ratchet = sessions.lock().unwrap_or_else(|e| e.into_inner()).encrypt(
+                let result = sessions.lock().unwrap_or_else(|e| e.into_inner()).encrypt(
                     &self.identity,
                     to,
                     &plain,
                     now_ms(),
-                )?;
-                if ratchet.init.is_some() && ratchet.message.header.n == 0 {
-                    let _ = self
-                        .ev_tx
-                        .send(ClientEvent::SessionEstablished {
-                            peer: to.user_id,
-                            initiated_by_us: true,
-                        })
-                        .await;
+                );
+                match result {
+                    Ok(ratchet) => {
+                        if ratchet.init.is_some() && ratchet.message.header.n == 0 {
+                            let _ = self
+                                .ev_tx
+                                .send(ClientEvent::SessionEstablished {
+                                    peer: to.user_id,
+                                    initiated_by_us: true,
+                                })
+                                .await;
+                        }
+                        Body::Ratchet(ratchet).encode()?
+                    }
+                    // Their prekey on the relay is one they will have thrown
+                    // away: a session against it would be unreadable. The
+                    // message goes as v1, which their long-term key reads,
+                    // and the user is told what that costs.
+                    Err(SessionError::StalePrekeys { days }) => {
+                        let _ = self
+                            .ev_tx
+                            .send(ClientEvent::Error(format!(
+                                "{}… has not been online for {days} days, so their forward-secrecy keys on the relay are stale; this message is sent without forward secrecy (readable with their long-term key). /refresh once they are back.",
+                                to.user_id.short()
+                            )))
+                            .await;
+                        plain
+                    }
+                    Err(e) => return Err(e.into()),
                 }
-                Body::Ratchet(ratchet).encode()?
             }
             _ => plain,
         };
@@ -713,13 +734,21 @@ async fn session(
 
     // --- handshake: challenge -> auth -> auth_ok ---------------------------
     let handshake = async {
-        let nonce = match read_frame(&mut stream).await? {
-            ServerFrame::Challenge { nonce } => nonce,
+        let (nonce, bound) = match read_frame(&mut stream).await? {
+            ServerFrame::Challenge { nonce, bound } => (nonce, bound),
             other => anyhow::bail!("expected challenge, got {other:?}"),
+        };
+        // A relay that understands the bound login gets one: the signature
+        // covers its host, so it cannot be presented to another relay.
+        let host = bound.then(|| url_host(relay_url)).flatten();
+        let signature = match &host {
+            Some(host) => auth_signature_bound(identity, host, &nonce),
+            None => auth_signature(identity, &nonce),
         };
         let auth = ClientFrame::Auth {
             user_id: identity.user_id(),
-            signature: auth_signature(identity, &nonce),
+            signature,
+            host,
         };
         sink.send(text(&auth)).await?;
         match read_frame(&mut stream).await? {
