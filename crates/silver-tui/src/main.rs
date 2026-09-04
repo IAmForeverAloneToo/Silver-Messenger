@@ -2,6 +2,7 @@
 
 mod app;
 mod notify;
+mod qr;
 mod ui;
 
 use std::path::PathBuf;
@@ -17,7 +18,7 @@ use ratatui::crossterm::event::{
 };
 use ratatui::crossterm::execute;
 use silver_client::{
-    Client, ConnectOptions, DEFAULT_RELAY_URL, Proxy, SessionStore, Store, VaultError,
+    Client, ConnectOptions, DEFAULT_RELAY_URL, InviteLink, Proxy, SessionStore, Store, VaultError,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -52,6 +53,10 @@ struct Args {
     /// Print your user id and exit.
     #[arg(long)]
     print_id: bool,
+
+    /// Print your invite link (`silver://add/<id>?relay=...`) and exit.
+    #[arg(long)]
+    print_invite: bool,
 
     /// Protect keys, contacts and history with a passphrase (asks for it),
     /// then exit. The passphrase is asked for at every start.
@@ -166,6 +171,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let mut config = store.load_config()?;
+    if args.print_invite {
+        let relay = args.relay.clone().or_else(|| config.relay_url.clone());
+        println!("{}", InviteLink::new(identity.user_id(), relay));
+        return Ok(());
+    }
     if args.relay.is_some()
         || args.ca_cert.is_some()
         || args.proxy.is_some()

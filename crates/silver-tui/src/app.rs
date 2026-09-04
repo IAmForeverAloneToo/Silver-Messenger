@@ -10,14 +10,14 @@ use ratatui::crossterm::event::{
 use silver_client::sequence::{self, SequenceCheck};
 use silver_client::{
     Client, ClientError, ClientEvent, Contact, ContactRequest, Delivery, Direction, HeldMessage,
-    HistoryEntry, ReceiptQueue, Store,
+    HistoryEntry, InviteLink, ReceiptQueue, Store,
 };
 use silver_protocol::envelope::{ReceiptKind, capability};
 use silver_protocol::{Content, KeyBundle, Message, UserId, now_ms};
 use tokio::sync::mpsc;
 
 use crate::notify::{Notifier, NotifyMode};
-use crate::ui;
+use crate::{qr, ui};
 
 const TOAST_TTL: Duration = Duration::from_secs(6);
 const SCROLL_STEP: usize = 5;
@@ -36,6 +36,8 @@ pub enum Connection {
 pub enum Level {
     Info,
     Warn,
+    /// A row of a QR code: drawn dark on light, unwrapped, without a clock.
+    Code,
 }
 
 /// One row in a conversation.
@@ -597,8 +599,13 @@ impl App {
             "me" | "id" => {
                 let me = self.me;
                 self.system(Level::Info, format!("Your id: {me}"));
+                self.system(
+                    Level::Info,
+                    format!("Your invite link: {}", self.invite_link()),
+                );
                 self.select(0);
             }
+            "invite" | "link" | "qr" => self.cmd_invite(),
             "add" => self.cmd_add(&rest),
             "alias" | "rename" => self.cmd_alias(&rest),
             "remove" | "rm" => self.cmd_remove(),
@@ -621,7 +628,8 @@ impl App {
     fn print_help(&mut self) {
         for line in [
             "Commands:",
-            "  /add <user-id> [alias]   add a contact by id (looks up their key on the relay)",
+            "  /add <id or link> [alias] add a contact by id or invite link (looks up their key on the relay)",
+            "  /invite                  show your invite link and a QR code of it",
             "  /alias <name>            name the selected contact",
             "  /remove                  forget the selected contact (history stays on disk)",
             "  /verify                  show the safety number to compare with the selected contact",
@@ -645,21 +653,68 @@ impl App {
         self.select(0);
     }
 
+    fn invite_link(&self) -> InviteLink {
+        InviteLink::new(self.me, Some(self.relay_url.clone()))
+    }
+
+    /// Show the invite link and a QR code of it in the System pane.
+    fn cmd_invite(&mut self) {
+        let link = self.invite_link().to_string();
+        self.system(
+            Level::Info,
+            "Your invite link. Anyone can paste it into /add, or scan the code with a phone:",
+        );
+        self.system(Level::Info, link.clone());
+        match qr::render(&link) {
+            Ok(rows) => {
+                for row in rows {
+                    self.system(Level::Code, row);
+                }
+            }
+            Err(e) => self.system(Level::Warn, format!("Could not draw the QR code: {e}")),
+        }
+        self.system(
+            Level::Info,
+            "The code holds the same link; PgUp/PgDn scroll if it does not fit.",
+        );
+        self.select(0);
+    }
+
     fn cmd_add(&mut self, args: &[&str]) {
         let Some(id_text) = args.first() else {
-            self.toast("Usage: /add <user-id> [alias]");
+            self.toast("Usage: /add <user-id or invite link> [alias]");
             return;
         };
-        let user_id: UserId = match id_text.parse() {
-            Ok(id) => id,
-            Err(_) => {
-                self.toast("That is not a valid user id.");
-                return;
+        let (user_id, their_relay) = if InviteLink::looks_like(id_text) {
+            match id_text.parse::<InviteLink>() {
+                Ok(link) => (link.user_id, link.relay),
+                Err(e) => {
+                    self.toast(format!("Bad invite link: {e}"));
+                    return;
+                }
+            }
+        } else {
+            match id_text.parse::<UserId>() {
+                Ok(id) => (id, None),
+                Err(_) => {
+                    self.toast("That is not a valid user id or invite link.");
+                    return;
+                }
             }
         };
         if user_id == self.me {
             self.toast("That is your own id.");
             return;
+        }
+        if let Some(relay) = their_relay.filter(|r| *r != self.relay_url) {
+            self.system(
+                Level::Warn,
+                format!(
+                    "This invite names the relay {relay}, but you are on {}. Relays do not talk to each other yet, so messages only reach them if you both use the same one (/relay {relay}).",
+                    self.relay_url
+                ),
+            );
+            self.toast("They use a different relay; see System.");
         }
         let alias = args.get(1).map(|s| s.to_string());
         if let Some(i) = self.contact_index(&user_id) {

@@ -146,6 +146,15 @@ fn system_rows(app: &App, width: usize) -> Vec<Line<'static>> {
         let style = match line.level {
             Level::Info => Style::default(),
             Level::Warn => Style::default().fg(Color::Yellow),
+            Level::Code => {
+                // Dark modules on a light ground whatever the theme, so a
+                // phone camera reads it.
+                rows.push(Line::styled(
+                    truncate(&line.text, width),
+                    Style::default().fg(Color::Black).bg(Color::White),
+                ));
+                continue;
+            }
         };
         let prefix = vec![Span::styled(
             format!("{} ", clock(line.timestamp_ms)),

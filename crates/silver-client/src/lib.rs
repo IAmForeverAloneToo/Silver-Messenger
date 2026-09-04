@@ -9,6 +9,7 @@
 
 pub mod backup;
 pub mod connection;
+pub mod invite;
 mod outbox;
 pub mod proxy;
 pub mod receipts;
@@ -21,6 +22,7 @@ pub mod vault;
 
 pub use backup::{BackupPayload, export_backup, import_backup, read_backup};
 pub use connection::{Client, ClientError, ClientEvent, DEFAULT_RELAY_URL, Delivery};
+pub use invite::InviteLink;
 pub use proxy::Proxy;
 pub use receipts::ReceiptQueue;
 pub use sessions::{SessionError, SessionInfo, SessionStore, SharedSessions};
