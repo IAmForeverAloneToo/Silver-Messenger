@@ -115,6 +115,22 @@ jobs:
           done
           echo "both builds are identical"
 
+  acme:
+    # The relay's own ACME client against Pebble, Let's Encrypt's test
+    # server: account, TLS-ALPN-01 on the relay's listener, a chain that
+    # verifies, the cache a restart needs. Pebble is built from its pinned
+    # module version; the Go checksum database vouches for the source.
+    name: ACME against Pebble
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: go install github.com/letsencrypt/pebble/v2/cmd/pebble@v2.10.1
+      - run: SILVER_PEBBLE="$HOME/go/bin/pebble" cargo test -p silver-relay --test acme -- --nocapture
+
   fuzz:
     name: fuzz (${{ matrix.target }})
     runs-on: ubuntu-latest

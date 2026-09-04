@@ -284,14 +284,16 @@ also someone running one. Today it needs Caddy in front for TLS, keeps no
 metrics, has no administration tooling, and has no backup, upgrade or
 container story. Operations come before reach.
 
-36. [ ] **Built-in TLS** (M). ACME in the relay, so a bare host with a DNS
+36. [x] **Built-in TLS** (M). ACME in the relay, so a bare host with a DNS
         name gets and renews its certificate itself, plus `--tls-cert`
         and `--tls-key` for people who have their own; Caddy becomes
         optional and the deployment docs show both. Publishing the relay
         as a Tor onion service is documented and tested in the same
         item, since a relay that hides its own address is the natural
         partner of a client that already connects through Tor.
-        (RFC 8555.)
+        (RFC 8555.) Done, with one deviation: the onion recipe is
+        documented and the client's SOCKS5 path is tested, but a live
+        run of a relay behind an onion service has not been done yet.
 37. [ ] **Metrics and structured logs** (S). A Prometheus endpoint on a
         separate listener that is never public, with the counters the
         relay already keeps plus failed logins per address; JSON log

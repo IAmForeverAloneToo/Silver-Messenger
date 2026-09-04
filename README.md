@@ -282,15 +282,39 @@ content (everything is end-to-end encrypted before it leaves the client) but
 exposes recipient ids and timing to the network path, and corporate or campus
 proxies often block non-standard ports outright. Point a hostname at the
 server and run the installer with `SILVER_DOMAIN=relay.example.org` (or set
-the repository variable `VPS_DOMAIN` for the workflow). It installs Caddy as
-a TLS front with an automatic Let's Encrypt certificate, moves the relay to
-localhost, and opens ports 80 and 443 instead. Clients then use
-`silver --relay wss://relay.example.org/ws`. The client trusts both the
-operating system's certificate store and Mozilla's root bundle, so it also
-works behind TLS-inspecting proxies whose root certificate is installed on
-the machine. Once a client has reached a relay over `wss://` it refuses to
-talk to that host over plain `ws://`, so a mistyped or tampered URL cannot
-quietly drop the encryption (the list is `secure_hosts` in `config.json`).
+the repository variable `VPS_DOMAIN` for the workflow). The relay then
+listens on port 443 itself and obtains a Let's Encrypt certificate on its
+own: it proves control of the name over TLS on that same port
+(TLS-ALPN-01, RFC 8737), so port 80 stays closed and nothing else is
+installed; renewals happen inside the relay, and `journalctl -u
+silver-relay` says when. Using Let's Encrypt means agreeing to its terms;
+`SILVER_EMAIL=you@example.org` gives it an address for expiry warnings.
+Clients then use `silver --relay wss://relay.example.org/ws`. The client
+trusts both the operating system's certificate store and Mozilla's root
+bundle, so it also works behind TLS-inspecting proxies whose root
+certificate is installed on the machine. Once a client has reached a relay
+over `wss://` it refuses to talk to that host over plain `ws://`, so a
+mistyped or tampered URL cannot quietly drop the encryption (the list is
+`secure_hosts` in `config.json`).
+
+The same without the installer: `silver-relay --listen 0.0.0.0:443
+--acme-domain relay.example.org` (`SILVER_RELAY_ACME_DOMAIN` in
+`relay.env`), with the account, the key and the certificate kept under
+`acme/` in the data directory, readable by the relay's user only.
+`--acme-email` gives the certificate authority an address for expiry
+warnings, `--acme-directory` points at another certificate authority, for
+example Let's Encrypt's staging directory for a dry run, and
+`--acme-root` trusts a private one. A certificate from elsewhere works too: `--tls-cert
+chain.pem --tls-key key.pem` serves it and re-reads the files whenever
+they change, so certbot's renewals take effect without a restart.
+
+**A TLS front instead.** Caddy, nginx or any other reverse proxy can still
+terminate TLS and forward the WebSocket to the relay on localhost; then
+the relay learns the client's address from `X-Forwarded-For`, trusted
+only from the addresses in `--trusted-proxy`. The installer sets Caddy up
+this way with `SILVER_TLS=caddy`, and keeps an existing Caddy setup from
+before 0.7.0 unless `SILVER_TLS=builtin` tells it to switch (which stops
+Caddy and moves the relay to port 443).
 
 **Pinning the relay's key.** To trust one key rather than every
 certificate authority on the machine, pin it: `silver --print-pin` shows
@@ -301,10 +325,12 @@ pin with what the relay's operator published (they get it with
 -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256`)
 rather than trusting the first answer. The pin names the public key, not
 the certificate, so a renewal that keeps the key needs no change: the
-installer's Caddyfile sets `reuse_private_keys` for that, and certbot does
-the same with `--reuse-key`. When the key does change, clients fail to
-connect until they are given the new pin (`--pin` again adds it; the list
-is `relay_pins` in `config.json`).
+relay's own ACME client generates its key once and reuses it for every
+renewal (delete `acme/key.pem` to change it), the installer's Caddyfile
+sets `reuse_private_keys`, and certbot does the same with `--reuse-key`.
+When the key does change, clients fail to connect until they are given the
+new pin (`--pin` again adds it; the list is `relay_pins` in
+`config.json`).
 
 **Through Tor.** With Tor running locally, `silver --proxy
 socks5://127.0.0.1:9050` sends both relay connections through it. The
@@ -313,6 +339,23 @@ gets its own circuit, so the relay sees two unrelated exit addresses rather
 than one address for the authenticated and the anonymous connection. An
 HTTP `CONNECT` proxy (`--proxy http://proxy.corp:3128`, or `HTTPS_PROXY`)
 works as before.
+
+**As an onion service.** A relay can be reachable as a Tor onion service
+instead of, or as well as, a public name: then no relay address is
+published, nobody's traffic leaves the Tor network, and the connection
+is encrypted end to end by Tor itself, so plain `ws://` is the right
+scheme for it. On the relay host, with the relay listening on
+`127.0.0.1:7777`, add to `/etc/tor/torrc`:
+
+```
+HiddenServiceDir /var/lib/tor/silver-relay/
+HiddenServicePort 80 127.0.0.1:7777
+```
+
+and restart Tor; `/var/lib/tor/silver-relay/hostname` holds the address.
+Clients use `silver --relay ws://<that address>.onion/ws --proxy
+socks5://127.0.0.1:9050`. The onion address is the relay's identity: give
+it to people the way you would an invite link.
 
 ## How the crypto works
 
@@ -434,7 +477,8 @@ cargo audit
 
 CI runs the same checks on every push, plus the test suite on Linux, macOS
 and Windows, the terminal tests below under two terminal types, a minute
-of fuzzing per parser, and a reproducibility check that builds the Linux
+of fuzzing per parser, the relay's ACME client against Pebble (Let's
+Encrypt's test server), and a reproducibility check that builds the Linux
 binaries twice from scratch and compares them. Every GitHub Action is
 pinned to a commit hash; the OpenSSF Scorecard runs weekly.
 

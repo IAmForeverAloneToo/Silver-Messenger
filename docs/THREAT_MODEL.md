@@ -128,10 +128,15 @@ the client carries a pin for the relay's key (`--pin`), in which case the
 connection fails loudly instead of going through the proxy's certificate.
 A relay once reached over `wss://` is never talked to over `ws://` again
 by that client, so a changed URL (a bad invite link, a typo, a tampered
-config file) cannot quietly strip the transport encryption. Through Tor
+config file) cannot quietly strip the transport encryption. From 0.7.0
+the relay terminates TLS itself and obtains its certificate over the same
+port, so nothing but the relay sees the plain WebSocket; the certificate's
+private key lives in the relay's data directory, readable by its user
+only, which is the exposure a TLS front on the same host had. Through Tor
 the observer near the client sees Tor traffic and nothing about the
 relay; the relay's operator and anyone near the relay see Tor exit
-addresses. Certificate revocation is not checked (no OCSP or CRL); a
+addresses. A relay published as an onion service has no public address
+at all, and its traffic never leaves the Tor network. Certificate revocation is not checked (no OCSP or CRL); a
 revoked-but-unexpired certificate in the wrong hands is caught only by a
 pin.
 

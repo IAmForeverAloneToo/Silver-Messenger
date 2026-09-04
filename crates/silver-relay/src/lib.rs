@@ -12,8 +12,14 @@
 //!
 //! Bundles, prekeys and mailboxes live in an embedded database ([`store`]),
 //! so restarts lose nothing; only the set of connected sessions is in memory.
+//!
+//! The relay can terminate TLS itself ([`tls`]), with a certificate from
+//! files or one it obtains and renews from an ACME certificate authority
+//! ([`acme`]); a TLS front such as Caddy remains an option.
 
+pub mod acme;
 pub mod store;
+pub mod tls;
 
 use std::collections::HashMap;
 use std::future::Future;

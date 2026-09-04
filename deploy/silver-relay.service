@@ -17,7 +17,10 @@ Restart=always
 RestartSec=2
 LimitNOFILE=65536
 
-# Hardening: the relay needs nothing but a network socket.
+# Hardening: the relay needs nothing but a network socket, plus the one
+# capability that lets it bind port 443 itself when it terminates TLS.
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true

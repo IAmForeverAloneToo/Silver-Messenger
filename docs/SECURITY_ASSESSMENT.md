@@ -37,7 +37,7 @@ all. The gaps that matter are listed at the end with what closes them.
 | 1.1.6 Centralised, reusable security controls | Met | All cryptography lives in `silver-protocol`; the relay and client contain none of their own. Limits and caps are constants in one place per crate. |
 | 1.1.7 Secure coding checklist | Partly | Conventions are enforced by tooling (`forbid(unsafe_code)` in every crate but the terminal binary, which has one documented exception; clippy; deny), not written as a checklist. |
 | 1.2.1 Low-privilege accounts per component | Met | The relay runs as its own system user under a hardened systemd unit (`deploy/silver-relay.service`: `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `StateDirectoryMode=0700`). |
-| 1.2.2 Component-to-component authentication | Partly | Relay behind Caddy on the same host talks plain HTTP on loopback; documented. Client to relay is authenticated (V2). |
+| 1.2.2 Component-to-component authentication | Met | The relay terminates TLS itself in the documented deployment (built-in ACME, item 36); with a TLS front instead, the loopback hop is plain HTTP on one host and documented as such. Client to relay is authenticated (V2). |
 | 1.2.3 One vetted authentication mechanism | Met | Challenge signature under a domain-separated prefix, one code path (`silver_protocol::wire::verify_auth`). |
 | 1.2.4 Consistent strength across authentication paths | Met | There is one path. Anonymous submission is unauthenticated by design and gets its own, lower limits. |
 | 1.4.x Access control architecture | Met | The only authorisation decision is "this connection proved this identity"; everything that follows (mailbox, bundle) is keyed on it on the relay. |
@@ -188,7 +188,7 @@ V6 and the threat model.
 | 9.1.2 Strong cipher suites | Met | rustls defaults (AEAD suites only). |
 | 9.1.3 Latest TLS versions | Met | TLS 1.3 and 1.2 only. |
 | 9.2.1 Server certificate validated | Met | rustls, system store plus Mozilla roots, `--ca-cert` for private roots, `--pin` for key pins. |
-| 9.2.2 Encrypted connections between components | Partly | Relay behind Caddy: loopback plain HTTP on one host, documented. |
+| 9.2.2 Encrypted connections between components | Met | No second component in the documented deployment: the relay terminates TLS itself (item 36). With a TLS front, the loopback hop on one host is plain HTTP, documented. |
 | 9.2.3 External connections authenticated | Met | The releases page over TLS with the same trust store. |
 | 9.2.4 Certificate revocation checked | Not met | rustls performs no OCSP or CRL checks; pins are the offered mitigation. No item planned; documented here. |
 | 9.2.5 TLS failures logged | Met | Connection errors are shown in the client's System pane and log. |
@@ -258,7 +258,7 @@ routes (`/` with the source notice, `/healthz`).
 | 14.2.5 SBOM | Met | CycloneDX per binary in every release; `cargo auditable` in the binaries. |
 | 14.3.1 Debug modes off in production | Met | Release builds; `--log-ids` and `SILVER_LOG=debug` are explicit opt-ins. |
 | 14.3.3 No stack traces to users | Met | Error codes and short messages; panics abort a relay connection task, not the process. |
-| 14.4.x HTTP security headers | Partly | The relay's two GET routes serve plain text without security headers; behind Caddy in the documented deployment. Item 36 (built-in TLS) is where the relay grows an HTTP surface worth hardening. |
+| 14.4.x HTTP security headers | Partly | The relay's HTTP surface is two plain-text GET routes and the WebSocket upgrade, now served over its own TLS; there is no browser client and no cookie, so the usual headers would protect nothing, and none are sent. |
 | 14.5.x HTTP request header validation | Partly | The WebSocket upgrade does not check `Origin`; there is no browser client, so the check would protect nothing today, and cookies are not involved. Noted for item 36. |
 
 ## Gaps, in order of weight

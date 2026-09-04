@@ -4,6 +4,24 @@ Notable changes to Silver Messenger. Versions follow [semantic
 versioning](https://semver.org); while the major version is 0, a minor bump
 means behaviour or the wire protocol changed in a way worth reading about.
 
+## Unreleased
+
+### Added
+
+- **Built-in TLS.** The relay can terminate TLS itself: `--acme-domain`
+  obtains a Let's Encrypt certificate (or one from any ACME certificate
+  authority, `--acme-directory`) and renews it, proving control of the
+  name over TLS on port 443 itself (TLS-ALPN-01), so no port 80 and no
+  web server in front are needed; the account, the key and the
+  certificate live under `acme/` in the data directory, readable by the
+  relay's user only, and the key is kept across renewals so pinned
+  clients keep working. `--tls-cert`/`--tls-key` serve a certificate from
+  elsewhere and re-read the files when they change. The installer sets
+  new installs up this way (`SILVER_DOMAIN`), keeps an existing Caddy
+  front unless `SILVER_TLS=builtin` says to switch, and opens only port
+  443. The ACME flow is tested end to end against Pebble in CI. The
+  README says how to publish a relay as a Tor onion service.
+
 ## 0.6.0 - 2026-09-04
 
 Phase 6: secure and private by default. A relay and a network observer are

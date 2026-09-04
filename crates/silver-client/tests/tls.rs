@@ -210,3 +210,77 @@ fn unreadable_ca_file_is_an_error_up_front() {
     );
     assert!(result.is_err());
 }
+
+/// A certificate for `localhost` as PEM files in `dir`, and its pin.
+fn write_certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf, Pin) {
+    let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+    let cert = dir.join("cert.pem");
+    let key = dir.join("key.pem");
+    // The key first, so a watcher that wakes between the two writes sees
+    // a mismatched pair (kept out) rather than half a certificate.
+    std::fs::write(&key, certified.signing_key.serialize_pem()).unwrap();
+    std::fs::write(&cert, certified.cert.pem()).unwrap();
+    (cert, key, Pin::of(certified.cert.der()).unwrap())
+}
+
+#[tokio::test]
+async fn the_relay_serves_tls_from_files_and_picks_up_a_renewal() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let dir = tempfile::tempdir().unwrap();
+    let (cert, key, first_pin) = write_certificate(dir.path());
+
+    let store = silver_relay::tls::CertStore::new();
+    store.set_current(silver_relay::tls::load_pem(&cert, &key).unwrap());
+    tokio::spawn(silver_relay::tls::watch_files(
+        store.clone(),
+        cert.clone(),
+        key.clone(),
+        Duration::from_millis(50),
+    ));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(silver_relay::tls::serve_tls(
+        listener,
+        silver_relay::tls::server_config(store).unwrap(),
+        RelayState::new(),
+        std::future::pending(),
+    ));
+    let url = format!("wss://localhost:{port}/ws");
+    let trusting = |path: &std::path::Path| ConnectOptions {
+        extra_ca_certs: vec![path.to_path_buf()],
+        ..Default::default()
+    };
+
+    // The certificate from the files, trusted when its own file is the CA.
+    let seen = silver_client::observe_relay(&url, &trusting(&cert))
+        .await
+        .unwrap();
+    assert!(seen.trusted.is_ok(), "{:?}", seen.trusted);
+    assert_eq!(seen.pins, vec![first_pin]);
+
+    // A renewal written in place is served without a restart; the old
+    // certificate file no longer vouches for it.
+    let old_cert = dir.path().join("old.pem");
+    std::fs::copy(&cert, &old_cert).unwrap();
+    let (_, _, second_pin) = write_certificate(dir.path());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let renewed = loop {
+        let seen = silver_client::observe_relay(&url, &trusting(&cert))
+            .await
+            .unwrap();
+        if seen.pins == vec![second_pin] {
+            break seen;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "still serving the old certificate"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert!(renewed.trusted.is_ok());
+    let stale = silver_client::observe_relay(&url, &trusting(&old_cert))
+        .await
+        .unwrap();
+    assert!(stale.trusted.is_err());
+    assert_eq!(stale.pins, vec![second_pin]);
+}

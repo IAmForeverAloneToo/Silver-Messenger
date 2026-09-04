@@ -17,9 +17,16 @@
 #
 # Environment overrides:
 #   SILVER_RELAY_LISTEN  address:port to listen on   (default 0.0.0.0:7777; only used on first install)
-#   SILVER_DOMAIN        hostname that points at this server. Installs Caddy as a
-#                        TLS front with an automatic Let's Encrypt certificate, so
-#                        clients use wss://<domain>/ws on port 443. Remembered.
+#   SILVER_DOMAIN        hostname that points at this server. The relay then
+#                        serves TLS on port 443 itself, with a Let's Encrypt
+#                        certificate it obtains and renews, so clients use
+#                        wss://<domain>/ws. Remembered.
+#   SILVER_EMAIL         address Let's Encrypt may write to about the certificate
+#                        (optional; only used with SILVER_DOMAIN)
+#   SILVER_TLS           builtin (default for new installs) or caddy: a Caddy front
+#                        as the installer set up before 0.7.0. An install that
+#                        already runs Caddy keeps it unless SILVER_TLS=builtin is
+#                        given, which switches it over and stops Caddy.
 #   SILVER_BINARY        path to a prebuilt relay binary (default: silver-relay next to this script)
 #   SILVER_BRANCH        git branch to deploy         (default main)
 #   SILVER_REPO          git repository URL
@@ -132,9 +139,43 @@ systemctl daemon-reload
 systemctl enable -q silver-relay
 systemctl restart silver-relay
 
-# --- 7. optional HTTPS front (Caddy) ------------------------------------------
+# --- 7. HTTPS ------------------------------------------------------------------
 DOMAIN="${SILVER_DOMAIN:-$(sed -n 's/^SILVER_DOMAIN=//p' "$ENV_FILE")}"
-if [ -n "$DOMAIN" ]; then
+# Which way TLS is done: the relay itself, or Caddy in front. An install
+# that already has the installer's Caddyfile keeps Caddy unless told otherwise.
+CADDY_MARK="Managed by the Silver Messenger relay installer"
+if [ -z "${SILVER_TLS:-}" ]; then
+    if grep -qs "$CADDY_MARK" /etc/caddy/Caddyfile 2>/dev/null && systemctl is-enabled -q caddy 2>/dev/null; then
+        SILVER_TLS=caddy
+    else
+        SILVER_TLS=builtin
+    fi
+fi
+set_env() { # set_env KEY VALUE: set or replace KEY in the relay's environment file
+    if grep -q "^$1=" "$ENV_FILE"; then
+        sed -i "s|^$1=.*|$1=$2|" "$ENV_FILE"
+    else
+        echo "$1=$2" >>"$ENV_FILE"
+    fi
+}
+unset_env() { sed -i "/^$1=/d" "$ENV_FILE"; }
+
+if [ -n "$DOMAIN" ] && [ "$SILVER_TLS" = builtin ]; then
+    log "Setting up HTTPS for $DOMAIN in the relay itself"
+    if grep -qs "$CADDY_MARK" /etc/caddy/Caddyfile 2>/dev/null; then
+        log "Stopping the Caddy front the installer set up earlier; the relay takes over port 443"
+        systemctl disable -q --now caddy 2>/dev/null || true
+    fi
+    set_env SILVER_DOMAIN "$DOMAIN"
+    set_env SILVER_RELAY_LISTEN 0.0.0.0:443
+    set_env SILVER_RELAY_ACME_DOMAIN "$DOMAIN"
+    if [ -n "${SILVER_EMAIL:-}" ]; then
+        set_env SILVER_RELAY_ACME_EMAIL "$SILVER_EMAIL"
+    fi
+    unset_env SILVER_TLS
+    echo "SILVER_TLS=builtin" >>"$ENV_FILE"
+    systemctl restart silver-relay
+elif [ -n "$DOMAIN" ]; then
     log "Setting up HTTPS for $DOMAIN with Caddy"
     if ! command -v caddy >/dev/null; then
         if command -v apt-get >/dev/null; then
@@ -152,12 +193,12 @@ if [ -n "$DOMAIN" ]; then
     command -v caddy >/dev/null || die "could not install Caddy; see https://caddyserver.com/docs/install"
 
     # The relay listens only locally; Caddy terminates TLS and proxies the WebSocket.
-    sed -i 's/^SILVER_RELAY_LISTEN=.*/SILVER_RELAY_LISTEN=127.0.0.1:7777/' "$ENV_FILE"
-    if grep -q '^SILVER_DOMAIN=' "$ENV_FILE"; then
-        sed -i "s/^SILVER_DOMAIN=.*/SILVER_DOMAIN=$DOMAIN/" "$ENV_FILE"
-    else
-        echo "SILVER_DOMAIN=$DOMAIN" >>"$ENV_FILE"
-    fi
+    set_env SILVER_RELAY_LISTEN 127.0.0.1:7777
+    set_env SILVER_DOMAIN "$DOMAIN"
+    unset_env SILVER_RELAY_ACME_DOMAIN
+    unset_env SILVER_RELAY_ACME_EMAIL
+    unset_env SILVER_TLS
+    echo "SILVER_TLS=caddy" >>"$ENV_FILE"
     mkdir -p /etc/caddy
     cat >/etc/caddy/Caddyfile <<CADDY
 # Managed by the Silver Messenger relay installer.
@@ -178,22 +219,25 @@ fi
 # --- 8. firewall --------------------------------------------------------------
 listen=$(sed -n 's/^SILVER_RELAY_LISTEN=//p' "$ENV_FILE")
 port="${listen##*:}"
-if [ -n "$DOMAIN" ]; then
+if [ -n "$DOMAIN" ] && [ "$SILVER_TLS" = caddy ]; then
     open_ports="80/tcp 443/tcp"
+elif [ -n "$DOMAIN" ]; then
+    # The relay validates its certificate over TLS on 443 (RFC 8737); no port 80.
+    open_ports="443/tcp"
 else
     open_ports="$port/tcp"
 fi
 if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q '^Status: active'; then
     log "Opening $open_ports in ufw"
     for p in $open_ports; do ufw allow "$p" >/dev/null; done
-    if [ -n "$DOMAIN" ] && ufw status | grep -q "^$port/tcp"; then
+    if [ -n "$DOMAIN" ] && [ "$port" != 443 ] && ufw status | grep -q "^$port/tcp"; then
         ufw delete allow "$port/tcp" >/dev/null
     fi
 fi
 if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
     log "Opening $open_ports in firewalld"
     for p in $open_ports; do firewall-cmd -q --permanent --add-port="$p"; done
-    if [ -n "$DOMAIN" ]; then
+    if [ -n "$DOMAIN" ] && [ "$port" != 443 ]; then
         firewall-cmd -q --permanent --remove-port="$port/tcp" || true
     fi
     firewall-cmd -q --reload
@@ -201,13 +245,20 @@ fi
 
 # --- 9. health check ----------------------------------------------------------
 log "Checking the relay"
+if [ -n "$DOMAIN" ] && [ "$SILVER_TLS" = builtin ]; then
+    # Before the first certificate arrives the handshake fails; the listener
+    # itself is up as soon as the port accepts.
+    local_check() { (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; }
+else
+    local_check() { curl -fsS "http://127.0.0.1:$port/healthz" >/dev/null 2>&1; }
+fi
 for _ in $(seq 1 10); do
-    if curl -fsS "http://127.0.0.1:$port/healthz" >/dev/null 2>&1; then
+    if local_check; then
         break
     fi
     sleep 1
 done
-if ! curl -fsS "http://127.0.0.1:$port/healthz" >/dev/null 2>&1; then
+if ! local_check; then
     journalctl -u silver-relay -n 30 --no-pager || true
     die "the relay did not come up; see the log above"
 fi
@@ -223,17 +274,23 @@ if [ -n "$DOMAIN" ]; then
         fi
         sleep 2
     done
+    if [ "$SILVER_TLS" = builtin ]; then
+        tls_log="journalctl -u silver-relay -f"
+        reach="port 443"
+    else
+        tls_log="journalctl -u caddy -f"
+        reach="ports 80 and 443"
+    fi
     if [ "$https_ok" != 1 ]; then
         cat <<WARN
 
 warning: https://$DOMAIN is not answering yet. Make sure the DNS record for
-$DOMAIN points at this server and that ports 80 and 443 are open in your
-hosting provider's firewall. Caddy keeps retrying; watch it with:
-  journalctl -u caddy -f
+$DOMAIN points at this server and that $reach is open in your hosting
+provider's firewall. The certificate request is retried; watch it with:
+  $tls_log
 WARN
     fi
-    extra="  tls:      journalctl -u caddy -f"
-    reach="ports 80 and 443"
+    extra="  tls:      $tls_log"
 else
     public_ip=$(curl -fsS -4 --max-time 5 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
     relay_url="ws://$public_ip:$port/ws"

@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::Parser;
+use silver_relay::tls::{self, CertStore};
 use silver_relay::{
     DEFAULT_LISTEN, DEFAULT_MESSAGE_TTL, Limits, Policy, RelayState, expire_periodically, serve,
 };
@@ -117,6 +118,85 @@ struct Args {
     /// beyond that get the bundle without one.
     #[arg(long, env = "SILVER_RELAY_ONE_TIME_PREKEYS_PER_USER_PER_HOUR", default_value_t = Policy::default().one_time_prekeys_per_user_per_hour)]
     one_time_prekeys_per_user_per_hour: u32,
+
+    /// Serve TLS on --listen with this certificate chain (PEM); the files
+    /// are re-read when they change, so a renewal needs no restart.
+    #[arg(
+        long,
+        env = "SILVER_RELAY_TLS_CERT",
+        requires = "tls_key",
+        conflicts_with = "acme_domain"
+    )]
+    tls_cert: Option<PathBuf>,
+    /// The PEM private key belonging to --tls-cert.
+    #[arg(long, env = "SILVER_RELAY_TLS_KEY", requires = "tls_cert")]
+    tls_key: Option<PathBuf>,
+    /// Obtain and renew a certificate for this name from an ACME certificate
+    /// authority (Let's Encrypt unless --acme-directory says otherwise) and
+    /// serve TLS on --listen, which must be reachable at the name on port
+    /// 443. Using the authority means agreeing to its terms. May be given
+    /// more than once, or comma-separated.
+    #[arg(long, env = "SILVER_RELAY_ACME_DOMAIN", value_delimiter = ',')]
+    acme_domain: Vec<String>,
+    /// An address the certificate authority may write to about the
+    /// certificate (expiry warnings), for --acme-domain.
+    #[arg(long, env = "SILVER_RELAY_ACME_EMAIL")]
+    acme_email: Option<String>,
+    /// The ACME directory to use. Let's Encrypt's staging directory,
+    /// https://acme-staging-v02.api.letsencrypt.org/directory, issues
+    /// untrusted certificates without rate limits, for trying things out.
+    #[arg(long, env = "SILVER_RELAY_ACME_DIRECTORY", default_value = silver_relay::acme::DEFAULT_DIRECTORY)]
+    acme_directory: String,
+    /// Where the ACME account, the certificate key and the certificate are
+    /// kept (default: acme/ under the data directory). Required with
+    /// --ephemeral, since the key must outlive a restart for the
+    /// certificate to stay valid.
+    #[arg(long, env = "SILVER_RELAY_ACME_CACHE")]
+    acme_cache: Option<PathBuf>,
+    /// A root certificate (PEM) to trust for the ACME directory, for a
+    /// private certificate authority.
+    #[arg(long, env = "SILVER_RELAY_ACME_ROOT")]
+    acme_root: Option<PathBuf>,
+}
+
+/// How the relay's listener is protected.
+enum Transport {
+    Plain,
+    Files { cert: PathBuf, key: PathBuf },
+    Acme(silver_relay::acme::AcmeConfig),
+}
+
+impl Transport {
+    fn from_args(args: &Args, data_dir: Option<&PathBuf>) -> anyhow::Result<Self> {
+        if let (Some(cert), Some(key)) = (&args.tls_cert, &args.tls_key) {
+            return Ok(Self::Files {
+                cert: cert.clone(),
+                key: key.clone(),
+            });
+        }
+        if args.acme_domain.is_empty() {
+            return Ok(Self::Plain);
+        }
+        let cache = match (&args.acme_cache, data_dir) {
+            (Some(cache), _) => cache.clone(),
+            (None, Some(dir)) => dir.join("acme"),
+            (None, None) => anyhow::bail!(
+                "--acme-domain with --ephemeral needs --acme-cache: the certificate key and the ACME account must survive a restart"
+            ),
+        };
+        Ok(Self::Acme(silver_relay::acme::AcmeConfig {
+            domains: args
+                .acme_domain
+                .iter()
+                .map(|d| d.trim().to_ascii_lowercase())
+                .filter(|d| !d.is_empty())
+                .collect(),
+            directory: args.acme_directory.clone(),
+            contact: args.acme_email.clone(),
+            cache,
+            root: args.acme_root.clone(),
+        }))
+    }
 }
 
 #[tokio::main]
@@ -135,7 +215,7 @@ async fn main() -> anyhow::Result<()> {
     let policy = Policy {
         sends_per_minute: args.sends_per_minute,
         lookups_per_minute: args.lookups_per_minute,
-        invite_token: args.invite_token.filter(|t| !t.trim().is_empty()),
+        invite_token: args.invite_token.clone().filter(|t| !t.trim().is_empty()),
         anonymous_sends_per_minute: args.anonymous_sends_per_minute,
         max_blob_mib: args.max_blob_mib,
         blob_storage_mib: args.blob_storage_mib,
@@ -145,7 +225,7 @@ async fn main() -> anyhow::Result<()> {
         registrations_per_hour: args.registrations_per_hour,
         max_identities: args.max_identities,
         blob_mib_per_address_per_hour: args.blob_mib_per_address_per_hour,
-        trusted_proxies: args.trusted_proxy,
+        trusted_proxies: args.trusted_proxy.clone(),
         log_ids: args.log_ids,
         require_bound_auth: args.require_bound_auth,
         one_time_prekeys_per_user_per_hour: args.one_time_prekeys_per_user_per_hour,
@@ -172,14 +252,18 @@ async fn main() -> anyhow::Result<()> {
     if policy.anonymous_sends_per_minute == 0 {
         info!("anonymous submission is off; senders submit on their own connection");
     }
+    let data_dir = (!args.ephemeral).then(|| {
+        args.data_dir
+            .clone()
+            .or_else(|| std::env::var_os("STATE_DIRECTORY").map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from("./silver-relay-data"))
+    });
+    let transport = Transport::from_args(&args, data_dir.as_ref())?;
     let state = if args.ephemeral {
         info!("running with in-memory state; nothing is persisted");
         RelayState::with_store_and_policy(silver_relay::Store::in_memory()?, limits, policy.clone())
     } else {
-        let dir = args
-            .data_dir
-            .or_else(|| std::env::var_os("STATE_DIRECTORY").map(PathBuf::from))
-            .unwrap_or_else(|| PathBuf::from("./silver-relay-data"));
+        let dir = data_dir.clone().expect("a data directory unless ephemeral");
         let path = dir.join("relay.redb");
         let state = RelayState::open_with(&path, limits, policy.clone())?;
         let stats = state.stats();
@@ -202,14 +286,48 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = TcpListener::bind(&args.listen).await?;
     let addr = listener.local_addr()?;
-    info!(
-        "relay listening on ws://{addr}{}",
-        silver_protocol::wire::WS_PATH
-    );
-
-    serve(listener, state, async {
+    let shutdown = async {
         let _ = tokio::signal::ctrl_c().await;
         info!("shutting down");
-    })
-    .await
+    };
+    let path = silver_protocol::wire::WS_PATH;
+    match transport {
+        Transport::Plain => {
+            info!("relay listening on ws://{addr}{path}");
+            serve(listener, state, shutdown).await
+        }
+        Transport::Files { cert, key } => {
+            let store = CertStore::new();
+            let loaded = tls::load_pem(&cert, &key)?;
+            info!(
+                "relay listening on wss://{addr}{path} with the certificate for {} from {}, valid until {}",
+                tls::dns_names(&loaded.cert[0]).join(", "),
+                cert.display(),
+                tls::expiry_text(&loaded.cert[0])
+            );
+            store.set_current(loaded);
+            tokio::spawn(tls::watch_files(
+                store.clone(),
+                cert,
+                key,
+                tls::FILE_CHECK_EVERY,
+            ));
+            let config = tls::server_config(store)?;
+            tls::serve_tls(listener.into_std()?, config, state, shutdown).await
+        }
+        Transport::Acme(acme) => {
+            let store = CertStore::new();
+            info!(
+                "relay listening on wss://{addr}{path}; certificate for {} from {}, kept in {}",
+                acme.domains.join(", "),
+                acme.directory,
+                acme.cache.display()
+            );
+            // The listener must be up before the order: validation connects
+            // to it. Until the first certificate arrives, handshakes fail.
+            let config = tls::server_config(store.clone())?;
+            tokio::spawn(silver_relay::acme::run(acme, store));
+            tls::serve_tls(listener.into_std()?, config, state, shutdown).await
+        }
+    }
 }

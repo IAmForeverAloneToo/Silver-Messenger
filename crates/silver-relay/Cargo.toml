@@ -26,6 +26,17 @@ tracing-subscriber = { workspace = true }
 clap = { workspace = true }
 subtle = { workspace = true }
 sha2 = { workspace = true }
+# Built-in TLS and ACME.
+axum-server = { workspace = true }
+rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
+rcgen = { workspace = true }
+instant-acme = { workspace = true }
+x509-parser = { workspace = true }
+base64 = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+tokio-rustls = { workspace = true }
+# The ACME test runs Pebble as a child process.
+tokio = { workspace = true, features = ["process"] }
