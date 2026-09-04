@@ -4,6 +4,38 @@ Notable changes to Silver Messenger. Versions follow [semantic
 versioning](https://semver.org); while the major version is 0, a minor bump
 means behaviour or the wire protocol changed in a way worth reading about.
 
+## Unreleased
+
+Forward secrecy. Clients and relays from this version interoperate with
+0.2.0 peers: a recipient without prekeys, or anyone behind an older relay,
+is sent the v1 format and told so in the chat title.
+
+### Added
+
+- Forward-secret sessions (protocol v2): clients publish a signed prekey
+  and one-time prekeys; the first message to a peer runs an X3DH handshake
+  against them and every message after that is encrypted under a Double
+  Ratchet key that is used once and discarded. The chat title says
+  `forward secret` once a session exists, `/session` explains the state,
+  and the System pane reports new sessions and messages that could not be
+  read after one side lost its session state.
+- Anonymous submission: the relay accepts messages on connections that
+  never authenticate, and the client sends on such a connection (with TLS
+  session resumption off) so the relay cannot pair a message with its
+  sender. `--submit-authenticated` on the client and
+  `--anonymous-sends-per-minute 0` on the relay turn it off.
+- `docs/PROTOCOL.md`, the wire format and cryptography in full.
+- Relay: one-time prekeys are stored, handed out one per lookup, and their
+  status reported so clients can top up. `--anonymous-sends-per-minute`.
+
+### Changed
+
+- The data directory gains `prekeys.json` and `sessions.json`, encrypted
+  like everything else under a passphrase. A restored backup starts with
+  fresh prekeys and no sessions; peers notice and start over.
+- A key change for a contact also drops the sessions with them.
+- The threat model is updated for sessions and anonymous submission.
+
 ## 0.2.0 - 2026-09-04
 
 Completes the trust model on top of the 0.1.0 baseline. Relay and client

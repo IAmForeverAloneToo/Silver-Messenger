@@ -47,12 +47,13 @@ Tick items off as they land on `main`.
 
 ## Phase 3: forward secrecy
 
-10. [ ] **Double ratchet sessions** (L). Prekey bundles for the initial
+10. [x] **Double ratchet sessions** (L). Prekey bundles for the initial
         handshake, then a ratchet per conversation, negotiated as protocol
         v2 with a fallback so old clients keep working during rollout.
-11. [ ] **Protocol specification** (S). Written alongside the ratchet so
-        the wire format is documented once it stops changing.
-12. [ ] **Unauthenticated submission** (M). Today the relay can pair a
+11. [x] **Protocol specification** (S). Written alongside the ratchet so
+        the wire format is documented once it stops changing
+        (`docs/PROTOCOL.md`).
+12. [x] **Unauthenticated submission** (M). Today the relay can pair a
         sealed envelope with the authenticated session that submitted it.
         Sending over a separate, unauthenticated connection (with abuse
         controls that do not need the sender's identity) closes that

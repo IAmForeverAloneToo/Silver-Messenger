@@ -123,7 +123,7 @@ if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
 fi
 mkdir -p "$ENV_DIR"
 if [ ! -f "$ENV_FILE" ]; then
-    printf 'SILVER_RELAY_LISTEN=%s\nRUST_LOG=info\n# Uncomment to only let people with this token register new identities:\n# SILVER_RELAY_INVITE_TOKEN=change-me\n' "$LISTEN" >"$ENV_FILE"
+    printf 'SILVER_RELAY_LISTEN=%s\nRUST_LOG=info\n# Uncomment to only let people with this token register new identities:\n# SILVER_RELAY_INVITE_TOKEN=change-me\n# Messages an unauthenticated connection may submit per minute (0 turns anonymous submission off):\n# SILVER_RELAY_ANONYMOUS_SENDS_PER_MINUTE=30\n' "$LISTEN" >"$ENV_FILE"
 fi
 chmod 640 "$ENV_FILE"
 chgrp "$SERVICE_USER" "$ENV_FILE"

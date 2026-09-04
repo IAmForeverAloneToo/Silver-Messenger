@@ -61,6 +61,7 @@ from then on. `/alias <name>` gives a contact a friendly name.
 | `/verify`                   | Show the safety number to compare with the selected contact  |
 | `/verify ok` / `/verify no` | Mark the selected contact as verified, or clear the mark     |
 | `/refresh`                  | Fetch the selected contact's key again and report any change |
+| `/session`                  | Show how messages with the selected contact are protected    |
 | `/accept <n>`               | Accept a contact request from the Requests pane              |
 | `/block <n or id>`          | Drop everything from that id from now on                     |
 | `/unblock <id>`, `/blocked` | Undo a block; list blocked ids                               |
@@ -86,6 +87,7 @@ SILVER_PASSPHRASE=…        supplies the passphrase non-interactively (scripts,
 silver --export-backup <F> write an encrypted backup of identity and contacts to F (asks for a passphrase for it)
 silver --import-backup <F> restore identity and contacts from F; add --force to replace an existing identity
 SILVER_BACKUP_PASSPHRASE=… supplies the backup passphrase non-interactively
+silver --submit-authenticated  send on the authenticated connection instead of the relay's anonymous one (env SILVER_SUBMIT_AUTHENTICATED)
 SILVER_LOG=debug silver    write logs to <data-dir>/silver.log
 
 silver-relay --listen <ADDR>          default 0.0.0.0:7777                          (env SILVER_RELAY_LISTEN)
@@ -96,6 +98,7 @@ silver-relay --max-mailbox-mib        per-recipient queue cap in MiB, default 32
 silver-relay --sends-per-minute <N>   messages one connection may submit per minute, default 60 (env SILVER_RELAY_SENDS_PER_MINUTE)
 silver-relay --lookups-per-minute <N> key lookups per connection per minute, default 30   (env SILVER_RELAY_LOOKUPS_PER_MINUTE)
 silver-relay --invite-token <T>       only register new identities that present T   (env SILVER_RELAY_INVITE_TOKEN)
+silver-relay --anonymous-sends-per-minute <N>  messages an unauthenticated connection may submit per minute, default 30; 0 turns anonymous submission off (env SILVER_RELAY_ANONYMOUS_SENDS_PER_MINUTE)
 silver-relay --ephemeral              keep everything in memory only
 RUST_LOG=debug silver-relay           relay log level
 ```
@@ -148,27 +151,53 @@ operating system's certificate store and Mozilla's root bundle, so it also
 works behind TLS-inspecting proxies whose root certificate is installed on
 the machine.
 
-## How the crypto works (v1)
+## How the crypto works
+
+The exact wire format and every constant are in
+[docs/PROTOCOL.md](docs/PROTOCOL.md); what it protects against, and what
+it does not, is in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 
 * **Identity**: an Ed25519 signing key (its public half is your user id,
   shown as base58) plus a long-term X25519 key for Diffie–Hellman.
-* **Key bundle**: your X25519 public key, signed with your identity key. The
-  relay stores and serves bundles; clients verify the signature and pin the
-  key on first use.
+* **Key bundle**: your X25519 public key, signed with your identity key,
+  plus your prekeys: a signed medium-term key rotated weekly and a batch of
+  one-time keys. The relay stores and serves bundles, hands out one
+  one-time key per lookup, and tells you when to deposit more. Clients
+  verify the signatures and pin the long-term key on first use.
 * **Envelope** (what the relay sees): `{ id, to, ephemeral_public, nonce, ciphertext }`.
   For each message the sender makes a fresh X25519 ephemeral key, derives a
   key with HKDF-SHA256 from `DH(ephemeral, recipient)`, and encrypts
   `sender_id || signature || body` with XChaCha20-Poly1305. The recipient id
   and ephemeral key are bound as associated data, and the signature covers the
   recipient, ephemeral key, nonce and body, so an envelope cannot be
-  re-addressed, altered, or forged.
+  re-addressed, altered, or forged. The sender is inside the ciphertext, so
+  the relay never sees it.
+* **Forward-secret sessions**: when the recipient has published prekeys, the
+  body inside the envelope is not the message but a Double Ratchet message.
+  The first one carries an X3DH handshake against the recipient's identity
+  key, signed prekey and a one-time prekey; from then on every message is
+  encrypted under a key derived for it alone and discarded afterwards, and
+  each change of direction in the conversation performs a fresh
+  Diffie–Hellman step. A stolen device or key cannot decrypt messages that
+  were already read, and a compromised chain heals at the next step. The
+  chat title says `forward secret` once a session exists; `/session`
+  explains the state. A recipient without prekeys (a client older than
+  0.3.0, or anyone behind an older relay) is sent the plain v1 body
+  instead, so everyone keeps talking during the upgrade.
+* **Anonymous submission**: a relay from 0.3.0 on accepts messages on
+  connections that never authenticate, and the client uses one such
+  connection (with TLS session resumption off) for everything it sends. The
+  relay therefore cannot pair an envelope with the identity that submitted
+  it; it still sees the address and the timing. `--submit-authenticated`
+  turns this off for networks that allow one connection only.
 * **Abuse controls**: strangers who know your id can write to you, but their
   messages wait in the Requests pane until you accept or block them. The
   relay limits each connection to 60 messages and 30 key lookups per minute,
   caps every mailbox, and can be told to register only identities that
   present an invite token.
 * **Encryption at rest**: with a passphrase set, every file in the data
-  directory (identity keys, contacts, history, outbox, config) is encrypted
+  directory (identity keys, prekeys, sessions, contacts, history, outbox,
+  config) is encrypted
   with XChaCha20-Poly1305 under a random data key, which is itself wrapped
   by the passphrase stretched with Argon2id (64 MiB, 3 passes). Each file is
   bound to its own name and history is encrypted line by line. A new
@@ -203,8 +232,9 @@ the machine.
   connection; it shows a pending mark (`⋯`) until the relay accepts it, and a
   failure mark (`✗`) if the relay refuses it for good.
 
-What v1 does **not** do yet: forward secrecy against a later compromise of
-a long-term key. The ordered plan is in [ROADMAP.md](ROADMAP.md).
+What it does **not** do: deniability (messages are signed), padding of
+message sizes, cover traffic. The ordered plan is in
+[ROADMAP.md](ROADMAP.md).
 
 ## Development
 
@@ -220,9 +250,11 @@ CI runs the same checks on every push, plus the test suite on Linux, macOS
 and Windows. Pushing a `v*` tag builds release archives for all platforms
 with a `SHA256SUMS` file and publishes them on the releases page.
 
-The end-to-end test in `crates/silver-client/tests/e2e.rs` starts a relay on
-a random port, connects two clients, and checks both directions, offline
-queueing, and reconnection after the relay goes away.
+The end-to-end tests in `crates/silver-client/tests/e2e.rs` start a relay
+on a random port, connect two clients, and check both directions, offline
+queueing, reconnection after the relay goes away, forward-secret sessions
+(including handshakes that wait in the mailbox, restarts, a peer that lost
+its session state, and a peer without prekeys), and anonymous submission.
 
 ## License
 

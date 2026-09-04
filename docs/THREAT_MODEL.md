@@ -1,17 +1,19 @@
 # Threat model
 
 What Silver Messenger protects, against whom, and where it currently falls
-short. Every claim here is about the code on `main` today; the "Gaps" column
-points at the roadmap item that closes each one. Keep this document honest
-before adding features.
+short. Every claim here is about the code on `main` today; the "Gaps"
+remarks point at the roadmap item that closes each one. Keep this document
+honest before adding features. The wire format itself is specified in
+[PROTOCOL.md](PROTOCOL.md).
 
 ## Assets
 
 | Asset | Where it lives | Why it matters |
 | --- | --- | --- |
 | Message content | Only on the two endpoints, and inside sealed envelopes in transit | The point of the program |
-| Identity key (Ed25519) | `identity.json` on the client | Whoever holds it *is* you: can read new messages sent to you and sign as you |
-| Diffie–Hellman key (X25519) | `identity.json` on the client | Decrypts every envelope ever addressed to you |
+| Identity key (Ed25519) | `identity.json` on the client | Whoever holds it *is* you: can sign as you and start sessions as you |
+| Long-term Diffie–Hellman key (X25519) | `identity.json` on the client | Opens the sealed layer of every envelope ever addressed to you; with the session state, reads v2 messages |
+| Prekeys and session state | `prekeys.json`, `sessions.json` on the client | Current ratchet keys: reads messages in flight and the ones not yet ratcheted past |
 | Contact list and history | `contacts.json`, `history/`, `outbox.json` on the client | Who you talk to and what was said |
 | Social graph and timing | Relay memory and database, network path | Who talks to whom, when, how much |
 
@@ -36,14 +38,18 @@ Can:
 
 - See every recipient id, every envelope size, and the timing of every
   send and delivery.
-- See which **authenticated session** submitted each envelope. The sender
-  id is sealed inside the ciphertext and absent from the envelope, but a
-  client sends over the same connection it authenticated on, so the operator
-  can correlate sender and recipient by watching connections. This is a
-  metadata leak, not a content leak.
+- See the network address and timing of the connection that submitted each
+  envelope. With a relay and clients from 0.3.0 on, envelopes arrive on
+  connections that never authenticate, so the relay is not told which
+  identity sent them; it can still guess from addresses and timing, and a
+  client that reaches a relay that offers no anonymous submission (or is
+  told `--submit-authenticated`) submits on its authenticated connection,
+  where the pairing is exact.
 - Withhold, delay or reorder deliveries; drop mailboxes; refuse service.
-- Serve a *stale* key bundle for a user. It cannot serve a forged one: bundles
-  are signed by the user's identity key and clients verify the signature.
+- Serve a *stale* key bundle for a user, or withhold one-time prekeys so a
+  session starts without one. It cannot serve a forged bundle or signed
+  prekey: both are signed by the user's identity key and clients verify
+  the signatures.
 
 Cannot:
 
@@ -55,7 +61,8 @@ Cannot:
 - Re-address an envelope to a different recipient: the recipient id is bound
   into both the associated data and the signature.
 - Replay an old envelope to its recipient undetected: envelope ids are
-  deduplicated and, for numbered senders, sequence numbers are checked.
+  deduplicated, sequence numbers are checked, and a ratchet message key is
+  used once.
 
 ### Network observer
 
@@ -68,13 +75,16 @@ that inspects TLS with an installed root sees what the relay sees.
 
 ### Stranger who knows your id
 
-Can send you messages until your mailbox is full, and can fetch your public
-key bundle. Cannot learn who your contacts are from the relay. Their
-messages are decrypted but held in the Requests pane until you accept them,
-and a blocked id is dropped on arrival. On the relay, each connection is
-limited to 60 messages and 30 lookups per minute, mailboxes are capped, and
-an operator can require an invite token to register at all. Flooding a
-mailbox to its cap remains possible for anyone with the id.
+Can send you messages until your mailbox is full, can fetch your public
+key bundle, and by looking you up repeatedly can drain your one-time
+prekeys (sessions then start without one, which costs the first message
+some forward secrecy until the signed prekey rotates). Cannot learn who
+your contacts are from the relay. Their messages are decrypted but held in
+the Requests pane until you accept them, and a blocked id is dropped on
+arrival. On the relay, each connection is limited to 60 messages and 30
+lookups per minute (30 messages for anonymous connections), mailboxes are
+capped, and an operator can require an invite token to register at all.
+Flooding a mailbox to its cap remains possible for anyone with the id.
 
 ### Malicious contact
 
@@ -84,63 +94,79 @@ decrypt messages between you and others.
 
 ### Device thief
 
-With the data directory and no passphrase set, they get the identity keys
-(read all future messages to you and impersonate you), the full history,
-contacts, and any queued outgoing messages. With a passphrase set, every
-file is encrypted under a key that only the passphrase unlocks (Argon2id,
-64 MiB and 3 passes, then XChaCha20-Poly1305), so the thief is left guessing
-the passphrase offline; a weak passphrase is the remaining risk. Memory of a
+With the data directory and no passphrase set, they get the identity keys,
+the prekeys and session state, the full history, contacts, and any queued
+outgoing messages. They can impersonate you and read future messages to
+you. What they cannot do, thanks to the ratchet, is read v2 messages that
+were already received and ratcheted past if those were recorded in transit:
+the message keys are gone. With a passphrase set, every file is encrypted
+under a key that only the passphrase unlocks (Argon2id, 64 MiB and 3
+passes, then XChaCha20-Poly1305), so the thief is left guessing the
+passphrase offline; a weak passphrase is the remaining risk. Memory of a
 running, unlocked client still holds the keys. There is no way to revoke an
 identity; the only remedy is to tell your contacts out of band and start a
 new one. A backup file (`--export-backup`) is encrypted under its own
-passphrase and holds the identity keys and contacts, so it deserves the same
-care as the data directory. (Revocation is not yet planned.)
+passphrase and holds the identity keys and contacts (not sessions or
+prekeys), so it deserves the same care as the data directory. (Revocation
+is not yet planned.)
 
 ### Compromised long-term Diffie–Hellman key
 
-Every envelope ever sent to that user, if it was recorded in transit or
-kept by the relay, becomes readable. There is no forward secrecy yet. (Gap:
-roadmap item 10, the ratchet.)
+Opens the sealed layer of every envelope ever sent to that user, which
+reveals the sender of each and, for v1 messages (from or to a client that
+has not published prekeys), the content. For v2 messages the content is
+protected by the session: without the session state and the private
+prekeys of the time, it stays unreadable. With the prekeys as well, the
+attacker can derive sessions started against those prekeys and read their
+messages until the next DH ratchet step they cannot follow. Both keys live
+in the same directory, so in practice this is the device-thief case above.
 
 ### Compromised identity key
 
-The attacker can publish a new Diffie–Hellman key for the victim and read
-new messages sent to them, and can sign messages as them. Contacts will see
-the published key change (roadmap item 6 makes this loud) but cannot tell a
-compromise from a legitimate reinstall without comparing safety numbers out
-of band.
+The attacker can publish a new Diffie–Hellman key and prekeys for the
+victim and read new messages sent to them, and can sign messages as them.
+Contacts see the published key change (loudly) and their sessions with the
+victim are dropped, but cannot tell a compromise from a legitimate reinstall
+without comparing safety numbers out of band.
 
 ## Cryptographic design in brief
 
 - **Identity**: Ed25519 signing key; its public key, base58-encoded, is the
   user id. Comparing ids is comparing public keys.
 - **Key bundle**: the user's X25519 public key, signed with the identity key
-  under a domain-separated prefix. Relays store and serve bundles.
+  under a domain-separated prefix, plus (0.3.0 on) a signed medium-term
+  prekey and a batch of unsigned one-time prekeys. Relays store and serve
+  bundles and hand out one one-time key per lookup.
 - **Envelope**: per message, a fresh X25519 ephemeral key; HKDF-SHA256 of the
   shared secret (info bound to both public keys) yields an XChaCha20-Poly1305
   key. The plaintext is `sender id || signature || body`; associated data is
   `recipient id || ephemeral public key`. The signature covers recipient,
-  ephemeral key, nonce and body. The body is JSON: timestamp, sequence
-  number and epoch, and the content.
+  ephemeral key, nonce and body.
+- **Sessions** (0.3.0 on): an X3DH handshake against the recipient's prekeys
+  derives a root key; a Double Ratchet (HKDF-SHA256 root chain, HMAC-SHA256
+  message chains, XChaCha20-Poly1305 per message) encrypts the body under a
+  key used once and discarded. A new DH step whenever the conversation
+  changes direction heals a compromised chain. The result is carried as the
+  envelope body, so the sealed layer still hides the sender.
 - **Relay auth**: the relay sends a 32-byte random nonce; the client signs it
   under a domain-separated prefix. Only the holder of an identity key can
-  read that identity's mailbox.
+  read that identity's mailbox. Submission needs no authentication at all.
 - **Sequence numbers**: a per-conversation counter and a per-installation
   random epoch inside the body. Replays are dropped, gaps reported.
 
-Deliberately absent so far: forward secrecy, post-compromise security,
-deniability (messages are signed), padding of message sizes, cover traffic.
+Deliberately absent so far: deniability (messages are signed), padding of
+message sizes, cover traffic, post-quantum key agreement.
 
 ## Trust decisions a user makes
 
 1. **Which relay to use.** The relay is trusted for availability and for
    metadata, never for content.
 2. **Whether an id belongs to who they think.** Adding a contact by id
-   trusts the channel the id arrived over. Safety numbers (item 6) let two
-   people confirm it by voice or in person.
+   trusts the channel the id arrived over. Safety numbers (`/verify`) let
+   two people confirm it by voice or in person.
 3. **Whether to keep a key that changed.** A new Diffie–Hellman key signed by
    the same identity is either a reinstall or a stolen identity key. The
-   client will say so and leave the decision to the user (item 6).
+   client says so, drops the sessions, and leaves the decision to the user.
 
 ## Out of scope
 
