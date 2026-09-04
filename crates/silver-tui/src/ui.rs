@@ -947,7 +947,7 @@ mod tests {
     #[tokio::test]
     async fn nothing_a_peer_sends_reaches_the_terminal_raw() {
         use crate::app::{ChatLine, Connection};
-        use ratatui::{Terminal, backend::CrosstermBackend};
+        use ratatui::{Terminal, TerminalOptions, Viewport, backend::CrosstermBackend, layout::Rect};
         use silver_client::{Client, ConnectOptions, Contact, ContactRequest, HeldMessage, Store};
         use silver_protocol::{Identity, Sequence};
         use std::io::Write;
@@ -1017,7 +1017,16 @@ mod tests {
         app.input = NASTY.to_owned();
 
         let shared = Shared(Arc::new(Mutex::new(Vec::new())));
-        let mut terminal = Terminal::new(CrosstermBackend::new(shared.clone())).unwrap();
+        // A fixed viewport, so drawing never asks the real terminal for its
+        // size (there is no controlling tty in CI, and querying one would
+        // fail); the crossterm backend still emits the escapes we inspect.
+        let mut terminal = Terminal::with_options(
+            CrosstermBackend::new(shared.clone()),
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(0, 0, 100, 24)),
+            },
+        )
+        .unwrap();
         for pane in [1, 2, 0] {
             app.selected = pane;
             terminal.draw(|f| draw(f, &mut app)).unwrap();

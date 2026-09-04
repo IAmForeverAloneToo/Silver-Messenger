@@ -65,6 +65,12 @@ jobs:
   fuzz:
     name: fuzz (${{ matrix.target }})
     runs-on: ubuntu-latest
+    # The repository pins the stable toolchain in rust-toolchain.toml, which
+    # would override the nightly installed below for cargo-fuzz's own build
+    # and make its -Z sanitizer flags fail. RUSTUP_TOOLCHAIN wins over the
+    # file, so every cargo/rustc call in this job uses nightly.
+    env:
+      RUSTUP_TOOLCHAIN: nightly
     strategy:
       fail-fast: false
       matrix:
