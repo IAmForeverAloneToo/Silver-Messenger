@@ -21,7 +21,10 @@ The repository is a Cargo workspace with four crates:
 
 ## Quick start
 
-You need a Rust toolchain (https://rustup.rs). Then, from the repository root:
+Ready-made binaries for Windows, macOS and Linux are on the
+[releases page](https://github.com/IAmForeverAloneToo/Silver-Messanger/releases)
+(unpack and run `silver`). To build from source you need a Rust toolchain
+(https://rustup.rs). Then, from the repository root:
 
 ```sh
 # 1. Run a relay somewhere both parties can reach (defaults to 0.0.0.0:7777)
