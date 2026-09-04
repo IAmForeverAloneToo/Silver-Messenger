@@ -31,7 +31,7 @@ Tick items off as they land on `main`.
 
 ## Phase 2: complete the trust model
 
-5. [ ] **Threat model document** (S). What the relay, the network and a
+5. [x] **Threat model document** (S). What the relay, the network and a
        stolen device can each see. Written first so items 6 to 9 are
        measured against it.
 6. [ ] **Key-change warnings and `/verify`** (S). Loud warning when a
@@ -52,31 +52,36 @@ Tick items off as they land on `main`.
         v2 with a fallback so old clients keep working during rollout.
 11. [ ] **Protocol specification** (S). Written alongside the ratchet so
         the wire format is documented once it stops changing.
+12. [ ] **Unauthenticated submission** (M). Today the relay can pair a
+        sealed envelope with the authenticated session that submitted it.
+        Sending over a separate, unauthenticated connection (with abuse
+        controls that do not need the sender's identity) closes that
+        metadata leak.
 
 ## Phase 4: everyday messaging
 
-12. [ ] **Delivery and read receipts** (S). Encrypted message types; the
+13. [ ] **Delivery and read receipts** (S). Encrypted message types; the
         relay learns nothing new.
-13. [ ] **TUI polish** (M). Date separators, mouse and keyboard scrolling,
+14. [ ] **TUI polish** (M). Date separators, mouse and keyboard scrolling,
         input history, multi-line composing, bracketed paste, `/search`.
-14. [ ] **Notifications** (S). Terminal bell, desktop notifications, unread
+15. [ ] **Notifications** (S). Terminal bell, desktop notifications, unread
         count in the window title.
-15. [ ] **Invite links and QR codes** (S). `silver://add/<id>` and a QR
+16. [ ] **Invite links and QR codes** (S). `silver://add/<id>` and a QR
         rendered in the terminal, so ids are shared without copy-pasting
         44 characters.
-16. [ ] **Attachments** (M). Encrypted files, chunked or via a relay blob
+17. [ ] **Attachments** (M). Encrypted files, chunked or via a relay blob
         endpoint, with a size cap and progress display.
 
 ## Phase 5: beyond one relay
 
-17. [ ] **Relay metrics and admin tooling, built-in TLS** (S). Prometheus
+18. [ ] **Relay metrics and admin tooling, built-in TLS** (S). Prometheus
         endpoint, mailbox inspection, ACME in the relay so Caddy is optional.
-18. [ ] **Relay-agnostic addresses** (M). Contacts as `id@relay` so people
+19. [ ] **Relay-agnostic addresses** (M). Contacts as `id@relay` so people
         on different self-hosted relays can talk.
-19. [ ] **Username registry** (M). Optional, signed claims on a relay.
+20. [ ] **Username registry** (M). Optional, signed claims on a relay.
         Decide the openness of the network before this one.
-20. [ ] **Group chats** (L). Sender keys, membership and invites.
-21. [ ] **Multiple devices** (L). Linked devices first, full identity sync
+21. [ ] **Group chats** (L). Sender keys, membership and invites.
+22. [ ] **Multiple devices** (L). Linked devices first, full identity sync
         later.
 
 ## Continuous

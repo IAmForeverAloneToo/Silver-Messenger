@@ -4,9 +4,11 @@ End-to-end encrypted messaging in your terminal. Written in Rust; runs on
 Windows, Linux and macOS.
 
 Messages travel through a **self-hosted relay** that only ever stores and
-forwards encrypted blobs. The relay cannot read your messages, and because the
-sender's identity is sealed inside the ciphertext, it does not even learn who
-sent a given message, only who it is for.
+forwards encrypted blobs. The relay cannot read your messages or forge them.
+The sender's identity is sealed inside the ciphertext, so the envelope itself
+names only the recipient; the relay can still see which connection submitted
+it. What the relay, the network and a stolen laptop can and cannot learn is
+spelled out in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 
 ## Layout
 

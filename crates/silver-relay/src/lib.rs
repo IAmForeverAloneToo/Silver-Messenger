@@ -3,8 +3,8 @@
 //! The relay is deliberately dumb: it authenticates clients by challenge
 //! signature, stores signed public-key bundles, and queues opaque
 //! [`Envelope`]s per recipient until the recipient acknowledges them. It never
-//! sees plaintext, and because senders are sealed inside the ciphertext it
-//! does not even learn who sent a given envelope.
+//! sees plaintext, and envelopes carry no sender field; what it can infer from
+//! connections and timing is described in docs/THREAT_MODEL.md.
 //!
 //! Bundles and mailboxes live in an embedded database ([`store`]), so
 //! restarts lose nothing; only the set of connected sessions is in memory.

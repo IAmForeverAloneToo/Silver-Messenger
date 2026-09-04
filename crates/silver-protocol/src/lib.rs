@@ -16,7 +16,8 @@
 //!   signature covers the recipient, the ephemeral key, the nonce and the body,
 //!   so an envelope cannot be re-addressed or replayed to someone else.
 //!   The sender's identity travels *inside* the ciphertext ("sealed sender"),
-//!   so the relay only learns the recipient.
+//!   so the envelope names only the recipient. (The relay can still see which
+//!   authenticated connection submitted it; see docs/THREAT_MODEL.md.)
 //!
 //! What v1 deliberately does not provide yet: forward secrecy against
 //! compromise of the recipient's long-term key (needs a ratchet), and
