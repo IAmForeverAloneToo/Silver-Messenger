@@ -381,7 +381,10 @@ impl App {
                 MouseEventKind::ScrollDown => self.scroll_by(-(MOUSE_SCROLL_STEP as isize)),
                 _ => {}
             },
-            Event::FocusGained => self.focused = true,
+            Event::FocusGained => {
+                self.focused = true;
+                self.mark_selected_read();
+            }
             Event::FocusLost => self.focused = false,
             _ => {}
         }
@@ -581,6 +584,15 @@ impl App {
     fn select(&mut self, index: usize) {
         self.selected = index.min(self.pane_count() - 1);
         self.scroll = 0;
+        self.mark_selected_read();
+    }
+
+    /// The selected chat is in front of the user: its unread messages are
+    /// read now, and their sender may be told so.
+    fn mark_selected_read(&mut self) {
+        if !self.focused {
+            return;
+        }
         if let Some(id) = self.selected_contact().map(|c| c.user_id) {
             let shown = self.unread.remove(&id).unwrap_or_default();
             if self.read_receipts && self.contact_supports(&id, capability::RECEIPTS) {
@@ -1340,8 +1352,11 @@ impl App {
                         receipt: None,
                     },
                 );
-                let shown = self.selected_contact().map(|c| c.user_id) == Some(from);
-                if !shown || !self.focused {
+                // Shown means in the selected chat of a window that has focus;
+                // a chat open on an unattended screen has not been read.
+                let shown =
+                    self.selected_contact().map(|c| c.user_id) == Some(from) && self.focused;
+                if !shown {
                     self.notifier.announce(&format!("New message from {name}"));
                 }
                 let wants = self.contacts[index].supports(capability::RECEIPTS);
