@@ -235,6 +235,12 @@ pub fn complete_path(partial: &str) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Vec::new();
     };
+    // Directories end in the separator the user has been typing (`/` on
+    // Windows too, if that is what they wrote), the platform's otherwise.
+    let separator = match dir_text.chars().next_back() {
+        Some(sep @ ('/' | '\\')) => sep.to_string(),
+        _ => std::path::MAIN_SEPARATOR_STR.to_owned(),
+    };
     let mut out: Vec<String> = entries
         .filter_map(|e| e.ok())
         .filter_map(|e| {
@@ -246,11 +252,7 @@ pub fn complete_path(partial: &str) -> Vec<String> {
                 || (e.path().is_dir() && Path::new(&e.path()).exists());
             Some(format!(
                 "{dir_text}{name}{}",
-                if is_dir {
-                    std::path::MAIN_SEPARATOR_STR
-                } else {
-                    ""
-                }
+                if is_dir { separator.as_str() } else { "" }
             ))
         })
         .collect();

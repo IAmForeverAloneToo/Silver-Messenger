@@ -910,11 +910,28 @@ mod tests {
             std::fs::create_dir_all(std::path::Path::new(path).parent().unwrap()).unwrap();
             std::fs::write(path, &got).unwrap();
         }
-        let want = std::fs::read_to_string(path).unwrap_or_default();
-        assert!(
-            got == want,
-            "the screen changed; look at it and run with UPDATE_SNAPSHOTS=1 to accept:\n{got}"
-        );
+        // A checkout with CRLF line endings (git on Windows) must not count.
+        let want = std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .replace('\r', "");
+        if got != want {
+            let first_difference = got
+                .lines()
+                .zip(want.lines())
+                .position(|(g, w)| g != w)
+                .map(|i| {
+                    format!(
+                        "first difference on row {}:\n{}\n{}",
+                        i + 1,
+                        got.lines().nth(i).unwrap_or(""),
+                        want.lines().nth(i).unwrap_or("")
+                    )
+                })
+                .unwrap_or_else(|| "the row count differs".to_owned());
+            panic!(
+                "the screen changed; look at it and run with UPDATE_SNAPSHOTS=1 to accept:\n{got}\n{first_difference}"
+            );
+        }
     }
 
     #[test]
