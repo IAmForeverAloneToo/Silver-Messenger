@@ -142,17 +142,9 @@ the machine.
   it, so nothing is lost if a client drops mid-download. Clients de-duplicate
   by envelope id.
 
-What v1 does **not** do yet, and what is next:
-
-- [ ] Forward secrecy against a later compromise of the recipient's long-term
-      key (needs a Double-Ratchet-style session; the envelope format leaves
-      room for it).
-- [ ] Encrypt local history and keys at rest behind a passphrase.
-- [ ] Relay persistence across restarts (mailboxes and bundles are in memory).
-- [ ] Warn loudly when a contact's published key changes.
-- [ ] Group chats, attachments, read receipts.
-- [ ] TLS on the relay (`wss://` already works in the client; put the relay
-      behind a reverse proxy that terminates TLS for now).
+What v1 does **not** do yet: forward secrecy against a later compromise of
+a long-term key, encrypted storage at rest, and relay persistence across
+restarts. The ordered plan is in [ROADMAP.md](ROADMAP.md).
 
 ## Development
 
