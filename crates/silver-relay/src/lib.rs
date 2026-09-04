@@ -18,6 +18,7 @@
 //! ([`acme`]); a TLS front such as Caddy remains an option.
 
 pub mod acme;
+pub mod metrics;
 pub mod store;
 pub mod tls;
 
@@ -301,6 +302,8 @@ pub struct RelayState {
     counters: Counters,
     next_session: AtomicU64,
     anonymous_submissions: AtomicU64,
+    auth_failures: metrics::AuthFailures,
+    started: Instant,
     /// Salt for the pseudonyms in the log; new every run.
     log_salt: [u8; 16],
 }
@@ -365,6 +368,8 @@ impl RelayState {
             counters: Counters::default(),
             next_session: AtomicU64::new(0),
             anonymous_submissions: AtomicU64::new(0),
+            auth_failures: metrics::AuthFailures::default(),
+            started: Instant::now(),
             log_salt: {
                 let mut salt = [0u8; 16];
                 OsRng.fill_bytes(&mut salt);
@@ -509,6 +514,25 @@ impl RelayState {
     /// Envelopes submitted on connections that never authenticated.
     pub fn anonymous_submission_count(&self) -> u64 {
         self.anonymous_submissions.load(Ordering::Relaxed)
+    }
+
+    /// Failed logins, for the metrics.
+    pub fn auth_failures(&self) -> &metrics::AuthFailures {
+        &self.auth_failures
+    }
+
+    pub fn uptime(&self) -> Duration {
+        self.started.elapsed()
+    }
+
+    /// A login from `addr` was refused. The address is named in the log
+    /// once its failures in an hour reach the warning level, so an
+    /// operator alerting on the journal sees the address; the metrics
+    /// carry only the counts.
+    pub fn note_auth_failure(&self, addr: IpAddr) {
+        if let Some(count) = self.auth_failures.note(addr, Instant::now()) {
+            warn!(%addr, "{count} failed logins from one address within an hour");
+        }
     }
 
     pub fn queued_for(&self, user: &UserId) -> usize {
@@ -939,12 +963,13 @@ pub async fn expire_periodically(state: Arc<RelayState>, ttl: Duration, every: D
         state.sweep_addresses();
         let c = state.counters();
         info!(
-            "{} connections open from {} addresses; refused so far: {} connections, {} registrations, {} uploads; {} closed idle",
+            "{} connections open from {} addresses; refused so far: {} connections, {} registrations, {} uploads, {} logins; {} closed idle",
             c.open_connections,
             c.addresses,
             c.refused_connections,
             c.refused_registrations,
             c.refused_uploads,
+            state.auth_failures().total(),
             c.idle_closed
         );
         tokio::time::sleep(every).await;
@@ -1060,6 +1085,7 @@ async fn handle_socket(
                     .map_err(|_| (ErrorCode::BadSignature, "challenge signature invalid")),
             };
             if let Err((code, message)) = verdict {
+                state.note_auth_failure(addr);
                 let _ = send(&mut sink, &ServerFrame::error(code, message)).await;
                 return;
             }

@@ -79,6 +79,7 @@ pub async fn run(config: AcmeConfig, store: Arc<CertStore>) {
                     if retry.as_secs() == 60 { "" } else { "s" }
                 );
                 tokio::time::sleep(retry).await;
+                store.note_acme_failure();
                 retry = (retry * 2).min(RETRY_LONGEST);
             }
         }

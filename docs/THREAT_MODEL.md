@@ -382,7 +382,6 @@ maintainer's account plus signing key both being taken.
 | Post-quantum ratchet steps: after the hybrid handshake the ratchet is X25519 only | Roadmap item 41; the handshake already protects recordings. |
 | Identity revocation | Not planned; the remedy is a new identity and word of mouth. |
 | Certificate revocation checking | Not planned; key pins are the mitigation. |
-| Relay metrics, alerting, a count of failed logins per address | Roadmap item 37. |
 | Received files stored unencrypted in `downloads/` | By design, so other programs can open them; a "keep encrypted" option could follow if asked for. |
 | History kept until the user removes it | By design; an expiry setting could follow if asked for. |
 | A panic in the terminal client can leave the terminal in raw mode | Small; next client pass. |

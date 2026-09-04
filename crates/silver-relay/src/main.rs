@@ -3,6 +3,7 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use anyhow::Context as _;
 use clap::Parser;
 use silver_relay::tls::{self, CertStore};
 use silver_relay::{
@@ -157,6 +158,23 @@ struct Args {
     /// private certificate authority.
     #[arg(long, env = "SILVER_RELAY_ACME_ROOT")]
     acme_root: Option<PathBuf>,
+
+    /// Serve Prometheus metrics at /metrics on this address, e.g.
+    /// 127.0.0.1:9107. For loopback or a private network only: the
+    /// numbers describe how the relay is used.
+    #[arg(long, env = "SILVER_RELAY_METRICS_LISTEN")]
+    metrics_listen: Option<String>,
+
+    /// Log lines as text, or as one JSON object per line for a log
+    /// collector.
+    #[arg(long, env = "SILVER_RELAY_LOG_FORMAT", value_enum, default_value_t = LogFormat::Text)]
+    log_format: LogFormat,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum LogFormat {
+    Text,
+    Json,
 }
 
 /// How the relay's listener is protected.
@@ -201,13 +219,15 @@ impl Transport {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
-
     let args = Args::parse();
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    match args.log_format {
+        LogFormat::Text => tracing_subscriber::fmt().with_env_filter(filter).init(),
+        LogFormat::Json => tracing_subscriber::fmt()
+            .json()
+            .with_env_filter(filter)
+            .init(),
+    }
     let limits = Limits {
         max_messages: args.max_mailbox_messages,
         max_bytes: args.max_mailbox_mib * 1024 * 1024,
@@ -284,6 +304,27 @@ async fn main() -> anyhow::Result<()> {
         Duration::from_secs(3600),
     ));
 
+    // One certificate store for the TLS listener and the metrics, which
+    // report the certificate's expiry.
+    let cert_store = match transport {
+        Transport::Plain => None,
+        _ => Some(CertStore::new()),
+    };
+    if let Some(metrics_addr) = &args.metrics_listen {
+        let metrics_listener = TcpListener::bind(metrics_addr)
+            .await
+            .with_context(|| format!("binding the metrics listener {metrics_addr}"))?;
+        info!(
+            "metrics at http://{}/metrics",
+            metrics_listener.local_addr()?
+        );
+        tokio::spawn(silver_relay::metrics::serve(
+            metrics_listener,
+            state.clone(),
+            cert_store.clone(),
+        ));
+    }
+
     let listener = TcpListener::bind(&args.listen).await?;
     let addr = listener.local_addr()?;
     let shutdown = async {
@@ -297,7 +338,9 @@ async fn main() -> anyhow::Result<()> {
             serve(listener, state, shutdown).await
         }
         Transport::Files { cert, key } => {
-            let store = CertStore::new();
+            let store = cert_store
+                .clone()
+                .expect("a certificate store whenever TLS is on");
             let loaded = tls::load_pem(&cert, &key)?;
             info!(
                 "relay listening on wss://{addr}{path} with the certificate for {} from {}, valid until {}",
@@ -316,7 +359,9 @@ async fn main() -> anyhow::Result<()> {
             tls::serve_tls(listener.into_std()?, config, state, shutdown).await
         }
         Transport::Acme(acme) => {
-            let store = CertStore::new();
+            let store = cert_store
+                .clone()
+                .expect("a certificate store whenever TLS is on");
             info!(
                 "relay listening on wss://{addr}{path}; certificate for {} from {}, kept in {}",
                 acme.domains.join(", "),

@@ -316,6 +316,22 @@ this way with `SILVER_TLS=caddy`, and keeps an existing Caddy setup from
 before 0.7.0 unless `SILVER_TLS=builtin` tells it to switch (which stops
 Caddy and moves the relay to port 443).
 
+**Watching it.** `silver-relay --metrics-listen 127.0.0.1:9107`
+(`SILVER_RELAY_METRICS_LISTEN` in `relay.env`) serves Prometheus metrics
+at `/metrics` on that address and nothing else: open connections and
+their cap, refusals by kind, failed logins (in total, and how many
+addresses failed in the last hour and the most from one of them, never
+the addresses themselves), identities, queued messages and their bytes,
+files on deposit against the cap, the certificate's expiry and failed
+renewals. It is meant for loopback or a private network, since the
+numbers describe how the relay is used. `deploy/alerts.yml` holds
+alerting rules for the things worth waking up for: the relay down, a
+certificate that will not renew, a flood of failed logins or of refused
+registrations, a nearly full file store. The log still carries the
+hourly summary, and names an address in a warning once it fails to log
+in twenty times within an hour; `--log-format json` writes one JSON
+object per line for a log collector.
+
 **Pinning the relay's key.** To trust one key rather than every
 certificate authority on the machine, pin it: `silver --print-pin` shows
 the pin of the key the relay presents right now, and `silver --pin

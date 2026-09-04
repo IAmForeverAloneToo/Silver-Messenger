@@ -1,0 +1,54 @@
+# Prometheus alerting rules for a Silver Messenger relay, for a scrape job
+# named silver-relay pointed at the relay's --metrics-listen address.
+# Copy into your rule files (rule_files in prometheus.yml) and adjust the
+# thresholds to the relay's size.
+groups:
+  - name: silver-relay
+    rules:
+      - alert: SilverRelayDown
+        expr: up{job="silver-relay"} == 0
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: The relay's metrics endpoint has not answered for 5 minutes.
+
+      - alert: SilverRelayCertificateExpiresSoon
+        # 0 means no certificate is being served at all, which is worse.
+        expr: silver_relay_certificate_expiry_seconds - time() < 7 * 86400
+        for: 1h
+        labels:
+          severity: page
+        annotations:
+          summary: The relay's certificate expires within a week, or there is none; renewal is failing.
+
+      - alert: SilverRelayLoginFailures
+        expr: silver_relay_auth_failures_max_per_address >= 20
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: One address has failed to log in 20 times or more within an hour; the relay log names it.
+
+      - alert: SilverRelayRegistrationsRefused
+        expr: increase(silver_relay_refused_total{reason="registration"}[10m]) > 20
+        labels:
+          severity: warning
+        annotations:
+          summary: More than 20 registrations were refused in 10 minutes; someone is creating identities faster than the limits allow.
+
+      - alert: SilverRelayBlobStoreNearlyFull
+        expr: silver_relay_blob_bytes / silver_relay_blob_bytes_limit > 0.9
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: The encrypted file store is over 90% of its cap; uploads will start being refused.
+
+      - alert: SilverRelayConnectionsNearLimit
+        expr: silver_relay_connections_limit > 0 and silver_relay_connections_open / silver_relay_connections_limit > 0.9
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Open connections are over 90% of the cap; new clients will be refused.

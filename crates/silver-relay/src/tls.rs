@@ -47,11 +47,24 @@ pub struct CertStore {
     /// Challenge certificates by lower-case name, while an ACME order is
     /// being validated.
     challenges: RwLock<HashMap<String, Arc<CertifiedKey>>>,
+    /// Attempts to obtain or renew a certificate that failed, for the
+    /// metrics.
+    acme_failures: std::sync::atomic::AtomicU64,
 }
 
 impl CertStore {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    pub fn note_acme_failure(&self) {
+        self.acme_failures
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn acme_failures(&self) -> u64 {
+        self.acme_failures
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Present `key` to every client from now on.

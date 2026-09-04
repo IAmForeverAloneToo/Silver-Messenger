@@ -294,7 +294,7 @@ container story. Operations come before reach.
         (RFC 8555.) Done, with one deviation: the onion recipe is
         documented and the client's SOCKS5 path is tested, but a live
         run of a relay behind an onion service has not been done yet.
-37. [ ] **Metrics and structured logs** (S). A Prometheus endpoint on a
+37. [x] **Metrics and structured logs** (S). A Prometheus endpoint on a
         separate listener that is never public, with the counters the
         relay already keeps plus failed logins per address; JSON log
         output as an option; example alert rules for a full mailbox

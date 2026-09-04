@@ -21,6 +21,17 @@ means behaviour or the wire protocol changed in a way worth reading about.
   front unless `SILVER_TLS=builtin` says to switch, and opens only port
   443. The ACME flow is tested end to end against Pebble in CI. The
   README says how to publish a relay as a Tor onion service.
+- **Metrics and structured logs.** `silver-relay --metrics-listen`
+  serves Prometheus metrics on a listener of its own, for loopback or a
+  private network: connections and their cap, refusals by kind, failed
+  logins in aggregate (the addresses stay out of the metrics; one that
+  fails twenty times within an hour is named in a warning in the log),
+  identities, queued messages, files on deposit against the cap, the
+  certificate's expiry and failed renewals. `deploy/alerts.yml` carries
+  alerting rules for the relay down, a certificate that will not renew,
+  floods of failed logins or refused registrations, and a nearly full
+  file store. `--log-format json` writes the log as JSON lines. The
+  hourly summary now counts failed logins too.
 
 ## 0.6.0 - 2026-09-04
 
