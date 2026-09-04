@@ -81,12 +81,15 @@ decrypt messages between you and others.
 
 ### Device thief
 
-With the data directory, they get the identity keys (read all future
-messages to you and impersonate you), the full history, contacts, and any
-queued outgoing messages. Nothing on disk is encrypted. (Gap: roadmap item 7.)
-There is no way to revoke an identity; the only remedy is to tell your
-contacts out of band and start a new one. (Gap: roadmap item 8 for backup;
-revocation is not yet planned.)
+With the data directory and no passphrase set, they get the identity keys
+(read all future messages to you and impersonate you), the full history,
+contacts, and any queued outgoing messages. With a passphrase set, every
+file is encrypted under a key that only the passphrase unlocks (Argon2id,
+64 MiB and 3 passes, then XChaCha20-Poly1305), so the thief is left guessing
+the passphrase offline; a weak passphrase is the remaining risk. Memory of a
+running, unlocked client still holds the keys. There is no way to revoke an
+identity; the only remedy is to tell your contacts out of band and start a
+new one. (Gap: roadmap item 8 for backup; revocation is not yet planned.)
 
 ### Compromised long-term Diffie–Hellman key
 

@@ -20,5 +20,6 @@ unicode-width = { workspace = true }
 chrono = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
+rpassword = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

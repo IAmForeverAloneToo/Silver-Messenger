@@ -74,6 +74,9 @@ silver --data-dir <DIR>    where keys, contacts and history live            (env
 silver --ca-cert <PEM>     extra trusted root certificates for wss://; remembered (env SILVER_CA_CERT)
 silver --proxy <URL>       HTTP CONNECT proxy to reach the relay through; remembered (env SILVER_PROXY, else HTTPS_PROXY)
 silver --print-id          print your user id and exit
+silver --set-passphrase    encrypt keys, contacts and history under a passphrase (asked at every start)
+silver --remove-passphrase store everything unencrypted again
+SILVER_PASSPHRASE=…        supplies the passphrase non-interactively (scripts, tests)
 SILVER_LOG=debug silver    write logs to <data-dir>/silver.log
 
 silver-relay --listen <ADDR>          default 0.0.0.0:7777                          (env SILVER_RELAY_LISTEN)
@@ -147,6 +150,13 @@ the machine.
   and ephemeral key are bound as associated data, and the signature covers the
   recipient, ephemeral key, nonce and body, so an envelope cannot be
   re-addressed, altered, or forged.
+* **Encryption at rest**: with a passphrase set, every file in the data
+  directory (identity keys, contacts, history, outbox, config) is encrypted
+  with XChaCha20-Poly1305 under a random data key, which is itself wrapped
+  by the passphrase stretched with Argon2id (64 MiB, 3 passes). Each file is
+  bound to its own name and history is encrypted line by line. A new
+  identity offers to set a passphrase on first start; `--set-passphrase`
+  and `--remove-passphrase` change it later.
 * **Safety numbers**: `/verify` shows twelve groups of five digits derived
   from both identity keys, identical on both sides. Two people who read them
   to each other confirm that nobody sits between them; `/verify ok` records
@@ -172,8 +182,7 @@ the machine.
   failure mark (`✗`) if the relay refuses it for good.
 
 What v1 does **not** do yet: forward secrecy against a later compromise of
-a long-term key, and encrypted storage at rest. The ordered plan is in
-[ROADMAP.md](ROADMAP.md).
+a long-term key. The ordered plan is in [ROADMAP.md](ROADMAP.md).
 
 ## Development
 

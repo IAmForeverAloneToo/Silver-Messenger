@@ -48,6 +48,8 @@ hkdf = "0.12"
 sha2 = "0.10"
 rand = "0.8"
 zeroize = { version = "1", features = ["derive"] }
+argon2 = "0.6"
+rpassword = "7"
 
 # errors, logging, cli
 anyhow = "1"

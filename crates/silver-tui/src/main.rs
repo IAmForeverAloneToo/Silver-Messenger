@@ -6,9 +6,11 @@ mod ui;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::Context;
+use std::io::IsTerminal;
+
+use anyhow::{Context, bail};
 use clap::Parser;
-use silver_client::{Client, ConnectOptions, DEFAULT_RELAY_URL, Proxy, Store};
+use silver_client::{Client, ConnectOptions, DEFAULT_RELAY_URL, Proxy, Store, VaultError};
 use tracing_subscriber::EnvFilter;
 
 /// End-to-end encrypted messaging in your terminal.
@@ -37,6 +39,16 @@ struct Args {
     /// Print your user id and exit.
     #[arg(long)]
     print_id: bool,
+
+    /// Protect keys, contacts and history with a passphrase (asks for it),
+    /// then exit. The passphrase is asked for at every start.
+    #[arg(long)]
+    set_passphrase: bool,
+
+    /// Remove the passphrase and store everything unencrypted again, then
+    /// exit.
+    #[arg(long)]
+    remove_passphrase: bool,
 }
 
 #[tokio::main]
@@ -50,9 +62,38 @@ async fn main() -> anyhow::Result<()> {
         .data_dir
         .or_else(Store::default_dir)
         .context("could not determine a data directory; pass --data-dir")?;
-    let store = Store::open(&data_dir)?;
+    let mut store = Store::open(&data_dir)?;
+    if store.is_locked() {
+        unlock(&mut store)?;
+    }
+    if args.set_passphrase {
+        if store.has_passphrase() {
+            bail!("a passphrase is already set; run --remove-passphrase first to change it");
+        }
+        let passphrase = new_passphrase()?;
+        store.set_passphrase(&passphrase)?;
+        println!(
+            "Keys, contacts and history in {} are now encrypted.",
+            data_dir.display()
+        );
+        return Ok(());
+    }
+    if args.remove_passphrase {
+        if !store.has_passphrase() {
+            bail!("no passphrase is set");
+        }
+        store.remove_passphrase()?;
+        println!(
+            "Passphrase removed; files in {} are stored unencrypted again.",
+            data_dir.display()
+        );
+        return Ok(());
+    }
 
     let (identity, created) = store.load_or_create_identity()?;
+    if created {
+        offer_passphrase(&mut store)?;
+    }
     if args.print_id {
         println!("{}", identity.user_id());
         return Ok(());
@@ -76,6 +117,7 @@ async fn main() -> anyhow::Result<()> {
         extra_ca_certs: config.ca_cert.iter().cloned().collect(),
         proxy: config.proxy.clone().or_else(Proxy::url_from_env),
         outbox_path: Some(store.outbox_path()),
+        outbox_cipher: store.cipher(),
     };
     let relay_url = config
         .relay_url
@@ -102,4 +144,74 @@ async fn main() -> anyhow::Result<()> {
     let result = app.run(terminal, events).await;
     ratatui::restore();
     result
+}
+
+/// `SILVER_PASSPHRASE` in the environment stands in for typing it, for
+/// scripts and tests.
+fn passphrase_from_env() -> Option<String> {
+    std::env::var("SILVER_PASSPHRASE").ok()
+}
+
+fn unlock(store: &mut Store) -> anyhow::Result<()> {
+    if let Some(passphrase) = passphrase_from_env() {
+        return store.unlock(&passphrase).map_err(Into::into);
+    }
+    for attempt in 1..=3 {
+        let passphrase = rpassword::prompt_password("Passphrase: ")?;
+        match store.unlock(&passphrase) {
+            Ok(()) => return Ok(()),
+            Err(VaultError::WrongPassphrase) if attempt < 3 => {
+                eprintln!("Wrong passphrase, try again.");
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    bail!("too many failed attempts")
+}
+
+fn new_passphrase() -> anyhow::Result<String> {
+    if let Some(passphrase) = passphrase_from_env() {
+        if passphrase.is_empty() {
+            bail!("SILVER_PASSPHRASE is set but empty");
+        }
+        return Ok(passphrase);
+    }
+    loop {
+        let first = rpassword::prompt_password("New passphrase: ")?;
+        if first.is_empty() {
+            bail!("the passphrase must not be empty");
+        }
+        let second = rpassword::prompt_password("Repeat passphrase: ")?;
+        if first == second {
+            return Ok(first);
+        }
+        eprintln!("They do not match; try again.");
+    }
+}
+
+/// First run: offer to protect the brand-new data directory.
+fn offer_passphrase(store: &mut Store) -> anyhow::Result<()> {
+    if let Some(passphrase) = passphrase_from_env() {
+        if !passphrase.is_empty() {
+            store.set_passphrase(&passphrase)?;
+        }
+        return Ok(());
+    }
+    if !std::io::stdin().is_terminal() {
+        return Ok(());
+    }
+    println!("This is a new identity. You can protect your keys, contacts and history");
+    println!("with a passphrase that is asked for at every start. Leave it empty for none;");
+    println!("you can add one later with --set-passphrase.");
+    let first = rpassword::prompt_password("Passphrase (optional): ")?;
+    if first.is_empty() {
+        return Ok(());
+    }
+    let second = rpassword::prompt_password("Repeat passphrase: ")?;
+    if first != second {
+        bail!("the passphrases do not match; start again");
+    }
+    store.set_passphrase(&first)?;
+    println!("Encrypted. Keep the passphrase safe: without it this identity cannot be recovered.");
+    Ok(())
 }

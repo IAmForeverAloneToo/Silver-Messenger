@@ -8,6 +8,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::vault::FileCipher;
+
 use anyhow::Context;
 use rustls::RootCertStore;
 use rustls_pki_types::CertificateDer;
@@ -24,6 +26,8 @@ pub struct ConnectOptions {
     /// Where to keep envelopes the relay has not accepted yet, so they
     /// survive a restart of the client. `None` keeps them in memory only.
     pub outbox_path: Option<PathBuf>,
+    /// Encrypts the outbox file when the data directory has a passphrase.
+    pub outbox_cipher: Option<Arc<FileCipher>>,
 }
 
 pub(crate) fn connector(options: &ConnectOptions) -> anyhow::Result<Connector> {

@@ -37,7 +37,7 @@ Tick items off as they land on `main`.
 6. [x] **Key-change warnings and `/verify`** (S). Loud warning when a
        contact's published key changes; a short safety-number string to
        compare out of band; a verified mark on contacts.
-7. [ ] **Encrypted local storage** (M). Keys and history under a passphrase
+7. [x] **Encrypted local storage** (M). Keys and history under a passphrase
        (Argon2id, XChaCha20-Poly1305), optional OS keychain unlock.
 8. [ ] **Identity backup and restore** (S). Seed phrase or encrypted export,
        so a lost machine is not a lost identity.

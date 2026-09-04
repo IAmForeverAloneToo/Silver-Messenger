@@ -97,7 +97,7 @@ impl Client {
     ) -> anyhow::Result<(Self, mpsc::Receiver<ClientEvent>)> {
         let connector = connector(&options)?;
         let proxy = options.proxy.as_deref().map(Proxy::parse).transpose()?;
-        let outbox = Outbox::load(options.outbox_path.clone())?;
+        let outbox = Outbox::load(options.outbox_path.clone(), options.outbox_cipher.clone())?;
         let pending: PendingIds = Arc::new(Mutex::new(outbox.ids()));
         let (cmd_tx, cmd_rx) = mpsc::channel(64);
         let (ev_tx, ev_rx) = mpsc::channel(256);
