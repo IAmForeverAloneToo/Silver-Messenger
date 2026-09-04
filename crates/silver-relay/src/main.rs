@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -67,6 +68,37 @@ struct Args {
     /// messages after --message-ttl-days.
     #[arg(long, env = "SILVER_RELAY_BLOB_STORAGE_MIB", default_value_t = Policy::default().blob_storage_mib)]
     blob_storage_mib: u32,
+
+    /// Open connections one client address may hold at once.
+    #[arg(long, env = "SILVER_RELAY_CONNECTIONS_PER_ADDRESS", default_value_t = Policy::default().connections_per_address)]
+    connections_per_address: u32,
+
+    /// Open connections in total.
+    #[arg(long, env = "SILVER_RELAY_MAX_CONNECTIONS", default_value_t = Policy::default().max_connections)]
+    max_connections: u32,
+
+    /// Seconds a connection may stay silent before it is closed. Clients
+    /// ping every 30 seconds.
+    #[arg(long, env = "SILVER_RELAY_IDLE_TIMEOUT_SECS", default_value_t = Policy::default().idle_timeout.as_secs())]
+    idle_timeout_secs: u64,
+
+    /// New identities one address may register per hour.
+    #[arg(long, env = "SILVER_RELAY_REGISTRATIONS_PER_HOUR", default_value_t = Policy::default().registrations_per_hour)]
+    registrations_per_hour: u32,
+
+    /// Identities the relay keeps at most; 0 for no cap.
+    #[arg(long, env = "SILVER_RELAY_MAX_IDENTITIES", default_value_t = Policy::default().max_identities)]
+    max_identities: u64,
+
+    /// File bytes one address may upload per hour, in MiB.
+    #[arg(long, env = "SILVER_RELAY_BLOB_MIB_PER_ADDRESS_PER_HOUR", default_value_t = Policy::default().blob_mib_per_address_per_hour)]
+    blob_mib_per_address_per_hour: u32,
+
+    /// Addresses of TLS fronts (Caddy, nginx) whose X-Forwarded-For header
+    /// names the real client, comma separated. By default the loopback
+    /// addresses are trusted, which is where the installer puts Caddy.
+    #[arg(long, env = "SILVER_RELAY_TRUSTED_PROXY", value_delimiter = ',')]
+    trusted_proxy: Vec<IpAddr>,
 }
 
 #[tokio::main]
@@ -89,8 +121,24 @@ async fn main() -> anyhow::Result<()> {
         anonymous_sends_per_minute: args.anonymous_sends_per_minute,
         max_blob_mib: args.max_blob_mib,
         blob_storage_mib: args.blob_storage_mib,
+        connections_per_address: args.connections_per_address,
+        max_connections: args.max_connections,
+        idle_timeout: Duration::from_secs(args.idle_timeout_secs.max(1)),
+        registrations_per_hour: args.registrations_per_hour,
+        max_identities: args.max_identities,
+        blob_mib_per_address_per_hour: args.blob_mib_per_address_per_hour,
+        trusted_proxies: args.trusted_proxy,
         ..Policy::default()
     };
+    info!(
+        "limits: {} connections per address, {} in total, idle after {}s, {} registrations per address per hour, {} identities at most, {} MiB of uploads per address per hour",
+        policy.connections_per_address,
+        policy.max_connections,
+        policy.idle_timeout.as_secs(),
+        policy.registrations_per_hour,
+        policy.max_identities,
+        policy.blob_mib_per_address_per_hour
+    );
     if policy.invite_token.is_some() {
         info!("registration requires an invite token");
     }

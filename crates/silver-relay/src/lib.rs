@@ -17,14 +17,16 @@ pub mod store;
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::Router;
-use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{ConnectInfo, State};
+use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use futures_util::stream::{SplitSink, SplitStream};
@@ -36,6 +38,7 @@ use silver_protocol::wire::{
     ClientFrame, ErrorCode, MAX_FRAME_BYTES, ServerFrame, feature, verify_auth,
 };
 use silver_protocol::{Envelope, KeyBundle, MAX_CIPHERTEXT_BYTES, UserId, now_ms};
+use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -79,6 +82,23 @@ pub struct Policy {
     pub blob_storage_mib: u32,
     /// File chunks (64 KiB each) one connection may put or get per minute.
     pub blob_chunks_per_minute: u32,
+    /// Open connections one client address may hold at once.
+    pub connections_per_address: u32,
+    /// Open connections in total.
+    pub max_connections: u32,
+    /// A connection that sends nothing for this long is closed. Clients
+    /// ping every 30 seconds.
+    pub idle_timeout: Duration,
+    /// New identities one address may register per hour.
+    pub registrations_per_hour: u32,
+    /// Identities the relay keeps at most; 0 for no cap.
+    pub max_identities: u64,
+    /// File bytes one address may upload per hour, in MiB.
+    pub blob_mib_per_address_per_hour: u32,
+    /// Addresses of TLS fronts (Caddy, nginx) whose `X-Forwarded-For`
+    /// header names the real client. Empty means the loopback addresses,
+    /// where the installer puts the front.
+    pub trusted_proxies: Vec<IpAddr>,
 }
 
 impl Default for Policy {
@@ -91,6 +111,13 @@ impl Default for Policy {
             max_blob_mib: 16,
             blob_storage_mib: 1024,
             blob_chunks_per_minute: 600,
+            connections_per_address: 16,
+            max_connections: 4096,
+            idle_timeout: Duration::from_secs(120),
+            registrations_per_hour: 20,
+            max_identities: 100_000,
+            blob_mib_per_address_per_hour: 256,
+            trusted_proxies: Vec::new(),
         }
     }
 }
@@ -114,23 +141,37 @@ struct Bucket {
 }
 
 impl Bucket {
-    fn per_minute(per_minute: u32) -> Self {
-        let burst = f64::from(per_minute.max(1));
+    fn new(burst: f64, per_second: f64) -> Self {
         Self {
             tokens: burst,
             burst,
-            per_second: burst / 60.0,
+            per_second,
             last: Instant::now(),
         }
     }
 
+    fn per_minute(per_minute: u32) -> Self {
+        let burst = f64::from(per_minute.max(1));
+        Self::new(burst, burst / 60.0)
+    }
+
+    /// `per_hour` units an hour, all of them available at once.
+    fn per_hour(per_hour: f64) -> Self {
+        let burst = per_hour.max(1.0);
+        Self::new(burst, burst / 3600.0)
+    }
+
     fn try_take(&mut self) -> bool {
+        self.try_take_n(1.0)
+    }
+
+    fn try_take_n(&mut self, amount: f64) -> bool {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last).as_secs_f64();
         self.last = now;
         self.tokens = (self.tokens + elapsed * self.per_second).min(self.burst);
-        if self.tokens >= 1.0 {
-            self.tokens -= 1.0;
+        if self.tokens >= amount {
+            self.tokens -= amount;
             true
         } else {
             false
@@ -140,6 +181,7 @@ impl Bucket {
 
 /// Per-connection state for an authenticated client.
 struct Conn {
+    addr: IpAddr,
     sends: Bucket,
     lookups: Bucket,
     blobs: Bucket,
@@ -149,12 +191,73 @@ struct Conn {
 }
 
 impl Conn {
-    fn new(policy: &Policy) -> Self {
+    fn new(policy: &Policy, addr: IpAddr) -> Self {
         Self {
+            addr,
             sends: Bucket::per_minute(policy.sends_per_minute),
             lookups: Bucket::per_minute(policy.lookups_per_minute),
             blobs: Bucket::per_minute(policy.blob_chunks_per_minute),
             prekeys: false,
+        }
+    }
+}
+
+/// What one client address is doing, for the limits that go by address
+/// rather than by connection.
+struct AddressState {
+    connections: u32,
+    registrations: Bucket,
+    blob_bytes: Bucket,
+    last_seen: Instant,
+}
+
+impl AddressState {
+    fn new(policy: &Policy) -> Self {
+        Self {
+            connections: 0,
+            registrations: Bucket::per_hour(f64::from(policy.registrations_per_hour)),
+            blob_bytes: Bucket::per_hour(
+                f64::from(policy.blob_mib_per_address_per_hour) * 1024.0 * 1024.0,
+            ),
+            last_seen: Instant::now(),
+        }
+    }
+}
+
+/// How often the limits said no; for the hourly summary and for tests.
+#[derive(Default)]
+struct Counters {
+    refused_connections: AtomicU64,
+    refused_registrations: AtomicU64,
+    refused_uploads: AtomicU64,
+    idle_closed: AtomicU64,
+}
+
+/// A copy of the counters plus what is open right now.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CounterSnapshot {
+    pub open_connections: u32,
+    pub addresses: usize,
+    pub refused_connections: u64,
+    pub refused_registrations: u64,
+    pub refused_uploads: u64,
+    pub idle_closed: u64,
+}
+
+/// Holds one connection's place in the counts; dropping it gives the
+/// place back.
+struct ConnectionGuard {
+    state: Arc<RelayState>,
+    addr: IpAddr,
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        self.state.connections.fetch_sub(1, Ordering::Relaxed);
+        let mut addresses = self.state.addresses();
+        if let Some(entry) = addresses.get_mut(&self.addr) {
+            entry.connections = entry.connections.saturating_sub(1);
+            entry.last_seen = Instant::now();
         }
     }
 }
@@ -165,6 +268,9 @@ pub struct RelayState {
     limits: Limits,
     policy: Policy,
     online: Mutex<HashMap<UserId, Session>>,
+    addresses: Mutex<HashMap<IpAddr, AddressState>>,
+    connections: AtomicU32,
+    counters: Counters,
     next_session: AtomicU64,
     anonymous_submissions: AtomicU64,
 }
@@ -221,6 +327,9 @@ impl RelayState {
             limits,
             policy,
             online: Mutex::new(HashMap::new()),
+            addresses: Mutex::new(HashMap::new()),
+            connections: AtomicU32::new(0),
+            counters: Counters::default(),
             next_session: AtomicU64::new(0),
             anonymous_submissions: AtomicU64::new(0),
         })
@@ -228,6 +337,105 @@ impl RelayState {
 
     pub fn online_count(&self) -> usize {
         self.online().len()
+    }
+
+    pub fn policy(&self) -> &Policy {
+        &self.policy
+    }
+
+    fn addresses(&self) -> std::sync::MutexGuard<'_, HashMap<IpAddr, AddressState>> {
+        self.addresses.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The address a connection counts under: what the socket says, or
+    /// what a trusted front says the client was.
+    pub fn client_address(&self, peer: Option<IpAddr>, headers: &HeaderMap) -> IpAddr {
+        let peer = peer.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        let trusted = if self.policy.trusted_proxies.is_empty() {
+            peer.is_loopback()
+        } else {
+            self.policy.trusted_proxies.contains(&peer)
+        };
+        if trusted {
+            // The front appends the client to whatever it was handed, so the
+            // last entry is the one it saw itself.
+            let forwarded = headers
+                .get("x-forwarded-for")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.rsplit(',').next())
+                .and_then(|v| v.trim().parse::<IpAddr>().ok());
+            if let Some(forwarded) = forwarded {
+                return forwarded;
+            }
+        }
+        peer
+    }
+
+    /// Take a place for a connection from `addr`, or say why not.
+    fn connect(self: &Arc<Self>, addr: IpAddr) -> Result<ConnectionGuard, &'static str> {
+        if self.connections.load(Ordering::Relaxed) >= self.policy.max_connections {
+            self.counters
+                .refused_connections
+                .fetch_add(1, Ordering::Relaxed);
+            return Err("the relay has as many connections as it takes; try again shortly");
+        }
+        let mut addresses = self.addresses();
+        let entry = addresses
+            .entry(addr)
+            .or_insert_with(|| AddressState::new(&self.policy));
+        if entry.connections >= self.policy.connections_per_address {
+            self.counters
+                .refused_connections
+                .fetch_add(1, Ordering::Relaxed);
+            return Err("too many connections from this address");
+        }
+        entry.connections += 1;
+        entry.last_seen = Instant::now();
+        drop(addresses);
+        self.connections.fetch_add(1, Ordering::Relaxed);
+        Ok(ConnectionGuard {
+            state: self.clone(),
+            addr,
+        })
+    }
+
+    /// Whether `addr` may register one more new identity this hour.
+    fn registration_allowed(&self, addr: IpAddr) -> bool {
+        let mut addresses = self.addresses();
+        let entry = addresses
+            .entry(addr)
+            .or_insert_with(|| AddressState::new(&self.policy));
+        entry.last_seen = Instant::now();
+        entry.registrations.try_take()
+    }
+
+    /// Whether `addr` may upload `bytes` more this hour.
+    fn upload_allowed(&self, addr: IpAddr, bytes: usize) -> bool {
+        let mut addresses = self.addresses();
+        let entry = addresses
+            .entry(addr)
+            .or_insert_with(|| AddressState::new(&self.policy));
+        entry.last_seen = Instant::now();
+        entry.blob_bytes.try_take_n(bytes as f64)
+    }
+
+    /// Forget addresses with nothing open that have been quiet for an hour
+    /// (their buckets are full again by then).
+    pub fn sweep_addresses(&self) {
+        let cutoff = Duration::from_secs(3600);
+        self.addresses()
+            .retain(|_, a| a.connections > 0 || a.last_seen.elapsed() < cutoff);
+    }
+
+    pub fn counters(&self) -> CounterSnapshot {
+        CounterSnapshot {
+            open_connections: self.connections.load(Ordering::Relaxed),
+            addresses: self.addresses().len(),
+            refused_connections: self.counters.refused_connections.load(Ordering::Relaxed),
+            refused_registrations: self.counters.refused_registrations.load(Ordering::Relaxed),
+            refused_uploads: self.counters.refused_uploads.load(Ordering::Relaxed),
+            idle_closed: self.counters.idle_closed.load(Ordering::Relaxed),
+        }
     }
 
     /// Envelopes submitted on connections that never authenticated.
@@ -294,6 +502,7 @@ impl RelayState {
         total: u32,
         data: &[u8],
         bucket: &mut Bucket,
+        addr: IpAddr,
     ) -> ServerFrame {
         if self.policy.max_blob_mib == 0 {
             return blob_rejected(
@@ -314,6 +523,16 @@ impl RelayState {
         }
         if !bucket.try_take() {
             return blob_rejected(&blob, ErrorCode::RateLimited, "too many chunks; slow down");
+        }
+        if !self.upload_allowed(addr, data.len()) {
+            self.counters
+                .refused_uploads
+                .fetch_add(1, Ordering::Relaxed);
+            return blob_rejected(
+                &blob,
+                ErrorCode::RateLimited,
+                "this address has uploaded its share of files for the hour",
+            );
         }
         match self.store.put_blob_chunk(
             &blob,
@@ -454,6 +673,7 @@ impl RelayState {
         me: &UserId,
         mut bundle: KeyBundle,
         invite: Option<&str>,
+        addr: IpAddr,
     ) -> Result<Option<PrekeyReport>, Rejection> {
         if bundle.user_id != *me {
             return Err((
@@ -464,12 +684,36 @@ impl RelayState {
         if bundle.verify().is_err() {
             return Err((ErrorCode::BadSignature, "bundle signature is invalid"));
         }
-        if let Some(token) = &self.policy.invite_token {
-            let known = self.bundle(me).is_some();
-            if !known && invite != Some(token.as_str()) {
+        // A new identity: the invite token, the registration rate for the
+        // address, and the room left all have a say.
+        if self.bundle(me).is_none() {
+            if let Some(token) = &self.policy.invite_token {
+                let given = invite.unwrap_or_default();
+                let matches: bool = token.as_bytes().ct_eq(given.as_bytes()).into();
+                if !matches {
+                    return Err((
+                        ErrorCode::InviteRequired,
+                        "this relay requires an invite token to register a new identity",
+                    ));
+                }
+            }
+            if self.policy.max_identities > 0 && self.stats().bundles >= self.policy.max_identities
+            {
+                self.counters
+                    .refused_registrations
+                    .fetch_add(1, Ordering::Relaxed);
                 return Err((
-                    ErrorCode::InviteRequired,
-                    "this relay requires an invite token to register a new identity",
+                    ErrorCode::Forbidden,
+                    "this relay has all the identities it takes",
+                ));
+            }
+            if !self.registration_allowed(addr) {
+                self.counters
+                    .refused_registrations
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err((
+                    ErrorCode::RateLimited,
+                    "too many new identities from this address; try again later",
                 ));
             }
         }
@@ -586,7 +830,8 @@ fn blob_rejected(blob: &str, code: ErrorCode, message: &str) -> ServerFrame {
     }
 }
 
-/// Periodically delete envelopes and blobs older than `ttl`, forever.
+/// Periodically delete envelopes and blobs older than `ttl`, forever, and
+/// say how the limits have been doing.
 pub async fn expire_periodically(state: Arc<RelayState>, ttl: Duration, every: Duration) {
     loop {
         let (messages, blobs) = state.expire(ttl);
@@ -595,6 +840,17 @@ pub async fn expire_periodically(state: Arc<RelayState>, ttl: Duration, every: D
                 "expired {messages} unacknowledged envelopes and {blobs} files older than {ttl:?}"
             );
         }
+        state.sweep_addresses();
+        let c = state.counters();
+        info!(
+            "{} connections open from {} addresses; refused so far: {} connections, {} registrations, {} uploads; {} closed idle",
+            c.open_connections,
+            c.addresses,
+            c.refused_connections,
+            c.refused_registrations,
+            c.refused_uploads,
+            c.idle_closed
+        );
         tokio::time::sleep(every).await;
     }
 }
@@ -616,26 +872,45 @@ pub async fn serve(
     state: Arc<RelayState>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
-    axum::serve(listener, router(state))
-        .with_graceful_shutdown(shutdown)
-        .await?;
+    axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await?;
     Ok(())
 }
 
 async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<RelayState>>,
+    // Absent when the router is served without connection info, as the
+    // TLS tests do; every connection then counts under one address.
+    peer: Result<ConnectInfo<SocketAddr>, axum::extract::rejection::ExtensionRejection>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
+    let addr = state.client_address(peer.ok().map(|p| p.0.ip()), &headers);
     ws.max_message_size(MAX_FRAME_BYTES)
         .max_frame_size(MAX_FRAME_BYTES)
-        .on_upgrade(move |socket| handle_socket(socket, state))
+        .on_upgrade(move |socket| handle_socket(socket, state, addr))
 }
 
 type Sink = SplitSink<WebSocket, Message>;
 type Stream = SplitStream<WebSocket>;
 
-async fn handle_socket(socket: WebSocket, state: Arc<RelayState>) {
+async fn handle_socket(socket: WebSocket, state: Arc<RelayState>, addr: IpAddr) {
     let (mut sink, mut stream) = socket.split();
+
+    // --- a place among the connections ----------------------------------
+    let _place = match state.connect(addr) {
+        Ok(guard) => guard,
+        Err(why) => {
+            debug!(%addr, "connection refused: {why}");
+            let _ = send(&mut sink, &ServerFrame::error(ErrorCode::RateLimited, why)).await;
+            let _ = sink.close().await;
+            return;
+        }
+    };
 
     // --- challenge / response -------------------------------------------
     let mut nonce = [0u8; 32];
@@ -665,7 +940,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>) {
             | ClientFrame::BlobPut { .. }
             | ClientFrame::BlobGet { .. }),
         ))) if state.policy.anonymous_sends_per_minute > 0 => {
-            anonymous_session(sink, stream, &state, frame).await;
+            anonymous_session(sink, stream, &state, frame, addr).await;
             return;
         }
         Ok(Some(Ok(_))) => {
@@ -688,7 +963,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>) {
     };
 
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let mut conn = Conn::new(&state.policy);
+    let mut conn = Conn::new(&state.policy, addr);
     let session_id = state.register(user, tx.clone());
     info!(%user, session_id, "client authenticated");
     let auth_ok = ServerFrame::AuthOk {
@@ -717,19 +992,24 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>) {
                 }
                 None => break,
             },
-            inbound = next_frame(&mut stream) => match inbound {
-                Some(Ok(frame)) => {
+            inbound = tokio::time::timeout(state.policy.idle_timeout, next_frame(&mut stream)) => match inbound {
+                Ok(Some(Ok(frame))) => {
                     for reply in handle_frame(&state, &user, frame, &mut conn) {
                         let _ = tx.send(Outbound::Frame(Box::new(reply)));
                     }
                 }
-                Some(Err(e)) => {
+                Ok(Some(Err(e))) => {
                     let _ = tx.send(Outbound::Frame(Box::new(ServerFrame::error(
                         ErrorCode::Malformed,
                         e,
                     ))));
                 }
-                None => break,
+                Ok(None) => break,
+                Err(_) => {
+                    debug!(%user, session_id, "closing an idle connection");
+                    state.counters.idle_closed.fetch_add(1, Ordering::Relaxed);
+                    break;
+                }
             },
         }
     }
@@ -746,6 +1026,7 @@ async fn anonymous_session(
     mut stream: Stream,
     state: &RelayState,
     first: ClientFrame,
+    addr: IpAddr,
 ) {
     debug!("anonymous submission session opened");
     let mut bucket = Bucket::per_minute(state.policy.anonymous_sends_per_minute);
@@ -754,9 +1035,11 @@ async fn anonymous_session(
     loop {
         let frame = match next.take() {
             Some(frame) => frame,
-            None => match next_frame(&mut stream).await {
-                Some(Ok(frame)) => frame,
-                Some(Err(e)) => {
+            None => match tokio::time::timeout(state.policy.idle_timeout, next_frame(&mut stream))
+                .await
+            {
+                Ok(Some(Ok(frame))) => frame,
+                Ok(Some(Err(e))) => {
                     if send(&mut sink, &ServerFrame::error(ErrorCode::Malformed, e))
                         .await
                         .is_err()
@@ -765,7 +1048,12 @@ async fn anonymous_session(
                     }
                     continue;
                 }
-                None => break,
+                Ok(None) => break,
+                Err(_) => {
+                    debug!("closing an idle anonymous connection");
+                    state.counters.idle_closed.fetch_add(1, Ordering::Relaxed);
+                    break;
+                }
             },
         };
         let replies = match frame {
@@ -778,7 +1066,7 @@ async fn anonymous_session(
                 index,
                 total,
                 data,
-            } => vec![state.put_blob(blob, index, total, &data, &mut blobs)],
+            } => vec![state.put_blob(blob, index, total, &data, &mut blobs, addr)],
             ClientFrame::BlobGet { blob } => state.get_blob(&blob, &mut blobs),
             ClientFrame::Ping => vec![ServerFrame::Pong],
             _ => vec![ServerFrame::error(
@@ -807,7 +1095,7 @@ fn handle_frame(
             "already authenticated",
         )],
         ClientFrame::Publish { bundle, invite } => {
-            match state.publish(me, bundle, invite.as_deref()) {
+            match state.publish(me, bundle, invite.as_deref(), conn.addr) {
                 Ok(report) => {
                     let mut replies = vec![ServerFrame::Published];
                     if let Some(report) = report {
@@ -848,7 +1136,7 @@ fn handle_frame(
             index,
             total,
             data,
-        } => vec![state.put_blob(blob, index, total, &data, &mut conn.blobs)],
+        } => vec![state.put_blob(blob, index, total, &data, &mut conn.blobs, conn.addr)],
         ClientFrame::BlobGet { blob } => state.get_blob(&blob, &mut conn.blobs),
         ClientFrame::Ping => vec![ServerFrame::Pong],
     }

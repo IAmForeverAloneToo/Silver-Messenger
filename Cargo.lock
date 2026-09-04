@@ -2756,6 +2756,7 @@ dependencies = [
  "serde",
  "serde_json",
  "silver-protocol",
+ "subtle",
  "tempfile",
  "tokio",
  "tracing",
