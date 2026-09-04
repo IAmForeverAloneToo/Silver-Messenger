@@ -358,6 +358,8 @@ impl App {
             "add" => self.cmd_add(&rest),
             "alias" | "rename" => self.cmd_alias(&rest),
             "remove" | "rm" => self.cmd_remove(),
+            "verify" => self.cmd_verify(&rest),
+            "refresh" => self.cmd_refresh(),
             "relay" => self.cmd_relay(&rest),
             "quit" | "q" | "exit" => self.should_quit = true,
             other => self.toast(format!("Unknown command /{other}. Try /help.")),
@@ -370,6 +372,9 @@ impl App {
             "  /add <user-id> [alias]   add a contact by id (looks up their key on the relay)",
             "  /alias <name>            name the selected contact",
             "  /remove                  forget the selected contact (history stays on disk)",
+            "  /verify                  show the safety number to compare with the selected contact",
+            "  /verify ok | no          mark the selected contact as verified, or not",
+            "  /refresh                 fetch the selected contact's key again and report changes",
             "  /me                      show your own id",
             "  /relay <ws-url>          change the relay (takes effect on next start)",
             "  /quit                    exit",
@@ -399,12 +404,17 @@ impl App {
         let alias = args.get(1).map(|s| s.to_string());
         if let Some(i) = self.contact_index(&user_id) {
             if alias.is_some() {
-                self.contacts[i].alias = alias;
+                self.contacts[i].alias = alias.clone();
                 self.persist_contacts();
             }
             self.select(i + 1);
-            return;
         }
+        self.lookup_contact(user_id, alias);
+    }
+
+    /// Fetch a contact's key bundle in the background; the result arrives
+    /// as [`Internal::LookupDone`].
+    fn lookup_contact(&mut self, user_id: UserId, alias: Option<String>) {
         let client = self.client.clone();
         let tx = self.internal_tx.clone();
         tokio::spawn(async move {
@@ -418,6 +428,60 @@ impl App {
                 .await;
         });
         self.toast(format!("Looking up {}…", user_id.short()));
+    }
+
+    fn cmd_refresh(&mut self) {
+        let Some(contact) = self.selected_contact() else {
+            self.toast("Select a contact first.");
+            return;
+        };
+        let user_id = contact.user_id;
+        self.lookup_contact(user_id, None);
+    }
+
+    fn cmd_verify(&mut self, args: &[&str]) {
+        let Some(index) = self.selected.checked_sub(1) else {
+            self.toast("Select a contact first.");
+            return;
+        };
+        let contact = &self.contacts[index];
+        let name = contact.display_name();
+        let peer = contact.user_id;
+        match args.first().map(|s| s.to_ascii_lowercase()).as_deref() {
+            None => {
+                let number = silver_protocol::safety_number(&self.me, &peer);
+                let groups: Vec<&str> = number.split(' ').collect();
+                let status = if contact.verified {
+                    "verified ✓"
+                } else {
+                    "not verified yet"
+                };
+                self.system(
+                    Level::Info,
+                    format!("Safety number with {name} ({status}). Read it to each other by voice or in person; it must match on both sides:"),
+                );
+                for row in groups.chunks(4) {
+                    self.system(Level::Info, format!("    {}", row.join("  ")));
+                }
+                self.system(
+                    Level::Info,
+                    "If it matches, run /verify ok. If it does not, someone may be between you: do not trust this contact.",
+                );
+                self.select(0);
+            }
+            Some("ok") | Some("yes") => {
+                self.contacts[index].verified = true;
+                self.persist_contacts();
+                self.system(Level::Info, format!("Marked {name} as verified ✓"));
+                self.toast(format!("{name} verified ✓"));
+            }
+            Some("no") | Some("clear") => {
+                self.contacts[index].verified = false;
+                self.persist_contacts();
+                self.toast(format!("{name} is no longer marked verified"));
+            }
+            Some(_) => self.toast("Usage: /verify, /verify ok, /verify no"),
+        }
     }
 
     fn cmd_alias(&mut self, args: &[&str]) {
@@ -537,25 +601,59 @@ impl App {
                 alias,
                 result,
             } => match result {
-                Ok(bundle) => {
-                    let found = bundle.is_some();
-                    let mut contact = Contact::new(user_id);
-                    contact.alias = alias;
-                    contact.bundle = bundle;
-                    let name = contact.display_name();
-                    self.contacts.push(contact);
-                    self.threads.entry(user_id).or_default();
-                    self.persist_contacts();
-                    self.select(self.contacts.len());
-                    if found {
-                        self.system(Level::Info, format!("Added {name} ({user_id})"));
-                    } else {
-                        self.system(
-                            Level::Warn,
-                            format!("Added {name}, but the relay has no key for them yet; they need to connect once before you can message them."),
-                        );
+                Ok(bundle) => match self.contact_index(&user_id) {
+                    // An existing contact: compare with the pinned key.
+                    Some(index) => {
+                        let name = self.contacts[index].display_name();
+                        match (self.contacts[index].bundle.clone(), bundle) {
+                            (_, None) => self.system(
+                                Level::Warn,
+                                format!("The relay has no key for {name} right now."),
+                            ),
+                            (None, Some(new)) => {
+                                self.contacts[index].bundle = Some(new);
+                                self.persist_contacts();
+                                self.system(Level::Info, format!("Got {name}'s key."));
+                            }
+                            (Some(old), Some(new)) if old.dh_public == new.dh_public => {
+                                self.toast(format!("{name}'s key is unchanged."));
+                            }
+                            (Some(_), Some(new)) => {
+                                let was_verified = self.contacts[index].verified;
+                                self.contacts[index].bundle = Some(new);
+                                self.contacts[index].verified = false;
+                                self.persist_contacts();
+                                self.system(
+                                    Level::Warn,
+                                    format!(
+                                        "KEY CHANGE: {name}'s encryption key is different from the one you had. It is signed by their identity, so either they rotated it or their identity key is compromised. Confirm with them and run /verify before trusting it{}.",
+                                        if was_verified { " (verified mark cleared)" } else { "" }
+                                    ),
+                                );
+                                self.toast(format!("Key change for {name}! See System."));
+                            }
+                        }
                     }
-                }
+                    None => {
+                        let found = bundle.is_some();
+                        let mut contact = Contact::new(user_id);
+                        contact.alias = alias;
+                        contact.bundle = bundle;
+                        let name = contact.display_name();
+                        self.contacts.push(contact);
+                        self.threads.entry(user_id).or_default();
+                        self.persist_contacts();
+                        self.select(self.contacts.len());
+                        if found {
+                            self.system(Level::Info, format!("Added {name} ({user_id})"));
+                        } else {
+                            self.system(
+                                Level::Warn,
+                                format!("Added {name}, but the relay has no key for them yet; they need to connect once before you can message them."),
+                            );
+                        }
+                    }
+                },
                 Err(e) => self.toast(format!("Lookup failed: {e}")),
             },
             Internal::SendDone {

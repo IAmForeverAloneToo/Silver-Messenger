@@ -54,6 +54,9 @@ pub struct Contact {
     /// Sequence of the last message accepted from them.
     #[serde(default)]
     pub received: Option<Sequence>,
+    /// The user compared safety numbers with this contact out of band.
+    #[serde(default)]
+    pub verified: bool,
 }
 
 impl Contact {
@@ -64,6 +67,7 @@ impl Contact {
             bundle: None,
             sent_seq: 0,
             received: None,
+            verified: false,
         }
     }
 

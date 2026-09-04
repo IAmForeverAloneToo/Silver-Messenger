@@ -28,6 +28,7 @@ pub mod encoding;
 pub mod envelope;
 mod error;
 pub mod identity;
+pub mod verify;
 pub mod wire;
 
 pub use bundle::KeyBundle;
@@ -37,6 +38,7 @@ pub use envelope::{
 };
 pub use error::ProtocolError;
 pub use identity::{DhPublic, Identity, IdentitySecrets, UserId};
+pub use verify::safety_number;
 pub use wire::{ClientFrame, ErrorCode, ServerFrame};
 
 /// Milliseconds since the Unix epoch, used for `sent_at_ms` timestamps.

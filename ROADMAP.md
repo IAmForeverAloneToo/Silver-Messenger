@@ -34,7 +34,7 @@ Tick items off as they land on `main`.
 5. [x] **Threat model document** (S). What the relay, the network and a
        stolen device can each see. Written first so items 6 to 9 are
        measured against it.
-6. [ ] **Key-change warnings and `/verify`** (S). Loud warning when a
+6. [x] **Key-change warnings and `/verify`** (S). Loud warning when a
        contact's published key changes; a short safety-number string to
        compare out of band; a verified mark on contacts.
 7. [ ] **Encrypted local storage** (M). Keys and history under a passphrase

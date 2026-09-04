@@ -70,7 +70,12 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
     lines.push(row("System".into(), None, app.selected == 0));
     for (i, contact) in app.contacts.iter().enumerate() {
         let unread = app.unread.get(&contact.user_id).copied().filter(|n| *n > 0);
-        lines.push(row(contact.display_name(), unread, app.selected == i + 1));
+        let label = if contact.verified {
+            format!("✓ {}", contact.display_name())
+        } else {
+            contact.display_name()
+        };
+        lines.push(row(label, unread, app.selected == i + 1));
     }
     if app.contacts.is_empty() {
         lines.push(Line::from(""));
@@ -89,7 +94,12 @@ fn draw_messages(frame: &mut Frame, app: &mut App, area: Rect) {
     let (title, rows) = match app.selected_contact() {
         None => (" System ".to_owned(), system_rows(app, width)),
         Some(contact) => (
-            format!(" {} · {} ", contact.display_name(), contact.user_id),
+            format!(
+                " {}{} · {} ",
+                if contact.verified { "✓ " } else { "" },
+                contact.display_name(),
+                contact.user_id
+            ),
             thread_rows(app, &contact.user_id, width),
         ),
     };

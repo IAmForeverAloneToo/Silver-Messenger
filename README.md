@@ -56,6 +56,9 @@ automatically; `/alias <name>` gives it a friendly name.
 | `/add <user-id> [alias]`    | Add a contact by id                                          |
 | `/alias <name>`             | Name the selected contact                                    |
 | `/remove`                   | Forget the selected contact (history file stays on disk)     |
+| `/verify`                   | Show the safety number to compare with the selected contact  |
+| `/verify ok` / `/verify no` | Mark the selected contact as verified, or clear the mark     |
+| `/refresh`                  | Fetch the selected contact's key again and report any change |
 | `/me`                       | Show your own id                                             |
 | `/relay <ws-url>`           | Change the relay (used on next start)                        |
 | `/help`, `/quit`            |                                                              |
@@ -144,6 +147,13 @@ the machine.
   and ephemeral key are bound as associated data, and the signature covers the
   recipient, ephemeral key, nonce and body, so an envelope cannot be
   re-addressed, altered, or forged.
+* **Safety numbers**: `/verify` shows twelve groups of five digits derived
+  from both identity keys, identical on both sides. Two people who read them
+  to each other confirm that nobody sits between them; `/verify ok` records
+  that. A contact's encryption key can only change with a signature from
+  their identity key; when it does, the client warns loudly and clears the
+  verified mark, because it means either a deliberate rotation or a stolen
+  identity key.
 * **Sequence numbers**: every message carries, inside the encrypted body, a
   per-conversation counter plus a random per-installation epoch. The
   recipient drops replays, points out gaps, and notices when a contact has
