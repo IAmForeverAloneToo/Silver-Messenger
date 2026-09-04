@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{
-    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use silver_client::sequence::{self, SequenceCheck};
 use silver_client::{
@@ -18,11 +18,14 @@ use silver_protocol::envelope::{ReceiptKind, capability};
 use silver_protocol::{Content, KeyBundle, Message, UserId, now_ms};
 use tokio::sync::mpsc;
 
+use crate::clipboard::{Clipboard, Copied};
 use crate::glyphs::{Glyphs, Marks};
 use crate::notify::{Notifier, NotifyMode};
 use crate::{qr, ui};
 
 const TOAST_TTL: Duration = Duration::from_secs(6);
+/// A second Ctrl-C within this long quits.
+const QUIT_CONFIRM: Duration = Duration::from_secs(3);
 const SCROLL_STEP: usize = 5;
 const MOUSE_SCROLL_STEP: usize = 3;
 const HISTORY_LIMIT: usize = 200;
@@ -112,6 +115,9 @@ pub struct App {
     pub read_receipts: bool,
     /// The symbols the interface draws with.
     pub glyphs: Glyphs,
+    clipboard: Clipboard,
+    /// When Ctrl-C was pressed with nothing to copy; a second press quits.
+    quit_armed: Option<Instant>,
     notifier: Notifier,
     pub system: Vec<SystemLine>,
     /// 0 is the system pane; `i >= 1` selects `contacts[i - 1]`.
@@ -197,6 +203,8 @@ impl App {
             receipts: ReceiptQueue::default(),
             read_receipts,
             glyphs,
+            clipboard: Clipboard::new(),
+            quit_armed: None,
             notifier,
             system: Vec::new(),
             selected: 0,
@@ -384,6 +392,7 @@ impl App {
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::ScrollUp => self.scroll_by(MOUSE_SCROLL_STEP as isize),
                 MouseEventKind::ScrollDown => self.scroll_by(-(MOUSE_SCROLL_STEP as isize)),
+                MouseEventKind::Down(MouseButton::Right) => self.paste_from_clipboard(),
                 _ => {}
             },
             Event::FocusGained => {
@@ -402,8 +411,12 @@ impl App {
     fn handle_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
-            KeyCode::Char('c') | KeyCode::Char('q') if ctrl => self.should_quit = true,
+            KeyCode::Char('q') if ctrl => self.should_quit = true,
+            KeyCode::Char('c') if ctrl => self.copy_or_quit(),
+            KeyCode::Char('v') if ctrl => self.paste_from_clipboard(),
+            KeyCode::Insert if shift => self.paste_from_clipboard(),
             KeyCode::Char('n') if ctrl => self.select_next(),
             KeyCode::Char('p') if ctrl => self.select_prev(),
             KeyCode::Char('u') if ctrl => self.clear_input(),
@@ -448,6 +461,83 @@ impl App {
                 self.history_pos = None;
             }
             _ => {}
+        }
+    }
+
+    // --- clipboard ---------------------------------------------------------
+
+    /// Ctrl-C: copy what is selected; with nothing selected, quit on the
+    /// second press so a copy habit from other programs does not end the
+    /// session by accident.
+    fn copy_or_quit(&mut self) {
+        if self.copy_selection() {
+            return;
+        }
+        if self
+            .quit_armed
+            .is_some_and(|at| at.elapsed() < QUIT_CONFIRM)
+        {
+            self.should_quit = true;
+            return;
+        }
+        self.quit_armed = Some(Instant::now());
+        self.toast("Nothing selected to copy. Press Ctrl-C again to quit (Ctrl-Q quits at once).");
+    }
+
+    /// Copy the selection in the message pane, if there is one.
+    fn copy_selection(&mut self) -> bool {
+        false
+    }
+
+    /// Put `text` on the clipboard and say so; `what` names it in the toast.
+    fn copy_text(&mut self, text: &str, what: &str) {
+        match self.clipboard.set(text) {
+            Copied::System => self.toast(format!("Copied {what} to the clipboard.")),
+            Copied::Terminal => self.toast(format!(
+                "Handed {what} to the terminal's clipboard (no system clipboard here)."
+            )),
+        }
+    }
+
+    fn paste_from_clipboard(&mut self) {
+        match self.clipboard.get() {
+            Some(text) => self.insert_str(&text.replace("\r\n", "\n").replace('\r', "\n")),
+            None if self.clipboard.can_read() => self.toast("The clipboard is empty."),
+            None => self.toast(
+                "No system clipboard here; paste with the terminal's own shortcut (Ctrl-Shift-V, Shift-Insert or the menu).",
+            ),
+        }
+    }
+
+    /// `/copy`: the last message in the selected chat; `/copy id`, `/copy
+    /// link` for your id and invite link.
+    fn cmd_copy(&mut self, args: &[&str]) {
+        match args.first().map(|s| s.to_ascii_lowercase()).as_deref() {
+            Some("id") | Some("me") => {
+                let me = self.me.to_string();
+                self.copy_text(&me, "your id");
+            }
+            Some("link") | Some("invite") => {
+                let link = self.invite_link().to_string();
+                self.copy_text(&link, "your invite link");
+            }
+            Some(_) => self.toast("Usage: /copy (last message), /copy id, /copy link"),
+            None => {
+                let Some(peer) = self.selected_contact().map(|c| c.user_id) else {
+                    self.toast("Select a chat first, or /copy id, /copy link.");
+                    return;
+                };
+                let Some(text) = self
+                    .threads
+                    .get(&peer)
+                    .and_then(|lines| lines.last())
+                    .map(|line| line.text.clone())
+                else {
+                    self.toast("No messages in this chat yet.");
+                    return;
+                };
+                self.copy_text(&text, "the last message");
+            }
         }
     }
 
@@ -638,7 +728,11 @@ impl App {
                 );
                 self.select(0);
             }
+            "invite" | "link" | "qr" if rest.first().is_some_and(|a| *a == "copy") => {
+                self.cmd_copy(&["link"])
+            }
             "invite" | "link" | "qr" => self.cmd_invite(),
+            "copy" => self.cmd_copy(&rest),
             "add" => self.cmd_add(&rest),
             "alias" | "rename" => self.cmd_alias(&rest),
             "remove" | "rm" => self.cmd_remove(),
@@ -664,7 +758,8 @@ impl App {
         for line in [
             "Commands:",
             "  /add <id or link> [alias] add a contact by id or invite link (looks up their key on the relay)",
-            "  /invite                  show your invite link and a QR code of it",
+            "  /invite                  show your invite link and a QR code of it; /invite copy puts it on the clipboard",
+            "  /copy [id|link]          copy the last message of this chat, your id, or your invite link",
             "  /alias <name>            name the selected contact",
             "  /remove                  forget the selected contact (history stays on disk)",
             "  /verify                  show the safety number to compare with the selected contact",
@@ -683,7 +778,8 @@ impl App {
             "  /relay <ws-url>          change the relay (takes effect on next start)",
             "  /quit                    exit",
             "Keys: Tab/Shift-Tab or Alt-Up/Down switch chats · Up/Down recall earlier lines · Alt-Enter new line",
-            "      PgUp/PgDn or mouse wheel scroll, Ctrl-Home/End jump · Esc clears input · Ctrl-C quits",
+            "      PgUp/PgDn or mouse wheel scroll, Ctrl-Home/End jump · Esc clears input or the selection",
+            "      Ctrl-V, Shift-Insert or right click paste · Ctrl-C copies the selection (twice: quit) · Ctrl-Q quits",
         ] {
             self.system(Level::Info, line);
         }

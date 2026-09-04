@@ -1,6 +1,7 @@
 //! Silver Messenger terminal client.
 
 mod app;
+mod clipboard;
 mod glyphs;
 mod notify;
 mod qr;

@@ -66,6 +66,7 @@ ratatui = "0.30"
 unicode-width = "0.2"
 qrcode = { version = "0.14", default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
 
 [profile.release]
 lto = "thin"
