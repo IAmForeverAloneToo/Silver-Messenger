@@ -4,7 +4,7 @@ Notable changes to Silver Messenger. Versions follow [semantic
 versioning](https://semver.org); while the major version is 0, a minor bump
 means behaviour or the wire protocol changed in a way worth reading about.
 
-## Unreleased
+## 0.6.0 - 2026-09-04
 
 Phase 6: secure and private by default. A relay and a network observer are
 shown less; a stolen data directory and a hostile relay get less; what a
