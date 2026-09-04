@@ -1,0 +1,34 @@
+[Unit]
+Description=Silver Messenger relay backup
+Documentation=https://github.com/IAmForeverAloneToo/Silver-Messenger/blob/main/docs/OPERATING.md
+After=silver-relay.service
+
+[Service]
+Type=oneshot
+User=silver
+Group=silver
+UMask=0077
+# Through the running relay's admin socket, or straight from the database
+# while the relay is stopped. The file lands under the relay's own state
+# directory, readable by its user only; two weeks of them are kept. Copy
+# them off the host, encrypted.
+Environment=SILVER_RELAY_DATA=/var/lib/silver-relay
+StateDirectory=silver-relay
+ExecStartPre=/bin/mkdir -p -m 700 /var/lib/silver-relay/backups
+ExecStart=/bin/sh -c 'exec /usr/local/bin/silver-relay backup "/var/lib/silver-relay/backups/relay-$(date -u +%%Y-%%m-%%dT%%H%%M).backup"'
+ExecStartPost=/usr/bin/find /var/lib/silver-relay/backups -name 'relay-*.backup' -mtime +14 -delete
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/run/silver-relay
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native

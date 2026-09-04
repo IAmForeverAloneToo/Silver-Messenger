@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily backup of the Silver Messenger relay
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

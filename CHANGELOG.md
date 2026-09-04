@@ -57,6 +57,13 @@ means behaviour or the wire protocol changed in a way worth reading about.
   with a provenance attestation), `deploy/compose.yml` runs it with the
   built-in TLS, and `deploy/Dockerfile` builds it from source. Releases
   include Linux arm64 binaries.
+- **An operator's guide.** `docs/OPERATING.md`: a checklist for a first
+  deployment, sizing, what every limit bounds and when to change it, what
+  the log records and how long to keep it, the metrics and what they
+  mean, day-to-day administration, backups, updates, what to do after a
+  compromise of the host, and how to shut a relay down. The installer now
+  enables a nightly backup timer (`deploy/silver-relay-backup.timer`)
+  that keeps two weeks of backups under the state directory.
 
 ## 0.6.0 - 2026-09-04
 

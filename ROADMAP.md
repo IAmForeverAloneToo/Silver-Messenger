@@ -311,7 +311,7 @@ container story. Operations come before reach.
         that take and load a consistent snapshot, an upgrade guide, and
         a reproducible container image for the usual architectures with
         a Compose example that uses the built-in TLS.
-40. [ ] **Operator's guide** (S). `docs/OPERATING.md`: sizing, journald
+40. [x] **Operator's guide** (S). `docs/OPERATING.md`: sizing, journald
         retention, tuning the limits, monitoring, what to do after a
         compromise of the host, and a checklist for a first deployment.
 

@@ -139,9 +139,21 @@ fi
 chmod 640 "$ENV_FILE"
 chgrp "$SERVICE_USER" "$ENV_FILE"
 install -D -m 644 "$UNIT_SRC" "$UNIT"
+# A nightly backup into the state directory (deploy/silver-relay-backup.*),
+# when the units came along with the service file.
+UNIT_DIR=$(dirname "$UNIT_SRC")
+BACKUP_TIMER=0
+if [ -f "$UNIT_DIR/silver-relay-backup.service" ] && [ -f "$UNIT_DIR/silver-relay-backup.timer" ]; then
+    install -D -m 644 "$UNIT_DIR/silver-relay-backup.service" /etc/systemd/system/silver-relay-backup.service
+    install -D -m 644 "$UNIT_DIR/silver-relay-backup.timer" /etc/systemd/system/silver-relay-backup.timer
+    BACKUP_TIMER=1
+fi
 systemctl daemon-reload
 systemctl enable -q silver-relay
 systemctl restart silver-relay
+if [ "$BACKUP_TIMER" = 1 ]; then
+    systemctl enable -q --now silver-relay-backup.timer
+fi
 
 # --- 7. HTTPS ------------------------------------------------------------------
 DOMAIN="${SILVER_DOMAIN:-$(sed -n 's/^SILVER_DOMAIN=//p' "$ENV_FILE")}"
@@ -309,7 +321,10 @@ Silver Messenger relay is running.
   service:  systemctl status silver-relay
   logs:     journalctl -u silver-relay -f
   config:   $ENV_FILE
+  admin:    silver-relay admin status
+  backups:  nightly into /var/lib/silver-relay/backups (systemctl list-timers silver-relay-backup.timer)
   update:   re-run this script
+  guide:    docs/OPERATING.md in the repository
 $extra
 Clients connect with:
 

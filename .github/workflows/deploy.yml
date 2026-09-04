@@ -96,7 +96,7 @@ jobs:
         run: |
           target="$VPS_USER@$VPS_HOST"
           ssh "$target" 'rm -rf /tmp/silver-deploy && mkdir -p /tmp/silver-deploy'
-          scp "target/$TARGET/release/silver-relay" deploy/silver-relay.service deploy/install.sh "$target:/tmp/silver-deploy/"
+          scp "target/$TARGET/release/silver-relay" deploy/silver-relay.service deploy/silver-relay-backup.service deploy/silver-relay-backup.timer deploy/install.sh "$target:/tmp/silver-deploy/"
           ssh "$target" "SILVER_DOMAIN='$DOMAIN' SILVER_EMAIL='$EMAIL' SILVER_TLS='$TLS' bash /tmp/silver-deploy/install.sh; rc=\$?; rm -rf /tmp/silver-deploy; exit \$rc"
 
       - name: Run "${{ inputs.action }}" on the server

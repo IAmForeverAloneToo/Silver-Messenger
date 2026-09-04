@@ -244,6 +244,10 @@ the unprivileged `silver` user under a hardened systemd unit
 in `/etc/silver-relay/relay.env`, the database in `/var/lib/silver-relay`,
 and logs are in `journalctl -u silver-relay`.
 Remember to open port 7777/tcp in your provider's firewall as well.
+[docs/OPERATING.md](docs/OPERATING.md) is the operator's guide: a
+checklist for a first deployment, sizing, the limits, the log, monitoring,
+day-to-day administration, backups, and what to do after a compromise of
+the host.
 
 The relay is careful about what it keeps. Its log names clients by a
 pseudonym that changes every run (`--log-ids` writes the real ids, for
