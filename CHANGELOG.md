@@ -4,7 +4,7 @@ Notable changes to Silver Messenger. Versions follow [semantic
 versioning](https://semver.org); while the major version is 0, a minor bump
 means behaviour or the wire protocol changed in a way worth reading about.
 
-## Unreleased
+## 0.4.0 - 2026-09-04
 
 Everyday messaging: receipts, files, notifications, invite links and a more
 comfortable terminal. Clients and relays interoperate with 0.3.0 peers;

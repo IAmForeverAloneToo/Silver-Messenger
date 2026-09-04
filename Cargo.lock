@@ -2468,7 +2468,7 @@ dependencies = [
 
 [[package]]
 name = "silver-client"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -2497,7 +2497,7 @@ dependencies = [
 
 [[package]]
 name = "silver-protocol"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "base64 0.22.1",
  "bs58",
@@ -2517,7 +2517,7 @@ dependencies = [
 
 [[package]]
 name = "silver-relay"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2536,7 +2536,7 @@ dependencies = [
 
 [[package]]
 name = "silver-tui"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "chrono",
