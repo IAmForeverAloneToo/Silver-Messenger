@@ -92,6 +92,12 @@ pub const COMMANDS: &[CommandInfo] = &[
         "draw the check marks in ASCII if your terminal shows boxes instead",
     ),
     cmd(
+        "theme",
+        &["colors", "colours"],
+        "dark|light|mono",
+        "colours for a dark or a light background, or none at all",
+    ),
+    cmd(
         "accept",
         &[],
         "<n|user-id>",

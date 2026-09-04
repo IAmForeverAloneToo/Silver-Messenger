@@ -4,7 +4,7 @@
 use chrono::{Local, NaiveDate, TimeZone};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use silver_client::Direction;
@@ -21,17 +21,24 @@ const INPUT_MAX_ROWS: u16 = 6;
 /// which entry of the pane's list it came from.
 type Row = (Line<'static>, Option<usize>);
 
+/// Below this many columns the chat list is folded away and the chat
+/// title says which pane this is.
+const NARROW_WIDTH: u16 = 70;
+
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let [main, status] =
         Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).areas(frame.area());
+    app.narrow = frame.area().width < NARROW_WIDTH;
+    let sidebar_width = if app.narrow { 0 } else { app.sidebar_width };
     let [sidebar, chat] =
-        Layout::horizontal([Constraint::Length(app.sidebar_width), Constraint::Min(20)])
-            .areas(main);
+        Layout::horizontal([Constraint::Length(sidebar_width), Constraint::Min(20)]).areas(main);
     let input_rows = (app.input.split('\n').count() as u16).clamp(1, INPUT_MAX_ROWS);
     let [messages, input] =
         Layout::vertical([Constraint::Min(3), Constraint::Length(input_rows + 2)]).areas(chat);
 
-    draw_sidebar(frame, app, sidebar);
+    if !app.narrow {
+        draw_sidebar(frame, app, sidebar);
+    }
     draw_messages(frame, app, messages);
     draw_input(frame, app, input);
     draw_status(frame, app, status);
@@ -62,7 +69,7 @@ fn draw_help(frame: &mut Frame, app: &mut App) {
         text.extend(wrap_message(
             vec![Span::styled(format!("  {head:<28} "), Style::default())],
             c.help,
-            dim(),
+            app.theme.dim,
             inner_width,
         ));
     }
@@ -94,7 +101,7 @@ fn draw_help(frame: &mut Frame, app: &mut App) {
     if below > 0 {
         block = block.title_bottom(Line::styled(
             format!(" {} {below} more (PgDn) ", app.glyphs.more_below),
-            dim(),
+            app.theme.dim,
         ));
     }
     let shown: Vec<Line> = text
@@ -103,17 +110,6 @@ fn draw_help(frame: &mut Frame, app: &mut App) {
         .take(visible)
         .collect();
     frame.render_widget(Paragraph::new(shown).block(block), rect);
-}
-
-fn dim() -> Style {
-    Style::default().fg(Color::DarkGray)
-}
-
-fn selected_style() -> Style {
-    Style::default()
-        .fg(Color::Black)
-        .bg(Color::Cyan)
-        .add_modifier(Modifier::BOLD)
 }
 
 fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
@@ -126,15 +122,11 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
         let label = truncate(&label, room);
         let pad = inner_width.saturating_sub(label.width() + badge.width());
         let style = if selected {
-            selected_style()
+            app.theme.selected
         } else {
             Style::default()
         };
-        let badge_style = if selected {
-            style
-        } else {
-            Style::default().fg(Color::Black).bg(Color::Yellow)
-        };
+        let badge_style = if selected { style } else { app.theme.badge };
         Line::from(vec![
             Span::styled(
                 format!(" {label}{}", " ".repeat(pad.saturating_sub(1))),
@@ -167,8 +159,8 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
     }
     if app.contacts.is_empty() && app.requests.is_empty() {
         lines.push(Line::from(""));
-        lines.push(Line::styled(" no contacts yet", dim()));
-        lines.push(Line::styled(" /add <user-id>", dim()));
+        lines.push(Line::styled(" no contacts yet", app.theme.dim));
+        lines.push(Line::styled(" /add <user-id>", app.theme.dim));
     }
 
     let block = Block::bordered().title(" Chats ");
@@ -230,11 +222,22 @@ fn draw_messages(frame: &mut Frame, app: &mut App, area: Rect) {
         .unzip();
     let visible: Vec<Line> = visible.into_iter().skip(start).take(end - start).collect();
 
+    // Without the chat list, the title says where in it this pane sits.
+    let title = if app.narrow {
+        format!("{}{}/{} ", title, app.selected + 1, app.pane_count())
+    } else {
+        title
+    };
+    // The pane with a selection has the keyboard's attention; otherwise
+    // the compose box does, and its border says so.
     let mut block = Block::bordered().title(truncate(&title, width));
+    if app.selection.is_some() {
+        block = block.border_style(app.theme.accent);
+    }
     if app.scroll > 0 {
         block = block.title_bottom(Line::styled(
             format!(" {} {} more ", app.glyphs.more_below, app.scroll),
-            dim(),
+            app.theme.dim,
         ));
     }
     frame.render_widget(Paragraph::new(visible).block(block), area);
@@ -306,15 +309,12 @@ fn system_rows(app: &App, width: usize) -> Vec<Row> {
     for (i, line) in app.system.iter().enumerate() {
         let style = match line.level {
             Level::Info => Style::default(),
-            Level::Warn => Style::default().fg(Color::Yellow),
+            Level::Warn => app.theme.warn,
             Level::Code => {
                 // Dark modules on a light ground whatever the theme, so a
                 // phone camera reads it.
                 rows.push((
-                    Line::styled(
-                        truncate(&line.text, width),
-                        Style::default().fg(Color::Black).bg(Color::White),
-                    ),
+                    Line::styled(truncate(&line.text, width), app.theme.code),
                     Some(i),
                 ));
                 continue;
@@ -322,7 +322,7 @@ fn system_rows(app: &App, width: usize) -> Vec<Row> {
         };
         let prefix = vec![Span::styled(
             format!("{} ", clock(line.timestamp_ms)),
-            dim(),
+            app.theme.dim,
         )];
         rows.extend(
             wrap_message(prefix, &line.text, style, width)
@@ -338,7 +338,7 @@ fn request_rows(app: &App, width: usize) -> Vec<Row> {
     rows.extend(wrap_message(
         vec![],
         "People who wrote to you but are not contacts yet. /accept <n> starts a chat with them; /block <n> drops their messages from now on.",
-        dim(),
+        app.theme.dim,
         width,
     ).into_iter().map(|l| (l, None)));
     rows.push((Line::from(""), None));
@@ -347,11 +347,9 @@ fn request_rows(app: &App, width: usize) -> Vec<Row> {
             Line::from(vec![
                 Span::styled(
                     format!("{}. {}…", i + 1, request.from.short()),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
+                    app.theme.accent.add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(format!("  {}", request.from), dim()),
+                Span::styled(format!("  {}", request.from), app.theme.dim),
             ]),
             None,
         ));
@@ -359,7 +357,7 @@ fn request_rows(app: &App, width: usize) -> Vec<Row> {
         for held in &request.messages[request.messages.len() - shown..] {
             let prefix = vec![Span::styled(
                 format!("   {} ", clock(held.timestamp_ms)),
-                dim(),
+                app.theme.dim,
             )];
             rows.extend(
                 wrap_message(prefix, &held.text, Style::default(), width)
@@ -371,7 +369,7 @@ fn request_rows(app: &App, width: usize) -> Vec<Row> {
             rows.push((
                 Line::styled(
                     format!("   … and {} earlier", request.messages.len() - shown),
-                    dim(),
+                    app.theme.dim,
                 ),
                 None,
             ));
@@ -393,6 +391,12 @@ fn thread_rows(app: &App, peer: &UserId, width: usize) -> Vec<Row> {
         .unwrap_or_default();
     let mut rows: Vec<Row> = Vec::new();
     let mut last_day: Option<NaiveDate> = None;
+    let today = Local::now().date_naive();
+    let marker = app
+        .new_marker
+        .as_ref()
+        .filter(|(p, _)| p == peer)
+        .map(|(_, id)| id.as_str());
     for (i, line) in lines.iter().enumerate() {
         // A separator whenever the calendar day changes.
         let day = Local
@@ -402,32 +406,31 @@ fn thread_rows(app: &App, peer: &UserId, width: usize) -> Vec<Row> {
         if day != last_day {
             if let Some(day) = day {
                 rows.push((
-                    separator(&day.format(" %A %-d %B %Y ").to_string(), width),
+                    separator(&day_label(day, today), width, app.theme.dim),
                     None,
                 ));
             }
             last_day = day;
         }
+        // A rule above what arrived while this chat was not open.
+        if marker == Some(line.id.as_str()) {
+            rows.push((separator(" new messages ", width, app.theme.accent), None));
+        }
         let (name, name_style) = match line.direction {
-            Direction::Sent => ("you".to_owned(), Style::default().fg(Color::Green)),
-            Direction::Received => (peer_name.clone(), Style::default().fg(Color::Cyan)),
+            Direction::Sent => ("you".to_owned(), app.theme.you),
+            Direction::Received => (peer_name.clone(), app.theme.peer),
         };
         // ⋯ waiting for the relay, ✓ accepted by the relay, ✓✓ delivered to
         // their device, ✓✓ in colour read, ✗ refused for good (or their
         // ASCII stand-ins).
         let g = app.glyphs;
         let (mark, mark_style) = match line.direction {
-            Direction::Sent if line.failed => (g.failed, Style::default().fg(Color::Red)),
-            Direction::Sent if !line.delivered => (g.pending, dim()),
+            Direction::Sent if line.failed => (g.failed, app.theme.error),
+            Direction::Sent if !line.delivered => (g.pending, app.theme.dim),
             Direction::Sent => match line.receipt {
-                Some(ReceiptKind::Read) => (
-                    g.delivered,
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Some(ReceiptKind::Delivered) => (g.delivered, dim()),
-                None => (g.accepted, dim()),
+                Some(ReceiptKind::Read) => (g.delivered, app.theme.read),
+                Some(ReceiptKind::Delivered) => (g.delivered, app.theme.dim),
+                None => (g.accepted, app.theme.dim),
             },
             Direction::Received => ("", Style::default()),
         };
@@ -437,7 +440,7 @@ fn thread_rows(app: &App, peer: &UserId, width: usize) -> Vec<Row> {
             format!(" {mark}")
         };
         let prefix = vec![
-            Span::styled(format!("{} ", clock(line.timestamp_ms)), dim()),
+            Span::styled(format!("{} ", clock(line.timestamp_ms)), app.theme.dim),
             Span::styled(name, name_style.add_modifier(Modifier::BOLD)),
             Span::styled(mark, mark_style),
             Span::raw(": "),
@@ -530,7 +533,13 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
         .collect();
 
     frame.render_widget(
-        Paragraph::new(shown).block(Block::bordered().title(title)),
+        Paragraph::new(shown).block(Block::bordered().title(title).border_style(
+            if app.selection.is_none() && !app.help_open {
+                app.theme.accent
+            } else {
+                Style::default()
+            },
+        )),
         area,
     );
     let x = area.x + 1 + (cursor_col - offset).min(inner_width.saturating_sub(1)) as u16;
@@ -540,32 +549,29 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     let g = app.glyphs;
-    let (dot, label, color) = match app.connection {
-        Connection::Connecting => (g.connecting, "connecting", Color::Yellow),
-        Connection::Connected => (g.connected, "connected", Color::Green),
-        Connection::Disconnected => (g.disconnected, "disconnected", Color::Red),
+    let (dot, label, style) = match app.connection {
+        Connection::Connecting => (g.connecting, "connecting", app.theme.warn),
+        Connection::Connected => (g.connected, "connected", app.theme.good),
+        Connection::Disconnected => (g.disconnected, "disconnected", app.theme.error),
     };
     let mut spans = vec![
-        Span::styled(format!(" {dot} {label} "), Style::default().fg(color)),
-        Span::styled(app.relay_url.clone(), dim()),
+        Span::styled(format!(" {dot} {label} "), style),
+        Span::styled(app.relay_url.clone(), app.theme.dim),
     ];
     let pending = app.pending_count();
     if pending > 0 {
-        spans.push(Span::styled(
-            format!("  {pending} queued"),
-            Style::default().fg(Color::Yellow),
-        ));
+        spans.push(Span::styled(format!("  {pending} queued"), app.theme.warn));
     }
     match &app.toast {
         Some((text, _)) => {
             spans.push(Span::raw("  "));
-            spans.push(Span::styled(
-                text.clone(),
-                Style::default().fg(Color::Yellow),
-            ));
+            spans.push(Span::styled(text.clone(), app.theme.toast));
         }
         None => {
-            spans.push(Span::styled(format!("  {}", app.status_hint()), dim()));
+            spans.push(Span::styled(
+                format!("  {}", app.status_hint()),
+                app.theme.dim,
+            ));
         }
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -590,8 +596,20 @@ pub fn stamp(timestamp_ms: u64) -> String {
         .unwrap_or_else(|| "--:--".into())
 }
 
-/// A dim rule with `text` in the middle, `width` columns wide.
-fn separator(text: &str, width: usize) -> Line<'static> {
+/// The date rule's text: today and yesterday by name, the rest in full.
+fn day_label(day: NaiveDate, today: NaiveDate) -> String {
+    let full = day.format("%A %-d %B %Y");
+    if day == today {
+        format!(" Today, {full} ")
+    } else if today.pred_opt() == Some(day) {
+        format!(" Yesterday, {full} ")
+    } else {
+        format!(" {full} ")
+    }
+}
+
+/// A rule with `text` in the middle, `width` columns wide.
+fn separator(text: &str, width: usize, style: Style) -> Line<'static> {
     let text_width = text.width().min(width);
     let left = width.saturating_sub(text_width) / 2;
     let right = width.saturating_sub(text_width + left);
@@ -602,7 +620,7 @@ fn separator(text: &str, width: usize) -> Line<'static> {
             truncate(text, width),
             "─".repeat(right)
         ),
-        dim(),
+        style,
     )
 }
 
@@ -732,6 +750,19 @@ mod tests {
     fn truncates_with_ellipsis() {
         assert_eq!(truncate("hello", 10), "hello");
         assert_eq!(truncate("hello world", 6), "hello…");
+    }
+
+    #[test]
+    fn date_rules_name_today_and_yesterday() {
+        let today = NaiveDate::from_ymd_opt(2026, 9, 4).unwrap();
+        assert_eq!(day_label(today, today), " Today, Friday 4 September 2026 ");
+        let yesterday = NaiveDate::from_ymd_opt(2026, 9, 3).unwrap();
+        assert_eq!(
+            day_label(yesterday, today),
+            " Yesterday, Thursday 3 September 2026 "
+        );
+        let earlier = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        assert_eq!(day_label(earlier, today), " Thursday 1 January 2026 ");
     }
 
     #[test]

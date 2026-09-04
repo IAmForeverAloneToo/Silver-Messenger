@@ -6,6 +6,7 @@ mod commands;
 mod glyphs;
 mod notify;
 mod qr;
+mod theme;
 mod ui;
 
 use std::path::PathBuf;
@@ -103,6 +104,11 @@ struct Args {
     /// itself where the terminal is known; /marks changes it for good.
     #[arg(long, env = "SILVER_ASCII")]
     ascii: bool,
+
+    /// Colours: dark (default), light for a light background, or mono for
+    /// none at all (NO_COLOR does the same). /theme changes it for good.
+    #[arg(long, env = "SILVER_THEME", value_name = "NAME")]
+    theme: Option<String>,
 }
 
 #[tokio::main]
@@ -240,6 +246,11 @@ async fn main() -> anyhow::Result<()> {
     } else {
         glyphs::Marks::parse(&config.marks).unwrap_or(glyphs::Marks::Auto)
     };
+    let theme = theme::choose(
+        args.theme.as_deref(),
+        &config.theme,
+        std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()),
+    );
     let (client, events) = Client::spawn(relay_url.clone(), Arc::new(identity), options)?;
     let app = app::App::new(
         store,
@@ -248,6 +259,7 @@ async fn main() -> anyhow::Result<()> {
         created,
         send_epoch,
         glyphs::Glyphs::for_marks(marks),
+        theme::Theme::named(theme),
     )?;
 
     let terminal = ratatui::init();

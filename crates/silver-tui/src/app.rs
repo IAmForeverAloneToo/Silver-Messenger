@@ -23,6 +23,7 @@ use crate::clipboard::{Clipboard, Copied};
 use crate::commands;
 use crate::glyphs::{Glyphs, Marks};
 use crate::notify::{Notifier, NotifyMode};
+use crate::theme::{Theme, ThemeName};
 use crate::{qr, ui};
 
 const TOAST_TTL: Duration = Duration::from_secs(6);
@@ -206,6 +207,12 @@ pub struct App {
     pub read_receipts: bool,
     /// The symbols the interface draws with.
     pub glyphs: Glyphs,
+    pub theme: Theme,
+    /// The terminal is too narrow for the chat list; set by the renderer.
+    pub narrow: bool,
+    /// The first unread message of the chat that was just opened, for the
+    /// "new messages" rule above it.
+    pub new_marker: Option<(UserId, String)>,
     clipboard: Clipboard,
     /// When Ctrl-C was pressed with nothing to copy; a second press quits.
     quit_armed: Option<Instant>,
@@ -262,6 +269,7 @@ impl App {
         fresh_identity: bool,
         send_epoch: u64,
         glyphs: Glyphs,
+        theme: Theme,
     ) -> anyhow::Result<Self> {
         let me = client.user_id();
         let contacts = store.load_contacts()?;
@@ -317,6 +325,9 @@ impl App {
             receipts: ReceiptQueue::default(),
             read_receipts,
             glyphs,
+            theme,
+            narrow: false,
+            new_marker: None,
             clipboard: Clipboard::new(),
             quit_armed: None,
             view: View::default(),
@@ -431,7 +442,7 @@ impl App {
     }
 
     /// Panes: System, one per contact, then Requests while any are pending.
-    fn pane_count(&self) -> usize {
+    pub fn pane_count(&self) -> usize {
         self.contacts.len() + 1 + usize::from(!self.requests.is_empty())
     }
 
@@ -1189,6 +1200,13 @@ impl App {
         self.selected = index.min(self.pane_count() - 1);
         self.scroll = 0;
         self.selection = None;
+        // A rule above what arrived while this chat was not open.
+        self.new_marker = self.selected_contact().map(|c| c.user_id).and_then(|id| {
+            self.unread
+                .get(&id)
+                .and_then(|ids| ids.first().cloned())
+                .map(|first| (id, first))
+        });
         self.mark_selected_read();
     }
 
@@ -1252,6 +1270,7 @@ impl App {
             "receipts" => self.cmd_receipts(&rest),
             "notify" => self.cmd_notify(&rest),
             "marks" | "ascii" => self.cmd_marks(&rest),
+            "theme" | "colors" | "colours" => self.cmd_theme(&rest),
             "search" | "find" => self.cmd_search(&rest),
             "accept" => self.cmd_accept(&rest),
             "block" => self.cmd_block(&rest),
@@ -1583,6 +1602,32 @@ impl App {
         );
     }
 
+    fn cmd_theme(&mut self, args: &[&str]) {
+        let name = match args.first() {
+            None => {
+                self.toast(format!(
+                    "Theme: {}. Usage: /theme dark|light|mono",
+                    self.theme.name.as_str()
+                ));
+                return;
+            }
+            Some(arg) => match ThemeName::parse(arg) {
+                Some(name) => name,
+                None => {
+                    self.toast("Usage: /theme dark|light|mono");
+                    return;
+                }
+            },
+        };
+        self.theme = Theme::named(name);
+        let mut config = self.store.load_config().unwrap_or_default();
+        config.theme = name.as_str().to_owned();
+        if let Err(e) = self.store.save_config(&config) {
+            self.toast(format!("Could not save config: {e}"));
+        }
+        self.toast(format!("Theme: {} (remembered).", name.as_str()));
+    }
+
     fn cmd_marks(&mut self, args: &[&str]) {
         let marks = match args.first() {
             None => {
@@ -1823,6 +1868,7 @@ impl App {
             return;
         };
         let peer = self.contacts[index].user_id;
+        self.new_marker = None; // answered: nothing is "new" any more
         self.send_content_to(peer, Content::Text { body: text });
     }
 
