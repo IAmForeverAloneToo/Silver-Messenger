@@ -180,3 +180,10 @@ with a `SHA256SUMS` file and publishes them on the releases page.
 The end-to-end test in `crates/silver-client/tests/e2e.rs` starts a relay on
 a random port, connects two clients, and checks both directions, offline
 queueing, and reconnection after the relay goes away.
+
+## License
+
+AGPL-3.0. You may use, study, share and modify Silver Messenger freely; if
+you distribute a modified version, or run a modified relay for other people
+over a network, you must offer them its source under the same terms. The
+relay serves a link to its source at `/` for that reason.

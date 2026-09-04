@@ -35,6 +35,15 @@ use tracing::{debug, error, info, warn};
 pub use store::{Enqueue, Limits, Stats, Store};
 
 pub const DEFAULT_LISTEN: &str = "0.0.0.0:7777";
+
+/// Served at `/`; the AGPL asks network services to point users at their source.
+pub const SOURCE_NOTICE: &str = concat!(
+    "Silver Messenger relay ",
+    env!("CARGO_PKG_VERSION"),
+    ". Source code (AGPL-3.0): ",
+    env!("CARGO_PKG_REPOSITORY"),
+    "\n"
+);
 const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
 /// Default time an unacknowledged envelope is kept.
 pub const DEFAULT_MESSAGE_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
@@ -209,6 +218,9 @@ pub async fn expire_periodically(state: Arc<RelayState>, ttl: Duration, every: D
 /// Build the HTTP router: `GET /healthz` and the WebSocket endpoint at `/ws`.
 pub fn router(state: Arc<RelayState>) -> Router {
     Router::new()
+        // AGPL section 13: people who use the relay over the network can get
+        // its source from here.
+        .route("/", get(|| async { SOURCE_NOTICE }))
         .route("/healthz", get(|| async { "ok" }))
         .route(silver_protocol::wire::WS_PATH, get(ws_handler))
         .with_state(state)
