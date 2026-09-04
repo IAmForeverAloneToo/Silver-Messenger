@@ -72,7 +72,7 @@ relay-bound login), so an older peer reads a newer one and vice versa.
   values (PQXDH-style), so a recording of today's traffic cannot be opened
   by a future quantum computer, and a flaw in ML-KEM alone changes
   nothing. The chat title says `forward secret, post-quantum` when it
-  applies; a peer or relay from before 0.7.0 gets the classical handshake
+  applies; a peer or relay from before 0.6.0 gets the classical handshake
   and `/session` says so. The relay keeps the new keys, reports them in
   `prekey_status` and advertises `pq_prekeys`. Deniability was considered
   and decided against for now; the reasoning and the path to it are in
@@ -87,6 +87,18 @@ relay-bound login), so an older peer reads a newer one and vice versa.
   keeps the pins and the crates current, and the OpenSSF Scorecard runs
   weekly. `silver --check-release` asks the releases page whether a
   newer version exists; only on request, never by itself.
+- **A security policy and an assessment.** `SECURITY.md` says how to
+  report a vulnerability privately, what to expect, what is in scope and
+  which versions get fixes. `docs/SECURITY_ASSESSMENT.md` walks the OWASP
+  ASVS Level 2 controls and says, for each that applies, whether the code
+  meets it and what closes any gap. The threat model is rewritten for the
+  whole phase, with the assumptions, a future quantum adversary and a
+  supply-chain attacker among the actors, what backs each claim, and a
+  table of the gaps with where they close. Release builds now keep
+  integer overflow checks on, so a wrapped counter is a crash to fix
+  rather than a silent wrong number in a limit. An independent review of
+  `silver-protocol` and the relay is planned before 1.0 and has not
+  happened yet; the policy says how to offer one.
 
 ### Changed
 

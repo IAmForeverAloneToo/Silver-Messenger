@@ -63,7 +63,7 @@ pub struct Prekeys {
     pub signed: SignedPrekey,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub one_time: Vec<OneTimePrekey>,
-    /// The signed ML-KEM-768 key (protocol v3). Clients before 0.7.0 publish
+    /// The signed ML-KEM-768 key (protocol v3). Clients before 0.6.0 publish
     /// none and are talked to with a classical handshake.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pq_signed: Option<SignedPqPrekey>,

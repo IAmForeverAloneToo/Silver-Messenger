@@ -1882,7 +1882,7 @@ impl App {
                 if info.post_quantum {
                     "Its handshake also used ML-KEM-768, so a recording of it stays closed even to a quantum computer."
                 } else {
-                    "Its handshake was classical (X25519 only): their client or the relay predates the post-quantum handshake of 0.7.0. It becomes post-quantum by itself when the next session starts after they update."
+                    "Its handshake was classical (X25519 only): their client or the relay predates the post-quantum handshake of 0.6.0. It becomes post-quantum by itself when the next session starts after they update."
                 }
             ),
             None => match &contact.bundle {

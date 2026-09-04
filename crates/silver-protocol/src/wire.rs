@@ -144,7 +144,7 @@ pub enum ServerFrame {
         one_time_remaining: u32,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         consumed: Vec<u32>,
-        /// The same for one-time ML-KEM keys; a relay from before 0.7.0
+        /// The same for one-time ML-KEM keys; a relay from before 0.6.0
         /// says nothing about them.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pq_one_time_remaining: Option<u32>,
@@ -352,7 +352,7 @@ mod tests {
             pq_consumed: vec![11],
         };
         assert_eq!(ServerFrame::decode(&status.encode()).unwrap(), status);
-        // A relay from before 0.7.0 says nothing about ML-KEM keys.
+        // A relay from before 0.6.0 says nothing about ML-KEM keys.
         let old = r#"{"type":"prekey_status","one_time_remaining":3,"consumed":[7,9]}"#;
         assert_eq!(
             ServerFrame::decode(old).unwrap(),

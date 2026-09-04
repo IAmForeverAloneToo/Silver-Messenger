@@ -109,7 +109,7 @@ pub(crate) struct PrekeyFile {
     signed: Vec<PrekeySecret>,
     #[serde(default)]
     one_time: Vec<OneTimeSecret>,
-    /// The signed ML-KEM keys, newest first; empty before 0.7.0.
+    /// The signed ML-KEM keys, newest first; empty before 0.6.0.
     #[serde(default)]
     pq_signed: Vec<PqPrekeySecret>,
     #[serde(default)]
@@ -216,7 +216,7 @@ impl SessionStore {
 
     /// Note what the relay reported after a publish. Returns whether a
     /// deposit ran low enough that fresh keys were made and a new publish
-    /// is needed. A relay from before 0.7.0 reports nothing about ML-KEM
+    /// is needed. A relay from before 0.6.0 reports nothing about ML-KEM
     /// keys (`None`); it does not keep them, so nothing is done about them.
     pub fn apply_prekey_status(
         &mut self,
@@ -750,7 +750,7 @@ mod tests {
             PQ_ONE_TIME_TARGET
         );
         assert_eq!(p.sessions.prekeys.pq_one_time.len(), PQ_ONE_TIME_TARGET + 2);
-        // A relay that says nothing about ML-KEM keys (before 0.7.0) does
+        // A relay that says nothing about ML-KEM keys (before 0.6.0) does
         // not keep them, so its silence asks for nothing.
         assert!(
             !p.sessions
@@ -767,7 +767,7 @@ mod tests {
         assert_eq!(p.sessions.prekeys.pq_signed.len(), 1);
         assert_eq!(p.sessions.prekeys.pq_one_time.len(), PQ_ONE_TIME_TARGET);
 
-        // A prekey file from before 0.7.0 gets ML-KEM keys on its next publish.
+        // A prekey file from before 0.6.0 gets ML-KEM keys on its next publish.
         let mut old = Party::new();
         old.sessions.prekeys_for_publish(&old.identity, 0).unwrap();
         old.sessions.prekeys.pq_signed.clear();
@@ -813,7 +813,7 @@ mod tests {
         assert_eq!(bob.sessions.prekeys.pq_one_time.len(), topped_up);
         assert!(info(&bob, &carol));
 
-        // A peer that published no ML-KEM keys (a client before 0.7.0)
+        // A peer that published no ML-KEM keys (a client before 0.6.0)
         // gets a classical session, and both sides say so.
         let mut classical = bob.bundle(6);
         let prekeys = classical.prekeys.as_mut().unwrap();

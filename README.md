@@ -8,7 +8,10 @@ forwards encrypted blobs. The relay cannot read your messages or forge them.
 The sender's identity is sealed inside the ciphertext, so the envelope itself
 names only the recipient; the relay can still see which connection submitted
 it. What the relay, the network and a stolen laptop can and cannot learn is
-spelled out in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+spelled out in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md); how the code
+measures up against the OWASP ASVS controls is in
+[docs/SECURITY_ASSESSMENT.md](docs/SECURITY_ASSESSMENT.md); how to report
+a vulnerability is in [SECURITY.md](SECURITY.md).
 
 ## Layout
 
@@ -340,7 +343,7 @@ it does not, is in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
   each change of direction in the conversation performs a fresh
   Diffie–Hellman step. A stolen device or key cannot decrypt messages that
   were already read, and a compromised chain heals at the next step. From
-  0.7.0 the handshake is a hybrid (PQXDH-style): the recipient also
+  0.6.0 the handshake is a hybrid (PQXDH-style): the recipient also
   publishes ML-KEM-768 keys (FIPS 203), the sender encapsulates a secret
   to one of them, and the session key depends on the Diffie–Hellman values
   *and* that secret, so a recording of today's traffic stays closed to a
@@ -448,6 +451,9 @@ contents of `minisign.key` in the repository secret `MINISIGN_SECRET_KEY`
 (the key is generated unencrypted so the workflow can use it; the secret
 store protects it). Until then the workflow says so and publishes
 `SHA256SUMS` unsigned; the provenance attestation is there either way.
+
+Security problems go through [SECURITY.md](SECURITY.md), not the issue
+tracker.
 
 The terminal client is tested for real in `tests/tui/`: each test starts a
 relay and one or two clients in pseudo-terminals, types, clicks, drags

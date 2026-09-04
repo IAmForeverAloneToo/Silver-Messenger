@@ -589,7 +589,7 @@ mod tests {
     use super::*;
     use crate::prekey::Prekeys;
 
-    /// What a peer publishes: `Classical` is a client before 0.7.0.
+    /// What a peer publishes: `Classical` is a client before 0.6.0.
     #[derive(Clone, Copy, PartialEq)]
     enum Keys {
         Classical,

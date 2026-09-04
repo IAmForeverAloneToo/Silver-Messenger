@@ -83,3 +83,7 @@ open = "5"
 lto = "thin"
 codegen-units = 1
 strip = true
+# Integer overflow panics in release builds too, as it does in tests, so a
+# counter or size that wraps is a crash to fix rather than a silent wrong
+# number in a limit check.
+overflow-checks = true

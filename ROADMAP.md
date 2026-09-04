@@ -268,7 +268,7 @@ sends, so a message cannot drive the terminal.
         (bodies are signed today, so a recipient can prove who wrote
         what) and records the decision either way. (FIPS 203, Signal
         PQXDH.)
-35. [ ] **Security policy, assessment and outside eyes** (S). A
+35. [x] **Security policy, assessment and outside eyes** (S). A
         `SECURITY.md` with how to report a vulnerability and which
         versions get fixes; `docs/SECURITY_ASSESSMENT.md` that walks the
         ASVS Level 2 controls and says for each whether the code meets
