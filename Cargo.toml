@@ -23,6 +23,7 @@ silver-client = { path = "crates/silver-client" }
 # async runtime & networking
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time", "net", "fs", "io-util", "signal"] }
 tokio-util = "0.7"
+redb = "4"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 axum = { version = "0.8", features = ["ws"] }
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots", "rustls-tls-native-roots"] }

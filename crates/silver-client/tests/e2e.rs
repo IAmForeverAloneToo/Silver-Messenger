@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use silver_client::{Client, ClientEvent, ConnectOptions};
 use silver_protocol::{Content, Identity};
-use silver_relay::RelayState;
+use silver_relay::{Limits, RelayState};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
@@ -227,4 +227,101 @@ async fn client_reconnects_after_relay_restart() {
     .await;
     assert!(alice_c.lookup(alice.user_id()).await.unwrap().is_some());
     alice_c.shutdown().await;
+}
+
+#[tokio::test]
+async fn relay_restart_keeps_queued_messages() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("relay.redb");
+    let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    std_listener.set_nonblocking(true).unwrap();
+    let addr = std_listener.local_addr().unwrap();
+    let url = format!("ws://{addr}/ws");
+
+    // A file-backed relay on its own runtime, so it can be torn down hard.
+    let first = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let db_for_first = db.clone();
+    first.spawn(async move {
+        let state = RelayState::open(&db_for_first, Limits::default()).unwrap();
+        let listener = TcpListener::from_std(std_listener).unwrap();
+        silver_relay::serve(listener, state, std::future::pending()).await
+    });
+
+    let alice = Arc::new(Identity::generate());
+    let bob = Arc::new(Identity::generate());
+
+    // Bob publishes his key, then goes offline.
+    let (bob_c, mut bob_ev) =
+        Client::spawn(url.clone(), bob.clone(), ConnectOptions::default()).unwrap();
+    wait_for(&mut bob_ev, "bob connected", |e| {
+        matches!(e, ClientEvent::Connected { .. })
+    })
+    .await;
+    bob_c.shutdown().await;
+
+    // Alice queues two messages for him and the relay confirms both.
+    let (alice_c, mut alice_ev) =
+        Client::spawn(url.clone(), alice.clone(), ConnectOptions::default()).unwrap();
+    wait_for(&mut alice_ev, "alice connected", |e| {
+        matches!(e, ClientEvent::Connected { .. })
+    })
+    .await;
+    let bundle = alice_c.lookup(bob.user_id()).await.unwrap().unwrap();
+    for i in 0..2 {
+        let env = alice_c
+            .send_text(&bundle, format!("durable {i}"))
+            .await
+            .unwrap();
+        wait_for(
+            &mut alice_ev,
+            "sent",
+            |e| matches!(e, ClientEvent::Sent { id } if *id == env.id),
+        )
+        .await;
+    }
+    alice_c.shutdown().await;
+
+    // Kill the relay process-style, then start a fresh one on the same
+    // database file and port.
+    tokio::task::spawn_blocking(move || first.shutdown_timeout(Duration::from_secs(5)))
+        .await
+        .unwrap();
+    let listener = loop {
+        match TcpListener::bind(addr).await {
+            Ok(l) => break l,
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(e) => panic!("rebind failed: {e}"),
+        }
+    };
+    let state = loop {
+        match RelayState::open(&db, Limits::default()) {
+            Ok(s) => break s,
+            Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+        }
+    };
+    assert_eq!(state.queued_for(&bob.user_id()), 2);
+    tokio::spawn(silver_relay::serve(
+        listener,
+        state.clone(),
+        std::future::pending(),
+    ));
+
+    // Bob comes back and receives both, in order.
+    let (bob_c, mut bob_ev) =
+        Client::spawn(url.clone(), bob.clone(), ConnectOptions::default()).unwrap();
+    let mut texts = Vec::new();
+    while texts.len() < 2 {
+        let ev = wait_for(&mut bob_ev, "durable message", |e| body(e).is_some()).await;
+        texts.push(body(&ev).unwrap().1.to_owned());
+    }
+    assert_eq!(texts, ["durable 0", "durable 1"]);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(state.queued_for(&bob.user_id()), 0);
+    bob_c.shutdown().await;
 }

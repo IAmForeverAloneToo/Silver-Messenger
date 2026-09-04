@@ -8,6 +8,8 @@ Wants=network-online.target
 User=silver
 Group=silver
 EnvironmentFile=-/etc/silver-relay/relay.env
+# Database lives in /var/lib/silver-relay (exposed as STATE_DIRECTORY).
+StateDirectory=silver-relay
 ExecStart=/usr/local/bin/silver-relay
 Restart=always
 RestartSec=2

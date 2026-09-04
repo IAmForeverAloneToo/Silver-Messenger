@@ -16,7 +16,7 @@ Tick items off as they land on `main`.
 
 ## Phase 1: make what exists reliable
 
-1. [ ] **Relay persistence** (M). Mailboxes and key bundles in an embedded
+1. [x] **Relay persistence** (M). Mailboxes and key bundles in an embedded
        store (redb or SQLite) so an update or reboot loses nothing. Includes
        message expiry and a per-user disk quota. First because every deploy
        currently drops queued mail.

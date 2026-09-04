@@ -5,9 +5,15 @@
 //! [`Envelope`]s per recipient until the recipient acknowledges them. It never
 //! sees plaintext, and because senders are sealed inside the ciphertext it
 //! does not even learn who sent a given envelope.
+//!
+//! Bundles and mailboxes live in an embedded database ([`store`]), so
+//! restarts lose nothing; only the set of connected sessions is in memory.
 
-use std::collections::{HashMap, VecDeque};
+pub mod store;
+
+use std::collections::HashMap;
 use std::future::Future;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -21,28 +27,24 @@ use futures_util::{SinkExt, StreamExt};
 use rand::RngCore;
 use rand::rngs::OsRng;
 use silver_protocol::wire::{ClientFrame, ErrorCode, MAX_FRAME_BYTES, ServerFrame, verify_auth};
-use silver_protocol::{Envelope, KeyBundle, MAX_CIPHERTEXT_BYTES, UserId};
+use silver_protocol::{Envelope, KeyBundle, MAX_CIPHERTEXT_BYTES, UserId, now_ms};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
+
+pub use store::{Enqueue, Limits, Stats, Store};
 
 pub const DEFAULT_LISTEN: &str = "0.0.0.0:7777";
 const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
-/// Maximum unacknowledged envelopes kept per recipient.
-pub const MAX_QUEUE_PER_USER: usize = 1000;
+/// Default time an unacknowledged envelope is kept.
+pub const DEFAULT_MESSAGE_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// Everything the relay knows. Shared between connections.
-#[derive(Default)]
 pub struct RelayState {
-    inner: Mutex<Inner>,
+    store: Store,
+    limits: Limits,
+    online: Mutex<HashMap<UserId, Session>>,
     next_session: AtomicU64,
-}
-
-#[derive(Default)]
-struct Inner {
-    bundles: HashMap<UserId, KeyBundle>,
-    online: HashMap<UserId, Session>,
-    queues: HashMap<UserId, VecDeque<Envelope>>,
 }
 
 struct Session {
@@ -60,49 +62,85 @@ enum Outbound {
 type Rejection = (ErrorCode, &'static str);
 
 impl RelayState {
+    /// State kept only in memory; for tests and `--ephemeral`.
     pub fn new() -> Arc<Self> {
-        Arc::new(Self::default())
+        Self::with_store(
+            Store::in_memory().expect("in-memory store"),
+            Limits::default(),
+        )
+    }
+
+    /// State persisted in the database file at `path`.
+    pub fn open(path: &Path, limits: Limits) -> anyhow::Result<Arc<Self>> {
+        Ok(Self::with_store(Store::open(path)?, limits))
+    }
+
+    pub fn with_store(store: Store, limits: Limits) -> Arc<Self> {
+        Arc::new(Self {
+            store,
+            limits,
+            online: Mutex::new(HashMap::new()),
+            next_session: AtomicU64::new(0),
+        })
     }
 
     pub fn online_count(&self) -> usize {
-        self.lock().online.len()
+        self.online().len()
     }
 
     pub fn queued_for(&self, user: &UserId) -> usize {
-        self.lock().queues.get(user).map_or(0, VecDeque::len)
+        self.store.queued_count(user).unwrap_or(0) as usize
     }
 
     pub fn bundle(&self, user: &UserId) -> Option<KeyBundle> {
-        self.lock().bundles.get(user).cloned()
+        self.store.bundle(user).unwrap_or_else(|e| {
+            error!("reading bundle: {e:#}");
+            None
+        })
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
-        // The state is small and never poisoned by design; recover anyway.
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    pub fn stats(&self) -> Stats {
+        self.store.stats().unwrap_or_default()
+    }
+
+    /// Delete unacknowledged envelopes older than `ttl`. Returns how many.
+    pub fn expire(&self, ttl: Duration) -> usize {
+        let cutoff = now_ms().saturating_sub(ttl.as_millis() as u64);
+        match self.store.expire(cutoff) {
+            Ok(n) => n,
+            Err(e) => {
+                error!("expiring messages: {e:#}");
+                0
+            }
+        }
+    }
+
+    fn online(&self) -> std::sync::MutexGuard<'_, HashMap<UserId, Session>> {
+        self.online.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Register a freshly authenticated session, replacing any older one for
     /// the same user, and replay all unacknowledged envelopes into it.
     fn register(&self, user: UserId, tx: mpsc::UnboundedSender<Outbound>) -> u64 {
         let id = self.next_session.fetch_add(1, Ordering::Relaxed);
-        let mut inner = self.lock();
-        if let Some(old) = inner.online.insert(user, Session { id, tx: tx.clone() }) {
+        let queued = self.store.queued(&user).unwrap_or_else(|e| {
+            error!("reading mailbox: {e:#}");
+            Vec::new()
+        });
+        let mut online = self.online();
+        if let Some(old) = online.insert(user, Session { id, tx: tx.clone() }) {
             let _ = old.tx.send(Outbound::Close);
         }
-        if let Some(queue) = inner.queues.get(&user) {
-            for envelope in queue {
-                let _ = tx.send(Outbound::Frame(ServerFrame::Deliver {
-                    envelope: envelope.clone(),
-                }));
-            }
+        for envelope in queued {
+            let _ = tx.send(Outbound::Frame(ServerFrame::Deliver { envelope }));
         }
         id
     }
 
     fn unregister(&self, user: &UserId, session_id: u64) {
-        let mut inner = self.lock();
-        if inner.online.get(user).is_some_and(|s| s.id == session_id) {
-            inner.online.remove(user);
+        let mut online = self.online();
+        if online.get(user).is_some_and(|s| s.id == session_id) {
+            online.remove(user);
         }
     }
 
@@ -116,8 +154,10 @@ impl RelayState {
         if bundle.verify().is_err() {
             return Err((ErrorCode::BadSignature, "bundle signature is invalid"));
         }
-        self.lock().bundles.insert(*me, bundle);
-        Ok(())
+        self.store.put_bundle(&bundle).map_err(|e| {
+            error!("storing bundle: {e:#}");
+            (ErrorCode::Internal, "storage error")
+        })
     }
 
     /// Queue an envelope for its recipient and push it if they are online.
@@ -125,28 +165,44 @@ impl RelayState {
         if envelope.ciphertext.len() > MAX_CIPHERTEXT_BYTES {
             return Err((ErrorCode::TooLarge, "ciphertext too large"));
         }
-        let mut inner = self.lock();
-        let queue = inner.queues.entry(envelope.to).or_default();
-        if queue.len() >= MAX_QUEUE_PER_USER {
-            return Err((ErrorCode::MailboxFull, "recipient mailbox is full"));
+        let outcome = self
+            .store
+            .enqueue(&envelope, now_ms(), self.limits)
+            .map_err(|e| {
+                error!("storing envelope: {e:#}");
+                (ErrorCode::Internal, "storage error")
+            })?;
+        match outcome {
+            Enqueue::Stored => {
+                if let Some(session) = self.online().get(&envelope.to) {
+                    let _ = session
+                        .tx
+                        .send(Outbound::Frame(ServerFrame::Deliver { envelope }));
+                }
+                Ok(())
+            }
+            // A resend of something already queued: nothing to do, the
+            // recipient will get (or has got) the original.
+            Enqueue::Duplicate => Ok(()),
+            Enqueue::MailboxFull => Err((ErrorCode::MailboxFull, "recipient mailbox is full")),
         }
-        queue.push_back(envelope.clone());
-        if let Some(session) = inner.online.get(&envelope.to) {
-            let _ = session
-                .tx
-                .send(Outbound::Frame(ServerFrame::Deliver { envelope }));
-        }
-        Ok(())
     }
 
     fn ack(&self, me: &UserId, id: &str) {
-        let mut inner = self.lock();
-        if let Some(queue) = inner.queues.get_mut(me) {
-            queue.retain(|e| e.id != id);
-            if queue.is_empty() {
-                inner.queues.remove(me);
-            }
+        if let Err(e) = self.store.ack(me, id) {
+            error!("acknowledging envelope: {e:#}");
         }
+    }
+}
+
+/// Periodically delete envelopes older than `ttl`, forever.
+pub async fn expire_periodically(state: Arc<RelayState>, ttl: Duration, every: Duration) {
+    loop {
+        let removed = state.expire(ttl);
+        if removed > 0 {
+            info!("expired {removed} unacknowledged envelopes older than {ttl:?}");
+        }
+        tokio::time::sleep(every).await;
     }
 }
 

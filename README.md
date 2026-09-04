@@ -71,8 +71,13 @@ silver --proxy <URL>       HTTP CONNECT proxy to reach the relay through; rememb
 silver --print-id          print your user id and exit
 SILVER_LOG=debug silver    write logs to <data-dir>/silver.log
 
-silver-relay --listen <ADDR>   default 0.0.0.0:7777                         (env SILVER_RELAY_LISTEN)
-RUST_LOG=debug silver-relay    relay log level
+silver-relay --listen <ADDR>          default 0.0.0.0:7777                          (env SILVER_RELAY_LISTEN)
+silver-relay --data-dir <DIR>         database location; under systemd /var/lib/silver-relay (env SILVER_RELAY_DATA)
+silver-relay --message-ttl-days <N>   delete unacknowledged messages after N days, default 30 (env SILVER_RELAY_TTL_DAYS)
+silver-relay --max-mailbox-messages   per-recipient queue cap, default 1000            (env SILVER_RELAY_MAX_MESSAGES)
+silver-relay --max-mailbox-mib        per-recipient queue cap in MiB, default 32       (env SILVER_RELAY_MAX_MIB)
+silver-relay --ephemeral              keep everything in memory only
+RUST_LOG=debug silver-relay           relay log level
 ```
 
 Default data directory: `~/.local/share/silver-messenger` on Linux,
@@ -84,7 +89,8 @@ Default data directory: `~/.local/share/silver-messenger` on Linux,
 A relay is a single static binary that needs one open TCP port. It runs as
 the unprivileged `silver` user under a hardened systemd unit
 (`deploy/silver-relay.service`), listening on `0.0.0.0:7777`. Settings live
-in `/etc/silver-relay/relay.env`; logs are in `journalctl -u silver-relay`.
+in `/etc/silver-relay/relay.env`, the database in `/var/lib/silver-relay`,
+and logs are in `journalctl -u silver-relay`.
 Remember to open port 7777/tcp in your provider's firewall as well.
 
 **From GitHub Actions** (works for a private repository): add the secrets
@@ -138,13 +144,15 @@ the machine.
   re-addressed, altered, or forged.
 * **Relay auth**: on connect the relay sends a random nonce; the client signs
   it with its identity key. Only the owner of an id can read its mailbox.
-* **Delivery**: the relay keeps an envelope until the recipient acknowledges
-  it, so nothing is lost if a client drops mid-download. Clients de-duplicate
-  by envelope id.
+* **Delivery**: the relay keeps an envelope in an embedded database until the
+  recipient acknowledges it, so nothing is lost if a client drops
+  mid-download or the relay restarts. Unacknowledged envelopes expire after
+  30 days by default, mailboxes are capped per recipient, and resends of the
+  same envelope id are ignored. Clients de-duplicate by envelope id too.
 
 What v1 does **not** do yet: forward secrecy against a later compromise of
-a long-term key, encrypted storage at rest, and relay persistence across
-restarts. The ordered plan is in [ROADMAP.md](ROADMAP.md).
+a long-term key, and encrypted storage at rest. The ordered plan is in
+[ROADMAP.md](ROADMAP.md).
 
 ## Development
 
