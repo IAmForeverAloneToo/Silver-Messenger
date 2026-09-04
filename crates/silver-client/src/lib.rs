@@ -12,6 +12,7 @@ pub mod backup;
 pub mod connection;
 pub mod files;
 pub mod invite;
+pub mod keystore;
 mod outbox;
 pub mod proxy;
 pub mod receipts;
@@ -37,6 +38,8 @@ pub const CAPABILITIES: &[&str] = &[
     silver_protocol::envelope::capability::FILES,
 ];
 pub use silver_protocol as protocol;
-pub use store::{Config, Contact, ContactRequest, Direction, HeldMessage, HistoryEntry, Store};
+pub use store::{
+    Config, Contact, ContactRequest, Direction, HeldMessage, HistoryEntry, Protection, Store,
+};
 pub use tls::ConnectOptions;
 pub use vault::{FileCipher, VaultError};

@@ -23,6 +23,10 @@ const VAULT_AAD: &[u8] = b"silver-messenger/v1/vault";
 const FILE_MAGIC: &[u8; 4] = b"SMV1";
 /// Prefix of an encrypted line in a line-oriented file.
 pub const LINE_PREFIX: &str = "enc:";
+/// `Kdf::algorithm` when the data key is wrapped under a random key kept
+/// in the operating system's key store rather than under a passphrase.
+pub const KEYSTORE_ALGORITHM: &str = "os-keystore";
+const PASSPHRASE_ALGORITHM: &str = "argon2id";
 
 #[derive(Debug, thiserror::Error)]
 pub enum VaultError {
@@ -59,12 +63,36 @@ impl Kdf {
         let mut salt = [0u8; 16];
         OsRng.fill_bytes(&mut salt);
         Self {
-            algorithm: "argon2id".into(),
+            algorithm: PASSPHRASE_ALGORITHM.into(),
             m_cost_kib,
             t_cost,
             p_cost,
             salt,
         }
+    }
+
+    /// No stretching: the wrapping key comes from the key store. The salt
+    /// doubles as the name the key is stored under.
+    pub fn keystore() -> Self {
+        let mut salt = [0u8; 16];
+        OsRng.fill_bytes(&mut salt);
+        Self {
+            algorithm: KEYSTORE_ALGORITHM.into(),
+            m_cost_kib: 0,
+            t_cost: 0,
+            p_cost: 0,
+            salt,
+        }
+    }
+
+    pub fn is_keystore(&self) -> bool {
+        self.algorithm == KEYSTORE_ALGORITHM
+    }
+
+    /// The name the key store keeps this vault's wrapping key under.
+    pub fn keystore_name(&self) -> String {
+        let hex: String = self.salt.iter().map(|b| format!("{b:02x}")).collect();
+        format!("data-key-{hex}")
     }
 }
 
@@ -108,11 +136,33 @@ impl FileCipher {
 
     /// Recover the data key from `vault` with `passphrase`.
     pub fn unlock(vault: &VaultFile, passphrase: &str) -> Result<Self, VaultError> {
-        if vault.version != 1 || vault.kdf.algorithm != "argon2id" {
+        if vault.version != 1 || vault.kdf.algorithm != PASSPHRASE_ALGORITHM {
             return Err(anyhow::anyhow!("unsupported vault format").into());
         }
         let kek = derive(&vault.kdf, passphrase)?;
-        let key = open(&kek, VAULT_AAD, &vault.wrapped_key).ok_or(VaultError::WrongPassphrase)?;
+        Self::unwrap(vault, &kek)
+    }
+
+    /// Make a fresh data key wrapped under `kek`, a random key the caller
+    /// keeps in the operating system's key store.
+    pub fn create_with_kek(kek: &[u8; 32]) -> (VaultFile, Self) {
+        let mut key = Zeroizing::new([0u8; 32]);
+        OsRng.fill_bytes(key.as_mut_slice());
+        let cipher = Self { key };
+        let vault = cipher.wrap_under_kek(kek, Kdf::keystore());
+        (vault, cipher)
+    }
+
+    /// Recover the data key from a key-store vault with its `kek`.
+    pub fn unlock_with_kek(vault: &VaultFile, kek: &[u8; 32]) -> Result<Self, VaultError> {
+        if vault.version != 1 || !vault.kdf.is_keystore() {
+            return Err(anyhow::anyhow!("unsupported vault format").into());
+        }
+        Self::unwrap(vault, kek)
+    }
+
+    fn unwrap(vault: &VaultFile, kek: &[u8; 32]) -> Result<Self, VaultError> {
+        let key = open(kek, VAULT_AAD, &vault.wrapped_key).ok_or(VaultError::WrongPassphrase)?;
         let key: [u8; 32] = key
             .as_slice()
             .try_into()
@@ -120,6 +170,26 @@ impl FileCipher {
         Ok(Self {
             key: Zeroizing::new(key),
         })
+    }
+
+    /// The same data key wrapped under `passphrase` instead: files need no
+    /// rewriting when the protection changes.
+    pub fn wrap_under_passphrase(&self, passphrase: &str, kdf: Kdf) -> anyhow::Result<VaultFile> {
+        let kek = derive(&kdf, passphrase)?;
+        Ok(VaultFile {
+            version: 1,
+            kdf,
+            wrapped_key: seal(&kek, VAULT_AAD, self.key.as_slice()),
+        })
+    }
+
+    /// The same data key wrapped under a key-store `kek`.
+    pub fn wrap_under_kek(&self, kek: &[u8; 32], kdf: Kdf) -> VaultFile {
+        VaultFile {
+            version: 1,
+            kdf,
+            wrapped_key: seal(kek, VAULT_AAD, self.key.as_slice()),
+        }
     }
 
     pub fn is_encrypted(bytes: &[u8]) -> bool {
@@ -267,5 +337,44 @@ mod tests {
     #[test]
     fn empty_passphrase_is_refused() {
         assert!(FileCipher::create("", Kdf::fast()).is_err());
+    }
+
+    #[test]
+    fn the_data_key_moves_between_a_key_store_key_and_a_passphrase() {
+        let kek = [9u8; 32];
+        let (vault, cipher) = FileCipher::create_with_kek(&kek);
+        assert!(vault.kdf.is_keystore());
+        assert!(vault.kdf.keystore_name().starts_with("data-key-"));
+        let blob = cipher.encrypt("contacts.json", b"[1]");
+        let again = FileCipher::unlock_with_kek(&vault, &kek).unwrap();
+        assert_eq!(
+            again.decrypt("contacts.json", &blob).unwrap().as_slice(),
+            b"[1]"
+        );
+        assert!(FileCipher::unlock_with_kek(&vault, &[8u8; 32]).is_err());
+        assert!(
+            FileCipher::unlock(&vault, "hunter2").is_err(),
+            "not a passphrase vault"
+        );
+        // Rewrapped under a passphrase, the files stay as they are.
+        let rewrapped = cipher
+            .wrap_under_passphrase("hunter2", Kdf::fast())
+            .unwrap();
+        let by_passphrase = FileCipher::unlock(&rewrapped, "hunter2").unwrap();
+        assert_eq!(
+            by_passphrase
+                .decrypt("contacts.json", &blob)
+                .unwrap()
+                .as_slice(),
+            b"[1]"
+        );
+        assert!(FileCipher::unlock_with_kek(&rewrapped, &kek).is_err());
+        // And back.
+        let back = by_passphrase.wrap_under_kek(&kek, Kdf::keystore());
+        let by_kek = FileCipher::unlock_with_kek(&back, &kek).unwrap();
+        assert_eq!(
+            by_kek.decrypt("contacts.json", &blob).unwrap().as_slice(),
+            b"[1]"
+        );
     }
 }

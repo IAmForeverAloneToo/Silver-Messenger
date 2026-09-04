@@ -120,6 +120,7 @@ refused. Received files are saved under their own name in
 | `/unblock <id>`, `/blocked`     | Undo a block; list blocked ids                               |
 | `/me`                           | Show your own id                                             |
 | `/relay <ws-url>`               | Change the relay (used on next start)                        |
+| `/lock`                         | Forget the keys until the passphrase is typed again (needs one; `lock_after_minutes` in config.json does it by itself) |
 | `/help`, `/quit`                |                                                              |
 
 `F1` (or `/help`) opens a help overlay with all of this. `Tab` completes
@@ -161,7 +162,8 @@ silver --no-mouse          leave the mouse to the terminal: no wheel scrolling, 
 silver --ascii             draw marks in ASCII (v, vv, x, ..); chosen by itself in the classic Windows console (env SILVER_ASCII)
 silver --theme <NAME>      dark (default), light for a light background, or mono for no colour; NO_COLOR means mono (env SILVER_THEME)
 silver --set-passphrase    encrypt keys, contacts and history under a passphrase (asked at every start)
-silver --remove-passphrase store everything unencrypted again
+silver --remove-passphrase drop the passphrase; files stay encrypted under this computer's key store where there is one
+silver --no-keystore       keep the files unencrypted rather than under a key from this computer's key store; remembered
 SILVER_PASSPHRASE=…        supplies the passphrase non-interactively (scripts, tests)
 silver --export-backup <F> write an encrypted backup of identity and contacts to F (asks for a passphrase for it)
 silver --import-backup <F> restore identity and contacts from F; add --force to replace an existing identity
@@ -186,9 +188,15 @@ RUST_LOG=debug silver-relay           relay log level
 
 Default data directory: `~/.local/share/silver-messenger` on Linux,
 `~/Library/Application Support/silver-messenger` on macOS,
-`%APPDATA%\silver-messenger\data` on Windows. Received files go to
-`downloads/` inside it; they are ordinary files, not encrypted at rest even
-when a passphrase is set.
+`%APPDATA%\silver-messenger\data` on Windows. Everything in it is encrypted
+at rest: under a passphrase if you set one, otherwise under a key kept in
+this computer's key store (the Credential Manager on Windows, the Keychain
+on macOS, the Secret Service on Linux desktops), so a copied directory is
+useless elsewhere. Where there is no key store (a server, a container) the
+files are plain and the System pane says so at start. Received files go to
+`downloads/` inside it; they are ordinary files, not encrypted at rest, so
+other programs can open them. The client keeps its keys out of core dumps
+and, on Linux, away from debuggers of the same user.
 
 ## Deploying a relay
 

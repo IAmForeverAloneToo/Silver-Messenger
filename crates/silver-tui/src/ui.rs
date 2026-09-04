@@ -825,6 +825,7 @@ mod tests {
             1,
             crate::glyphs::UNICODE,
             crate::theme::Theme::dark(),
+            crate::app::AtRest::Passphrase,
         )
         .unwrap();
         app.connection = Connection::Connected;
@@ -978,6 +979,7 @@ mod tests {
             1,
             crate::glyphs::UNICODE,
             crate::theme::Theme::dark(),
+            crate::app::AtRest::Passphrase,
         )
         .unwrap();
         app.connection = Connection::Connected;

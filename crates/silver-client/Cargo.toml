@@ -28,6 +28,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 directories = { workspace = true }
 unicode-normalization = { workspace = true }
+keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "async-secret-service", "async-io", "crypto-rust"] }
 
 [dev-dependencies]
 rcgen = { workspace = true }

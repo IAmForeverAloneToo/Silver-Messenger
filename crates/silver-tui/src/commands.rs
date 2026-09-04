@@ -150,6 +150,12 @@ pub const COMMANDS: &[CommandInfo] = &[
         "change the relay (takes effect on next start)",
     ),
     cmd("help", &["h", "?"], "", "show this help"),
+    cmd(
+        "lock",
+        &[],
+        "",
+        "forget the keys until the passphrase is typed again (needs one; lock_after_minutes in config.json does it by itself)",
+    ),
     cmd("quit", &["q", "exit"], "", "exit"),
 ];
 

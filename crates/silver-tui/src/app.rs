@@ -316,9 +316,35 @@ pub struct App {
     /// Epoch for numbering outgoing messages; see [`silver_protocol::Sequence`].
     send_epoch: u64,
     should_quit: bool,
+    /// How the data directory is protected on disk.
+    at_rest: AtRest,
+    /// Lock after this long without a keystroke, when set and possible.
+    lock_after: Option<Duration>,
+    last_activity: Instant,
+    /// `/lock` was asked for, or the idle time ran out.
+    lock_requested: bool,
+}
+
+/// What stands between the data directory and whoever copies it, as the
+/// front end tells the user at the start.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AtRest {
+    Passphrase,
+    Keystore,
+    /// Plain files, and why.
+    Plain(String),
+}
+
+/// Why [`App::run`] returned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Exit {
+    Quit,
+    /// Drop everything that holds keys and ask for the passphrase again.
+    Lock,
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         store: Store,
         client: Client,
@@ -327,6 +353,7 @@ impl App {
         send_epoch: u64,
         glyphs: Glyphs,
         theme: Theme,
+        at_rest: AtRest,
     ) -> anyhow::Result<Self> {
         let me = client.user_id();
         let contacts = store.load_contacts()?;
@@ -334,6 +361,8 @@ impl App {
         let blocked = store.load_blocked()?;
         let config = store.load_config()?;
         let read_receipts = config.read_receipts;
+        let lock_after = (config.lock_after_minutes > 0)
+            .then(|| Duration::from_secs(config.lock_after_minutes.saturating_mul(60)));
         let notifier = Notifier::new(NotifyMode::parse(&config.notify).unwrap_or(NotifyMode::All));
         let pending: HashSet<String> = client.pending_ids().into_iter().collect();
         let mut threads = HashMap::new();
@@ -421,8 +450,25 @@ impl App {
             internal_rx: Some(internal_rx),
             send_epoch,
             should_quit: false,
+            at_rest,
+            lock_after,
+            last_activity: Instant::now(),
+            lock_requested: false,
         };
         app.system(Level::Info, "Welcome to Silver Messenger.");
+        match &app.at_rest {
+            AtRest::Passphrase => {}
+            AtRest::Keystore => app.system(
+                Level::Info,
+                "Keys, contacts and history are encrypted with a key kept in this computer's key store: a copy of the data directory is useless elsewhere. A passphrase (--set-passphrase) protects them from anyone using this account too.",
+            ),
+            AtRest::Plain(why) => app.system(
+                Level::Warn,
+                format!(
+                    "Keys, contacts and history are stored unencrypted: {why}. --set-passphrase protects them with a passphrase."
+                ),
+            ),
+        }
         if fresh_identity {
             app.system(
                 Level::Info,
@@ -458,33 +504,59 @@ impl App {
         mut self,
         mut terminal: DefaultTerminal,
         mut events: mpsc::Receiver<ClientEvent>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Exit> {
         let mut keys = spawn_input_thread();
         let mut internal_rx = self.internal_rx.take().expect("run is called once");
         let mut tick = tokio::time::interval(Duration::from_millis(250));
         self.notifier.push_title();
 
-        loop {
+        let exit = loop {
             terminal.draw(|frame| ui::draw(frame, &mut self))?;
             let unread: usize =
                 self.unread.values().map(Vec::len).sum::<usize>() + self.held_message_count();
             self.notifier.set_unread(unread);
             tokio::select! {
-                Some(ev) = keys.recv() => self.handle_terminal_event(ev),
+                Some(ev) = keys.recv() => {
+                    self.last_activity = Instant::now();
+                    self.handle_terminal_event(ev)
+                }
                 Some(ev) = events.recv() => self.handle_client_event(ev),
                 Some(ev) = internal_rx.recv() => self.handle_internal(ev),
                 _ = tick.tick() => {
                     self.expire_toast();
                     self.flush_receipts();
+                    if let Some(after) = self.lock_after {
+                        if self.can_lock() && self.last_activity.elapsed() >= after {
+                            self.lock_requested = true;
+                        }
+                    }
                 }
             }
-            if self.should_quit {
-                break;
+            if self.lock_requested {
+                break Exit::Lock;
             }
-        }
+            if self.should_quit {
+                break Exit::Quit;
+            }
+        };
         self.notifier.pop_title();
         self.client.shutdown().await;
-        Ok(())
+        Ok(exit)
+    }
+
+    /// Locking only means something when a passphrase stands between the
+    /// files and the next start.
+    fn can_lock(&self) -> bool {
+        self.at_rest == AtRest::Passphrase
+    }
+
+    /// `/lock`: drop the keys and ask for the passphrase again.
+    fn cmd_lock(&mut self) {
+        if self.can_lock() {
+            self.lock_requested = true;
+        } else {
+            self.toast("Locking needs a passphrase: set one with --set-passphrase.");
+        }
     }
 
     // --- derived state -----------------------------------------------------
@@ -1350,6 +1422,7 @@ impl App {
             "files" => self.cmd_files(&rest),
             "open" => self.cmd_open(),
             "relay" => self.cmd_relay(&rest),
+            "lock" => self.cmd_lock(),
             "quit" | "q" | "exit" => self.should_quit = true,
             other => match commands::closest(other) {
                 Some(meant) => self.toast(format!(

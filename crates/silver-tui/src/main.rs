@@ -1,4 +1,4 @@
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 //! Silver Messenger terminal client.
 
 mod app;
@@ -23,9 +23,12 @@ use ratatui::crossterm::event::{
 };
 use ratatui::crossterm::execute;
 use silver_client::{
-    Client, ConnectOptions, DEFAULT_RELAY_URL, InviteLink, Proxy, SessionStore, Store, VaultError,
+    Client, ConnectOptions, DEFAULT_RELAY_URL, InviteLink, Protection, Proxy, SessionStore, Store,
+    VaultError, keystore,
 };
 use tracing_subscriber::EnvFilter;
+
+use crate::app::{AtRest, Exit};
 
 /// End-to-end encrypted messaging in your terminal.
 #[derive(Parser, Debug)]
@@ -68,10 +71,17 @@ struct Args {
     #[arg(long)]
     set_passphrase: bool,
 
-    /// Remove the passphrase and store everything unencrypted again, then
-    /// exit.
+    /// Remove the passphrase, then exit. The files stay encrypted under a
+    /// key in this computer's key store where there is one, and are stored
+    /// unencrypted otherwise.
     #[arg(long)]
     remove_passphrase: bool,
+
+    /// Keep keys, contacts and history as plain files rather than encrypting
+    /// them with a key from this computer's key store. Remembered; a
+    /// passphrase still works.
+    #[arg(long)]
+    no_keystore: bool,
 
     /// Write an encrypted backup of your identity and contacts to this file
     /// (asks for a passphrase for the file), then exit.
@@ -112,8 +122,56 @@ struct Args {
     theme: Option<String>,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// Passphrases handed over in the environment (scripts, tests), taken out
+/// of it before anything else runs so that no child process (the file
+/// opener, say) and no other reader of the environment sees them.
+struct EnvSecrets {
+    passphrase: Option<String>,
+    backup_passphrase: Option<String>,
+}
+
+impl EnvSecrets {
+    #[allow(unsafe_code)]
+    fn take() -> Self {
+        let passphrase = std::env::var("SILVER_PASSPHRASE").ok();
+        let backup_passphrase = std::env::var("SILVER_BACKUP_PASSPHRASE").ok();
+        // SAFETY: this runs first thing in `main`, before the runtime and
+        // therefore before any other thread exists, so nothing can be
+        // reading the environment while it changes.
+        unsafe {
+            std::env::remove_var("SILVER_PASSPHRASE");
+            std::env::remove_var("SILVER_BACKUP_PASSPHRASE");
+        }
+        Self {
+            passphrase,
+            backup_passphrase,
+        }
+    }
+}
+
+fn main() -> anyhow::Result<()> {
+    let secrets = EnvSecrets::take();
+    harden_process();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(run(secrets))
+}
+
+/// Keep the keys in memory out of core dumps and away from other
+/// processes of the same user: no core file, and on Linux no ptrace.
+fn harden_process() {
+    #[cfg(unix)]
+    {
+        let _ = rlimit::setrlimit(rlimit::Resource::CORE, 0, 0);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = nix::sys::prctl::set_dumpable(false);
+    }
+}
+
+async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
     let args = Args::parse();
 
     if args.data_dir.is_none() {
@@ -124,17 +182,15 @@ async fn main() -> anyhow::Result<()> {
         .or_else(Store::default_dir)
         .context("could not determine a data directory; pass --data-dir")?;
     let mut store = Store::open(&data_dir)?;
-    if store.is_locked() {
-        unlock(&mut store)?;
-    }
+    open_protected(&mut store, &secrets)?;
     if args.set_passphrase {
         if store.has_passphrase() {
             bail!("a passphrase is already set; run --remove-passphrase first to change it");
         }
-        let passphrase = new_passphrase()?;
+        let passphrase = new_passphrase(&secrets)?;
         store.set_passphrase(&passphrase)?;
         println!(
-            "Keys, contacts and history in {} are now encrypted.",
+            "Keys, contacts and history in {} are now encrypted under your passphrase.",
             data_dir.display()
         );
         return Ok(());
@@ -143,16 +199,21 @@ async fn main() -> anyhow::Result<()> {
         if !store.has_passphrase() {
             bail!("no passphrase is set");
         }
-        store.remove_passphrase()?;
-        println!(
-            "Passphrase removed; files in {} are stored unencrypted again.",
-            data_dir.display()
-        );
+        match store.remove_passphrase()? {
+            Protection::Keystore => println!(
+                "Passphrase removed; files in {} stay encrypted under a key in this computer's key store.",
+                data_dir.display()
+            ),
+            _ => println!(
+                "Passphrase removed; files in {} are stored unencrypted again.",
+                data_dir.display()
+            ),
+        }
         return Ok(());
     }
 
     if let Some(path) = args.import_backup {
-        let passphrase = backup_passphrase("Backup passphrase: ")?;
+        let passphrase = backup_passphrase(&secrets, "Backup passphrase: ")?;
         let payload = silver_client::read_backup(&path, &passphrase)?;
         let user_id = silver_protocol::Identity::from_secrets(&payload.identity).user_id();
         silver_client::import_backup(&store, payload, args.force)?;
@@ -160,16 +221,19 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let (identity, created) = store.load_or_create_identity()?;
+    let (mut identity, mut created) = store.load_or_create_identity()?;
     if created {
-        offer_passphrase(&mut store)?;
+        offer_passphrase(&mut store, &secrets)?;
     }
     if let Some(path) = args.export_backup {
-        let passphrase = match passphrase_from_env_backup() {
-            Some(p) => p,
+        let passphrase = match &secrets.backup_passphrase {
+            Some(p) => p.clone(),
             None => {
                 println!("Choose a passphrase for the backup file; it is needed to restore it.");
-                new_passphrase()?
+                new_passphrase(&EnvSecrets {
+                    passphrase: None,
+                    backup_passphrase: None,
+                })?
             }
         };
         silver_client::export_backup(&store, &path, &passphrase)?;
@@ -196,6 +260,7 @@ async fn main() -> anyhow::Result<()> {
         || args.ca_cert.is_some()
         || args.proxy.is_some()
         || args.invite.is_some()
+        || args.no_keystore
     {
         if let Some(relay) = args.relay {
             config.relay_url = Some(relay);
@@ -209,32 +274,53 @@ async fn main() -> anyhow::Result<()> {
         if let Some(invite) = args.invite {
             config.invite_token = Some(invite);
         }
+        if args.no_keystore {
+            config.os_keystore = false;
+        }
         store.save_config(&config)?;
     }
-    let send_epoch = store.ensure_send_epoch(&mut config)?;
-    let sessions = SessionStore::load(&store, identity.user_id())
-        .context("loading sessions and prekeys")?
-        .shared();
-    let options = ConnectOptions {
-        extra_ca_certs: config.ca_cert.iter().cloned().collect(),
-        proxy: config.proxy.clone().or_else(Proxy::url_from_env),
-        outbox_path: Some(store.outbox_path()),
-        outbox_cipher: store.cipher(),
-        invite_token: config.invite_token.clone(),
-        sessions: Some(sessions),
-        submit_authenticated: args.submit_authenticated,
+    if args.no_keystore && store.protection() == Protection::Keystore {
+        store.remove_protection()?;
+        println!(
+            "Files in {} are stored unencrypted again (--no-keystore).",
+            data_dir.display()
+        );
+    }
+    // Protected at rest by default: with no passphrase, the data key goes
+    // into this computer's key store.
+    let at_rest = match store.protection() {
+        Protection::Passphrase => AtRest::Passphrase,
+        Protection::Keystore => AtRest::Keystore,
+        Protection::None if !config.os_keystore => {
+            AtRest::Plain("os_keystore is off in config.json".into())
+        }
+        Protection::None if keystore::available() => match store.protect_with_keystore() {
+            Ok(()) => AtRest::Keystore,
+            Err(e) => AtRest::Plain(format!("the key store could not be used ({e:#})")),
+        },
+        Protection::None => AtRest::Plain(
+            "this computer has no key store the client can use (on Linux that is a Secret \
+             Service such as GNOME Keyring or KWallet)"
+                .into(),
+        ),
     };
+    let send_epoch = store.ensure_send_epoch(&mut config)?;
     let relay_url = config
         .relay_url
         .clone()
         .unwrap_or_else(|| DEFAULT_RELAY_URL.to_owned());
 
-    // The terminal belongs to the UI, so logs go to a file, and only on request.
+    // The terminal belongs to the UI, so logs go to a file, and only on
+    // request; the file is the user's alone.
     if let Ok(filter) = std::env::var("SILVER_LOG") {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(data_dir.join("silver.log"))?;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let file = opts.open(data_dir.join("silver.log"))?;
         tracing_subscriber::fmt()
             .with_env_filter(EnvFilter::new(filter))
             .with_writer(file)
@@ -252,56 +338,83 @@ async fn main() -> anyhow::Result<()> {
         &config.theme,
         std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()),
     );
-    let (client, events) = Client::spawn(relay_url.clone(), Arc::new(identity), options)?;
-    let app = app::App::new(
-        store,
-        client,
-        relay_url,
-        created,
-        send_epoch,
-        glyphs::Glyphs::for_marks(marks),
-        theme::Theme::named(theme),
-    )?;
 
-    let terminal = ratatui::init();
-    let mut stdout = std::io::stdout();
-    // Best effort: a terminal that lacks one of these just ignores it.
-    let _ = execute!(stdout, EnableBracketedPaste, EnableFocusChange);
-    if !args.no_mouse {
-        let _ = execute!(stdout, EnableMouseCapture);
+    // The client runs until it quits or locks; a lock drops everything that
+    // holds keys and starts over from the passphrase.
+    loop {
+        let sessions = SessionStore::load(&store, identity.user_id())
+            .context("loading sessions and prekeys")?
+            .shared();
+        let options = ConnectOptions {
+            extra_ca_certs: config.ca_cert.iter().cloned().collect(),
+            proxy: config.proxy.clone().or_else(Proxy::url_from_env),
+            outbox_path: Some(store.outbox_path()),
+            outbox_cipher: store.cipher(),
+            invite_token: config.invite_token.clone(),
+            sessions: Some(sessions),
+            submit_authenticated: args.submit_authenticated,
+        };
+        let (client, events) = Client::spawn(relay_url.clone(), Arc::new(identity), options)?;
+        let app = app::App::new(
+            store,
+            client,
+            relay_url.clone(),
+            created,
+            send_epoch,
+            glyphs::Glyphs::for_marks(marks),
+            theme::Theme::named(theme),
+            at_rest.clone(),
+        )?;
+
+        let terminal = ratatui::init();
+        let mut stdout = std::io::stdout();
+        // Best effort: a terminal that lacks one of these just ignores it.
+        let _ = execute!(stdout, EnableBracketedPaste, EnableFocusChange);
+        if !args.no_mouse {
+            let _ = execute!(stdout, EnableMouseCapture);
+        }
+        let result = app.run(terminal, events).await;
+        let _ = execute!(
+            stdout,
+            DisableMouseCapture,
+            DisableFocusChange,
+            DisableBracketedPaste
+        );
+        ratatui::restore();
+        match result? {
+            Exit::Quit => return Ok(()),
+            Exit::Lock => {
+                // `app` is gone, and with it the client, the identity, the
+                // sessions and the data key.
+                println!("Locked. The passphrase opens it again; Ctrl-C quits.");
+                store = Store::open(&data_dir)?;
+                unlock(&mut store, &secrets)?;
+                identity = store.load_or_create_identity()?.0;
+                created = false;
+            }
+        }
     }
-    let result = app.run(terminal, events).await;
-    let _ = execute!(
-        stdout,
-        DisableMouseCapture,
-        DisableFocusChange,
-        DisableBracketedPaste
-    );
-    ratatui::restore();
-    result
 }
 
-/// `SILVER_PASSPHRASE` in the environment stands in for typing it, for
-/// scripts and tests.
-fn passphrase_from_env() -> Option<String> {
-    std::env::var("SILVER_PASSPHRASE").ok()
+/// Unlock the directory by whatever protects it.
+fn open_protected(store: &mut Store, secrets: &EnvSecrets) -> anyhow::Result<()> {
+    match store.protection() {
+        Protection::None => Ok(()),
+        Protection::Keystore => store.unlock_with_keystore(),
+        Protection::Passphrase => unlock(store, secrets),
+    }
 }
 
-/// `SILVER_BACKUP_PASSPHRASE` stands in for typing the backup passphrase.
-fn passphrase_from_env_backup() -> Option<String> {
-    std::env::var("SILVER_BACKUP_PASSPHRASE").ok()
-}
-
-fn backup_passphrase(prompt: &str) -> anyhow::Result<String> {
-    match passphrase_from_env_backup() {
-        Some(p) => Ok(p),
+fn backup_passphrase(secrets: &EnvSecrets, prompt: &str) -> anyhow::Result<String> {
+    match &secrets.backup_passphrase {
+        Some(p) => Ok(p.clone()),
         None => Ok(rpassword::prompt_password(prompt)?),
     }
 }
 
-fn unlock(store: &mut Store) -> anyhow::Result<()> {
-    if let Some(passphrase) = passphrase_from_env() {
-        return store.unlock(&passphrase).map_err(Into::into);
+fn unlock(store: &mut Store, secrets: &EnvSecrets) -> anyhow::Result<()> {
+    if let Some(passphrase) = &secrets.passphrase {
+        return store.unlock(passphrase).map_err(Into::into);
     }
     for attempt in 1..=3 {
         let passphrase = rpassword::prompt_password("Passphrase: ")?;
@@ -316,12 +429,12 @@ fn unlock(store: &mut Store) -> anyhow::Result<()> {
     bail!("too many failed attempts")
 }
 
-fn new_passphrase() -> anyhow::Result<String> {
-    if let Some(passphrase) = passphrase_from_env() {
+fn new_passphrase(secrets: &EnvSecrets) -> anyhow::Result<String> {
+    if let Some(passphrase) = &secrets.passphrase {
         if passphrase.is_empty() {
             bail!("SILVER_PASSPHRASE is set but empty");
         }
-        return Ok(passphrase);
+        return Ok(passphrase.clone());
     }
     loop {
         let first = rpassword::prompt_password("New passphrase: ")?;
@@ -337,10 +450,10 @@ fn new_passphrase() -> anyhow::Result<String> {
 }
 
 /// First run: offer to protect the brand-new data directory.
-fn offer_passphrase(store: &mut Store) -> anyhow::Result<()> {
-    if let Some(passphrase) = passphrase_from_env() {
+fn offer_passphrase(store: &mut Store, secrets: &EnvSecrets) -> anyhow::Result<()> {
+    if let Some(passphrase) = &secrets.passphrase {
         if !passphrase.is_empty() {
-            store.set_passphrase(&passphrase)?;
+            store.set_passphrase(passphrase)?;
         }
         return Ok(());
     }
@@ -348,8 +461,15 @@ fn offer_passphrase(store: &mut Store) -> anyhow::Result<()> {
         return Ok(());
     }
     println!("This is a new identity. You can protect your keys, contacts and history");
-    println!("with a passphrase that is asked for at every start. Leave it empty for none;");
-    println!("you can add one later with --set-passphrase.");
+    println!("with a passphrase that is asked for at every start.");
+    if keystore::available() {
+        println!(
+            "Leave it empty to encrypt them with a key kept in this computer's key store instead;"
+        );
+        println!("you can add a passphrase later with --set-passphrase.");
+    } else {
+        println!("Leave it empty for none; you can add one later with --set-passphrase.");
+    }
     let first = rpassword::prompt_password("Passphrase (optional): ")?;
     if first.is_empty() {
         return Ok(());

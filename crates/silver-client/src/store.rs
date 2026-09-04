@@ -86,6 +86,14 @@ pub struct Config {
     /// Most the `downloads/` folder may hold, in MiB; 0 means no limit.
     #[serde(default = "default_downloads_quota_mib")]
     pub downloads_quota_mib: u64,
+    /// Keep the data key in the operating system's key store when no
+    /// passphrase is set, so the files are encrypted at rest.
+    #[serde(default = "default_true")]
+    pub os_keystore: bool,
+    /// Lock the client (drop the keys, ask for the passphrase again) after
+    /// this many minutes without a keystroke; 0 never. Needs a passphrase.
+    #[serde(default)]
+    pub lock_after_minutes: u64,
 }
 
 fn default_downloads_quota_mib() -> u64 {
@@ -133,6 +141,8 @@ impl Default for Config {
             theme: default_theme(),
             sidebar_width: default_sidebar_width(),
             downloads_quota_mib: default_downloads_quota_mib(),
+            os_keystore: true,
+            lock_after_minutes: 0,
         }
     }
 }
@@ -277,6 +287,17 @@ pub struct ContactRequest {
     pub messages: Vec<HeldMessage>,
 }
 
+/// What stands between the files on disk and whoever copies them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Protection {
+    /// Plain files.
+    None,
+    /// Encrypted under a key kept in this computer's key store.
+    Keystore,
+    /// Encrypted under a key a passphrase unlocks.
+    Passphrase,
+}
+
 /// Handle to the data directory.
 #[derive(Clone, Debug)]
 pub struct Store {
@@ -332,16 +353,28 @@ impl Store {
         &self.root
     }
 
-    // --- passphrase -----------------------------------------------------------
+    // --- protection at rest -------------------------------------------------
+
+    /// How the directory is protected on disk.
+    pub fn protection(&self) -> Protection {
+        match self.read_vault() {
+            Ok(Some(vault)) if vault.kdf.is_keystore() => Protection::Keystore,
+            Ok(Some(_)) => Protection::Passphrase,
+            Ok(None) => Protection::None,
+            // An unreadable vault is treated as a passphrase one: the
+            // unlock then fails with the real reason.
+            Err(_) => Protection::Passphrase,
+        }
+    }
 
     /// Whether a passphrase protects this directory.
     pub fn has_passphrase(&self) -> bool {
-        self.root.join(VAULT_FILE).exists()
+        self.protection() == Protection::Passphrase
     }
 
     /// Protected and not yet unlocked.
     pub fn is_locked(&self) -> bool {
-        self.has_passphrase() && self.cipher.is_none()
+        self.protection() != Protection::None && self.cipher.is_none()
     }
 
     /// The data key, for components that keep their own files (the outbox).
@@ -349,53 +382,151 @@ impl Store {
         self.cipher.clone()
     }
 
-    pub fn unlock(&mut self, passphrase: &str) -> Result<(), VaultError> {
+    fn read_vault(&self) -> anyhow::Result<Option<VaultFile>> {
         let path = self.root.join(VAULT_FILE);
-        let text = fs::read_to_string(&path)
-            .with_context(|| format!("reading {}", path.display()))
-            .map_err(VaultError::Other)?;
-        let vault: VaultFile = serde_json::from_str(&text)
+        if !path.exists() {
+            return Ok(None);
+        }
+        let text =
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        serde_json::from_str(&text)
             .context("parsing vault.json")
-            .map_err(VaultError::Other)?;
+            .map(Some)
+    }
+
+    fn write_vault(&self, vault: &VaultFile) -> anyhow::Result<()> {
+        write_private(
+            &self.root.join(VAULT_FILE),
+            serde_json::to_string_pretty(vault)?.as_bytes(),
+        )
+    }
+
+    pub fn unlock(&mut self, passphrase: &str) -> Result<(), VaultError> {
+        let vault = self
+            .read_vault()
+            .map_err(VaultError::Other)?
+            .ok_or_else(|| VaultError::Other(anyhow::anyhow!("no passphrase is set")))?;
         self.cipher = Some(Arc::new(FileCipher::unlock(&vault, passphrase)?));
         Ok(())
     }
 
+    /// Unlock a directory whose wrapping key lives in this computer's key
+    /// store.
+    pub fn unlock_with_keystore(&mut self) -> anyhow::Result<()> {
+        let vault = self
+            .read_vault()?
+            .context("the data directory is not protected")?;
+        if !vault.kdf.is_keystore() {
+            bail!("the data directory is protected by a passphrase, not the key store");
+        }
+        let kek = crate::keystore::load(&vault.kdf.keystore_name())?.context(
+            "this computer's key store has no key for this data directory: it was copied from \
+             another computer or account, or the key was removed; restore from a backup or \
+             start over with a fresh data directory",
+        )?;
+        let cipher = FileCipher::unlock_with_kek(&vault, &kek).map_err(|e| {
+            anyhow::anyhow!("the key in the key store does not open this vault: {e}")
+        })?;
+        self.cipher = Some(Arc::new(cipher));
+        Ok(())
+    }
+
+    /// Encrypt everything under a key kept in the operating system's key
+    /// store. For a directory that is not protected yet.
+    pub fn protect_with_keystore(&mut self) -> anyhow::Result<()> {
+        if self.protection() != Protection::None {
+            bail!("the data directory is already protected");
+        }
+        let kdf = Kdf::keystore();
+        let kek = crate::keystore::create(&kdf.keystore_name())?;
+        let (_, cipher) = FileCipher::create_with_kek(&kek);
+        let vault = cipher.wrap_under_kek(&kek, kdf);
+        let cipher = Arc::new(cipher);
+        if let Err(e) = self.recrypt_all(None, Some(&cipher)) {
+            let _ = crate::keystore::delete(&vault.kdf.keystore_name());
+            return Err(e);
+        }
+        self.write_vault(&vault)?;
+        self.cipher = Some(cipher);
+        Ok(())
+    }
+
     /// Protect the directory with `passphrase`, encrypting everything in it.
+    /// A directory the key store protects keeps its files as they are:
+    /// only the wrapping changes, and the key store forgets its key.
     pub fn set_passphrase(&mut self, passphrase: &str) -> anyhow::Result<()> {
         self.set_passphrase_with(passphrase, Kdf::default_params())
     }
 
     #[doc(hidden)]
     pub fn set_passphrase_with(&mut self, passphrase: &str, kdf: Kdf) -> anyhow::Result<()> {
-        if self.has_passphrase() {
-            bail!("a passphrase is already set; remove it first to change it");
+        match self.protection() {
+            Protection::Passphrase => {
+                bail!("a passphrase is already set; remove it first to change it")
+            }
+            Protection::Keystore => {
+                self.ensure_unlocked()?;
+                let old = self.read_vault()?.context("reading the vault")?;
+                let cipher = self
+                    .cipher
+                    .clone()
+                    .context("the data directory is locked")?;
+                self.write_vault(&cipher.wrap_under_passphrase(passphrase, kdf)?)?;
+                crate::keystore::delete(&old.kdf.keystore_name())?;
+                Ok(())
+            }
+            Protection::None => {
+                let (vault, cipher) = FileCipher::create(passphrase, kdf)?;
+                let cipher = Arc::new(cipher);
+                self.recrypt_all(None, Some(&cipher))?;
+                self.write_vault(&vault)?;
+                self.cipher = Some(cipher);
+                Ok(())
+            }
         }
-        let (vault, cipher) = FileCipher::create(passphrase, kdf)?;
-        let cipher = Arc::new(cipher);
-        self.recrypt_all(None, Some(&cipher))?;
-        write_private(
-            &self.root.join(VAULT_FILE),
-            serde_json::to_string_pretty(&vault)?.as_bytes(),
-        )?;
-        self.cipher = Some(cipher);
-        Ok(())
     }
 
-    /// Store everything unencrypted again and forget the passphrase.
-    pub fn remove_passphrase(&mut self) -> anyhow::Result<()> {
-        self.ensure_unlocked()?;
-        let Some(cipher) = self.cipher.take() else {
+    /// Forget the passphrase. With a key store at hand the files stay
+    /// encrypted under a key kept there; otherwise they are stored
+    /// unencrypted again. Says which happened.
+    pub fn remove_passphrase(&mut self) -> anyhow::Result<Protection> {
+        if self.protection() != Protection::Passphrase {
             bail!("no passphrase is set");
+        }
+        self.ensure_unlocked()?;
+        let cipher = self
+            .cipher
+            .clone()
+            .context("the data directory is locked")?;
+        if crate::keystore::available() {
+            let kdf = Kdf::keystore();
+            let kek = crate::keystore::create(&kdf.keystore_name())?;
+            self.write_vault(&cipher.wrap_under_kek(&kek, kdf))?;
+            return Ok(Protection::Keystore);
+        }
+        self.remove_protection()
+    }
+
+    /// Store everything unencrypted again, whatever protected it.
+    pub fn remove_protection(&mut self) -> anyhow::Result<Protection> {
+        self.ensure_unlocked()?;
+        let Some(vault) = self.read_vault()? else {
+            return Ok(Protection::None);
+        };
+        let Some(cipher) = self.cipher.take() else {
+            bail!("the data directory is locked");
         };
         self.recrypt_all(Some(&cipher), None)?;
         fs::remove_file(self.root.join(VAULT_FILE)).context("removing vault.json")?;
-        Ok(())
+        if vault.kdf.is_keystore() {
+            let _ = crate::keystore::delete(&vault.kdf.keystore_name());
+        }
+        Ok(Protection::None)
     }
 
     fn ensure_unlocked(&self) -> anyhow::Result<()> {
         if self.is_locked() {
-            bail!("the data directory is protected by a passphrase; unlock it first");
+            bail!("the data directory is protected; unlock it first");
         }
         Ok(())
     }
@@ -792,6 +923,68 @@ mod tests {
         (Store::open(dir.path()).unwrap(), dir)
     }
 
+    #[test]
+    fn the_key_store_protects_files_without_a_passphrase() {
+        crate::keystore::use_mock_store();
+        let (mut store, dir) = temp_store();
+        let (identity, _) = store.load_or_create_identity().unwrap();
+        let peer = Identity::generate();
+        store.append_history(&peer.user_id(), &entry(0)).unwrap();
+        assert_eq!(store.protection(), Protection::None);
+        let identity_path = dir.path().join("identity.json");
+
+        store.protect_with_keystore().unwrap();
+        assert_eq!(store.protection(), Protection::Keystore);
+        assert!(!store.is_locked() && !store.has_passphrase());
+        assert!(FileCipher::is_encrypted(&fs::read(&identity_path).unwrap()));
+        store.append_history(&peer.user_id(), &entry(1)).unwrap();
+
+        // A fresh handle unlocks from the key store without being asked.
+        let mut again = Store::open(dir.path()).unwrap();
+        assert!(again.is_locked());
+        assert!(again.unlock("anything").is_err());
+        again.unlock_with_keystore().unwrap();
+        assert_eq!(
+            again.load_or_create_identity().unwrap().0.user_id(),
+            identity.user_id()
+        );
+        assert_eq!(again.load_history(&peer.user_id()).unwrap().len(), 2);
+
+        // A passphrase takes over without rewriting the files; the key
+        // store forgets its key, so a copy is useless without the passphrase.
+        let raw_before = fs::read(&identity_path).unwrap();
+        let name = again.read_vault().unwrap().unwrap().kdf.keystore_name();
+        again
+            .set_passphrase_with("correct horse", Kdf::fast())
+            .unwrap();
+        assert_eq!(again.protection(), Protection::Passphrase);
+        assert_eq!(fs::read(&identity_path).unwrap(), raw_before);
+        assert!(crate::keystore::load(&name).unwrap().is_none());
+        let mut third = Store::open(dir.path()).unwrap();
+        assert!(third.unlock_with_keystore().is_err());
+        third.unlock("correct horse").unwrap();
+        assert_eq!(third.load_history(&peer.user_id()).unwrap().len(), 2);
+
+        // Dropping the passphrase goes back to the key store, files untouched.
+        assert_eq!(third.remove_passphrase().unwrap(), Protection::Keystore);
+        assert_eq!(fs::read(&identity_path).unwrap(), raw_before);
+        let mut fourth = Store::open(dir.path()).unwrap();
+        fourth.unlock_with_keystore().unwrap();
+        assert_eq!(fourth.load_history(&peer.user_id()).unwrap().len(), 2);
+
+        // And plain files on request.
+        assert_eq!(fourth.remove_protection().unwrap(), Protection::None);
+        assert!(
+            fs::read_to_string(&identity_path)
+                .unwrap()
+                .contains("signing_seed")
+        );
+        assert_eq!(
+            Store::open(dir.path()).unwrap().protection(),
+            Protection::None
+        );
+    }
+
     fn entry(i: u64) -> HistoryEntry {
         HistoryEntry {
             id: i.to_string(),
@@ -960,9 +1153,14 @@ mod tests {
             ["msg 0", "msg 1"]
         );
 
-        // Removing the passphrase restores plaintext.
-        again.remove_passphrase().unwrap();
+        // Removing the passphrase restores plaintext (the mock key store is
+        // empty and counts as absent here, so nothing moves into it).
+        crate::keystore::use_mock_store();
+        let after = again.remove_passphrase().unwrap();
         assert!(!again.has_passphrase());
+        if after == Protection::Keystore {
+            again.remove_protection().unwrap();
+        }
         assert!(
             fs::read_to_string(&identity_path)
                 .unwrap()
