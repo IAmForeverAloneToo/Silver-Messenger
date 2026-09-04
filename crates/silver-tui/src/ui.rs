@@ -105,10 +105,13 @@ fn draw_messages(frame: &mut Frame, app: &mut App, area: Rect) {
         None => (" System ".to_owned(), system_rows(app, width)),
         Some(contact) => (
             format!(
-                " {}{} · {} ",
+                " {}{} · {}{} ",
                 if contact.verified { "✓ " } else { "" },
                 contact.display_name(),
-                contact.user_id
+                contact.user_id,
+                app.encryption_label(contact)
+                    .map(|l| format!(" · {l}"))
+                    .unwrap_or_default()
             ),
             thread_rows(app, &contact.user_id, width),
         ),
@@ -277,7 +280,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
 
 // --- text helpers ----------------------------------------------------------
 
-fn clock(timestamp_ms: u64) -> String {
+pub fn clock(timestamp_ms: u64) -> String {
     Local
         .timestamp_millis_opt(timestamp_ms as i64)
         .single()

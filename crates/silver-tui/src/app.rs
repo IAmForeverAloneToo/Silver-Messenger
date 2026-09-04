@@ -7,10 +7,10 @@ use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use silver_client::sequence::{self, SequenceCheck};
 use silver_client::{
-    Client, ClientError, ClientEvent, Contact, ContactRequest, Direction, HeldMessage,
+    Client, ClientError, ClientEvent, Contact, ContactRequest, Delivery, Direction, HeldMessage,
     HistoryEntry, Store,
 };
-use silver_protocol::{Content, Envelope, KeyBundle, Message, UserId, now_ms};
+use silver_protocol::{Content, KeyBundle, Message, UserId, now_ms};
 use tokio::sync::mpsc;
 
 use crate::ui;
@@ -60,9 +60,7 @@ enum Internal {
     SendDone {
         peer: UserId,
         text: String,
-        /// A bundle we had to look up on the way; pin it.
-        learned: Option<KeyBundle>,
-        result: Result<Envelope, String>,
+        result: Result<Delivery, String>,
     },
 }
 
@@ -250,6 +248,30 @@ impl App {
         self.client.pending_count()
     }
 
+    /// How messages with this contact are protected, for the pane title.
+    pub fn encryption_label(&self, contact: &Contact) -> Option<&'static str> {
+        if self.client.session_info(&contact.user_id).is_some() {
+            Some("forward secret")
+        } else if contact
+            .bundle
+            .as_ref()
+            .is_some_and(|b| !b.supports_sessions())
+        {
+            if self.relay_supports_prekeys() {
+                Some("their client has no forward secrecy yet")
+            } else {
+                Some("relay too old for forward secrecy")
+            }
+        } else {
+            None
+        }
+    }
+
+    fn relay_supports_prekeys(&self) -> bool {
+        self.client
+            .relay_supports(silver_protocol::wire::feature::PREKEYS)
+    }
+
     fn mark_line(&mut self, id: &str, update: impl FnOnce(&mut ChatLine)) {
         for lines in self.threads.values_mut() {
             if let Some(line) = lines.iter_mut().rev().find(|l| l.id == id) {
@@ -401,6 +423,7 @@ impl App {
             "remove" | "rm" => self.cmd_remove(),
             "verify" => self.cmd_verify(&rest),
             "refresh" => self.cmd_refresh(),
+            "session" => self.cmd_session(),
             "accept" => self.cmd_accept(&rest),
             "block" => self.cmd_block(&rest),
             "unblock" => self.cmd_unblock(&rest),
@@ -420,6 +443,7 @@ impl App {
             "  /verify                  show the safety number to compare with the selected contact",
             "  /verify ok | no          mark the selected contact as verified, or not",
             "  /refresh                 fetch the selected contact's key again and report changes",
+            "  /session                 show how messages with the selected contact are protected",
             "  /accept <n|user-id>      accept a contact request from the Requests pane",
             "  /block <n|user-id>       ignore a requester or contact from now on; /unblock <user-id> undoes it",
             "  /blocked                 list blocked ids",
@@ -485,6 +509,61 @@ impl App {
         };
         let user_id = contact.user_id;
         self.lookup_contact(user_id, None);
+    }
+
+    fn cmd_session(&mut self) {
+        let Some(index) = self.selected_contact_index() else {
+            self.toast("Select a contact first.");
+            return;
+        };
+        let contact = &self.contacts[index];
+        let name = contact.display_name();
+        let line = match self.client.session_info(&contact.user_id) {
+            Some(info) => format!(
+                "Messages with {name} are forward secret: each one is encrypted under a key used once and then discarded. The session was started by {} at {}{}.",
+                if info.initiated_by_us { "you" } else { "them" },
+                crate::ui::clock(info.established_at_ms),
+                if info.awaiting_reply {
+                    "; it completes when they answer"
+                } else {
+                    ""
+                }
+            ),
+            None => match &contact.bundle {
+                Some(b) if !b.supports_sessions() && !self.relay_supports_prekeys() => format!(
+                    "Messages with {name} are encrypted to their long-term key only: the relay is older than 0.3.0 and does not keep prekeys. Forward secrecy starts by itself once it is updated."
+                ),
+                Some(b) if !b.supports_sessions() => format!(
+                    "Messages with {name} are encrypted to their long-term key only: their client does not publish prekeys yet (it is older than 0.3.0). Forward secrecy starts by itself once it does."
+                ),
+                Some(_) => format!(
+                    "No session with {name} yet; the next message you send starts a forward-secret one."
+                ),
+                None => format!("No key for {name} yet; /refresh fetches it."),
+            },
+        };
+        self.system(Level::Info, line);
+        self.select(0);
+    }
+
+    /// The relay served a different long-term key for a contact than the
+    /// one pinned: adopt it, but say so loudly.
+    fn note_key_change(&mut self, index: usize, new: KeyBundle) {
+        let name = self.contacts[index].display_name();
+        let was_verified = self.contacts[index].verified;
+        let user_id = self.contacts[index].user_id;
+        self.contacts[index].bundle = Some(new);
+        self.contacts[index].verified = false;
+        self.persist_contacts();
+        self.client.forget_sessions(&user_id);
+        self.system(
+            Level::Warn,
+            format!(
+                "KEY CHANGE: {name}'s encryption key is different from the one you had. It is signed by their identity, so either they rotated it or their identity key is compromised. Confirm with them and run /verify before trusting it{}.",
+                if was_verified { " (verified mark cleared)" } else { "" }
+            ),
+        );
+        self.toast(format!("Key change for {name}! See System."));
     }
 
     fn cmd_verify(&mut self, args: &[&str]) {
@@ -603,46 +682,11 @@ impl App {
         let client = self.client.clone();
         let tx = self.internal_tx.clone();
         tokio::spawn(async move {
-            let (bundle, learned) = match pinned {
-                Some(b) => (b, None),
-                None => match client.lookup(peer).await {
-                    Ok(Some(b)) => (b.clone(), Some(b)),
-                    Ok(None) => {
-                        let _ = tx
-                            .send(Internal::SendDone {
-                                peer,
-                                text,
-                                learned: None,
-                                result: Err("they have not published a key yet (they need to run Silver Messenger once)".into()),
-                            })
-                            .await;
-                        return;
-                    }
-                    Err(e) => {
-                        let _ = tx
-                            .send(Internal::SendDone {
-                                peer,
-                                text,
-                                learned: None,
-                                result: Err(e.to_string()),
-                            })
-                            .await;
-                        return;
-                    }
-                },
-            };
             let result = client
-                .send_text_sequenced(&bundle, text.clone(), sequence)
+                .send_message(peer, pinned, text.clone(), sequence)
                 .await
                 .map_err(|e| e.to_string());
-            let _ = tx
-                .send(Internal::SendDone {
-                    peer,
-                    text,
-                    learned,
-                    result,
-                })
-                .await;
+            let _ = tx.send(Internal::SendDone { peer, text, result }).await;
         });
     }
 
@@ -668,22 +712,12 @@ impl App {
                                 self.system(Level::Info, format!("Got {name}'s key."));
                             }
                             (Some(old), Some(new)) if old.dh_public == new.dh_public => {
+                                // Same identity; keep the fresher prekeys.
+                                self.contacts[index].bundle = Some(new);
+                                self.persist_contacts();
                                 self.toast(format!("{name}'s key is unchanged."));
                             }
-                            (Some(_), Some(new)) => {
-                                let was_verified = self.contacts[index].verified;
-                                self.contacts[index].bundle = Some(new);
-                                self.contacts[index].verified = false;
-                                self.persist_contacts();
-                                self.system(
-                                    Level::Warn,
-                                    format!(
-                                        "KEY CHANGE: {name}'s encryption key is different from the one you had. It is signed by their identity, so either they rotated it or their identity key is compromised. Confirm with them and run /verify before trusting it{}.",
-                                        if was_verified { " (verified mark cleared)" } else { "" }
-                                    ),
-                                );
-                                self.toast(format!("Key change for {name}! See System."));
-                            }
+                            (Some(_), Some(new)) => self.note_key_change(index, new),
                         }
                     }
                     None => {
@@ -708,42 +742,37 @@ impl App {
                 },
                 Err(e) => self.toast(format!("Lookup failed: {e}")),
             },
-            Internal::SendDone {
-                peer,
-                text,
-                learned,
-                result,
-            } => {
-                if let Some(bundle) = learned {
+            Internal::SendDone { peer, text, result } => match result {
+                Ok(delivery) => {
                     if let Some(i) = self.contact_index(&peer) {
-                        self.contacts[i].bundle = Some(bundle);
-                        self.persist_contacts();
+                        if delivery.key_changed {
+                            self.note_key_change(i, delivery.bundle);
+                        } else {
+                            self.contacts[i].bundle = Some(delivery.bundle);
+                            self.persist_contacts();
+                        }
                     }
+                    self.record(
+                        peer,
+                        ChatLine {
+                            id: delivery.envelope.id,
+                            direction: Direction::Sent,
+                            timestamp_ms: now_ms(),
+                            text,
+                            delivered: false,
+                            failed: false,
+                        },
+                    );
+                    self.scroll = 0;
                 }
-                match result {
-                    Ok(envelope) => {
-                        self.record(
-                            peer,
-                            ChatLine {
-                                id: envelope.id,
-                                direction: Direction::Sent,
-                                timestamp_ms: now_ms(),
-                                text,
-                                delivered: false,
-                                failed: false,
-                            },
-                        );
-                        self.scroll = 0;
-                    }
-                    Err(e) => {
-                        self.toast(format!("Not sent: {e}"));
-                        self.system(
-                            Level::Warn,
-                            format!("Message to {} not sent: {e}", self.contact_name(&peer)),
-                        );
-                    }
+                Err(e) => {
+                    self.toast(format!("Not sent: {e}"));
+                    self.system(
+                        Level::Warn,
+                        format!("Message to {} not sent: {e}", self.contact_name(&peer)),
+                    );
                 }
-            }
+            },
         }
     }
 
@@ -826,6 +855,29 @@ impl App {
                 if self.selected_contact().map(|c| c.user_id) != Some(from) {
                     *self.unread.entry(from).or_default() += 1;
                 }
+            }
+            ClientEvent::SessionEstablished {
+                peer,
+                initiated_by_us,
+            } => {
+                let name = self.contact_name(&peer);
+                self.system(
+                    Level::Info,
+                    format!(
+                        "Forward-secret session with {name} started by {}. From here each message is encrypted under a key that is used once and then discarded.",
+                        if initiated_by_us { "you" } else { "them" }
+                    ),
+                );
+            }
+            ClientEvent::Undecryptable { from, reason, .. } => {
+                let name = self.contact_name(&from);
+                self.system(
+                    Level::Warn,
+                    format!(
+                        "A message from {name} could not be read: {reason}. It is lost; sending them a message starts a fresh session so the next ones get through."
+                    ),
+                );
+                self.toast(format!("Unreadable message from {name}; see System."));
             }
             ClientEvent::Error(text) => {
                 self.system(Level::Warn, text.clone());
@@ -957,6 +1009,7 @@ impl App {
             self.blocked.push(id);
             self.persist_blocked();
         }
+        self.client.forget_sessions(&id);
         self.select(0);
         self.system(
             Level::Info,

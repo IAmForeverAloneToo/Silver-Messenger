@@ -19,6 +19,16 @@ pub const MAX_FRAME_BYTES: usize = 128 * 1024;
 /// Default WebSocket path served by the relay.
 pub const WS_PATH: &str = "/ws";
 
+/// Relay feature names advertised in [`ServerFrame::AuthOk`].
+pub mod feature {
+    /// The relay stores prekeys, hands out one-time prekeys on lookup and
+    /// reports their status.
+    pub const PREKEYS: &str = "prekeys";
+    /// The relay accepts `Send` frames on connections that never
+    /// authenticated, so a sender need not reveal itself to submit.
+    pub const ANONYMOUS_SEND: &str = "anonymous_send";
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientFrame {
@@ -39,7 +49,10 @@ pub enum ClientFrame {
     Lookup {
         user_id: UserId,
     },
-    /// Hand an encrypted envelope to the relay for delivery.
+    /// Hand an encrypted envelope to the relay for delivery. Accepted on an
+    /// authenticated connection, or (on relays advertising
+    /// [`feature::ANONYMOUS_SEND`]) as the first frame after the challenge
+    /// on a connection that never authenticates.
     Send {
         envelope: Envelope,
     },
@@ -75,8 +88,20 @@ pub enum ServerFrame {
     },
     AuthOk {
         user_id: UserId,
+        /// What this relay can do beyond v1; see [`feature`]. Older relays
+        /// omit the field.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        features: Vec<String>,
     },
     Published,
+    /// Sent after `Published` to clients that publish prekeys: how many
+    /// one-time prekeys the relay still holds, and which ids it has handed
+    /// out since they were published.
+    PrekeyStatus {
+        one_time_remaining: u32,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        consumed: Vec<u32>,
+    },
     LookupResult {
         user_id: UserId,
         bundle: Option<KeyBundle>,
@@ -160,6 +185,47 @@ mod tests {
         let pong = ServerFrame::Pong.encode();
         assert_eq!(pong, "{\"type\":\"pong\"}");
         assert_eq!(ServerFrame::decode(&pong).unwrap(), ServerFrame::Pong);
+    }
+
+    #[test]
+    fn a_v1_client_still_reads_frames_with_new_fields() {
+        // The shapes clients before protocol v2 deserialize.
+        #[derive(Deserialize, Debug)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        enum OldServerFrame {
+            AuthOk { user_id: UserId },
+            Published,
+            Pong,
+        }
+        let id = Identity::generate().user_id();
+        let auth_ok = ServerFrame::AuthOk {
+            user_id: id,
+            features: vec![feature::PREKEYS.into(), feature::ANONYMOUS_SEND.into()],
+        }
+        .encode();
+        assert!(auth_ok.contains("\"features\""));
+        assert!(matches!(
+            serde_json::from_str(&auth_ok).unwrap(),
+            OldServerFrame::AuthOk { user_id } if user_id == id
+        ));
+        assert!(matches!(
+            serde_json::from_str(&ServerFrame::Published.encode()).unwrap(),
+            OldServerFrame::Published
+        ));
+        // And a relay without the new field is read by new clients.
+        let bare = format!("{{\"type\":\"auth_ok\",\"user_id\":\"{id}\"}}");
+        assert_eq!(
+            ServerFrame::decode(&bare).unwrap(),
+            ServerFrame::AuthOk {
+                user_id: id,
+                features: Vec::new()
+            }
+        );
+        let status = ServerFrame::PrekeyStatus {
+            one_time_remaining: 3,
+            consumed: vec![7, 9],
+        };
+        assert_eq!(ServerFrame::decode(&status.encode()).unwrap(), status);
     }
 
     #[test]

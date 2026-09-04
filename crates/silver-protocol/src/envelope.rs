@@ -1,4 +1,14 @@
 //! Sealing and opening end-to-end encrypted envelopes.
+//!
+//! The envelope is the "sealed sender" layer: a fresh ephemeral key, a
+//! Diffie–Hellman with the recipient's long-term key, and an AEAD over
+//! `sender id || signature || body`. The relay sees only the recipient.
+//!
+//! The body inside is one of two things ([`Body`]): a plain v1 body (the
+//! message itself), or a v2 ratchet body carrying a message encrypted once
+//! more under a forward-secret [`Session`](crate::session::Session). The
+//! sealed layer is the same for both, so relays and v1 clients cannot tell
+//! them apart from the outside.
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
@@ -14,6 +24,7 @@ use crate::ProtocolError;
 use crate::bundle::KeyBundle;
 use crate::encoding::{b64, b64_array};
 use crate::identity::{DhPublic, Identity, UserId};
+use crate::session::{InitHeader, RatchetMessage, SessionId};
 
 pub const ENVELOPE_DOMAIN: &[u8] = b"silver-messenger/v1/envelope";
 const KDF_INFO: &[u8] = b"silver-messenger/v1/xchacha20poly1305";
@@ -56,15 +67,100 @@ pub struct Sequence {
     pub seq: u64,
 }
 
-/// The encrypted, signed body of an envelope.
+/// The v1 body: the message itself.
 #[derive(Serialize, Deserialize)]
-struct Body {
+struct PlainBody {
     sent_at_ms: u64,
     #[serde(default)]
     epoch: u64,
     #[serde(default)]
     seq: u64,
     content: Content,
+}
+
+/// The v2 body: a plain body encrypted again under a session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RatchetBody {
+    /// Always 2; absent from v1 bodies.
+    pub v: u32,
+    #[serde(with = "b64_array")]
+    pub session: SessionId,
+    /// Present until the initiator hears back from the responder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub init: Option<InitHeader>,
+    pub message: RatchetMessage,
+}
+
+/// Everything the sealed layer can carry.
+pub enum Body {
+    Plain {
+        sent_at_ms: u64,
+        sequence: Sequence,
+        content: Content,
+    },
+    Ratchet(RatchetBody),
+}
+
+/// Peek at the version before choosing how to parse.
+#[derive(Deserialize)]
+struct Version {
+    #[serde(default)]
+    v: u32,
+}
+
+impl Body {
+    pub fn plain(content: Content, sent_at_ms: u64, sequence: Sequence) -> Self {
+        Self::Plain {
+            sent_at_ms,
+            sequence,
+            content,
+        }
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, ProtocolError> {
+        let bytes = match self {
+            Self::Plain {
+                sent_at_ms,
+                sequence,
+                content,
+            } => serde_json::to_vec(&PlainBody {
+                sent_at_ms: *sent_at_ms,
+                epoch: sequence.epoch,
+                seq: sequence.seq,
+                content: content.clone(),
+            }),
+            Self::Ratchet(body) => serde_json::to_vec(body),
+        }
+        .map_err(|e| ProtocolError::Malformed(e.to_string()))?;
+        if bytes.len() > MAX_BODY_BYTES {
+            return Err(ProtocolError::TooLarge(bytes.len()));
+        }
+        Ok(bytes)
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        let malformed = |e: serde_json::Error| ProtocolError::Malformed(e.to_string());
+        let version: Version = serde_json::from_slice(bytes).map_err(malformed)?;
+        match version.v {
+            0 | 1 => {
+                let body: PlainBody = serde_json::from_slice(bytes).map_err(malformed)?;
+                Ok(Self::Plain {
+                    sent_at_ms: body.sent_at_ms,
+                    sequence: Sequence {
+                        epoch: body.epoch,
+                        seq: body.seq,
+                    },
+                    content: body.content,
+                })
+            }
+            2 => Ok(Self::Ratchet(
+                serde_json::from_slice(bytes).map_err(malformed)?,
+            )),
+            other => Err(ProtocolError::Malformed(format!(
+                "unsupported body version {other}"
+            ))),
+        }
+    }
 }
 
 /// A decrypted and authenticated message.
@@ -76,6 +172,17 @@ pub struct Message {
     pub sent_at_ms: u64,
     pub sequence: Sequence,
     pub content: Content,
+    /// Encrypted under a forward-secret session (protocol v2) rather than
+    /// only the recipient's long-term key.
+    pub forward_secret: bool,
+}
+
+/// The sealed layer of an envelope, opened: who sent it and the raw body.
+pub struct Opened {
+    pub id: String,
+    pub from: UserId,
+    pub to: UserId,
+    pub body: Zeroizing<Vec<u8>>,
 }
 
 /// Encrypt and sign `content` from `sender` to `recipient`, without a
@@ -89,8 +196,8 @@ pub fn seal(
     seal_with(sender, recipient, content, sent_at_ms, Sequence::default())
 }
 
-/// Encrypt and sign `content` from `sender` to `recipient`, numbered with
-/// `sequence` so the recipient can spot replays and gaps.
+/// Encrypt and sign `content` from `sender` to `recipient` as a v1 body,
+/// numbered with `sequence` so the recipient can spot replays and gaps.
 pub fn seal_with(
     sender: &Identity,
     recipient: &KeyBundle,
@@ -98,13 +205,16 @@ pub fn seal_with(
     sent_at_ms: u64,
     sequence: Sequence,
 ) -> Result<Envelope, ProtocolError> {
-    let body = serde_json::to_vec(&Body {
-        sent_at_ms,
-        epoch: sequence.epoch,
-        seq: sequence.seq,
-        content,
-    })
-    .map_err(|e| ProtocolError::Malformed(e.to_string()))?;
+    let body = Body::plain(content, sent_at_ms, sequence).encode()?;
+    seal_bytes(sender, recipient, &body)
+}
+
+/// Seal an already encoded [`Body`] for `recipient`.
+pub fn seal_bytes(
+    sender: &Identity,
+    recipient: &KeyBundle,
+    body: &[u8],
+) -> Result<Envelope, ProtocolError> {
     if body.len() > MAX_BODY_BYTES {
         return Err(ProtocolError::TooLarge(body.len()));
     }
@@ -122,13 +232,13 @@ pub fn seal_with(
 
     let signature = sender.sign(
         ENVELOPE_DOMAIN,
-        &signed_bytes(&recipient.user_id, &ephemeral_public, &nonce, &body),
+        &signed_bytes(&recipient.user_id, &ephemeral_public, &nonce, body),
     );
 
     let mut plaintext = Zeroizing::new(Vec::with_capacity(96 + body.len()));
     plaintext.extend_from_slice(sender.user_id().as_bytes());
     plaintext.extend_from_slice(&signature);
-    plaintext.extend_from_slice(&body);
+    plaintext.extend_from_slice(body);
 
     let cipher = XChaCha20Poly1305::new(Key::from_slice(key.as_slice()));
     let ciphertext = cipher
@@ -150,10 +260,34 @@ pub fn seal_with(
     })
 }
 
-/// Decrypt an envelope addressed to `recipient` and verify the sender's
-/// signature. Succeeds only if the envelope is intact, addressed to us, and
-/// really signed by the identity it claims to come from.
+/// Decrypt a v1 envelope addressed to `recipient` and verify the sender's
+/// signature. Fails on a v2 body; use [`open_bytes`] and [`Body::decode`]
+/// to handle both.
 pub fn open(recipient: &Identity, envelope: &Envelope) -> Result<Message, ProtocolError> {
+    let opened = open_bytes(recipient, envelope)?;
+    match Body::decode(&opened.body)? {
+        Body::Plain {
+            sent_at_ms,
+            sequence,
+            content,
+        } => Ok(Message {
+            id: opened.id,
+            from: opened.from,
+            to: opened.to,
+            sent_at_ms,
+            sequence,
+            content,
+            forward_secret: false,
+        }),
+        Body::Ratchet(_) => Err(ProtocolError::Malformed(
+            "body is encrypted under a session".into(),
+        )),
+    }
+}
+
+/// Open the sealed layer: verify we are the recipient, decrypt, and check
+/// the sender's signature. The body is returned undecoded.
+pub fn open_bytes(recipient: &Identity, envelope: &Envelope) -> Result<Opened, ProtocolError> {
     if envelope.to != recipient.user_id() {
         return Err(ProtocolError::WrongRecipient);
     }
@@ -205,19 +339,11 @@ pub fn open(recipient: &Identity, envelope: &Envelope) -> Result<Message, Protoc
         &signature,
     )?;
 
-    let body: Body =
-        serde_json::from_slice(body).map_err(|e| ProtocolError::Malformed(e.to_string()))?;
-
-    Ok(Message {
+    Ok(Opened {
         id: envelope.id.clone(),
         from,
         to: envelope.to,
-        sent_at_ms: body.sent_at_ms,
-        sequence: Sequence {
-            epoch: body.epoch,
-            seq: body.seq,
-        },
-        content: body.content,
+        body: Zeroizing::new(body.to_vec()),
     })
 }
 
@@ -261,6 +387,8 @@ fn signed_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prekey::{PrekeySecret, Prekeys};
+    use crate::session::Session;
 
     fn text(s: &str) -> Content {
         Content::Text { body: s.into() }
@@ -291,6 +419,7 @@ mod tests {
         assert_eq!(msg.sent_at_ms, 1234);
         assert_eq!(msg.content, text("hello bob"));
         assert_eq!(msg.id, env.id);
+        assert!(!msg.forward_secret);
     }
 
     #[test]
@@ -357,5 +486,62 @@ mod tests {
             seal(&alice, &bob.key_bundle(), text(&big), 0),
             Err(ProtocolError::TooLarge(_))
         ));
+    }
+
+    #[test]
+    fn plain_body_encoding_is_unchanged_from_v1() {
+        let bytes = Body::plain(text("hi"), 5, Sequence { epoch: 1, seq: 2 })
+            .encode()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(bytes.clone()).unwrap(),
+            r#"{"sent_at_ms":5,"epoch":1,"seq":2,"content":{"type":"text","body":"hi"}}"#
+        );
+        assert!(matches!(Body::decode(&bytes), Ok(Body::Plain { .. })));
+        assert!(Body::decode(br#"{"v":9}"#).is_err());
+        assert!(Body::decode(b"nonsense").is_err());
+    }
+
+    #[test]
+    fn ratchet_bodies_ride_inside_the_sealed_layer() {
+        let alice = Identity::generate();
+        let bob = Identity::generate();
+        let signed = PrekeySecret::generate(1, 0);
+        let bob_bundle = bob.key_bundle_with(Prekeys {
+            signed: signed.signed_by(&bob),
+            one_time: Vec::new(),
+        });
+        let (mut alice_session, init) = Session::initiate(&alice, &bob_bundle).unwrap();
+        let inner = Body::plain(text("ratcheted"), 9, Sequence { epoch: 3, seq: 1 })
+            .encode()
+            .unwrap();
+        let message = alice_session.encrypt(&inner).unwrap();
+        let body = Body::Ratchet(RatchetBody {
+            v: 2,
+            session: *alice_session.id(),
+            init: Some(init.clone()),
+            message,
+        });
+        let env = seal_bytes(&alice, &bob_bundle, &body.encode().unwrap()).unwrap();
+
+        // The v1 opener refuses it; the raw opener hands the body over.
+        assert!(open(&bob, &env).is_err());
+        let opened = open_bytes(&bob, &env).unwrap();
+        assert_eq!(opened.from, alice.user_id());
+        let Body::Ratchet(ratchet) = Body::decode(&opened.body).unwrap() else {
+            panic!("expected a ratchet body");
+        };
+        assert_eq!(ratchet.init, Some(init.clone()));
+        let mut bob_session =
+            Session::respond(&bob, &alice.user_id(), &signed, None, &init).unwrap();
+        let plain = bob_session.decrypt(&ratchet.message).unwrap();
+        let Body::Plain {
+            content, sequence, ..
+        } = Body::decode(&plain).unwrap()
+        else {
+            panic!("expected a plain body inside");
+        };
+        assert_eq!(content, text("ratcheted"));
+        assert_eq!(sequence.seq, 1);
     }
 }

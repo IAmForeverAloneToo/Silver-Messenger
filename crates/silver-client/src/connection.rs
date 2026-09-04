@@ -2,17 +2,19 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
-use silver_protocol::wire::{ClientFrame, ErrorCode, ServerFrame, auth_signature};
+use silver_protocol::wire::{ClientFrame, ErrorCode, ServerFrame, auth_signature, feature};
 
 use crate::outbox::Outbox;
 use crate::proxy::Proxy;
-use crate::tls::{ConnectOptions, connector};
+use crate::sessions::{SessionError, SessionInfo, SharedSessions};
+use crate::submitter::{SubmitEvent, Submitter};
+use crate::tls::{ConnectOptions, Connectors, connectors};
 use silver_protocol::{
-    Content, Envelope, Identity, KeyBundle, Message, ProtocolError, Sequence, UserId, now_ms, open,
-    seal_with,
+    Body, Content, Envelope, Identity, KeyBundle, Message, ProtocolError, Sequence, UserId, now_ms,
+    open_bytes, seal_bytes,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -27,6 +29,10 @@ const KEEPALIVE: Duration = Duration::from_secs(30);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// How long to wait before resending the outbox after the relay rate-limits us.
 const RATE_LIMIT_RETRY: Duration = Duration::from_secs(5);
+/// How often to look a v1 contact up again in case they now publish prekeys.
+const UPGRADE_CHECK: Duration = Duration::from_secs(3600);
+/// Publishes per connection in answer to a low prekey deposit.
+const MAX_REPUBLISH: u32 = 2;
 
 /// Things the connection task reports to the front end.
 #[derive(Debug)]
@@ -38,6 +44,16 @@ pub enum ClientEvent {
     Disconnected { reason: String, retry_in: Duration },
     /// A decrypted, signature-verified incoming message.
     Message(Message),
+    /// A forward-secret session with `peer` came into being.
+    SessionEstablished { peer: UserId, initiated_by_us: bool },
+    /// An envelope from `from` was authentic but its session-encrypted body
+    /// could not be read, usually because one side lost its session state.
+    /// Sending them a message starts a fresh session.
+    Undecryptable {
+        from: UserId,
+        id: String,
+        reason: String,
+    },
     /// The relay accepted the envelope with this id.
     Sent { id: String },
     /// The relay refused the envelope with this id for good (for example the
@@ -62,6 +78,10 @@ pub enum ClientError {
     Relay(String),
     #[error("protocol error: {0}")]
     Protocol(#[from] ProtocolError),
+    #[error("{0}")]
+    Session(#[from] SessionError),
+    #[error("they have not published a key yet (they need to run Silver Messenger once)")]
+    NoKey,
     #[error("timed out waiting for relay")]
     Timeout,
     #[error("client task has stopped")]
@@ -80,12 +100,29 @@ enum Command {
     Shutdown,
 }
 
+/// What [`Client::send_message`] did.
+#[derive(Debug)]
+pub struct Delivery {
+    pub envelope: Envelope,
+    /// The bundle the message was sealed for; pin it.
+    pub bundle: KeyBundle,
+    /// The relay served a different long-term key than the pinned one.
+    pub key_changed: bool,
+    pub forward_secret: bool,
+}
+
 /// Cheap-to-clone handle to the connection task.
 #[derive(Clone)]
 pub struct Client {
     identity: Arc<Identity>,
     cmd_tx: mpsc::Sender<Command>,
+    ev_tx: mpsc::Sender<ClientEvent>,
     pending: PendingIds,
+    sessions: Option<SharedSessions>,
+    /// When each v1 contact was last checked for an upgrade to prekeys.
+    upgrade_checks: Arc<Mutex<HashMap<UserId, Instant>>>,
+    /// Features the relay advertised on the last handshake.
+    relay_features: Arc<Mutex<Vec<String>>>,
 }
 
 impl Client {
@@ -97,31 +134,51 @@ impl Client {
         identity: Arc<Identity>,
         options: ConnectOptions,
     ) -> anyhow::Result<(Self, mpsc::Receiver<ClientEvent>)> {
-        let connector = connector(&options)?;
+        let connectors = connectors(&options)?;
         let proxy = options.proxy.as_deref().map(Proxy::parse).transpose()?;
         let outbox = Outbox::load(options.outbox_path.clone(), options.outbox_cipher.clone())?;
         let pending: PendingIds = Arc::new(Mutex::new(outbox.ids()));
         let (cmd_tx, cmd_rx) = mpsc::channel(64);
         let (ev_tx, ev_rx) = mpsc::channel(256);
+        let relay_features = Arc::new(Mutex::new(Vec::new()));
         tokio::spawn(run(
-            relay_url,
-            identity.clone(),
-            connector,
-            proxy,
-            options.invite_token.clone(),
+            Setup {
+                relay_url,
+                identity: identity.clone(),
+                connectors,
+                proxy,
+                invite_token: options.invite_token.clone(),
+                sessions: options.sessions.clone(),
+                submit_authenticated: options.submit_authenticated,
+                relay_features: relay_features.clone(),
+            },
             outbox,
             pending.clone(),
             cmd_rx,
-            ev_tx,
+            ev_tx.clone(),
         ));
         Ok((
             Self {
                 identity,
                 cmd_tx,
+                ev_tx,
                 pending,
+                sessions: options.sessions,
+                upgrade_checks: Arc::new(Mutex::new(HashMap::new())),
+                relay_features,
             },
             ev_rx,
         ))
+    }
+
+    /// Whether the relay advertised a feature (see
+    /// [`silver_protocol::wire::feature`]) on the last handshake.
+    pub fn relay_supports(&self, feature: &str) -> bool {
+        self.relay_features
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|f| f == feature)
     }
 
     pub fn identity(&self) -> &Identity {
@@ -142,6 +199,28 @@ impl Client {
 
     pub fn pending_count(&self) -> usize {
         self.pending.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// The forward-secret session in use with `peer`, if any.
+    pub fn session_info(&self, peer: &UserId) -> Option<SessionInfo> {
+        self.sessions
+            .as_ref()?
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .session_info(peer)
+    }
+
+    /// Drop every session with `peer`, for example after a key change.
+    pub fn forget_sessions(&self, peer: &UserId) {
+        if let Some(sessions) = &self.sessions {
+            if let Err(e) = sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .forget(peer)
+            {
+                warn!("could not drop sessions with {peer}: {e:#}");
+            }
+        }
     }
 
     /// Fetch and verify someone's key bundle from the relay.
@@ -169,6 +248,9 @@ impl Client {
     /// Seal `text` for `to` and queue it for the relay. Resolves once the
     /// envelope is in the outbox, connected or not; [`ClientEvent::Sent`] or
     /// [`ClientEvent::Rejected`] follows once the relay has answered.
+    ///
+    /// With a session store and a bundle that carries prekeys the message
+    /// goes out under a forward-secret session; otherwise as protocol v1.
     pub async fn send_text(&self, to: &KeyBundle, text: String) -> Result<Envelope, ClientError> {
         self.send_text_sequenced(to, text, Sequence::default())
             .await
@@ -182,13 +264,29 @@ impl Client {
         text: String,
         sequence: Sequence,
     ) -> Result<Envelope, ClientError> {
-        let envelope = seal_with(
-            &self.identity,
-            to,
-            Content::Text { body: text },
-            now_ms(),
-            sequence,
-        )?;
+        let plain = Body::plain(Content::Text { body: text }, now_ms(), sequence).encode()?;
+        let body = match &self.sessions {
+            Some(sessions) if to.supports_sessions() => {
+                let ratchet = sessions.lock().unwrap_or_else(|e| e.into_inner()).encrypt(
+                    &self.identity,
+                    to,
+                    &plain,
+                    now_ms(),
+                )?;
+                if ratchet.init.is_some() && ratchet.message.header.n == 0 {
+                    let _ = self
+                        .ev_tx
+                        .send(ClientEvent::SessionEstablished {
+                            peer: to.user_id,
+                            initiated_by_us: true,
+                        })
+                        .await;
+                }
+                Body::Ratchet(ratchet).encode()?
+            }
+            _ => plain,
+        };
+        let envelope = seal_bytes(&self.identity, to, &body)?;
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(Command::Send {
@@ -201,10 +299,92 @@ impl Client {
         Ok(envelope)
     }
 
+    /// Send `text` to `peer`, fetching their current bundle from the relay
+    /// when that is needed: when nothing is pinned, when a forward-secret
+    /// session has to be started (it needs fresh prekeys), or now and then
+    /// for a contact who did not publish prekeys last time. Falls back to
+    /// the pinned bundle when the relay cannot be asked.
+    pub async fn send_message(
+        &self,
+        peer: UserId,
+        pinned: Option<KeyBundle>,
+        text: String,
+        sequence: Sequence,
+    ) -> Result<Delivery, ClientError> {
+        let needs_fresh = match (&self.sessions, &pinned) {
+            (_, None) => true,
+            (None, Some(_)) => false,
+            (Some(sessions), Some(bundle)) => {
+                let has_session = sessions
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .has_session(&peer);
+                if has_session {
+                    false
+                } else if bundle.supports_sessions() {
+                    true
+                } else {
+                    self.upgrade_check_due(&peer)
+                }
+            }
+        };
+        let mut bundle = pinned.clone();
+        if needs_fresh {
+            match self.lookup(peer).await {
+                Ok(Some(fresh)) => bundle = Some(fresh),
+                Ok(None) => {}
+                Err(e) if bundle.is_none() => return Err(e),
+                Err(e) => debug!("using the pinned bundle for {peer}: lookup failed: {e}"),
+            }
+        }
+        let bundle = bundle.ok_or(ClientError::NoKey)?;
+        let key_changed = pinned
+            .as_ref()
+            .is_some_and(|p| p.dh_public != bundle.dh_public);
+        if key_changed {
+            // Sessions were agreed with the old key; they cannot continue.
+            self.forget_sessions(&peer);
+        }
+        let envelope = self.send_text_sequenced(&bundle, text, sequence).await?;
+        let forward_secret = self.session_info(&peer).is_some();
+        Ok(Delivery {
+            envelope,
+            bundle,
+            key_changed,
+            forward_secret,
+        })
+    }
+
+    fn upgrade_check_due(&self, peer: &UserId) -> bool {
+        let mut checks = self
+            .upgrade_checks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let due = checks
+            .get(peer)
+            .is_none_or(|at| at.elapsed() >= UPGRADE_CHECK);
+        if due {
+            checks.insert(*peer, Instant::now());
+        }
+        due
+    }
+
     /// Close the connection and stop the task.
     pub async fn shutdown(&self) {
         let _ = self.cmd_tx.send(Command::Shutdown).await;
     }
+}
+
+/// Everything the connection task needs that does not change.
+struct Setup {
+    relay_url: String,
+    identity: Arc<Identity>,
+    connectors: Connectors,
+    proxy: Option<Proxy>,
+    invite_token: Option<String>,
+    sessions: Option<SharedSessions>,
+    submit_authenticated: bool,
+    relay_features: Arc<Mutex<Vec<String>>>,
 }
 
 enum Exit {
@@ -212,13 +392,8 @@ enum Exit {
     Disconnected(String),
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run(
-    relay_url: String,
-    identity: Arc<Identity>,
-    connector: Connector,
-    proxy: Option<Proxy>,
-    invite_token: Option<String>,
+    setup: Setup,
     mut outbox: Outbox,
     pending: PendingIds,
     mut cmd_rx: mpsc::Receiver<Command>,
@@ -227,11 +402,7 @@ async fn run(
     let mut backoff = Duration::from_secs(1);
     loop {
         let outcome = session(
-            &relay_url,
-            &identity,
-            connector.clone(),
-            proxy.as_ref(),
-            invite_token.as_deref(),
+            &setup,
             &mut outbox,
             &pending,
             &mut cmd_rx,
@@ -279,25 +450,35 @@ async fn run(
     }
 }
 
-type Pending = HashMap<UserId, Vec<oneshot::Sender<Result<Option<KeyBundle>, ClientError>>>>;
+type Lookups = HashMap<UserId, Vec<oneshot::Sender<Result<Option<KeyBundle>, ClientError>>>>;
 
-#[allow(clippy::too_many_arguments)]
+/// Where outgoing envelopes go on this connection.
+enum Submission {
+    /// On the authenticated connection.
+    Authenticated,
+    /// On the anonymous submission connection, once it is ready.
+    Anonymous(Submitter),
+}
+
+/// One authenticated connection, from connect to disconnect.
 async fn session(
-    relay_url: &str,
-    identity: &Identity,
-    connector: Connector,
-    proxy: Option<&Proxy>,
-    invite_token: Option<&str>,
+    setup: &Setup,
     outbox: &mut Outbox,
     pending: &PendingIds,
     cmd_rx: &mut mpsc::Receiver<Command>,
     ev_tx: &mpsc::Sender<ClientEvent>,
     backoff: &mut Duration,
 ) -> anyhow::Result<Exit> {
+    let relay_url = setup.relay_url.as_str();
+    let identity = setup.identity.as_ref();
     debug!("connecting to {relay_url}");
     let ws = tokio::time::timeout(
         HANDSHAKE_TIMEOUT,
-        open_websocket(relay_url, connector, proxy),
+        open_websocket(
+            relay_url,
+            setup.connectors.main.clone(),
+            setup.proxy.as_ref(),
+        ),
     )
     .await
     .map_err(|_| anyhow::anyhow!("connect timed out"))??;
@@ -305,7 +486,7 @@ async fn session(
 
     // --- handshake: challenge -> auth -> auth_ok ---------------------------
     let handshake = async {
-        let nonce = match next_frame(&mut stream).await? {
+        let nonce = match read_frame(&mut stream).await? {
             ServerFrame::Challenge { nonce } => nonce,
             other => anyhow::bail!("expected challenge, got {other:?}"),
         };
@@ -314,35 +495,37 @@ async fn session(
             signature: auth_signature(identity, &nonce),
         };
         sink.send(text(&auth)).await?;
-        match next_frame(&mut stream).await? {
-            ServerFrame::AuthOk { .. } => {}
+        match read_frame(&mut stream).await? {
+            ServerFrame::AuthOk { features, .. } => anyhow::Ok(features),
             ServerFrame::Error { code, message } => {
                 anyhow::bail!("auth rejected ({code:?}): {message}")
             }
             other => anyhow::bail!("expected auth_ok, got {other:?}"),
         }
-        anyhow::Ok(())
     };
-    tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake)
+    let features = tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake)
         .await
         .map_err(|_| anyhow::anyhow!("handshake timed out"))??;
+    let anonymous_offered = features.iter().any(|f| f == feature::ANONYMOUS_SEND);
+    *setup
+        .relay_features
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = features;
 
     // Publish our bundle. The relay may interleave queued deliveries before it
     // answers, so `Published` is handled in the main loop; only then are we
     // discoverable and report `Connected`.
-    sink.send(text(&ClientFrame::Publish {
-        bundle: identity.key_bundle(),
-        invite: invite_token.map(str::to_owned),
-    }))
-    .await?;
+    sink.send(text(&publish_frame(setup)?)).await?;
     let mut published = false;
+    let mut republished = 0u32;
 
     // --- steady state ------------------------------------------------------
-    let mut lookups: Pending = HashMap::new();
+    let mut lookups: Lookups = HashMap::new();
     let mut keepalive = tokio::time::interval(KEEPALIVE);
     keepalive.tick().await; // first tick fires immediately; skip it
     // Set when the relay rate-limited us; the outbox is resent at that time.
     let mut retry_at: Option<tokio::time::Instant> = None;
+    let mut submission = Submission::Authenticated;
 
     loop {
         let retry = async {
@@ -351,16 +534,17 @@ async fn session(
                 None => std::future::pending::<()>().await,
             }
         };
+        let submit_event = async {
+            match &mut submission {
+                Submission::Anonymous(submitter) => submitter.next_event().await,
+                Submission::Authenticated => std::future::pending().await,
+            }
+        };
         tokio::select! {
             _ = retry => {
                 retry_at = None;
-                for envelope in outbox.iter() {
-                    let frame = ClientFrame::Send {
-                        envelope: envelope.clone(),
-                    };
-                    if sink.send(text(&frame)).await.is_err() {
-                        return Ok(Exit::Disconnected("resend failed".into()));
-                    }
+                if !flush_outbox(&mut sink, &mut submission, outbox).await {
+                    return Ok(Exit::Disconnected("resend failed".into()));
                 }
             }
             cmd = cmd_rx.recv() => match cmd {
@@ -374,7 +558,7 @@ async fn session(
                     outbox.push(envelope.clone());
                     sync_pending(pending, outbox);
                     let _ = reply.send(Ok(()));
-                    if sink.send(text(&ClientFrame::Send { envelope })).await.is_err() {
+                    if published && !submit(&mut sink, &mut submission, envelope).await {
                         return Ok(Exit::Disconnected("send failed".into()));
                     }
                 }
@@ -391,7 +575,36 @@ async fn session(
                     return Ok(Exit::Disconnected("keepalive failed".into()));
                 }
             }
-            frame = next_frame(&mut stream) => {
+            event = submit_event => match event {
+                Some(SubmitEvent::Ready) => {
+                    if let Submission::Anonymous(s) = &mut submission {
+                        s.ready = true;
+                    }
+                    if !flush_outbox(&mut sink, &mut submission, outbox).await {
+                        return Ok(Exit::Disconnected("resend failed".into()));
+                    }
+                }
+                Some(SubmitEvent::Down { reason }) => {
+                    debug!("anonymous submission down: {reason}");
+                    if let Submission::Anonymous(s) = &mut submission {
+                        s.ready = false;
+                    }
+                }
+                Some(SubmitEvent::Refused) | None => {
+                    warn!("submitting on the authenticated connection instead");
+                    submission = Submission::Authenticated;
+                    if !flush_outbox(&mut sink, &mut submission, outbox).await {
+                        return Ok(Exit::Disconnected("resend failed".into()));
+                    }
+                }
+                Some(SubmitEvent::Sent { id }) => {
+                    accepted(id, outbox, pending, ev_tx).await;
+                }
+                Some(SubmitEvent::Rejected { id, code, message }) => {
+                    refused(id, code, message, outbox, pending, ev_tx, &mut retry_at).await;
+                }
+            },
+            frame = read_frame(&mut stream) => {
                 let frame = match frame {
                     Ok(f) => f,
                     Err(e) => return Ok(Exit::Disconnected(e.to_string())),
@@ -399,50 +612,17 @@ async fn session(
                 match frame {
                     ServerFrame::Deliver { envelope } => {
                         let id = envelope.id.clone();
-                        match open(identity, &envelope) {
-                            Ok(message) => {
-                                let _ = ev_tx.send(ClientEvent::Message(message)).await;
-                            }
-                            Err(e) => {
-                                warn!("dropping undecryptable envelope {id}: {e}");
-                                let _ = ev_tx
-                                    .send(ClientEvent::Error(format!("could not open envelope {id}: {e}")))
-                                    .await;
-                            }
-                        }
+                        deliver(setup, envelope, ev_tx).await;
                         // Ack either way so a poison envelope cannot wedge the mailbox.
                         if sink.send(text(&ClientFrame::Ack { id })).await.is_err() {
                             return Ok(Exit::Disconnected("ack failed".into()));
                         }
                     }
                     ServerFrame::Sent { id } => {
-                        outbox.remove(&id);
-                        sync_pending(pending, outbox);
-                        let _ = ev_tx.send(ClientEvent::Sent { id }).await;
-                    }
-                    ServerFrame::Rejected { id, code: ErrorCode::RateLimited, .. } => {
-                        // Not a verdict on the message: keep it and try again.
-                        if retry_at.is_none() {
-                            retry_at = Some(tokio::time::Instant::now() + RATE_LIMIT_RETRY);
-                            let _ = ev_tx
-                                .send(ClientEvent::Error(format!(
-                                    "the relay is rate limiting; retrying {} queued message(s) in {}s",
-                                    outbox.iter().count(),
-                                    RATE_LIMIT_RETRY.as_secs()
-                                )))
-                                .await;
-                        }
-                        debug!("rate limited on envelope {id}");
+                        accepted(id, outbox, pending, ev_tx).await;
                     }
                     ServerFrame::Rejected { id, code, message } => {
-                        outbox.remove(&id);
-                        sync_pending(pending, outbox);
-                        let _ = ev_tx
-                            .send(ClientEvent::Rejected {
-                                id,
-                                reason: format!("{message} ({code:?})"),
-                            })
-                            .await;
+                        refused(id, code, message, outbox, pending, ev_tx, &mut retry_at).await;
                     }
                     ServerFrame::LookupResult { user_id, bundle } => {
                         for reply in lookups.remove(&user_id).unwrap_or_default() {
@@ -474,15 +654,37 @@ async fn session(
                                     relay_url: relay_url.to_owned(),
                                 })
                                 .await;
+                            if anonymous_offered && !setup.submit_authenticated {
+                                submission = Submission::Anonymous(Submitter::spawn(
+                                    relay_url.to_owned(),
+                                    setup.connectors.anonymous.clone(),
+                                    setup.proxy.clone(),
+                                ));
+                            }
                             // Resend everything the relay has not accepted
                             // yet; it ignores ids it already holds.
-                            for envelope in outbox.iter() {
-                                let frame = ClientFrame::Send {
-                                    envelope: envelope.clone(),
-                                };
-                                if sink.send(text(&frame)).await.is_err() {
-                                    return Ok(Exit::Disconnected("resend failed".into()));
-                                }
+                            if !flush_outbox(&mut sink, &mut submission, outbox).await {
+                                return Ok(Exit::Disconnected("resend failed".into()));
+                            }
+                        }
+                    }
+                    ServerFrame::PrekeyStatus { one_time_remaining, consumed } => {
+                        let republish = match &setup.sessions {
+                            Some(sessions) => sessions
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .apply_prekey_status(one_time_remaining, &consumed, now_ms())
+                                .unwrap_or_else(|e| {
+                                    warn!("could not record prekey status: {e:#}");
+                                    false
+                                }),
+                            None => false,
+                        };
+                        if republish && republished < MAX_REPUBLISH {
+                            republished += 1;
+                            debug!("one-time prekeys ran low ({one_time_remaining} left); publishing more");
+                            if sink.send(text(&publish_frame(setup)?)).await.is_err() {
+                                return Ok(Exit::Disconnected("publish failed".into()));
                             }
                         }
                     }
@@ -496,11 +698,230 @@ async fn session(
     }
 }
 
+/// Our bundle, with prekeys when we keep sessions.
+fn publish_frame(setup: &Setup) -> anyhow::Result<ClientFrame> {
+    let bundle = match &setup.sessions {
+        Some(sessions) => {
+            let prekeys = sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .prekeys_for_publish(&setup.identity, now_ms())?;
+            setup.identity.key_bundle_with(prekeys)
+        }
+        None => setup.identity.key_bundle(),
+    };
+    Ok(ClientFrame::Publish {
+        bundle,
+        invite: setup.invite_token.clone(),
+    })
+}
+
+/// Hand one envelope to the relay on whichever connection submits. `false`
+/// means the authenticated connection is broken.
+async fn submit(sink: &mut WsSink, submission: &mut Submission, envelope: Envelope) -> bool {
+    match submission {
+        Submission::Anonymous(submitter) => {
+            if submitter.ready && !submitter.submit(envelope).await {
+                // The task is gone; fall back for good.
+                *submission = Submission::Authenticated;
+                return true; // the outbox holds it; resent on the next flush
+            }
+            true // not ready: submitted when `Ready` arrives
+        }
+        Submission::Authenticated => sink
+            .send(text(&ClientFrame::Send { envelope }))
+            .await
+            .is_ok(),
+    }
+}
+
+/// Resend everything the relay has not accepted yet. It ignores ids it
+/// already holds, so this is safe to do after every reconnect.
+async fn flush_outbox(sink: &mut WsSink, submission: &mut Submission, outbox: &Outbox) -> bool {
+    let queued: Vec<Envelope> = outbox.iter().cloned().collect();
+    for envelope in queued {
+        if !submit(sink, submission, envelope).await {
+            return false;
+        }
+    }
+    true
+}
+
+async fn accepted(
+    id: String,
+    outbox: &mut Outbox,
+    pending: &PendingIds,
+    ev_tx: &mpsc::Sender<ClientEvent>,
+) {
+    outbox.remove(&id);
+    sync_pending(pending, outbox);
+    let _ = ev_tx.send(ClientEvent::Sent { id }).await;
+}
+
+async fn refused(
+    id: String,
+    code: ErrorCode,
+    message: String,
+    outbox: &mut Outbox,
+    pending: &PendingIds,
+    ev_tx: &mpsc::Sender<ClientEvent>,
+    retry_at: &mut Option<tokio::time::Instant>,
+) {
+    if code == ErrorCode::RateLimited {
+        // Not a verdict on the message: keep it and try again.
+        if retry_at.is_none() {
+            *retry_at = Some(tokio::time::Instant::now() + RATE_LIMIT_RETRY);
+            let _ = ev_tx
+                .send(ClientEvent::Error(format!(
+                    "the relay is rate limiting; retrying {} queued message(s) in {}s",
+                    outbox.iter().count(),
+                    RATE_LIMIT_RETRY.as_secs()
+                )))
+                .await;
+        }
+        debug!("rate limited on envelope {id}");
+        return;
+    }
+    outbox.remove(&id);
+    sync_pending(pending, outbox);
+    let _ = ev_tx
+        .send(ClientEvent::Rejected {
+            id,
+            reason: format!("{message} ({code:?})"),
+        })
+        .await;
+}
+
+/// Open an incoming envelope and report what it held.
+async fn deliver(setup: &Setup, envelope: Envelope, ev_tx: &mpsc::Sender<ClientEvent>) {
+    let id = envelope.id.clone();
+    let opened = match open_bytes(&setup.identity, &envelope) {
+        Ok(opened) => opened,
+        Err(e) => {
+            warn!("dropping undecryptable envelope {id}: {e}");
+            let _ = ev_tx
+                .send(ClientEvent::Error(format!(
+                    "could not open envelope {id}: {e}"
+                )))
+                .await;
+            return;
+        }
+    };
+    let from = opened.from;
+    let (plain, forward_secret) = match Body::decode(&opened.body) {
+        Ok(Body::Plain {
+            sent_at_ms,
+            sequence,
+            content,
+        }) => {
+            let _ = ev_tx
+                .send(ClientEvent::Message(Message {
+                    id,
+                    from,
+                    to: opened.to,
+                    sent_at_ms,
+                    sequence,
+                    content,
+                    forward_secret: false,
+                }))
+                .await;
+            return;
+        }
+        Ok(Body::Ratchet(body)) => {
+            let Some(sessions) = &setup.sessions else {
+                let _ = ev_tx
+                    .send(ClientEvent::Undecryptable {
+                        from,
+                        id,
+                        reason:
+                            "it was sent under a forward-secret session but this client keeps none"
+                                .into(),
+                    })
+                    .await;
+                return;
+            };
+            let result = sessions.lock().unwrap_or_else(|e| e.into_inner()).decrypt(
+                &setup.identity,
+                from,
+                &body,
+                now_ms(),
+            );
+            match result {
+                Ok((plain, established)) => {
+                    if established {
+                        let _ = ev_tx
+                            .send(ClientEvent::SessionEstablished {
+                                peer: from,
+                                initiated_by_us: false,
+                            })
+                            .await;
+                    }
+                    (plain, true)
+                }
+                Err(e) => {
+                    warn!("undecryptable session message {id} from {from}: {e}");
+                    let _ = ev_tx
+                        .send(ClientEvent::Undecryptable {
+                            from,
+                            id,
+                            reason: e.to_string(),
+                        })
+                        .await;
+                    return;
+                }
+            }
+        }
+        Err(e) => {
+            warn!("malformed body in envelope {id} from {from}: {e}");
+            let _ = ev_tx
+                .send(ClientEvent::Error(format!(
+                    "could not read envelope {id}: {e}"
+                )))
+                .await;
+            return;
+        }
+    };
+    match Body::decode(&plain) {
+        Ok(Body::Plain {
+            sent_at_ms,
+            sequence,
+            content,
+        }) => {
+            let _ = ev_tx
+                .send(ClientEvent::Message(Message {
+                    id,
+                    from,
+                    to: opened.to,
+                    sent_at_ms,
+                    sequence,
+                    content,
+                    forward_secret,
+                }))
+                .await;
+        }
+        Ok(Body::Ratchet(_)) => {
+            let _ = ev_tx
+                .send(ClientEvent::Error(format!(
+                    "envelope {id} nests a session inside a session; dropped"
+                )))
+                .await;
+        }
+        Err(e) => {
+            let _ = ev_tx
+                .send(ClientEvent::Error(format!(
+                    "could not read envelope {id}: {e}"
+                )))
+                .await;
+        }
+    }
+}
+
 type Ws = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+type WsSink = futures_util::stream::SplitSink<Ws, WsMessage>;
 
 /// Open the WebSocket, directly or through a CONNECT proxy. TLS (for
 /// `wss://`) is always negotiated end to end with the relay by us.
-async fn open_websocket(
+pub(crate) async fn open_websocket(
     url: &str,
     connector: Connector,
     proxy: Option<&Proxy>,
@@ -618,12 +1039,10 @@ fn text(frame: &ClientFrame) -> WsMessage {
     WsMessage::Text(frame.encode().into())
 }
 
-type WsStream = futures_util::stream::SplitStream<
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
->;
+pub(crate) type WsStream = futures_util::stream::SplitStream<Ws>;
 
 /// Read the next server frame, skipping control frames. Errors on close.
-async fn next_frame(stream: &mut WsStream) -> anyhow::Result<ServerFrame> {
+pub(crate) async fn read_frame(stream: &mut WsStream) -> anyhow::Result<ServerFrame> {
     loop {
         let msg = match stream.next().await {
             Some(Ok(m)) => m,

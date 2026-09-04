@@ -51,6 +51,12 @@ struct Args {
     /// (clients pass it with --invite). Existing identities are unaffected.
     #[arg(long, env = "SILVER_RELAY_INVITE_TOKEN")]
     invite_token: Option<String>,
+
+    /// Messages a connection that never authenticates may submit per
+    /// minute. Such connections let senders stay unknown to the relay;
+    /// 0 turns them off.
+    #[arg(long, env = "SILVER_RELAY_ANONYMOUS_SENDS_PER_MINUTE", default_value_t = Policy::default().anonymous_sends_per_minute)]
+    anonymous_sends_per_minute: u32,
 }
 
 #[tokio::main]
@@ -70,9 +76,13 @@ async fn main() -> anyhow::Result<()> {
         sends_per_minute: args.sends_per_minute,
         lookups_per_minute: args.lookups_per_minute,
         invite_token: args.invite_token.filter(|t| !t.trim().is_empty()),
+        anonymous_sends_per_minute: args.anonymous_sends_per_minute,
     };
     if policy.invite_token.is_some() {
         info!("registration requires an invite token");
+    }
+    if policy.anonymous_sends_per_minute == 0 {
+        info!("anonymous submission is off; senders submit on their own connection");
     }
     let state = if args.ephemeral {
         info!("running with in-memory state; nothing is persisted");

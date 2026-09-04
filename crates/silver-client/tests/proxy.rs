@@ -98,8 +98,18 @@ async fn connects_through_a_connect_proxy() {
         .trim_start_matches("ws://")
         .trim_end_matches("/ws")
         .to_owned();
-    let seen = seen.lock().unwrap().clone();
-    assert_eq!(seen, vec![format!("CONNECT {relay_host_port} HTTP/1.1")]);
+    // Both the authenticated connection and the anonymous submission
+    // connection the relay offers go through the proxy.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let seen = loop {
+        let seen = seen.lock().unwrap().clone();
+        if seen.len() >= 2 || tokio::time::Instant::now() >= deadline {
+            break seen;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    let expected = format!("CONNECT {relay_host_port} HTTP/1.1");
+    assert_eq!(seen, vec![expected.clone(), expected]);
     client.shutdown().await;
 }
 

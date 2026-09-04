@@ -1,13 +1,16 @@
 //! The Silver Messenger relay.
 //!
 //! The relay is deliberately dumb: it authenticates clients by challenge
-//! signature, stores signed public-key bundles, and queues opaque
-//! [`Envelope`]s per recipient until the recipient acknowledges them. It never
-//! sees plaintext, and envelopes carry no sender field; what it can infer from
-//! connections and timing is described in docs/THREAT_MODEL.md.
+//! signature, stores signed public-key bundles and one-time prekeys, and
+//! queues opaque [`Envelope`]s per recipient until the recipient acknowledges
+//! them. It never sees plaintext, and envelopes carry no sender field. A
+//! sender may also submit envelopes on a connection that never
+//! authenticates, so the relay cannot pair an envelope with an identity;
+//! what it can still infer from connections and timing is described in
+//! docs/THREAT_MODEL.md.
 //!
-//! Bundles and mailboxes live in an embedded database ([`store`]), so
-//! restarts lose nothing; only the set of connected sessions is in memory.
+//! Bundles, prekeys and mailboxes live in an embedded database ([`store`]),
+//! so restarts lose nothing; only the set of connected sessions is in memory.
 
 pub mod store;
 
@@ -23,10 +26,13 @@ use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use axum::routing::get;
+use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use rand::RngCore;
 use rand::rngs::OsRng;
-use silver_protocol::wire::{ClientFrame, ErrorCode, MAX_FRAME_BYTES, ServerFrame, verify_auth};
+use silver_protocol::wire::{
+    ClientFrame, ErrorCode, MAX_FRAME_BYTES, ServerFrame, feature, verify_auth,
+};
 use silver_protocol::{Envelope, KeyBundle, MAX_CIPHERTEXT_BYTES, UserId, now_ms};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -47,17 +53,23 @@ pub const SOURCE_NOTICE: &str = concat!(
 const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
 /// Default time an unacknowledged envelope is kept.
 pub const DEFAULT_MESSAGE_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+/// One-time prekeys a client may have on deposit at once.
+pub const MAX_ONE_TIME_PREKEYS: usize = 200;
 
 /// Abuse controls applied per connection, plus the registration policy.
 #[derive(Clone, Debug)]
 pub struct Policy {
-    /// Envelopes one connection may submit per minute (burst of the same size).
+    /// Envelopes one authenticated connection may submit per minute (burst
+    /// of the same size).
     pub sends_per_minute: u32,
     /// Key lookups one connection may make per minute.
     pub lookups_per_minute: u32,
     /// When set, an identity not yet known to the relay must present this
     /// token with its first `Publish`.
     pub invite_token: Option<String>,
+    /// Envelopes a connection that never authenticates may submit per
+    /// minute. Zero refuses such connections altogether.
+    pub anonymous_sends_per_minute: u32,
 }
 
 impl Default for Policy {
@@ -66,6 +78,7 @@ impl Default for Policy {
             sends_per_minute: 60,
             lookups_per_minute: 30,
             invite_token: None,
+            anonymous_sends_per_minute: 30,
         }
     }
 }
@@ -103,17 +116,21 @@ impl Bucket {
     }
 }
 
-/// Per-connection rate limiters.
-struct Buckets {
+/// Per-connection state for an authenticated client.
+struct Conn {
     sends: Bucket,
     lookups: Bucket,
+    /// The client published prekeys, so it speaks protocol v2: it gets
+    /// prekey status reports and one-time prekeys with its lookups.
+    prekeys: bool,
 }
 
-impl Buckets {
+impl Conn {
     fn new(policy: &Policy) -> Self {
         Self {
             sends: Bucket::per_minute(policy.sends_per_minute),
             lookups: Bucket::per_minute(policy.lookups_per_minute),
+            prekeys: false,
         }
     }
 }
@@ -125,6 +142,7 @@ pub struct RelayState {
     policy: Policy,
     online: Mutex<HashMap<UserId, Session>>,
     next_session: AtomicU64,
+    anonymous_submissions: AtomicU64,
 }
 
 struct Session {
@@ -133,13 +151,19 @@ struct Session {
 }
 
 enum Outbound {
-    Frame(ServerFrame),
+    Frame(Box<ServerFrame>),
     /// A newer session for the same user replaced this one.
     Close,
 }
 
 /// Why the relay refused a client frame.
 type Rejection = (ErrorCode, &'static str);
+
+/// What a client that published prekeys is told afterwards.
+struct PrekeyReport {
+    one_time_remaining: u32,
+    consumed: Vec<u32>,
+}
 
 impl RelayState {
     /// State kept only in memory; for tests and `--ephemeral`.
@@ -174,6 +198,7 @@ impl RelayState {
             policy,
             online: Mutex::new(HashMap::new()),
             next_session: AtomicU64::new(0),
+            anonymous_submissions: AtomicU64::new(0),
         })
     }
 
@@ -181,10 +206,16 @@ impl RelayState {
         self.online().len()
     }
 
+    /// Envelopes submitted on connections that never authenticated.
+    pub fn anonymous_submission_count(&self) -> u64 {
+        self.anonymous_submissions.load(Ordering::Relaxed)
+    }
+
     pub fn queued_for(&self, user: &UserId) -> usize {
         self.store.queued_count(user).unwrap_or(0) as usize
     }
 
+    /// The stored bundle: the signed prekey included, one-time keys not.
     pub fn bundle(&self, user: &UserId) -> Option<KeyBundle> {
         self.store.bundle(user).unwrap_or_else(|e| {
             error!("reading bundle: {e:#}");
@@ -192,8 +223,25 @@ impl RelayState {
         })
     }
 
+    /// One-time prekeys on deposit for `user`.
+    pub fn one_time_prekeys_left(&self, user: &UserId) -> u32 {
+        self.store
+            .one_time_status(user)
+            .map(|(remaining, _)| remaining)
+            .unwrap_or(0)
+    }
+
     pub fn stats(&self) -> Stats {
         self.store.stats().unwrap_or_default()
+    }
+
+    /// What this relay can do beyond protocol v1.
+    pub fn features(&self) -> Vec<String> {
+        let mut features = vec![feature::PREKEYS.to_owned()];
+        if self.policy.anonymous_sends_per_minute > 0 {
+            features.push(feature::ANONYMOUS_SEND.to_owned());
+        }
+        features
     }
 
     /// Delete unacknowledged envelopes older than `ttl`. Returns how many.
@@ -225,7 +273,7 @@ impl RelayState {
             let _ = old.tx.send(Outbound::Close);
         }
         for envelope in queued {
-            let _ = tx.send(Outbound::Frame(ServerFrame::Deliver { envelope }));
+            let _ = tx.send(Outbound::Frame(Box::new(ServerFrame::Deliver { envelope })));
         }
         id
     }
@@ -237,12 +285,14 @@ impl RelayState {
         }
     }
 
+    /// Store a bundle. With prekeys, the one-time keys go to their own
+    /// table and the report says how the deposit stands.
     fn publish(
         &self,
         me: &UserId,
-        bundle: KeyBundle,
+        mut bundle: KeyBundle,
         invite: Option<&str>,
-    ) -> Result<(), Rejection> {
+    ) -> Result<Option<PrekeyReport>, Rejection> {
         if bundle.user_id != *me {
             return Err((
                 ErrorCode::Forbidden,
@@ -261,10 +311,45 @@ impl RelayState {
                 ));
             }
         }
-        self.store.put_bundle(&bundle).map_err(|e| {
+        let one_time = bundle
+            .prekeys
+            .as_mut()
+            .map(|p| std::mem::take(&mut p.one_time));
+        if one_time
+            .as_ref()
+            .is_some_and(|k| k.len() > MAX_ONE_TIME_PREKEYS)
+        {
+            return Err((ErrorCode::TooLarge, "too many one-time prekeys"));
+        }
+        let storage = |e: anyhow::Error| {
             error!("storing bundle: {e:#}");
             (ErrorCode::Internal, "storage error")
-        })
+        };
+        self.store.put_bundle(&bundle).map_err(storage)?;
+        let Some(keys) = one_time else {
+            return Ok(None);
+        };
+        self.store
+            .set_one_time_prekeys(me, &keys)
+            .map_err(storage)?;
+        let (one_time_remaining, consumed) = self.store.one_time_status(me).map_err(storage)?;
+        Ok(Some(PrekeyReport {
+            one_time_remaining,
+            consumed,
+        }))
+    }
+
+    /// A bundle for a lookup by a v2 client: one one-time prekey attached,
+    /// if the owner has any left.
+    fn bundle_with_one_time_prekey(&self, user: &UserId) -> Option<KeyBundle> {
+        let mut bundle = self.bundle(user)?;
+        if let Some(prekeys) = bundle.prekeys.as_mut() {
+            match self.store.take_one_time_prekey(user) {
+                Ok(taken) => prekeys.one_time = taken.into_iter().collect(),
+                Err(e) => error!("taking one-time prekey: {e:#}"),
+            }
+        }
+        Some(bundle)
     }
 
     /// Queue an envelope for its recipient and push it if they are online.
@@ -284,7 +369,7 @@ impl RelayState {
                 if let Some(session) = self.online().get(&envelope.to) {
                     let _ = session
                         .tx
-                        .send(Outbound::Frame(ServerFrame::Deliver { envelope }));
+                        .send(Outbound::Frame(Box::new(ServerFrame::Deliver { envelope })));
                 }
                 Ok(())
             }
@@ -292,6 +377,30 @@ impl RelayState {
             // recipient will get (or has got) the original.
             Enqueue::Duplicate => Ok(()),
             Enqueue::MailboxFull => Err((ErrorCode::MailboxFull, "recipient mailbox is full")),
+        }
+    }
+
+    /// Rate-limit and route a submitted envelope; the reply for the sender.
+    fn submit(&self, envelope: Envelope, bucket: &mut Bucket, who: Option<&UserId>) -> ServerFrame {
+        let id = envelope.id.clone();
+        if !bucket.try_take() {
+            match who {
+                Some(me) => warn!(%me, "send rate limit hit"),
+                None => warn!("send rate limit hit on an anonymous connection"),
+            }
+            return ServerFrame::Rejected {
+                id,
+                code: ErrorCode::RateLimited,
+                message: "too many messages; slow down".into(),
+            };
+        }
+        match self.route(envelope) {
+            Ok(()) => ServerFrame::Sent { id },
+            Err((code, message)) => ServerFrame::Rejected {
+                id,
+                code,
+                message: message.into(),
+            },
         }
     }
 
@@ -345,6 +454,9 @@ async fn ws_handler(
         .on_upgrade(move |socket| handle_socket(socket, state))
 }
 
+type Sink = SplitSink<WebSocket, Message>;
+type Stream = SplitStream<WebSocket>;
+
 async fn handle_socket(socket: WebSocket, state: Arc<RelayState>) {
     let (mut sink, mut stream) = socket.split();
 
@@ -358,8 +470,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>) {
         return;
     }
 
-    let auth = tokio::time::timeout(AUTH_TIMEOUT, next_frame(&mut stream)).await;
-    let user = match auth {
+    let first = tokio::time::timeout(AUTH_TIMEOUT, next_frame(&mut stream)).await;
+    let user = match first {
         Ok(Some(Ok(ClientFrame::Auth { user_id, signature }))) => {
             if verify_auth(&user_id, &nonce, &signature).is_err() {
                 let _ = send(
@@ -370,6 +482,12 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>) {
                 return;
             }
             user_id
+        }
+        Ok(Some(Ok(ClientFrame::Send { envelope })))
+            if state.policy.anonymous_sends_per_minute > 0 =>
+        {
+            anonymous_session(sink, stream, &state, envelope).await;
+            return;
         }
         Ok(Some(Ok(_))) => {
             let _ = send(
@@ -391,13 +509,14 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>) {
     };
 
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let mut buckets = Buckets::new(&state.policy);
+    let mut conn = Conn::new(&state.policy);
     let session_id = state.register(user, tx.clone());
     info!(%user, session_id, "client authenticated");
-    if send(&mut sink, &ServerFrame::AuthOk { user_id: user })
-        .await
-        .is_err()
-    {
+    let auth_ok = ServerFrame::AuthOk {
+        user_id: user,
+        features: state.features(),
+    };
+    if send(&mut sink, &auth_ok).await.is_err() {
         state.unregister(&user, session_id);
         return;
     }
@@ -420,12 +539,15 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>) {
             },
             inbound = next_frame(&mut stream) => match inbound {
                 Some(Ok(frame)) => {
-                    if let Some(reply) = handle_frame(&state, &user, frame, &mut buckets) {
-                        let _ = tx.send(Outbound::Frame(reply));
+                    for reply in handle_frame(&state, &user, frame, &mut conn) {
+                        let _ = tx.send(Outbound::Frame(Box::new(reply)));
                     }
                 }
                 Some(Err(e)) => {
-                    let _ = tx.send(Outbound::Frame(ServerFrame::error(ErrorCode::Malformed, e)));
+                    let _ = tx.send(Outbound::Frame(Box::new(ServerFrame::error(
+                        ErrorCode::Malformed,
+                        e,
+                    ))));
                 }
                 None => break,
             },
@@ -436,74 +558,111 @@ async fn handle_socket(socket: WebSocket, state: Arc<RelayState>) {
     info!(%user, session_id, "client disconnected");
 }
 
+/// A connection that only submits envelopes and never says who it is. It
+/// gets its own, stricter rate limit and nothing else: no mailbox, no
+/// lookups, no bundle.
+async fn anonymous_session(
+    mut sink: Sink,
+    mut stream: Stream,
+    state: &RelayState,
+    first: Envelope,
+) {
+    debug!("anonymous submission session opened");
+    let mut bucket = Bucket::per_minute(state.policy.anonymous_sends_per_minute);
+    let mut next = Some(ClientFrame::Send { envelope: first });
+    loop {
+        let frame = match next.take() {
+            Some(frame) => frame,
+            None => match next_frame(&mut stream).await {
+                Some(Ok(frame)) => frame,
+                Some(Err(e)) => {
+                    if send(&mut sink, &ServerFrame::error(ErrorCode::Malformed, e))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    continue;
+                }
+                None => break,
+            },
+        };
+        let reply = match frame {
+            ClientFrame::Send { envelope } => {
+                state.anonymous_submissions.fetch_add(1, Ordering::Relaxed);
+                state.submit(envelope, &mut bucket, None)
+            }
+            ClientFrame::Ping => ServerFrame::Pong,
+            _ => ServerFrame::error(
+                ErrorCode::Unauthenticated,
+                "this connection only accepts send and ping",
+            ),
+        };
+        if send(&mut sink, &reply).await.is_err() {
+            return;
+        }
+    }
+    debug!("anonymous submission session closed");
+}
+
 fn handle_frame(
     state: &RelayState,
     me: &UserId,
     frame: ClientFrame,
-    buckets: &mut Buckets,
-) -> Option<ServerFrame> {
+    conn: &mut Conn,
+) -> Vec<ServerFrame> {
     match frame {
-        ClientFrame::Auth { .. } => Some(ServerFrame::error(
+        ClientFrame::Auth { .. } => vec![ServerFrame::error(
             ErrorCode::Malformed,
             "already authenticated",
-        )),
+        )],
         ClientFrame::Publish { bundle, invite } => {
-            Some(match state.publish(me, bundle, invite.as_deref()) {
-                Ok(()) => ServerFrame::Published,
-                Err((code, message)) => ServerFrame::error(code, message),
-            })
+            match state.publish(me, bundle, invite.as_deref()) {
+                Ok(report) => {
+                    let mut replies = vec![ServerFrame::Published];
+                    if let Some(report) = report {
+                        conn.prekeys = true;
+                        replies.push(ServerFrame::PrekeyStatus {
+                            one_time_remaining: report.one_time_remaining,
+                            consumed: report.consumed,
+                        });
+                    }
+                    replies
+                }
+                Err((code, message)) => vec![ServerFrame::error(code, message)],
+            }
         }
         ClientFrame::Lookup { user_id } => {
-            if !buckets.lookups.try_take() {
+            if !conn.lookups.try_take() {
                 warn!(%me, "lookup rate limit hit");
-                return Some(ServerFrame::error(
+                return vec![ServerFrame::error(
                     ErrorCode::RateLimited,
                     "too many lookups; slow down",
-                ));
+                )];
             }
-            Some(ServerFrame::LookupResult {
-                user_id,
-                bundle: state.bundle(&user_id),
-            })
+            // Only a client that can use a one-time prekey gets one.
+            let bundle = if conn.prekeys {
+                state.bundle_with_one_time_prekey(&user_id)
+            } else {
+                state.bundle(&user_id)
+            };
+            vec![ServerFrame::LookupResult { user_id, bundle }]
         }
-        ClientFrame::Send { envelope } => {
-            let id = envelope.id.clone();
-            if !buckets.sends.try_take() {
-                warn!(%me, "send rate limit hit");
-                return Some(ServerFrame::Rejected {
-                    id,
-                    code: ErrorCode::RateLimited,
-                    message: "too many messages; slow down".into(),
-                });
-            }
-            Some(match state.route(envelope) {
-                Ok(()) => ServerFrame::Sent { id },
-                Err((code, message)) => ServerFrame::Rejected {
-                    id,
-                    code,
-                    message: message.into(),
-                },
-            })
-        }
+        ClientFrame::Send { envelope } => vec![state.submit(envelope, &mut conn.sends, Some(me))],
         ClientFrame::Ack { id } => {
             state.ack(me, &id);
-            None
+            Vec::new()
         }
-        ClientFrame::Ping => Some(ServerFrame::Pong),
+        ClientFrame::Ping => vec![ServerFrame::Pong],
     }
 }
 
-async fn send(
-    sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
-    frame: &ServerFrame,
-) -> Result<(), axum::Error> {
+async fn send(sink: &mut Sink, frame: &ServerFrame) -> Result<(), axum::Error> {
     sink.send(Message::Text(frame.encode().into())).await
 }
 
 /// Read the next JSON frame. `None` means the socket closed.
-async fn next_frame(
-    stream: &mut futures_util::stream::SplitStream<WebSocket>,
-) -> Option<Result<ClientFrame, String>> {
+async fn next_frame(stream: &mut Stream) -> Option<Result<ClientFrame, String>> {
     loop {
         let msg = match stream.next().await {
             Some(Ok(msg)) => msg,

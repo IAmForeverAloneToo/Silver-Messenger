@@ -13,6 +13,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use crate::ProtocolError;
 use crate::bundle::{BUNDLE_DOMAIN, KeyBundle};
 use crate::encoding::{b64_array, to_base64};
+use crate::prekey::Prekeys;
 
 /// A user's public identity: the raw Ed25519 verifying key.
 ///
@@ -94,7 +95,7 @@ impl<'de> Deserialize<'de> for UserId {
 }
 
 /// An X25519 public key.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Zeroize)]
 pub struct DhPublic(#[serde(with = "b64_array")] pub [u8; 32]);
 
 impl DhPublic {
@@ -166,13 +167,23 @@ impl Identity {
         &self.dh
     }
 
-    /// The signed public key bundle to publish on a relay.
+    /// The signed public key bundle to publish on a relay, without prekeys
+    /// (protocol v1 only).
     pub fn key_bundle(&self) -> KeyBundle {
         let dh_public = self.dh_public();
         KeyBundle {
             user_id: self.user_id(),
             dh_public,
             signature: self.sign(BUNDLE_DOMAIN, &dh_public.0),
+            prekeys: None,
+        }
+    }
+
+    /// The bundle with prekeys, so peers can start forward-secret sessions.
+    pub fn key_bundle_with(&self, prekeys: Prekeys) -> KeyBundle {
+        KeyBundle {
+            prekeys: Some(prekeys),
+            ..self.key_bundle()
         }
     }
 }

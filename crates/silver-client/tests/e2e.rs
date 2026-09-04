@@ -3,11 +3,40 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use silver_client::{Client, ClientEvent, ConnectOptions};
-use silver_protocol::{Content, Identity};
+use silver_client::{Client, ClientEvent, ConnectOptions, SessionStore, SharedSessions, Store};
+use silver_protocol::{Content, Identity, Sequence};
 use silver_relay::{Limits, RelayState};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
+
+/// Options for a client that keeps forward-secret sessions in memory.
+fn with_sessions(identity: &Identity) -> ConnectOptions {
+    ConnectOptions {
+        sessions: Some(SessionStore::ephemeral(identity.user_id()).shared()),
+        ..Default::default()
+    }
+}
+
+fn reuse_sessions(sessions: &SharedSessions) -> ConnectOptions {
+    ConnectOptions {
+        sessions: Some(sessions.clone()),
+        ..Default::default()
+    }
+}
+
+async fn connected(rx: &mut mpsc::Receiver<ClientEvent>, who: &str) {
+    wait_for(rx, &format!("{who} connected"), |e| {
+        matches!(e, ClientEvent::Connected { .. })
+    })
+    .await;
+}
+
+fn message(ev: &ClientEvent) -> Option<&silver_protocol::Message> {
+    match ev {
+        ClientEvent::Message(m) => Some(m),
+        _ => None,
+    }
+}
 
 async fn start_relay() -> (String, Arc<RelayState>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -520,6 +549,7 @@ async fn rate_limited_sends_stay_queued_and_retry_later() {
         Limits::default(),
         silver_relay::Policy {
             sends_per_minute: 2,
+            anonymous_sends_per_minute: 2,
             ..Default::default()
         },
     );
@@ -620,4 +650,379 @@ async fn invite_token_gates_registration_of_new_identities() {
     })
     .await;
     c.shutdown().await;
+}
+
+// --- protocol v2: sessions and anonymous submission ------------------------
+
+#[tokio::test]
+async fn clients_with_prekeys_talk_over_forward_secret_sessions() {
+    let (url, state) = start_relay().await;
+    let alice = Arc::new(Identity::generate());
+    let bob = Arc::new(Identity::generate());
+    let (alice_c, mut alice_ev) =
+        Client::spawn(url.clone(), alice.clone(), with_sessions(&alice)).unwrap();
+    let (bob_c, mut bob_ev) = Client::spawn(url.clone(), bob.clone(), with_sessions(&bob)).unwrap();
+    connected(&mut alice_ev, "alice").await;
+    connected(&mut bob_ev, "bob").await;
+
+    // The relay holds Bob's prekeys; the stored bundle carries no one-time
+    // keys itself, they are handed out one per lookup.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(state.one_time_prekeys_left(&bob.user_id()), 20);
+    let stored = state.bundle(&bob.user_id()).unwrap();
+    assert!(stored.supports_sessions());
+    assert!(stored.prekeys.unwrap().one_time.is_empty());
+
+    let delivery = alice_c
+        .send_message(
+            bob.user_id(),
+            None,
+            "hello under a session".into(),
+            Sequence { epoch: 1, seq: 1 },
+        )
+        .await
+        .unwrap();
+    assert!(delivery.forward_secret && !delivery.key_changed);
+    assert_eq!(delivery.bundle.prekeys.as_ref().unwrap().one_time.len(), 1);
+    assert_eq!(state.one_time_prekeys_left(&bob.user_id()), 19);
+    // The sealed layer is as opaque as before.
+    let wire = serde_json::to_string(&delivery.envelope).unwrap();
+    assert!(!wire.contains("hello") && !wire.contains(&alice.user_id().to_string()));
+
+    wait_for(&mut alice_ev, "alice's session", |e| {
+        matches!(e, ClientEvent::SessionEstablished { peer, initiated_by_us: true } if *peer == bob.user_id())
+    })
+    .await;
+    wait_for(&mut bob_ev, "bob's session", |e| {
+        matches!(e, ClientEvent::SessionEstablished { peer, initiated_by_us: false } if *peer == alice.user_id())
+    })
+    .await;
+    let got = wait_for(&mut bob_ev, "bob's message", |e| message(e).is_some()).await;
+    let m = message(&got).unwrap();
+    assert_eq!(m.from, alice.user_id());
+    assert_eq!(
+        m.content,
+        Content::Text {
+            body: "hello under a session".into()
+        }
+    );
+    assert_eq!(m.sequence, Sequence { epoch: 1, seq: 1 });
+    assert!(m.forward_secret);
+    assert!(
+        bob_c
+            .session_info(&alice.user_id())
+            .is_some_and(|s| !s.initiated_by_us)
+    );
+
+    // Bob answers on the same session.
+    let reply = bob_c
+        .send_message(
+            alice.user_id(),
+            None,
+            "back under it".into(),
+            Sequence::default(),
+        )
+        .await
+        .unwrap();
+    assert!(reply.forward_secret);
+    let got = wait_for(&mut alice_ev, "alice's message", |e| message(e).is_some()).await;
+    assert!(message(&got).unwrap().forward_secret);
+    assert!(
+        alice_c
+            .session_info(&bob.user_id())
+            .is_some_and(|s| s.initiated_by_us && !s.awaiting_reply)
+    );
+
+    // Both envelopes went in on connections that never authenticated.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(state.anonymous_submission_count(), 2);
+    assert_eq!(state.online_count(), 2);
+    alice_c.shutdown().await;
+    bob_c.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_peer_without_prekeys_is_sent_v1_and_understood() {
+    let (url, _state) = start_relay().await;
+    let alice = Arc::new(Identity::generate());
+    let bob = Arc::new(Identity::generate());
+    let (alice_c, mut alice_ev) =
+        Client::spawn(url.clone(), alice.clone(), with_sessions(&alice)).unwrap();
+    // Bob is an older client: no session store, so no prekeys.
+    let (bob_c, mut bob_ev) =
+        Client::spawn(url.clone(), bob.clone(), ConnectOptions::default()).unwrap();
+    connected(&mut alice_ev, "alice").await;
+    connected(&mut bob_ev, "bob").await;
+
+    let delivery = alice_c
+        .send_message(
+            bob.user_id(),
+            None,
+            "plain for bob".into(),
+            Sequence::default(),
+        )
+        .await
+        .unwrap();
+    assert!(!delivery.forward_secret);
+    assert!(!delivery.bundle.supports_sessions());
+    let got = wait_for(&mut bob_ev, "bob's message", |e| message(e).is_some()).await;
+    assert_eq!(body(&got).unwrap().1, "plain for bob");
+    assert!(!message(&got).unwrap().forward_secret);
+
+    // Bob's v1 reply to Alice's v2 bundle is read as plain too.
+    let alice_bundle = bob_c.lookup(alice.user_id()).await.unwrap().unwrap();
+    assert!(alice_bundle.supports_sessions());
+    bob_c
+        .send_text(&alice_bundle, "plain back".into())
+        .await
+        .unwrap();
+    let got = wait_for(&mut alice_ev, "alice's message", |e| message(e).is_some()).await;
+    assert_eq!(body(&got).unwrap().1, "plain back");
+    assert!(!message(&got).unwrap().forward_secret);
+    assert!(alice_c.session_info(&bob.user_id()).is_none());
+}
+
+#[tokio::test]
+async fn handshakes_wait_in_the_mailbox_and_sessions_survive_restarts() {
+    let (url, state) = start_relay().await;
+    let alice = Arc::new(Identity::generate());
+    let bob = Arc::new(Identity::generate());
+    let bob_sessions = SessionStore::ephemeral(bob.user_id()).shared();
+    let alice_dir = tempfile::tempdir().unwrap();
+    let alice_store = Store::open(alice_dir.path()).unwrap();
+
+    // Bob deposits prekeys, then goes offline.
+    let (bob_c, mut bob_ev) =
+        Client::spawn(url.clone(), bob.clone(), reuse_sessions(&bob_sessions)).unwrap();
+    connected(&mut bob_ev, "bob").await;
+    bob_c.shutdown().await;
+
+    // Alice, with sessions on disk, writes to him twice.
+    let alice_options = || ConnectOptions {
+        sessions: Some(
+            SessionStore::load(&alice_store, alice.user_id())
+                .unwrap()
+                .shared(),
+        ),
+        outbox_path: Some(alice_dir.path().join("outbox.json")),
+        ..Default::default()
+    };
+    let (alice_c, mut alice_ev) =
+        Client::spawn(url.clone(), alice.clone(), alice_options()).unwrap();
+    connected(&mut alice_ev, "alice").await;
+    let mut pinned = None;
+    for text in ["first while away", "second while away"] {
+        let d = alice_c
+            .send_message(
+                bob.user_id(),
+                pinned.clone(),
+                text.into(),
+                Sequence::default(),
+            )
+            .await
+            .unwrap();
+        assert!(d.forward_secret);
+        pinned = Some(d.bundle);
+        wait_for(
+            &mut alice_ev,
+            "sent",
+            |e| matches!(e, ClientEvent::Sent { id } if *id == d.envelope.id),
+        )
+        .await;
+    }
+    assert_eq!(state.queued_for(&bob.user_id()), 2);
+    alice_c.shutdown().await;
+
+    // Bob returns: the handshake in the first message sets the session up,
+    // the second continues it.
+    let (bob_c, mut bob_ev) =
+        Client::spawn(url.clone(), bob.clone(), reuse_sessions(&bob_sessions)).unwrap();
+    let mut texts = Vec::new();
+    let mut established = 0;
+    while texts.len() < 2 {
+        let ev = wait_for(&mut bob_ev, "queued message", |e| {
+            message(e).is_some() || matches!(e, ClientEvent::SessionEstablished { .. })
+        })
+        .await;
+        match ev {
+            ClientEvent::SessionEstablished { .. } => established += 1,
+            ClientEvent::Message(m) => {
+                assert!(m.forward_secret);
+                let Content::Text { body } = m.content;
+                texts.push(body);
+            }
+            _ => unreachable!(),
+        }
+    }
+    assert_eq!(texts, ["first while away", "second while away"]);
+    assert_eq!(established, 1);
+
+    // Alice restarts from disk and the session carries on both ways.
+    let (alice_c, mut alice_ev) =
+        Client::spawn(url.clone(), alice.clone(), alice_options()).unwrap();
+    connected(&mut alice_ev, "alice again").await;
+    assert!(alice_c.session_info(&bob.user_id()).is_some());
+    let d = alice_c
+        .send_message(
+            bob.user_id(),
+            pinned.clone(),
+            "third, after restart".into(),
+            Sequence::default(),
+        )
+        .await
+        .unwrap();
+    assert!(d.forward_secret);
+    let got = wait_for(&mut bob_ev, "third message", |e| message(e).is_some()).await;
+    assert_eq!(body(&got).unwrap().1, "third, after restart");
+    let d = bob_c
+        .send_message(
+            alice.user_id(),
+            None,
+            "reply to the restarted client".into(),
+            Sequence::default(),
+        )
+        .await
+        .unwrap();
+    assert!(d.forward_secret);
+    let got = wait_for(&mut alice_ev, "reply", |e| message(e).is_some()).await;
+    assert_eq!(body(&got).unwrap().1, "reply to the restarted client");
+    assert!(message(&got).unwrap().forward_secret);
+    alice_c.shutdown().await;
+    bob_c.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_lost_session_store_is_reported_and_recovered_by_writing_back() {
+    let (url, _state) = start_relay().await;
+    let alice = Arc::new(Identity::generate());
+    let bob = Arc::new(Identity::generate());
+    let (alice_c, mut alice_ev) =
+        Client::spawn(url.clone(), alice.clone(), with_sessions(&alice)).unwrap();
+    let (bob_c, mut bob_ev) = Client::spawn(url.clone(), bob.clone(), with_sessions(&bob)).unwrap();
+    connected(&mut alice_ev, "alice").await;
+    connected(&mut bob_ev, "bob").await;
+    let d = alice_c
+        .send_message(bob.user_id(), None, "one".into(), Sequence::default())
+        .await
+        .unwrap();
+    let pinned = Some(d.bundle);
+    wait_for(&mut bob_ev, "one", |e| message(e).is_some()).await;
+    bob_c
+        .send_message(alice.user_id(), None, "two".into(), Sequence::default())
+        .await
+        .unwrap();
+    wait_for(&mut alice_ev, "two", |e| message(e).is_some()).await;
+
+    // Bob reinstalls without his sessions: Alice's next message is
+    // unreadable, and says so.
+    bob_c.shutdown().await;
+    let (bob_c, mut bob_ev) = Client::spawn(url.clone(), bob.clone(), with_sessions(&bob)).unwrap();
+    connected(&mut bob_ev, "bob again").await;
+    alice_c
+        .send_message(
+            bob.user_id(),
+            pinned.clone(),
+            "three".into(),
+            Sequence::default(),
+        )
+        .await
+        .unwrap();
+    let ev = wait_for(&mut bob_ev, "undecryptable notice", |e| {
+        matches!(e, ClientEvent::Undecryptable { .. })
+    })
+    .await;
+    let ClientEvent::Undecryptable { from, reason, .. } = ev else {
+        unreachable!()
+    };
+    assert_eq!(from, alice.user_id());
+    assert!(reason.contains("session"), "{reason}");
+
+    // Writing back starts a fresh session, which Alice follows.
+    bob_c
+        .send_message(
+            alice.user_id(),
+            None,
+            "start over".into(),
+            Sequence::default(),
+        )
+        .await
+        .unwrap();
+    let got = wait_for(&mut alice_ev, "start over", |e| message(e).is_some()).await;
+    assert_eq!(body(&got).unwrap().1, "start over");
+    assert!(
+        alice_c
+            .session_info(&bob.user_id())
+            .is_some_and(|s| !s.initiated_by_us)
+    );
+    alice_c
+        .send_message(bob.user_id(), pinned, "four".into(), Sequence::default())
+        .await
+        .unwrap();
+    let got = wait_for(&mut bob_ev, "four", |e| message(e).is_some()).await;
+    assert_eq!(body(&got).unwrap().1, "four");
+    assert!(message(&got).unwrap().forward_secret);
+}
+
+#[tokio::test]
+async fn submission_uses_the_authenticated_connection_when_it_must() {
+    // A relay that does not offer anonymous submission.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/ws", listener.local_addr().unwrap());
+    let state = RelayState::with_store_and_policy(
+        silver_relay::Store::in_memory().unwrap(),
+        Limits::default(),
+        silver_relay::Policy {
+            anonymous_sends_per_minute: 0,
+            ..Default::default()
+        },
+    );
+    tokio::spawn(silver_relay::serve(
+        listener,
+        state.clone(),
+        std::future::pending(),
+    ));
+    let alice = Arc::new(Identity::generate());
+    let bob = Arc::new(Identity::generate());
+    let (alice_c, mut alice_ev) =
+        Client::spawn(url.clone(), alice.clone(), with_sessions(&alice)).unwrap();
+    let (_bob_c, mut bob_ev) =
+        Client::spawn(url.clone(), bob.clone(), with_sessions(&bob)).unwrap();
+    connected(&mut alice_ev, "alice").await;
+    connected(&mut bob_ev, "bob").await;
+    alice_c
+        .send_message(bob.user_id(), None, "over auth".into(), Sequence::default())
+        .await
+        .unwrap();
+    let got = wait_for(&mut bob_ev, "bob's message", |e| message(e).is_some()).await;
+    assert_eq!(body(&got).unwrap().1, "over auth");
+    assert_eq!(state.anonymous_submission_count(), 0);
+
+    // And a client told to stay on its authenticated connection.
+    let (url, state) = start_relay().await;
+    let carol = Arc::new(Identity::generate());
+    let options = ConnectOptions {
+        submit_authenticated: true,
+        ..with_sessions(&carol)
+    };
+    let (carol_c, mut carol_ev) = Client::spawn(url.clone(), carol.clone(), options).unwrap();
+    let (_bob_c, mut bob_ev) =
+        Client::spawn(url.clone(), bob.clone(), with_sessions(&bob)).unwrap();
+    connected(&mut carol_ev, "carol").await;
+    connected(&mut bob_ev, "bob").await;
+    let d = carol_c
+        .send_message(
+            bob.user_id(),
+            None,
+            "also over auth".into(),
+            Sequence::default(),
+        )
+        .await
+        .unwrap();
+    wait_for(
+        &mut carol_ev,
+        "sent",
+        |e| matches!(e, ClientEvent::Sent { id } if *id == d.envelope.id),
+    )
+    .await;
+    assert_eq!(state.anonymous_submission_count(), 0);
 }

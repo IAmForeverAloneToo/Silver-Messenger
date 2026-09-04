@@ -1,4 +1,4 @@
-//! TLS configuration for `wss://` relays.
+//! TLS configuration for `wss://` relays, and the connection options.
 //!
 //! The trust store is the operating system's certificate store plus Mozilla's
 //! root bundle, so the client works both on machines whose organisation
@@ -8,16 +8,18 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::sessions::SharedSessions;
 use crate::vault::FileCipher;
 
 use anyhow::Context;
 use rustls::RootCertStore;
+use rustls::client::Resumption;
 use rustls_pki_types::CertificateDer;
 use rustls_pki_types::pem::PemObject;
 use tokio_tungstenite::Connector;
 
 /// Options controlling how the client reaches the relay.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct ConnectOptions {
     /// PEM files whose certificates are trusted as additional roots.
     pub extra_ca_certs: Vec<PathBuf>,
@@ -30,9 +32,41 @@ pub struct ConnectOptions {
     pub outbox_cipher: Option<Arc<FileCipher>>,
     /// Invite token for relays that only register invited identities.
     pub invite_token: Option<String>,
+    /// Forward-secret sessions and prekeys. Without one the client speaks
+    /// protocol v1 only: it publishes no prekeys and cannot read messages
+    /// sent under a session.
+    pub sessions: Option<SharedSessions>,
+    /// Refuse to use the relay's anonymous submission connection even when
+    /// it offers one, and submit on the authenticated connection instead.
+    pub submit_authenticated: bool,
 }
 
-pub(crate) fn connector(options: &ConnectOptions) -> anyhow::Result<Connector> {
+impl std::fmt::Debug for ConnectOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectOptions")
+            .field("extra_ca_certs", &self.extra_ca_certs)
+            .field("proxy", &self.proxy)
+            .field("outbox_path", &self.outbox_path)
+            .field("outbox_cipher", &self.outbox_cipher.is_some())
+            .field("invite_token", &self.invite_token.is_some())
+            .field("sessions", &self.sessions.is_some())
+            .field("submit_authenticated", &self.submit_authenticated)
+            .finish()
+    }
+}
+
+/// TLS connectors for the two kinds of connection a client opens.
+#[derive(Clone)]
+pub(crate) struct Connectors {
+    /// For the authenticated connection.
+    pub(crate) main: Connector,
+    /// For anonymous submission: no session resumption, so the relay cannot
+    /// tie it to the authenticated connection through a resumed TLS
+    /// session.
+    pub(crate) anonymous: Connector,
+}
+
+pub(crate) fn connectors(options: &ConnectOptions) -> anyhow::Result<Connectors> {
     let mut roots = RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 
@@ -63,5 +97,10 @@ pub(crate) fn connector(options: &ConnectOptions) -> anyhow::Result<Connector> {
     .with_safe_default_protocol_versions()?
     .with_root_certificates(roots)
     .with_no_client_auth();
-    Ok(Connector::Rustls(Arc::new(config)))
+    let mut anonymous = config.clone();
+    anonymous.resumption = Resumption::disabled();
+    Ok(Connectors {
+        main: Connector::Rustls(Arc::new(config)),
+        anonymous: Connector::Rustls(Arc::new(anonymous)),
+    })
 }

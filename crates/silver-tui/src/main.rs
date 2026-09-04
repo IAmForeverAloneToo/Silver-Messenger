@@ -10,7 +10,9 @@ use std::io::IsTerminal;
 
 use anyhow::{Context, bail};
 use clap::Parser;
-use silver_client::{Client, ConnectOptions, DEFAULT_RELAY_URL, Proxy, Store, VaultError};
+use silver_client::{
+    Client, ConnectOptions, DEFAULT_RELAY_URL, Proxy, SessionStore, Store, VaultError,
+};
 use tracing_subscriber::EnvFilter;
 
 /// End-to-end encrypted messaging in your terminal.
@@ -70,6 +72,12 @@ struct Args {
     /// directory.
     #[arg(long)]
     force: bool,
+
+    /// Submit messages on the authenticated relay connection even when the
+    /// relay offers a separate anonymous one (which hides the sender from
+    /// the relay). Useful behind networks that allow one connection only.
+    #[arg(long, env = "SILVER_SUBMIT_AUTHENTICATED")]
+    submit_authenticated: bool,
 }
 
 #[tokio::main]
@@ -167,12 +175,17 @@ async fn main() -> anyhow::Result<()> {
         store.save_config(&config)?;
     }
     let send_epoch = store.ensure_send_epoch(&mut config)?;
+    let sessions = SessionStore::load(&store, identity.user_id())
+        .context("loading sessions and prekeys")?
+        .shared();
     let options = ConnectOptions {
         extra_ca_certs: config.ca_cert.iter().cloned().collect(),
         proxy: config.proxy.clone().or_else(Proxy::url_from_env),
         outbox_path: Some(store.outbox_path()),
         outbox_cipher: store.cipher(),
         invite_token: config.invite_token.clone(),
+        sessions: Some(sessions),
+        submit_authenticated: args.submit_authenticated,
     };
     let relay_url = config
         .relay_url

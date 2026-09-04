@@ -15,4 +15,10 @@ pub enum ProtocolError {
     TooLarge(usize),
     #[error("non-contributory Diffie-Hellman result")]
     WeakKey,
+    #[error("the peer has not published prekeys")]
+    MissingPrekeys,
+    #[error("the session cannot send until the peer's first message arrives")]
+    SessionNotReady,
+    #[error("message is too far ahead of the ones received so far")]
+    TooManySkipped,
 }

@@ -5,9 +5,13 @@
 //! ```text
 //! vault.json           present when a passphrase protects the directory
 //! identity.json        private keys (0600 on Unix)
+//! prekeys.json         private prekeys peers start sessions against (0600)
+//! sessions.json        forward-secret session state per peer (0600)
 //! config.json          relay URL etc.
 //! contacts.json        known peers and their pinned key bundles
 //! outbox.json          outgoing envelopes the relay has not accepted yet
+//! requests.json        messages from people who are not contacts yet
+//! blocked.json         ids whose messages are dropped
 //! history/<user>.jsonl one line per message, per peer
 //! ```
 //!
@@ -25,10 +29,13 @@ use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 use silver_protocol::{Identity, IdentitySecrets, KeyBundle, Sequence, UserId};
 
+use crate::sessions::{PrekeyFile, SessionsFile};
 use crate::vault::{FileCipher, Kdf, LINE_PREFIX, VaultError, VaultFile};
 
 const VAULT_FILE: &str = "vault.json";
 const IDENTITY_FILE: &str = "identity.json";
+const PREKEYS_FILE: &str = "prekeys.json";
+const SESSIONS_FILE: &str = "sessions.json";
 const CONFIG_FILE: &str = "config.json";
 const CONTACTS_FILE: &str = "contacts.json";
 const OUTBOX_FILE: &str = "outbox.json";
@@ -273,6 +280,8 @@ impl Store {
     ) -> anyhow::Result<()> {
         for name in [
             IDENTITY_FILE,
+            PREKEYS_FILE,
+            SESSIONS_FILE,
             CONFIG_FILE,
             CONTACTS_FILE,
             OUTBOX_FILE,
@@ -286,7 +295,7 @@ impl Store {
             let bytes = fs::read(&path)?;
             let plain = decode_file(from, name, &bytes)?;
             let out = encode_file(to, name, &plain);
-            if name == IDENTITY_FILE {
+            if matches!(name, IDENTITY_FILE | PREKEYS_FILE | SESSIONS_FILE) {
                 write_private(&path, &out)?;
             } else {
                 write_atomic(&path, &out)?;
@@ -372,6 +381,35 @@ impl Store {
     pub fn save_identity(&self, identity: &Identity) -> anyhow::Result<()> {
         let text = serde_json::to_string_pretty(&identity.to_secrets())?;
         self.write_file(IDENTITY_FILE, text.as_bytes(), true)
+    }
+
+    // --- prekeys and sessions ------------------------------------------------
+
+    pub(crate) fn load_prekeys(&self) -> anyhow::Result<PrekeyFile> {
+        self.read_json_or_default(PREKEYS_FILE)
+    }
+
+    pub(crate) fn save_prekeys(&self, prekeys: &PrekeyFile) -> anyhow::Result<()> {
+        self.write_file(PREKEYS_FILE, &serde_json::to_vec(prekeys)?, true)
+    }
+
+    pub(crate) fn load_sessions(&self) -> anyhow::Result<SessionsFile> {
+        self.read_json_or_default(SESSIONS_FILE)
+    }
+
+    pub(crate) fn save_sessions(&self, sessions: &SessionsFile) -> anyhow::Result<()> {
+        self.write_file(SESSIONS_FILE, &serde_json::to_vec(sessions)?, true)
+    }
+
+    /// Delete prekeys and sessions, e.g. when the identity is replaced.
+    pub fn clear_sessions(&self) -> anyhow::Result<()> {
+        for name in [PREKEYS_FILE, SESSIONS_FILE] {
+            let path = self.root.join(name);
+            if path.exists() {
+                fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+            }
+        }
+        Ok(())
     }
 
     pub fn load_config(&self) -> anyhow::Result<Config> {

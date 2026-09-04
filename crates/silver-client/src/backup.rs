@@ -101,6 +101,9 @@ pub fn import_backup(store: &Store, payload: BackupPayload, force: bool) -> anyh
     }
     let identity = Identity::from_secrets(&payload.identity);
     store.save_identity(&identity)?;
+    // Sessions and prekeys belong to the installation, not the identity:
+    // peers will be told to start over.
+    store.clear_sessions()?;
     let contacts: Vec<Contact> = payload
         .contacts
         .into_iter()

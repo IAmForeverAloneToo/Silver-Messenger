@@ -1,16 +1,25 @@
-//! Durable relay state: published key bundles and per-recipient mailboxes.
+//! Durable relay state: published key bundles, one-time prekeys and
+//! per-recipient mailboxes.
 //!
 //! Backed by an embedded [`redb`] database so an update or reboot loses
 //! nothing. Every mailbox entry is `received_at_ms (8 bytes BE) || envelope
 //! JSON`, kept until the recipient acknowledges it or it expires.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::Context;
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
-use silver_protocol::{Envelope, KeyBundle, UserId};
+use silver_protocol::prekey::OneTimePrekey;
+use silver_protocol::{DhPublic, Envelope, KeyBundle, UserId};
 
+/// `owner -> bundle JSON` (the signed prekey included, one-time keys not).
 const BUNDLES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("bundles");
+/// `(owner, prekey id) -> public key` for one-time prekeys not yet handed out.
+const ONE_TIME: TableDefinition<(&[u8], u32), &[u8]> = TableDefinition::new("one_time_prekeys");
+/// `(owner, prekey id)` for one-time prekeys handed out that the owner may
+/// still list on its next publish; forgotten once the owner stops listing them.
+const ONE_TIME_USED: TableDefinition<(&[u8], u32), ()> = TableDefinition::new("one_time_used");
 /// `(recipient, sequence) -> stored entry`; the sequence gives delivery order.
 const MAILBOX: TableDefinition<(&[u8], u64), &[u8]> = TableDefinition::new("mailbox");
 /// `envelope id -> (recipient, sequence)` so acknowledgements are O(log n).
@@ -79,6 +88,8 @@ impl Store {
         let txn = db.begin_write()?;
         {
             txn.open_table(BUNDLES)?;
+            txn.open_table(ONE_TIME)?;
+            txn.open_table(ONE_TIME_USED)?;
             txn.open_table(MAILBOX)?;
             txn.open_table(BY_ID)?;
             txn.open_table(USAGE)?;
@@ -104,6 +115,111 @@ impl Store {
             Some(guard) => Ok(Some(serde_json::from_slice(guard.value())?)),
             None => Ok(None),
         }
+    }
+
+    // --- one-time prekeys -----------------------------------------------------
+
+    /// Replace `user`'s one-time prekeys with `keys`, the full list the
+    /// client still holds. Keys already handed out are not stored again
+    /// even if listed; keys no longer listed are forgotten.
+    pub fn set_one_time_prekeys(
+        &self,
+        user: &UserId,
+        keys: &[OneTimePrekey],
+    ) -> anyhow::Result<()> {
+        let user = user.as_bytes().as_slice();
+        let listed: HashSet<u32> = keys.iter().map(|k| k.id).collect();
+        let txn = self.db.begin_write()?;
+        {
+            let mut table = txn.open_table(ONE_TIME)?;
+            let mut used = txn.open_table(ONE_TIME_USED)?;
+            let mut stale = Vec::new();
+            for item in table.range((user, 0u32)..=(user, u32::MAX))? {
+                let (key, _) = item?;
+                let id = key.value().1;
+                if !listed.contains(&id) {
+                    stale.push(id);
+                }
+            }
+            for id in stale {
+                table.remove((user, id))?;
+            }
+            let mut stale_used = Vec::new();
+            for item in used.range((user, 0u32)..=(user, u32::MAX))? {
+                let (key, _) = item?;
+                let id = key.value().1;
+                if !listed.contains(&id) {
+                    stale_used.push(id);
+                }
+            }
+            for id in stale_used {
+                used.remove((user, id))?;
+            }
+            for key in keys {
+                if used.get((user, key.id))?.is_some() || table.get((user, key.id))?.is_some() {
+                    continue;
+                }
+                table.insert((user, key.id), key.public.0.as_slice())?;
+            }
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// Hand out one of `user`'s one-time prekeys, never to be handed out
+    /// again. `None` when there are none left.
+    pub fn take_one_time_prekey(&self, user: &UserId) -> anyhow::Result<Option<OneTimePrekey>> {
+        let user = user.as_bytes().as_slice();
+        let txn = self.db.begin_write()?;
+        let taken = {
+            let mut table = txn.open_table(ONE_TIME)?;
+            let first = table
+                .range((user, 0u32)..=(user, u32::MAX))?
+                .next()
+                .transpose()?
+                .map(|(key, value)| (key.value().1, value.value().to_vec()));
+            match first {
+                Some((id, public)) => {
+                    table.remove((user, id))?;
+                    txn.open_table(ONE_TIME_USED)?.insert((user, id), ())?;
+                    let bytes: [u8; 32] = public
+                        .as_slice()
+                        .try_into()
+                        .context("stored one-time prekey has the wrong length")?;
+                    Some(OneTimePrekey {
+                        id,
+                        public: DhPublic(bytes),
+                    })
+                }
+                None => None,
+            }
+        };
+        txn.commit()?;
+        Ok(taken)
+    }
+
+    /// How many one-time prekeys `user` has left, and the ids handed out
+    /// that the user has not dropped from its list yet.
+    pub fn one_time_status(&self, user: &UserId) -> anyhow::Result<(u32, Vec<u32>)> {
+        let user = user.as_bytes().as_slice();
+        let txn = self.db.begin_read()?;
+        let mut remaining = 0u32;
+        for item in txn
+            .open_table(ONE_TIME)?
+            .range((user, 0u32)..=(user, u32::MAX))?
+        {
+            item?;
+            remaining += 1;
+        }
+        let mut used = Vec::new();
+        for item in txn
+            .open_table(ONE_TIME_USED)?
+            .range((user, 0u32)..=(user, u32::MAX))?
+        {
+            let (key, _) = item?;
+            used.push(key.value().1);
+        }
+        Ok((remaining, used))
     }
 
     /// Queue an envelope for its recipient.
@@ -296,6 +412,67 @@ mod tests {
         store.put_bundle(&id.key_bundle()).unwrap();
         assert_eq!(store.bundle(&id.user_id()).unwrap(), Some(id.key_bundle()));
         assert_eq!(store.stats().unwrap().bundles, 1);
+    }
+
+    #[test]
+    fn one_time_prekeys_are_handed_out_once_and_reconciled() {
+        use silver_protocol::PrekeySecret;
+        let store = Store::in_memory().unwrap();
+        let bob = Identity::generate();
+        let keys: Vec<OneTimePrekey> = (1..=3)
+            .map(|i| PrekeySecret::generate(i, 0).one_time())
+            .collect();
+        store.set_one_time_prekeys(&bob.user_id(), &keys).unwrap();
+        assert_eq!(store.one_time_status(&bob.user_id()).unwrap(), (3, vec![]));
+
+        // Handed out in id order, each exactly once.
+        let first = store.take_one_time_prekey(&bob.user_id()).unwrap().unwrap();
+        assert_eq!(first, keys[0]);
+        assert_eq!(store.one_time_status(&bob.user_id()).unwrap(), (2, vec![1]));
+
+        // Bob republishes the same list (he does not know yet): id 1 is not
+        // stored again, a new id 4 is.
+        let mut relisted = keys.clone();
+        relisted.push(PrekeySecret::generate(4, 0).one_time());
+        store
+            .set_one_time_prekeys(&bob.user_id(), &relisted)
+            .unwrap();
+        assert_eq!(store.one_time_status(&bob.user_id()).unwrap(), (3, vec![1]));
+
+        // Once Bob drops id 1 and 2 from his list, both are forgotten.
+        store
+            .set_one_time_prekeys(&bob.user_id(), &relisted[2..])
+            .unwrap();
+        assert_eq!(store.one_time_status(&bob.user_id()).unwrap(), (2, vec![]));
+        assert_eq!(
+            store
+                .take_one_time_prekey(&bob.user_id())
+                .unwrap()
+                .unwrap()
+                .id,
+            3
+        );
+        assert_eq!(
+            store
+                .take_one_time_prekey(&bob.user_id())
+                .unwrap()
+                .unwrap()
+                .id,
+            4
+        );
+        assert!(
+            store
+                .take_one_time_prekey(&bob.user_id())
+                .unwrap()
+                .is_none()
+        );
+        // Other users are untouched.
+        assert!(
+            store
+                .take_one_time_prekey(&Identity::generate().user_id())
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
