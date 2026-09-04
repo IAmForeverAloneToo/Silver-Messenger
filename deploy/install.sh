@@ -2,13 +2,22 @@
 # Install or update the Silver Message relay on a Linux server (Debian/Ubuntu
 # or Fedora/RHEL family) and run it as a hardened systemd service.
 #
-# One-liner, as root:
-#   curl -fsSL https://raw.githubusercontent.com/IAmForeverAloneToo/Silver-Messanger/main/deploy/install.sh | bash
+# Two ways to use it:
 #
-# Re-running it pulls the latest code, rebuilds, and restarts the service.
+#   * Prebuilt (what the "Deploy relay" GitHub workflow does): put a
+#     `silver-relay` binary and `silver-relay.service` next to this script and
+#     run it. The server needs no compiler and no access to the repository.
+#
+#   * From source: with nothing next to it, the script installs Rust, clones
+#     the repository and builds the relay. The repository must be reachable
+#     from the server (public, or SILVER_REPO carrying credentials):
+#       curl -fsSL https://raw.githubusercontent.com/IAmForeverAloneToo/Silver-Messanger/main/deploy/install.sh | bash
+#
+# Re-running it updates the relay and restarts the service.
 #
 # Environment overrides:
 #   SILVER_RELAY_LISTEN  address:port to listen on   (default 0.0.0.0:7777; only used on first install)
+#   SILVER_BINARY        path to a prebuilt relay binary (default: silver-relay next to this script)
 #   SILVER_BRANCH        git branch to deploy         (default main)
 #   SILVER_REPO          git repository URL
 #   SILVER_SRC_DIR       where the source is checked out (default /opt/silver-messanger)
@@ -24,60 +33,80 @@ UNIT=/etc/systemd/system/silver-relay.service
 ENV_DIR=/etc/silver-relay
 ENV_FILE="$ENV_DIR/relay.env"
 
+# When run as a file (not piped), look for a prebuilt binary next to it.
+HERE=""
+if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+    HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+fi
+PREBUILT="${SILVER_BINARY:-${HERE:+$HERE/silver-relay}}"
+
 log() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 [ "$(id -u)" -eq 0 ] || die "run this script as root"
 command -v systemctl >/dev/null || die "this script expects a systemd-based distribution"
+command -v curl >/dev/null || die "curl is required"
 
-# --- 1. build dependencies ----------------------------------------------------
-log "Installing build dependencies"
-if command -v apt-get >/dev/null; then
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq
-    apt-get install -y -qq build-essential curl git pkg-config ca-certificates
-elif command -v dnf >/dev/null; then
-    dnf install -y -q gcc make curl git pkgconf-pkg-config ca-certificates
+if [ -n "$PREBUILT" ] && [ -f "$PREBUILT" ]; then
+    # ------------------------------------------------------------------ prebuilt
+    log "Installing prebuilt relay from $PREBUILT"
+    UNIT_SRC="${SILVER_UNIT:-$(dirname "$PREBUILT")/silver-relay.service}"
+    [ -f "$UNIT_SRC" ] || die "expected the unit file at $UNIT_SRC"
+    install -m 755 "$PREBUILT" "$BIN.new"
 else
-    die "unsupported distribution: need apt-get or dnf"
-fi
 
-# --- 2. swap on small machines ------------------------------------------------
-# A release build of the relay peaks at roughly 500 MB; give 1 GB boxes headroom.
-mem_mb=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
-if [ "$mem_mb" -lt 2048 ] && [ ! -f /swapfile ]; then
-    log "Adding a 2 GB swap file (machine has ${mem_mb} MB of RAM)"
-    fallocate -l 2G /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=2048 status=none
-    chmod 600 /swapfile
-    mkswap -q /swapfile
-    swapon /swapfile
-    grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >>/etc/fstab
-fi
+    # ---- 1. build dependencies ----------------------------------------------------
+    log "Installing build dependencies"
+    if command -v apt-get >/dev/null; then
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq
+        apt-get install -y -qq build-essential curl git pkg-config ca-certificates
+    elif command -v dnf >/dev/null; then
+        dnf install -y -q gcc make curl git pkgconf-pkg-config ca-certificates
+    else
+        die "unsupported distribution: need apt-get or dnf"
+    fi
 
-# --- 3. rust toolchain --------------------------------------------------------
-export CARGO_HOME="${CARGO_HOME:-/root/.cargo}"
-export RUSTUP_HOME="${RUSTUP_HOME:-/root/.rustup}"
-export PATH="$CARGO_HOME/bin:$PATH"
-if ! command -v cargo >/dev/null; then
-    log "Installing Rust (rustup, minimal profile)"
-    curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --no-modify-path
-fi
+    # ---- 2. swap on small machines ------------------------------------------------
+    # A release build of the relay peaks at roughly 500 MB; give 1 GB boxes headroom.
+    mem_mb=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
+    if [ "$mem_mb" -lt 2048 ] && [ ! -f /swapfile ]; then
+        log "Adding a 2 GB swap file (machine has ${mem_mb} MB of RAM)"
+        fallocate -l 2G /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=2048 status=none
+        chmod 600 /swapfile
+        mkswap -q /swapfile
+        swapon /swapfile
+        grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >>/etc/fstab
+    fi
 
-# --- 4. source ----------------------------------------------------------------
-if [ -d "$SRC_DIR/.git" ]; then
-    log "Updating $SRC_DIR from $BRANCH"
-    git -C "$SRC_DIR" fetch -q origin "$BRANCH"
-    git -C "$SRC_DIR" checkout -q -B "$BRANCH" "origin/$BRANCH"
-else
-    log "Cloning $REPO_URL ($BRANCH) into $SRC_DIR"
-    git clone -q --branch "$BRANCH" "$REPO_URL" "$SRC_DIR"
-fi
-log "Deploying commit $(git -C "$SRC_DIR" rev-parse --short HEAD)"
+    # ---- 3. rust toolchain --------------------------------------------------------
+    export CARGO_HOME="${CARGO_HOME:-/root/.cargo}"
+    export RUSTUP_HOME="${RUSTUP_HOME:-/root/.rustup}"
+    export PATH="$CARGO_HOME/bin:$PATH"
+    if ! command -v cargo >/dev/null; then
+        log "Installing Rust (rustup, minimal profile)"
+        curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --no-modify-path
+    fi
 
-# --- 5. build -----------------------------------------------------------------
-log "Building the relay (this takes a few minutes on a small VPS)"
-(cd "$SRC_DIR" && cargo build --release -p silver-relay)
-install -m 755 "$SRC_DIR/target/release/silver-relay" "$BIN.new"
+    # ---- 4. source ----------------------------------------------------------------
+    if [ -d "$SRC_DIR/.git" ]; then
+        log "Updating $SRC_DIR from $BRANCH"
+        git -C "$SRC_DIR" fetch -q origin "$BRANCH"
+        git -C "$SRC_DIR" checkout -q -B "$BRANCH" "origin/$BRANCH"
+    else
+        log "Cloning $REPO_URL ($BRANCH) into $SRC_DIR"
+        git clone -q --branch "$BRANCH" "$REPO_URL" "$SRC_DIR" ||
+            die "clone failed. Is the repository public? For a private one either run the Deploy relay workflow, or set SILVER_REPO=https://<token>@github.com/<owner>/<repo>.git"
+    fi
+    log "Deploying commit $(git -C "$SRC_DIR" rev-parse --short HEAD)"
+
+    # ---- 5. build -----------------------------------------------------------------
+    log "Building the relay (this takes a few minutes on a small VPS)"
+    (cd "$SRC_DIR" && cargo build --release -p silver-relay)
+    install -m 755 "$SRC_DIR/target/release/silver-relay" "$BIN.new"
+    UNIT_SRC="$SRC_DIR/deploy/silver-relay.service"
+
+fi
 mv -f "$BIN.new" "$BIN"
 
 # --- 6. service user, config, unit -------------------------------------------
@@ -91,7 +120,7 @@ if [ ! -f "$ENV_FILE" ]; then
 fi
 chmod 640 "$ENV_FILE"
 chgrp "$SERVICE_USER" "$ENV_FILE"
-install -D -m 644 "$SRC_DIR/deploy/silver-relay.service" "$UNIT"
+install -D -m 644 "$UNIT_SRC" "$UNIT"
 systemctl daemon-reload
 systemctl enable -q silver-relay
 systemctl restart silver-relay

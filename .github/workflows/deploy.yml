@@ -1,7 +1,8 @@
 name: Deploy relay
 
-# Runs deploy/install.sh (or a status/log/restart command) on the relay server
-# over SSH. Needs repository secrets:
+# Builds a static relay binary on the runner and installs it on the server
+# over SSH, so the server needs neither Rust nor access to this repository.
+# Also offers status / logs / restart. Needs repository secrets:
 #   VPS_HOST     server IP or hostname
 #   VPS_SSH_KEY  private key whose public half is in the server's authorized_keys
 #   VPS_USER     optional, defaults to root
@@ -16,6 +17,9 @@ on:
         options: [deploy, status, logs, restart]
 
 concurrency: deploy-relay
+
+env:
+  TARGET: x86_64-unknown-linux-musl
 
 jobs:
   relay:
@@ -35,16 +39,42 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts 2>/dev/null
 
+      - name: Install Rust
+        if: inputs.action == 'deploy'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Cache cargo
+        if: inputs.action == 'deploy'
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build static relay binary
+        if: inputs.action == 'deploy'
+        run: |
+          cargo build --release -p silver-relay --target "$TARGET"
+          file "target/$TARGET/release/silver-relay"
+
+      - name: Install on the server
+        if: inputs.action == 'deploy'
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER || 'root' }}
+        run: |
+          target="$VPS_USER@$VPS_HOST"
+          ssh "$target" 'rm -rf /tmp/silver-deploy && mkdir -p /tmp/silver-deploy'
+          scp "target/$TARGET/release/silver-relay" deploy/silver-relay.service deploy/install.sh "$target:/tmp/silver-deploy/"
+          ssh "$target" 'bash /tmp/silver-deploy/install.sh; rc=$?; rm -rf /tmp/silver-deploy; exit $rc'
+
       - name: Run "${{ inputs.action }}" on the server
+        if: inputs.action != 'deploy'
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER || 'root' }}
           ACTION: ${{ inputs.action }}
-          BRANCH: ${{ github.ref_name }}
         run: |
           target="$VPS_USER@$VPS_HOST"
           case "$ACTION" in
-            deploy)  ssh "$target" "SILVER_BRANCH='$BRANCH' bash -s" < deploy/install.sh ;;
             status)  ssh "$target" "systemctl status silver-relay --no-pager; ss -ltnp | grep silver-relay || true" ;;
             logs)    ssh "$target" "journalctl -u silver-relay -n 200 --no-pager" ;;
             restart) ssh "$target" "systemctl restart silver-relay && sleep 1 && systemctl is-active silver-relay" ;;

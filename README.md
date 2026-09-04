@@ -76,20 +76,31 @@ Default data directory: `~/.local/share/silver-message` on Linux,
 
 ## Deploying a relay
 
-A relay is a single static-ish binary that needs one open TCP port. On a
-fresh Debian/Ubuntu or Fedora VPS, as root:
+A relay is a single static binary that needs one open TCP port. It runs as
+the unprivileged `silver` user under a hardened systemd unit
+(`deploy/silver-relay.service`), listening on `0.0.0.0:7777`. Settings live
+in `/etc/silver-relay/relay.env`; logs are in `journalctl -u silver-relay`.
+Remember to open port 7777/tcp in your provider's firewall as well.
+
+**From GitHub Actions** (works for a private repository): add the secrets
+`VPS_HOST` and `VPS_SSH_KEY` (a private key whose public half is in the
+server's `authorized_keys`; `VPS_USER` optionally, default `root`) and run
+the **Deploy relay** workflow. It builds a static binary on the runner and
+installs it over SSH, so the server needs neither Rust nor access to the
+repository. The same workflow can show status and logs or restart the relay.
+
+**By hand**, on a Debian/Ubuntu or Fedora server as root, if the repository
+is public:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/IAmForeverAloneToo/Silver-Messanger/main/deploy/install.sh | bash
 ```
 
-The script installs build tools and Rust, clones this repository into
-`/opt/silver-messanger`, builds the relay, and runs it as the unprivileged
-`silver` user under a hardened systemd unit (`deploy/silver-relay.service`)
-listening on `0.0.0.0:7777`. Re-running the script updates to the latest
-`main`. Settings live in `/etc/silver-relay/relay.env`; logs are in
-`journalctl -u silver-relay`. Remember to open port 7777/tcp in your
-provider's firewall as well.
+This installs build tools and Rust, clones the repository into
+`/opt/silver-messanger`, and builds the relay on the server. Re-running it
+updates to the latest `main`. With a `silver-relay` binary and
+`silver-relay.service` placed next to it, the same script installs those
+instead and needs no compiler.
 
 Clients then start with `silver --relay ws://<server-ip>:7777/ws`. The
 transport is plain WebSocket for now, which is safe for message content
