@@ -4,6 +4,59 @@ Notable changes to Silver Messenger. Versions follow [semantic
 versioning](https://semver.org); while the major version is 0, a minor bump
 means behaviour or the wire protocol changed in a way worth reading about.
 
+## Unreleased
+
+A terminal client that feels native. Nothing on the wire changed; clients
+and relays interoperate with 0.4.0 peers. `Ctrl-C` no longer quits on its
+own (see below), which is the one habit to relearn.
+
+### Added
+
+- ASCII marks (`..`, `v`, `vv`, `x`) where the terminal's fonts are
+  unlikely to have the Unicode ones: the classic Windows console,
+  `TERM=linux`, a non-UTF-8 locale. `--ascii`, `SILVER_ASCII` and
+  `/marks ascii|unicode|auto` decide by hand; the choice is remembered.
+- A clipboard the client reads and writes itself: `Ctrl-V`, `Shift-Insert`
+  and a right click paste from the system clipboard (Windows, macOS, X11,
+  Wayland); `Ctrl-C` copies the selection, `/copy` the last message of the
+  chat, `/copy id` your id, `/copy link` and `/invite copy` your invite
+  link. Where there is no system clipboard (SSH, tmux, a headless box)
+  copies go to the terminal's clipboard through OSC 52. `Ctrl-Q` quits;
+  `Ctrl-C` with nothing selected asks to be pressed again.
+- Text selection inside the client: drag with the mouse, double click a
+  word, triple click a whole message, `Shift-Up`/`Shift-Down` extend by
+  messages, `Esc` clears. Copying whole messages gives clean
+  `hh:mm name: text` lines. The terminal's own selection (`Shift`+drag,
+  or `--no-mouse`) keeps working.
+- Mouse navigation: click a chat, Requests or System in the list to open
+  it, drag the scrollbar that appears when the chat overflows, drag the
+  divider to resize the list (remembered in `config.json` as
+  `sidebar_width`), double-click a received file's line to open it with
+  the system's opener; `/open` does the same for the last file.
+- Discoverability: `F1` and `/help` open a scrollable help overlay built
+  from the command table, `Tab` completes `/commands` and file paths,
+  the status line hints at the keys for the focused pane, a mistyped
+  command answers "Did you mean /x?", and a fresh identity (or one
+  without contacts) gets a short guided start in the System pane.
+- Layout and rendering: `--theme dark|light|mono` and `/theme` (`NO_COLOR`
+  means mono, using bold, dim and reverse video only), a narrow layout
+  under 70 columns that folds the list away and counts "N/M" in the chat
+  title, the focused pane shown by an accented border, a "new messages"
+  rule above what arrived since the chat was last open, "Today" and
+  "Yesterday" on the date rules.
+- Terminal tests: `tests/tui/` drives the client in a pseudo-terminal
+  through a screen emulator and checks marks, clipboard, selection,
+  mouse, help, layout, notifications and files; CI runs it under
+  `xterm-256color` and `linux`, plus a run inside tmux, and a snapshot
+  test of the main screen. `docs/TERMINALS.md` lists what the client
+  needs from a terminal and what each known terminal does about it.
+
+### Changed
+
+- `config.json` gains `marks`, `theme` and `sidebar_width`.
+- The README's quick start covers the release archives per platform and
+  recommends Windows Terminal over the classic console.
+
 ## 0.4.0 - 2026-09-04
 
 Everyday messaging: receipts, files, notifications, invite links and a more

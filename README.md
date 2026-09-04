@@ -100,7 +100,8 @@ refused. Received files are saved under their own name in
 | Command                         | Effect                                                       |
 | ------------------------------- | ------------------------------------------------------------ |
 | `/add <user-id or link> [alias]` | Add a contact by id or invite link                           |
-| `/invite`                       | Show your invite link and a QR code of it                    |
+| `/invite [copy]`                | Show your invite link and a QR code of it; `copy` puts it on the clipboard |
+| `/copy [id\|link]`              | Copy the last message of this chat, your id, or your invite link |
 | `/alias <name>`                 | Name the selected contact                                    |
 | `/remove`                       | Forget the selected contact (history file stays on disk)     |
 | `/verify`                       | Show the safety number to compare with the selected contact  |
@@ -108,10 +109,12 @@ refused. Received files are saved under their own name in
 | `/refresh`                      | Fetch the selected contact's key again and report any change |
 | `/session`                      | Show how messages with the selected contact are protected    |
 | `/send <path>`                  | Send a file to the selected contact (also `/file`, `/attach`) |
+| `/open`                         | Open the last file received in this chat (or double-click its line) |
 | `/search <text>`                | Find messages in the selected chat, or in all chats from System |
 | `/receipts on\|off`             | Tell contacts when you have read their messages (default on) |
 | `/notify all\|bell\|off`        | Bell and desktop notification, bell only, or nothing         |
 | `/marks ascii\|unicode\|auto`   | Draw the marks in ASCII if your terminal shows boxes for them |
+| `/theme dark\|light\|mono`      | Colours for a dark or a light background, or none at all     |
 | `/accept <n>`                   | Accept a contact request from the Requests pane              |
 | `/block <n or id>`              | Drop everything from that id from now on                     |
 | `/unblock <id>`, `/blocked`     | Undo a block; list blocked ids                               |
@@ -119,14 +122,30 @@ refused. Received files are saved under their own name in
 | `/relay <ws-url>`               | Change the relay (used on next start)                        |
 | `/help`, `/quit`                |                                                              |
 
+`F1` (or `/help`) opens a help overlay with all of this. `Tab` completes
+`/commands` and file paths, and the status line at the bottom says what the
+keys do where you are.
+
+Mouse: click a chat, Requests or System in the list to open it, the wheel
+scrolls, the scrollbar on the right edge can be dragged, so can the line
+between the list and the chat to resize the list. Drag in the chat to select
+text (double click selects a word, triple click a whole message), double
+click a received file's line to open it.
+
 Keys: `Tab` / `Shift-Tab` or `Alt-Up` / `Alt-Down` switch chats, `Up` /
 `Down` recall earlier lines, `Alt-Enter` starts a new line in a message,
-`PgUp` / `PgDn` or the mouse wheel scroll and `Ctrl-Home` / `Ctrl-End` jump,
-`Esc` clears the input line, `Ctrl-C` quits. Pasting keeps line breaks.
-New messages in chats you are not looking at ring the bell, raise a desktop
-notification where the terminal can (WezTerm, kitty, foot, iTerm2, rxvt and
-others; the notification never contains the message), and put the unread
-count in the window title; `/notify` adjusts that.
+`PgUp` / `PgDn` scroll and `Ctrl-Home` / `Ctrl-End` jump, `Shift-Up` /
+`Shift-Down` select messages. `Ctrl-C` copies the selection (with nothing
+selected, pressing it twice quits), `Ctrl-V`, `Shift-Insert` or a right
+click paste from the system clipboard, `Esc` clears the selection and then
+the input line, `Ctrl-Q` quits. Copies go to the system clipboard, or to
+the terminal's clipboard through OSC 52 over SSH and in tmux. Pasting keeps
+line breaks. New messages in chats you are not looking at ring the bell,
+raise a desktop notification where the terminal can (WezTerm, kitty, foot,
+iTerm2, rxvt and others; the notification never contains the message), and
+put the unread count in the window title; `/notify` adjusts that. If the
+terminal is narrower than 70 columns the list folds away and the chat title
+shows where you are.
 
 ### Options
 
@@ -140,6 +159,7 @@ silver --print-id          print your user id and exit
 silver --print-invite      print your invite link (silver://add/<id>?relay=…) and exit
 silver --no-mouse          leave the mouse to the terminal: no wheel scrolling, but text selects without Shift (env SILVER_NO_MOUSE)
 silver --ascii             draw marks in ASCII (v, vv, x, ..); chosen by itself in the classic Windows console (env SILVER_ASCII)
+silver --theme <NAME>      dark (default), light for a light background, or mono for no colour; NO_COLOR means mono (env SILVER_THEME)
 silver --set-passphrase    encrypt keys, contacts and history under a passphrase (asked at every start)
 silver --remove-passphrase store everything unencrypted again
 SILVER_PASSPHRASE=…        supplies the passphrase non-interactively (scripts, tests)

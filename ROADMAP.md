@@ -85,7 +85,7 @@ the console's default fonts do not have. This phase does nothing but make
 the client comfortable, on every terminal people actually use, before any
 more protocol work.
 
-18. [ ] **Windows first run** (S). Detect the classic console and
+18. [x] **Windows first run** (S). Detect the classic console and
         terminals without the glyphs and fall back to ASCII marks
         (`..`, `v`, `vv`, `x`), with `--ascii` and a config key to force
         either way; check box drawing, the date rule and the QR code
@@ -93,7 +93,7 @@ more protocol work.
         every Windows host; document Windows Terminal as the recommended
         terminal and how to install it. First because it is what a new
         Windows user hits in the first minute.
-19. [ ] **Clipboard that just works** (M). Paste from the system clipboard
+19. [x] **Clipboard that just works** (M). Paste from the system clipboard
         on `Ctrl-V`, `Shift-Insert` and right click, read by the client
         itself (arboard on Windows, macOS and X11/Wayland; OSC 52 over
         SSH and in tmux) instead of relying on the terminal's paste path;
@@ -102,36 +102,43 @@ more protocol work.
         `Ctrl-Q` with a confirmation, with `Ctrl-C` quitting only when
         there is nothing to copy. Second because it removes the reason
         people reach for the terminal's own selection.
-20. [ ] **Text selection inside the client** (M). Drag with the mouse or
+20. [x] **Text selection inside the client** (M). Drag with the mouse or
         `Shift`+arrows in the message pane to select, with a visible
         highlight; double click selects a word, triple click a message;
         the selection copies to the clipboard and can be cleared with
         `Esc`. The terminal's native selection (`Shift`+drag, or
         `--no-mouse`) keeps working as the fallback.
-21. [ ] **Mouse navigation** (M). Click a chat, the Requests entry or
+21. [x] **Mouse navigation** (M). Click a chat, the Requests entry or
         System in the sidebar to open it, click the message box to focus
         it, click a scrollbar or drag it, click a file line to open the
         file, drag the divider to resize the sidebar; the wheel keeps
         scrolling. Everything stays reachable by keyboard.
-22. [ ] **Discoverability** (M). A help overlay on `F1` and `?`, a status
+22. [x] **Discoverability** (M). A help overlay on `F1` and `?`, a status
         line that shows the keys that matter for the focused pane,
         `Tab` completion and a suggestion popup for `/commands`, contact
         names and file paths, usage hints when a command is mistyped,
         unread badges in the sidebar, and a short guided first run in
         the System pane. So nobody needs the README to get going.
-23. [ ] **Layout and rendering** (S). A narrow-terminal layout that
+23. [x] **Layout and rendering** (S). A narrow-terminal layout that
         collapses the sidebar, light and dark palettes with `--theme` and
         `NO_COLOR`, focus shown on pane borders, word-boundary wrapping
         with hanging indents everywhere, an unread separator in the
         chat, relative timestamps on hover-less terminals ("today",
         "yesterday"), and clickable OSC 8 links for invite links and
         saved file paths.
-24. [ ] **Terminal test matrix** (S). Run the pty smoke tests and a
+24. [x] **Terminal test matrix** (S). Run the pty smoke tests and a
         snapshot test against xterm, Windows Terminal, the classic
         console, tmux, macOS Terminal.app and iTerm2; record each
         terminal's quirks in `docs/TERMINALS.md`; make the matrix part of
         CI where the terminal can be driven headless. Last because it
         keeps 18 to 23 from regressing.
+
+Done, with two deviations: clickable OSC 8 links were left out (the
+renderer's cell buffer cannot carry them; paths and links are copied with
+`/copy` and opened with `/open` or a double click instead), and only
+xterm, the Linux console and tmux are driven in CI. Windows Terminal, the
+classic console, Terminal.app and iTerm2 are documented in
+`docs/TERMINALS.md` from hand checks and the terminals' own documentation.
 
 ## Phase 6: beyond one relay
 
