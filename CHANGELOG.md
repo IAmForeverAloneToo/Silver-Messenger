@@ -32,6 +32,17 @@ means behaviour or the wire protocol changed in a way worth reading about.
   floods of failed logins or refused registrations, and a nearly full
   file store. `--log-format json` writes the log as JSON lines. The
   hourly summary now counts failed logins too.
+- **Administration.** `silver-relay --admin-socket` answers
+  `silver-relay admin` on a Unix socket that only root and the relay's
+  user can open, so nothing about administration is on the network:
+  `status`, `identities` (every identity under its log pseudonym, with
+  mailbox size and prekey deposit), `evict`, `ban` and `unban` an address
+  or an identity (kept across restarts, listed by `bans`), and
+  `invite-set`, `invite-off` and `invite-reset` for the invite token
+  without a restart. A banned address is refused at the door and a
+  banned identity at login. The installer configures the socket and the
+  unit gives it a private runtime directory. Nothing an administrator can
+  do shows a message or a key.
 
 ## 0.6.0 - 2026-09-04
 

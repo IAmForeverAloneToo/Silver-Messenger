@@ -332,6 +332,25 @@ hourly summary, and names an address in a warning once it fails to log
 in twenty times within an hour; `--log-format json` writes one JSON
 object per line for a log collector.
 
+**Administering it.** With `--admin-socket /run/silver-relay/admin.sock`
+(`SILVER_RELAY_ADMIN_SOCKET` in `relay.env`, which the installer sets)
+the relay answers `silver-relay admin` on a Unix socket that only root
+and the relay's user can open; nothing about administration is reachable
+from the network and there is no password to keep. `silver-relay admin
+status` prints the counters, the store's numbers, the registration
+policy and the certificate; `admin identities` lists every identity
+under the pseudonym the log uses, with its mailbox size and its prekey
+deposit, largest mailbox first; `admin evict <who>` deletes an identity's
+bundle, prekeys and mailbox and disconnects it; `admin ban <target>
+--note why` and `admin unban` refuse or readmit an address or an
+identity (a pseudonym from the listing, or a full id), kept across
+restarts and listed by `admin bans`; `admin invite-set [token]`,
+`invite-off` and `invite-reset` change which token new identities need
+without a restart, until `invite-reset` hands the decision back to the
+command line. None of it shows a message or a key: the store holds only
+ciphertext and public keys, and the listing shows what the relay already
+knows about each identity.
+
 **Pinning the relay's key.** To trust one key rather than every
 certificate authority on the machine, pin it: `silver --print-pin` shows
 the pin of the key the relay presents right now, and `silver --pin

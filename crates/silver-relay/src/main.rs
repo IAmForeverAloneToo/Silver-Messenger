@@ -169,6 +169,244 @@ struct Args {
     /// collector.
     #[arg(long, env = "SILVER_RELAY_LOG_FORMAT", value_enum, default_value_t = LogFormat::Text)]
     log_format: LogFormat,
+
+    /// Answer `silver-relay admin` on this Unix socket, created readable by
+    /// the relay's user only. Off unless given.
+    #[arg(long, env = "SILVER_RELAY_ADMIN_SOCKET")]
+    admin_socket: Option<PathBuf>,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum Command {
+    /// Ask or tell a running relay something over its admin socket.
+    Admin {
+        /// The socket the relay was started with (--admin-socket).
+        #[arg(long, default_value = silver_relay::admin::DEFAULT_SOCKET)]
+        socket: PathBuf,
+        #[command(subcommand)]
+        action: AdminAction,
+    },
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum AdminAction {
+    /// Counters, store numbers, the certificate, the invite policy.
+    Status,
+    /// Every identity by its log pseudonym, largest mailbox first.
+    Identities,
+    /// Delete an identity's bundle, prekeys and mailbox and disconnect it.
+    /// WHO is a pseudonym from the listing or a full id.
+    Evict { who: String },
+    /// Refuse an address (an IP) or an identity (a pseudonym or an id)
+    /// from now on, across restarts.
+    Ban {
+        target: String,
+        /// Why, for the listing.
+        #[arg(long, default_value = "")]
+        note: String,
+    },
+    /// Lift a ban.
+    Unban { target: String },
+    /// The bans in force.
+    Bans,
+    /// Require this token from new identities from now on, or a fresh
+    /// random one when none is given; printed, and kept across restarts.
+    InviteSet { token: Option<String> },
+    /// Require no token from now on, kept across restarts.
+    InviteOff,
+    /// Forget the runtime choice; the token from the command line or the
+    /// environment applies again.
+    InviteReset,
+}
+
+fn ms_text(ms: u64) -> String {
+    let secs = ms / 1000;
+    let now = silver_protocol::now_ms() / 1000;
+    let ago = now.saturating_sub(secs);
+    match ago {
+        0..=119 => format!("{ago}s ago"),
+        120..=7199 => format!("{}m ago", ago / 60),
+        7200..=172_799 => format!("{}h ago", ago / 3600),
+        _ => format!("{}d ago", ago / 86_400),
+    }
+}
+
+fn bytes_text(bytes: u64) -> String {
+    match bytes {
+        0..=1023 => format!("{bytes} B"),
+        1024..=1_048_575 => format!("{:.1} KiB", bytes as f64 / 1024.0),
+        _ => format!("{:.1} MiB", bytes as f64 / 1_048_576.0),
+    }
+}
+
+/// Run one admin action against the socket and print the answer.
+async fn run_admin(socket: PathBuf, action: AdminAction) -> anyhow::Result<()> {
+    use silver_relay::admin::{Evicted, InviteToken, Status, request};
+    use silver_relay::{BanRow, IdentityRow};
+    let ban_path = |target: &str| {
+        if target.parse::<IpAddr>().is_ok() {
+            format!("/bans/address/{target}")
+        } else {
+            format!("/bans/identity/{target}")
+        }
+    };
+    let (status, body) = match &action {
+        AdminAction::Status => request(&socket, "GET", "/status", "").await?,
+        AdminAction::Identities => request(&socket, "GET", "/identities", "").await?,
+        AdminAction::Evict { who } => {
+            request(&socket, "POST", &format!("/evict/{who}"), "").await?
+        }
+        AdminAction::Ban { target, note } => {
+            request(&socket, "POST", &ban_path(target), note).await?
+        }
+        AdminAction::Unban { target } => request(&socket, "DELETE", &ban_path(target), "").await?,
+        AdminAction::Bans => request(&socket, "GET", "/bans", "").await?,
+        AdminAction::InviteSet { token } => {
+            request(&socket, "POST", "/invite", token.as_deref().unwrap_or("")).await?
+        }
+        AdminAction::InviteOff => request(&socket, "DELETE", "/invite", "").await?,
+        AdminAction::InviteReset => request(&socket, "POST", "/invite/reset", "").await?,
+    };
+    if !(200..300).contains(&status) {
+        let text = match &body {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        anyhow::bail!("the relay answered {status}: {text}");
+    }
+    match action {
+        AdminAction::Status => {
+            let s: Status = serde_json::from_value(body)?;
+            println!(
+                "silver-relay {} up {}h{:02}m",
+                s.version,
+                s.uptime_secs / 3600,
+                (s.uptime_secs % 3600) / 60
+            );
+            println!(
+                "connections: {} open from {} addresses; {} identities online",
+                s.counters.open_connections, s.counters.addresses, s.online
+            );
+            println!(
+                "refused: {} connections, {} registrations, {} uploads, {} logins; {} closed idle; {} anonymous submissions",
+                s.counters.refused_connections,
+                s.counters.refused_registrations,
+                s.counters.refused_uploads,
+                s.auth_failures,
+                s.counters.idle_closed,
+                s.anonymous_submissions
+            );
+            println!(
+                "store: {} identities, {} messages in {} mailboxes ({}), {} files ({})",
+                s.stats.bundles,
+                s.stats.messages,
+                s.stats.mailboxes,
+                bytes_text(s.stats.bytes),
+                s.stats.blobs,
+                bytes_text(s.stats.blob_bytes)
+            );
+            println!(
+                "registration: {}",
+                if s.invite_required {
+                    "invite token required"
+                } else {
+                    "open"
+                }
+            );
+            if let Some(tls) = s.tls {
+                match tls.certificate_expires_at_ms {
+                    Some(at) => println!(
+                        "certificate: expires in {}d; {} failed renewals",
+                        (at / 1000).saturating_sub(silver_protocol::now_ms() / 1000) / 86_400,
+                        tls.acme_failures
+                    ),
+                    None => println!(
+                        "certificate: none yet; {} failed attempts",
+                        tls.acme_failures
+                    ),
+                }
+            }
+        }
+        AdminAction::Identities => {
+            let rows: Vec<IdentityRow> = serde_json::from_value(body)?;
+            if rows.is_empty() {
+                println!("no identities");
+                return Ok(());
+            }
+            println!(
+                "{:<14} {:<7} {:>8} {:>10} {:>9} {:>6} {:<12} flags",
+                "who", "online", "messages", "bytes", "prekeys", "pq", "published"
+            );
+            for r in rows {
+                println!(
+                    "{:<14} {:<7} {:>8} {:>10} {:>9} {:>6} {:<12} {}",
+                    r.who,
+                    if r.online { "yes" } else { "no" },
+                    r.messages,
+                    bytes_text(r.bytes),
+                    r.one_time_prekeys,
+                    r.pq_one_time_prekeys,
+                    r.signed_prekey_at_ms
+                        .map(ms_text)
+                        .unwrap_or_else(|| "never".into()),
+                    [(r.post_quantum, "post-quantum"), (r.banned, "banned")]
+                        .into_iter()
+                        .filter(|(on, _)| *on)
+                        .map(|(_, flag)| flag)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+        }
+        AdminAction::Evict { .. } => {
+            let e: Evicted = serde_json::from_value(body)?;
+            println!(
+                "evicted {}: {} messages ({}), {} prekeys, bundle {}",
+                e.who,
+                e.removed.messages,
+                bytes_text(e.removed.bytes),
+                e.removed.prekeys,
+                if e.removed.had_bundle {
+                    "removed"
+                } else {
+                    "was not there"
+                }
+            );
+        }
+        AdminAction::Ban { target, .. } => println!("banned {target}"),
+        AdminAction::Unban { target } => println!("unbanned {target}"),
+        AdminAction::Bans => {
+            let rows: Vec<BanRow> = serde_json::from_value(body)?;
+            if rows.is_empty() {
+                println!("no bans");
+            }
+            for r in rows {
+                println!("{:<40} {:<10} {}", r.target, ms_text(r.since_ms), r.note);
+            }
+        }
+        AdminAction::InviteSet { .. } => {
+            let t: InviteToken = serde_json::from_value(body)?;
+            println!(
+                "new identities must now present: {}",
+                t.token.unwrap_or_default()
+            );
+        }
+        AdminAction::InviteOff => println!("new identities need no invite token now"),
+        AdminAction::InviteReset => {
+            let t: InviteToken = serde_json::from_value(body)?;
+            println!(
+                "runtime choice forgotten; {}",
+                match t.token {
+                    Some(_) => "the configured token applies",
+                    None => "no token is configured, so registration is open",
+                }
+            );
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -220,6 +458,15 @@ impl Transport {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    if let Some(Command::Admin { socket, action }) = args.command {
+        // One line on stderr and a failing exit status, as a command-line
+        // tool should; not the debug rendering a crashed relay gets.
+        if let Err(e) = run_admin(socket, action).await {
+            eprintln!("error: {e:#}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     match args.log_format {
         LogFormat::Text => tracing_subscriber::fmt().with_env_filter(filter).init(),
@@ -310,6 +557,24 @@ async fn main() -> anyhow::Result<()> {
         Transport::Plain => None,
         _ => Some(CertStore::new()),
     };
+    if let Some(socket) = &args.admin_socket {
+        #[cfg(unix)]
+        {
+            info!("administration on {}", socket.display());
+            let admin =
+                silver_relay::admin::serve_unix(socket.clone(), state.clone(), cert_store.clone());
+            tokio::spawn(async move {
+                if let Err(e) = admin.await {
+                    tracing::error!("admin socket: {e:#}");
+                }
+            });
+        }
+        #[cfg(not(unix))]
+        anyhow::bail!(
+            "--admin-socket {} needs a Unix socket, which this system has none of",
+            socket.display()
+        );
+    }
     if let Some(metrics_addr) = &args.metrics_listen {
         let metrics_listener = TcpListener::bind(metrics_addr)
             .await

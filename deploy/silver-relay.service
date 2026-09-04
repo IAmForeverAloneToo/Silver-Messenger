@@ -12,6 +12,9 @@ EnvironmentFile=-/etc/silver-relay/relay.env
 # readable by the relay's user only: it holds every mailbox and key bundle.
 StateDirectory=silver-relay
 StateDirectoryMode=0700
+# The admin socket lives in /run/silver-relay, for the relay's user and root.
+RuntimeDirectory=silver-relay
+RuntimeDirectoryMode=0700
 ExecStart=/usr/local/bin/silver-relay
 Restart=always
 RestartSec=2
@@ -29,7 +32,8 @@ PrivateDevices=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
-RestrictAddressFamilies=AF_INET AF_INET6
+# AF_UNIX for the admin socket.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=true
 LockPersonality=true
 MemoryDenyWriteExecute=true

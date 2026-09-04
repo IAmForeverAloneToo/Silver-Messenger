@@ -72,6 +72,11 @@ Can:
   exit addresses and the address tells the relay nothing; timing still
   does.
 - Withhold, delay or reorder deliveries; drop mailboxes; refuse service.
+  The administration that makes this a command rather than a database
+  edit (evict an identity, ban an address or an identity, change the
+  invite token) is over a Unix socket on the host that only root and the
+  relay's user can open; there is no administration over the network,
+  and nothing it offers shows a message or a key.
 - Serve a *stale* key bundle for a user, or withhold one-time prekeys so a
   session starts without one. It cannot serve a forged bundle or signed
   prekey: both are signed by the user's identity key and clients verify

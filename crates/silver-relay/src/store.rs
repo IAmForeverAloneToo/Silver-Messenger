@@ -37,6 +37,12 @@ const BY_ID: TableDefinition<&str, (&[u8], u64)> = TableDefinition::new("by_id")
 const USAGE: TableDefinition<&[u8], (u64, u64)> = TableDefinition::new("usage");
 const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
 const NEXT_SEQ: &str = "next_seq";
+/// `"address:<ip>"` or `"identity:<id>"` -> [`Ban`] JSON, set by the
+/// administrator and enforced until removed.
+const BANS: TableDefinition<&str, &[u8]> = TableDefinition::new("bans");
+/// Settings the administrator changed while the relay ran, which win over
+/// the command line at the next start: the invite token, for one.
+const ADMIN: TableDefinition<&str, &str> = TableDefinition::new("admin");
 /// `blob id -> BlobMeta JSON` for encrypted file chunks on deposit.
 const BLOBS: TableDefinition<&str, &[u8]> = TableDefinition::new("blobs");
 /// `(blob id, chunk index) -> ciphertext`.
@@ -69,8 +75,25 @@ pub enum Enqueue {
     MailboxFull,
 }
 
+/// A ban on an address or an identity, as the administrator set it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Ban {
+    pub since_ms: u64,
+    #[serde(default)]
+    pub note: String,
+}
+
+/// What [`Store::remove_user`] deleted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Removed {
+    pub had_bundle: bool,
+    pub messages: u64,
+    pub bytes: u64,
+    pub prekeys: u64,
+}
+
 /// Aggregate numbers for logs and health output.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Stats {
     pub bundles: u64,
     pub mailboxes: u64,
@@ -181,9 +204,144 @@ impl Store {
             txn.open_table(META)?;
             txn.open_table(BLOBS)?;
             txn.open_table(BLOB_CHUNKS)?;
+            txn.open_table(BANS)?;
+            txn.open_table(ADMIN)?;
         }
         txn.commit()?;
         Ok(Self { db })
+    }
+
+    // --- administration --------------------------------------------------------
+
+    /// Every identity with a bundle.
+    pub fn users(&self) -> anyhow::Result<Vec<UserId>> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(BUNDLES)?;
+        let mut users = Vec::new();
+        for item in table.iter()? {
+            let (key, _) = item?;
+            let bytes: [u8; 32] = key
+                .value()
+                .try_into()
+                .context("a bundle key that is not a user id")?;
+            users.push(UserId::from_bytes(bytes)?);
+        }
+        Ok(users)
+    }
+
+    /// Queued envelopes and their bytes for `user`.
+    pub fn usage(&self, user: &UserId) -> anyhow::Result<(u64, u64)> {
+        let txn = self.db.begin_read()?;
+        Ok(txn
+            .open_table(USAGE)?
+            .get(user.as_bytes().as_slice())?
+            .map(|guard| guard.value())
+            .unwrap_or((0, 0)))
+    }
+
+    /// Delete everything kept for `user`: the bundle, prekeys of both
+    /// kinds, the mailbox. Blobs belong to nobody and expire on their own.
+    pub fn remove_user(&self, user: &UserId) -> anyhow::Result<Removed> {
+        let key = user.as_bytes().as_slice();
+        let txn = self.db.begin_write()?;
+        let mut removed = Removed::default();
+        {
+            removed.had_bundle = txn.open_table(BUNDLES)?.remove(key)?.is_some();
+            let mut mailbox = txn.open_table(MAILBOX)?;
+            let mut by_id = txn.open_table(BY_ID)?;
+            let entries = mailbox
+                .range((key, 0u64)..=(key, u64::MAX))?
+                .map(|item| {
+                    let (k, v) = item?;
+                    let (_, envelope) = decode_entry(v.value())?;
+                    Ok((k.value().1, envelope.id, v.value().len() as u64))
+                })
+                .collect::<anyhow::Result<Vec<(u64, String, u64)>>>()?;
+            for (seq, id, size) in entries {
+                mailbox.remove((key, seq))?;
+                by_id.remove(id.as_str())?;
+                removed.messages += 1;
+                removed.bytes += size;
+            }
+            txn.open_table(USAGE)?.remove(key)?;
+            for (deposit, used) in [(ONE_TIME, ONE_TIME_USED), (PQ_ONE_TIME, PQ_ONE_TIME_USED)] {
+                let mut table = txn.open_table(deposit)?;
+                let ids = table
+                    .range((key, 0u32)..=(key, u32::MAX))?
+                    .map(|item| item.map(|(k, _)| k.value().1))
+                    .collect::<Result<Vec<u32>, _>>()?;
+                for id in ids {
+                    table.remove((key, id))?;
+                    removed.prekeys += 1;
+                }
+                let mut table = txn.open_table(used)?;
+                let ids = table
+                    .range((key, 0u32)..=(key, u32::MAX))?
+                    .map(|item| item.map(|(k, _)| k.value().1))
+                    .collect::<Result<Vec<u32>, _>>()?;
+                for id in ids {
+                    table.remove((key, id))?;
+                }
+            }
+        }
+        txn.commit()?;
+        Ok(removed)
+    }
+
+    pub fn set_ban(&self, key: &str, ban: &Ban) -> anyhow::Result<()> {
+        let bytes = serde_json::to_vec(ban)?;
+        let txn = self.db.begin_write()?;
+        txn.open_table(BANS)?.insert(key, bytes.as_slice())?;
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// Whether there was one.
+    pub fn remove_ban(&self, key: &str) -> anyhow::Result<bool> {
+        let txn = self.db.begin_write()?;
+        let was = txn.open_table(BANS)?.remove(key)?.is_some();
+        txn.commit()?;
+        Ok(was)
+    }
+
+    pub fn bans(&self) -> anyhow::Result<Vec<(String, Ban)>> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(BANS)?;
+        let mut bans = Vec::new();
+        for item in table.iter()? {
+            let (key, value) = item?;
+            bans.push((
+                key.value().to_owned(),
+                serde_json::from_slice(value.value())?,
+            ));
+        }
+        Ok(bans)
+    }
+
+    pub fn admin_setting(&self, key: &str) -> anyhow::Result<Option<String>> {
+        let txn = self.db.begin_read()?;
+        Ok(txn
+            .open_table(ADMIN)?
+            .get(key)?
+            .map(|guard| guard.value().to_owned()))
+    }
+
+    /// `None` removes the setting.
+    pub fn set_admin_setting(&self, key: &str, value: Option<&str>) -> anyhow::Result<()> {
+        let txn = self.db.begin_write()?;
+        {
+            let mut table = txn.open_table(ADMIN)?;
+            match value {
+                Some(value) => {
+                    table.insert(key, value)?;
+                }
+                None => {
+                    table.remove(key)?;
+                }
+            }
+        }
+        txn.commit()?;
+        Ok(())
     }
 
     // --- blobs ---------------------------------------------------------------
@@ -644,6 +802,111 @@ fn decode_entry(bytes: &[u8]) -> anyhow::Result<(u64, Envelope)> {
 mod tests {
     use super::*;
     use silver_protocol::{Content, Identity, PqPrekeySecret, seal};
+
+    #[test]
+    fn a_user_is_removed_from_every_table_and_nobody_else_is() {
+        let store = Store::in_memory().unwrap();
+        let bob = Identity::generate();
+        let carol = Identity::generate();
+        for who in [&bob, &carol] {
+            let signed = silver_protocol::PrekeySecret::generate(1, 0);
+            store
+                .put_bundle(&who.key_bundle_with(silver_protocol::Prekeys::classical(
+                    signed.signed_by(who),
+                    vec![silver_protocol::PrekeySecret::generate(2, 0).one_time()],
+                )))
+                .unwrap();
+            store
+                .set_one_time_prekeys(
+                    &who.user_id(),
+                    &[silver_protocol::PrekeySecret::generate(2, 0).one_time()],
+                )
+                .unwrap();
+            store
+                .set_pq_one_time_prekeys(
+                    &who.user_id(),
+                    &[PqPrekeySecret::generate(3, 0).signed_by(who)],
+                )
+                .unwrap();
+            let alice = Identity::generate();
+            for text in ["one", "two"] {
+                store
+                    .enqueue(&envelope(&alice, who, text), 1, Limits::default())
+                    .unwrap();
+            }
+        }
+        store.take_one_time_prekey(&bob.user_id()).unwrap();
+        assert_eq!(store.users().unwrap().len(), 2);
+        let (count, bytes) = store.usage(&bob.user_id()).unwrap();
+        assert_eq!(count, 2);
+        assert!(bytes > 0);
+
+        let removed = store.remove_user(&bob.user_id()).unwrap();
+        assert!(removed.had_bundle);
+        assert_eq!(removed.messages, 2);
+        assert_eq!(removed.bytes, bytes);
+        assert_eq!(
+            removed.prekeys, 1,
+            "the pq one; the x25519 one was handed out"
+        );
+        assert!(store.bundle(&bob.user_id()).unwrap().is_none());
+        assert_eq!(store.usage(&bob.user_id()).unwrap(), (0, 0));
+        assert!(store.queued(&bob.user_id()).unwrap().is_empty());
+        assert_eq!(store.one_time_status(&bob.user_id()).unwrap(), (0, vec![]));
+        assert_eq!(
+            store.pq_one_time_status(&bob.user_id()).unwrap(),
+            (0, vec![])
+        );
+        assert_eq!(store.users().unwrap(), vec![carol.user_id()]);
+        assert_eq!(store.queued(&carol.user_id()).unwrap().len(), 2);
+        assert_eq!(store.stats().unwrap().messages, 2);
+        // Removing again is a harmless no-op.
+        assert_eq!(
+            store.remove_user(&bob.user_id()).unwrap(),
+            Removed::default()
+        );
+    }
+
+    #[test]
+    fn bans_and_settings_survive_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("relay.redb");
+        {
+            let store = Store::open(&path).unwrap();
+            store
+                .set_ban(
+                    "address:203.0.113.9",
+                    &Ban {
+                        since_ms: 5,
+                        note: "flood".into(),
+                    },
+                )
+                .unwrap();
+            store.set_ban("identity:abc", &Ban::default()).unwrap();
+            assert!(store.remove_ban("identity:abc").unwrap());
+            assert!(!store.remove_ban("identity:abc").unwrap());
+            store
+                .set_admin_setting("invite_token", Some("new-token"))
+                .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.bans().unwrap(),
+            vec![(
+                "address:203.0.113.9".to_owned(),
+                Ban {
+                    since_ms: 5,
+                    note: "flood".into()
+                }
+            )]
+        );
+        assert_eq!(
+            store.admin_setting("invite_token").unwrap().as_deref(),
+            Some("new-token")
+        );
+        store.set_admin_setting("invite_token", None).unwrap();
+        assert_eq!(store.admin_setting("invite_token").unwrap(), None);
+    }
 
     #[test]
     fn one_time_ml_kem_keys_are_handed_out_once_signature_and_all() {

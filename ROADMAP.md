@@ -300,7 +300,7 @@ container story. Operations come before reach.
         output as an option; example alert rules for a full mailbox
         store, a full blob store and a burst of refused registrations.
         Closes the monitoring gap in `docs/SECURITY_ASSESSMENT.md`.
-38. [ ] **Administration** (M). `silver-relay admin` over a local Unix
+38. [x] **Administration** (M). `silver-relay admin` over a local Unix
         socket, for the operator only: identities and their mailbox
         sizes under the log pseudonyms, blob usage, evict an identity,
         rotate the invite token, ban an address or an id. Nothing an

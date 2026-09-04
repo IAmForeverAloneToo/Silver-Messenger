@@ -18,16 +18,17 @@
 //! ([`acme`]); a TLS front such as Caddy remains an option.
 
 pub mod acme;
+pub mod admin;
 pub mod metrics;
 pub mod store;
 pub mod tls;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use axum::Router;
@@ -51,7 +52,91 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-pub use store::{BlobLimits, BlobMeta, BlobPut, Enqueue, Limits, Stats, Store};
+pub use store::{Ban, BlobLimits, BlobMeta, BlobPut, Enqueue, Limits, Removed, Stats, Store};
+
+/// The admin setting that holds an invite token changed at runtime; an
+/// empty value means "no token needed", chosen over the command line.
+const INVITE_SETTING: &str = "invite_token";
+
+/// Who may not connect or log in, as the administrator decided.
+#[derive(Default)]
+struct Bans {
+    addresses: HashSet<IpAddr>,
+    users: HashSet<UserId>,
+}
+
+impl Bans {
+    fn load(store: &Store) -> Self {
+        let mut bans = Self::default();
+        match store.bans() {
+            Ok(list) => {
+                for (key, _) in list {
+                    match BanTarget::from_key(&key) {
+                        Some(BanTarget::Address(addr)) => {
+                            bans.addresses.insert(addr);
+                        }
+                        Some(BanTarget::Identity(user)) => {
+                            bans.users.insert(user);
+                        }
+                        None => warn!("ignoring an unreadable ban entry {key}"),
+                    }
+                }
+            }
+            Err(e) => error!("reading the bans: {e:#}"),
+        }
+        bans
+    }
+}
+
+/// What a ban applies to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BanTarget {
+    Address(IpAddr),
+    Identity(UserId),
+}
+
+impl BanTarget {
+    /// The store key: `address:<ip>` or `identity:<id>`.
+    pub fn key(&self) -> String {
+        match self {
+            Self::Address(addr) => format!("address:{addr}"),
+            Self::Identity(user) => format!("identity:{user}"),
+        }
+    }
+
+    fn from_key(key: &str) -> Option<Self> {
+        let (kind, value) = key.split_once(':')?;
+        match kind {
+            "address" => value.parse().ok().map(Self::Address),
+            "identity" => value.parse().ok().map(Self::Identity),
+            _ => None,
+        }
+    }
+}
+
+/// One identity as the administrator sees it: by its log pseudonym unless
+/// `--log-ids` is set, never by anything the relay cannot see anyway.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IdentityRow {
+    pub who: String,
+    pub online: bool,
+    pub banned: bool,
+    pub messages: u64,
+    pub bytes: u64,
+    pub one_time_prekeys: u32,
+    pub pq_one_time_prekeys: u32,
+    pub signed_prekey_at_ms: Option<u64>,
+    pub post_quantum: bool,
+}
+
+/// A ban as listed to the administrator.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BanRow {
+    /// `address:<ip>`, or `identity:<pseudonym>` as in the log.
+    pub target: String,
+    pub since_ms: u64,
+    pub note: String,
+}
 
 pub const DEFAULT_LISTEN: &str = "0.0.0.0:7777";
 
@@ -261,7 +346,7 @@ struct Counters {
 }
 
 /// A copy of the counters plus what is open right now.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CounterSnapshot {
     pub open_connections: u32,
     pub addresses: usize,
@@ -304,6 +389,12 @@ pub struct RelayState {
     anonymous_submissions: AtomicU64,
     auth_failures: metrics::AuthFailures,
     started: Instant,
+    /// Addresses and identities the operator has banned; read on every
+    /// connection and every login, so kept in memory next to the store.
+    bans: RwLock<Bans>,
+    /// The invite token in force: the one set at runtime if any, else the
+    /// command line's.
+    invite: RwLock<Option<String>>,
     /// Salt for the pseudonyms in the log; new every run.
     log_salt: [u8; 16],
 }
@@ -315,8 +406,11 @@ struct Session {
 
 enum Outbound {
     Frame(Box<ServerFrame>),
-    /// A newer session for the same user replaced this one.
-    Close,
+    /// The relay ends this session, and says why for the log: a newer
+    /// session for the same user replaced it, or the administrator evicted
+    /// or banned the identity. Whoever sent this took the session's place
+    /// in the registry already.
+    Close(&'static str),
 }
 
 /// Why the relay refused a client frame.
@@ -357,6 +451,15 @@ impl RelayState {
     }
 
     pub fn with_store_and_policy(store: Store, limits: Limits, policy: Policy) -> Arc<Self> {
+        let bans = Bans::load(&store);
+        let invite = match store.admin_setting(INVITE_SETTING) {
+            Ok(Some(token)) => (!token.is_empty()).then_some(token),
+            Ok(None) => policy.invite_token.clone(),
+            Err(e) => {
+                error!("reading the admin settings: {e:#}");
+                policy.invite_token.clone()
+            }
+        };
         Arc::new(Self {
             store,
             limits,
@@ -370,6 +473,8 @@ impl RelayState {
             anonymous_submissions: AtomicU64::new(0),
             auth_failures: metrics::AuthFailures::default(),
             started: Instant::now(),
+            bans: RwLock::new(bans),
+            invite: RwLock::new(invite),
             log_salt: {
                 let mut salt = [0u8; 16];
                 OsRng.fill_bytes(&mut salt);
@@ -430,6 +535,12 @@ impl RelayState {
 
     /// Take a place for a connection from `addr`, or say why not.
     fn connect(self: &Arc<Self>, addr: IpAddr) -> Result<ConnectionGuard, &'static str> {
+        if self.address_banned(addr) {
+            self.counters
+                .refused_connections
+                .fetch_add(1, Ordering::Relaxed);
+            return Err("this address is banned from this relay");
+        }
         if self.connections.load(Ordering::Relaxed) >= self.policy.max_connections {
             self.counters
                 .refused_connections
@@ -519,6 +630,171 @@ impl RelayState {
     /// Failed logins, for the metrics.
     pub fn auth_failures(&self) -> &metrics::AuthFailures {
         &self.auth_failures
+    }
+
+    // --- administration --------------------------------------------------------
+
+    /// The invite token new identities must present, if any.
+    pub fn invite_token(&self) -> Option<String> {
+        self.invite
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Change the invite token while the relay runs. `Some(token)` requires
+    /// it from now on; `None` requires none. Both are remembered in the
+    /// store and win over `--invite-token` at later starts, until
+    /// [`forget_invite_token`](Self::forget_invite_token).
+    pub fn set_invite_token(&self, token: Option<String>) -> anyhow::Result<()> {
+        self.store
+            .set_admin_setting(INVITE_SETTING, Some(token.as_deref().unwrap_or("")))?;
+        *self.invite.write().unwrap_or_else(|e| e.into_inner()) = token;
+        Ok(())
+    }
+
+    /// Drop the runtime choice: the command line's token applies again,
+    /// now and at later starts.
+    pub fn forget_invite_token(&self) -> anyhow::Result<()> {
+        self.store.set_admin_setting(INVITE_SETTING, None)?;
+        *self.invite.write().unwrap_or_else(|e| e.into_inner()) = self.policy.invite_token.clone();
+        Ok(())
+    }
+
+    pub fn address_banned(&self, addr: IpAddr) -> bool {
+        self.bans
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .addresses
+            .contains(&addr)
+    }
+
+    pub fn user_banned(&self, user: &UserId) -> bool {
+        self.bans
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .users
+            .contains(user)
+    }
+
+    /// Refuse `target` from now on, across restarts; a banned identity
+    /// that is online is disconnected.
+    pub fn ban(&self, target: &BanTarget, note: &str) -> anyhow::Result<()> {
+        self.store.set_ban(
+            &target.key(),
+            &Ban {
+                since_ms: now_ms(),
+                note: note.to_owned(),
+            },
+        )?;
+        {
+            let mut bans = self.bans.write().unwrap_or_else(|e| e.into_inner());
+            match target {
+                BanTarget::Address(addr) => {
+                    bans.addresses.insert(*addr);
+                }
+                BanTarget::Identity(user) => {
+                    bans.users.insert(*user);
+                }
+            }
+        }
+        if let BanTarget::Identity(user) = target {
+            self.disconnect(user, "banned by the administrator");
+        }
+        Ok(())
+    }
+
+    /// Whether there was a ban to lift.
+    pub fn unban(&self, target: &BanTarget) -> anyhow::Result<bool> {
+        let was = self.store.remove_ban(&target.key())?;
+        let mut bans = self.bans.write().unwrap_or_else(|e| e.into_inner());
+        match target {
+            BanTarget::Address(addr) => {
+                bans.addresses.remove(addr);
+            }
+            BanTarget::Identity(user) => {
+                bans.users.remove(user);
+            }
+        }
+        Ok(was)
+    }
+
+    pub fn bans(&self) -> anyhow::Result<Vec<BanRow>> {
+        let mut rows: Vec<BanRow> = self
+            .store
+            .bans()?
+            .into_iter()
+            .map(|(key, ban)| BanRow {
+                target: match BanTarget::from_key(&key) {
+                    Some(BanTarget::Identity(user)) => format!("identity:{}", self.who(&user)),
+                    _ => key,
+                },
+                since_ms: ban.since_ms,
+                note: ban.note,
+            })
+            .collect();
+        rows.sort_by(|a, b| a.target.cmp(&b.target));
+        Ok(rows)
+    }
+
+    /// The identity `who` names: a full id, or the pseudonym the log and
+    /// the admin listings use for it.
+    pub fn resolve(&self, who: &str) -> anyhow::Result<Option<UserId>> {
+        if let Ok(user) = who.parse::<UserId>() {
+            return Ok(Some(user));
+        }
+        let banned: Vec<UserId> = self
+            .bans
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .users
+            .iter()
+            .copied()
+            .collect();
+        Ok(self
+            .store
+            .users()?
+            .into_iter()
+            .chain(banned)
+            .find(|user| self.who(user) == who))
+    }
+
+    /// Every identity with a bundle, largest mailbox first.
+    pub fn identities(&self) -> anyhow::Result<Vec<IdentityRow>> {
+        let mut rows = Vec::new();
+        for user in self.store.users()? {
+            let (messages, bytes) = self.store.usage(&user)?;
+            let (one_time_prekeys, _) = self.store.one_time_status(&user)?;
+            let (pq_one_time_prekeys, _) = self.store.pq_one_time_status(&user)?;
+            let prekeys = self.store.bundle(&user)?.and_then(|b| b.prekeys);
+            rows.push(IdentityRow {
+                who: self.who(&user),
+                online: self.online().contains_key(&user),
+                banned: self.user_banned(&user),
+                messages,
+                bytes,
+                one_time_prekeys,
+                pq_one_time_prekeys,
+                signed_prekey_at_ms: prekeys.as_ref().map(|p| p.signed.created_at_ms),
+                post_quantum: prekeys.as_ref().is_some_and(|p| p.supports_post_quantum()),
+            });
+        }
+        rows.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.who.cmp(&b.who)));
+        Ok(rows)
+    }
+
+    /// Delete everything kept for `user` and disconnect them. Their
+    /// identity is not banned: they can register again unless it is.
+    pub fn evict(&self, user: &UserId) -> anyhow::Result<Removed> {
+        self.disconnect(user, "evicted by the administrator");
+        self.store.remove_user(user)
+    }
+
+    /// Take `user`'s session out of the registry and tell it to close.
+    fn disconnect(&self, user: &UserId, why: &'static str) {
+        if let Some(session) = self.online().remove(user) {
+            let _ = session.tx.send(Outbound::Close(why));
+        }
     }
 
     pub fn uptime(&self) -> Duration {
@@ -743,7 +1019,7 @@ impl RelayState {
         });
         let mut online = self.online();
         if let Some(old) = online.insert(user, Session { id, tx: tx.clone() }) {
-            let _ = old.tx.send(Outbound::Close);
+            let _ = old.tx.send(Outbound::Close("replaced by a newer session"));
         }
         for envelope in queued {
             let _ = tx.send(Outbound::Frame(Box::new(ServerFrame::Deliver { envelope })));
@@ -779,7 +1055,7 @@ impl RelayState {
         // A new identity: the invite token, the registration rate for the
         // address, and the room left all have a say.
         if self.bundle(me).is_none() {
-            if let Some(token) = &self.policy.invite_token {
+            if let Some(token) = self.invite_token() {
                 let given = invite.unwrap_or_default();
                 let matches: bool = token.as_bytes().ct_eq(given.as_bytes()).into();
                 if !matches {
@@ -1089,6 +1365,17 @@ async fn handle_socket(
                 let _ = send(&mut sink, &ServerFrame::error(code, message)).await;
                 return;
             }
+            if state.user_banned(&user_id) {
+                let _ = send(
+                    &mut sink,
+                    &ServerFrame::error(
+                        ErrorCode::Forbidden,
+                        "this identity is banned from this relay",
+                    ),
+                )
+                .await;
+                return;
+            }
             user_id
         }
         Ok(Some(Ok(
@@ -1142,10 +1429,10 @@ async fn handle_socket(
                         break;
                     }
                 }
-                Some(Outbound::Close) => {
-                    debug!(%who, session_id, "replaced by a newer session");
+                Some(Outbound::Close(why)) => {
+                    debug!(%who, session_id, "closing: {why}");
                     let _ = sink.close().await;
-                    return; // the newer session owns the registry entry now
+                    return; // whoever sent this owns the registry entry now
                 }
                 None => break,
             },
