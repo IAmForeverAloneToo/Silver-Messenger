@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use silver_client::{Client, ClientEvent};
+use silver_client::{Client, ClientEvent, ConnectOptions};
 use silver_protocol::{Content, Identity};
 use silver_relay::RelayState;
 use tokio::net::TcpListener;
@@ -53,8 +53,10 @@ async fn alice_and_bob_exchange_messages_through_the_relay() {
     let alice = Arc::new(Identity::generate());
     let bob = Arc::new(Identity::generate());
 
-    let (alice_c, mut alice_ev) = Client::spawn(url.clone(), alice.clone());
-    let (bob_c, mut bob_ev) = Client::spawn(url.clone(), bob.clone());
+    let (alice_c, mut alice_ev) =
+        Client::spawn(url.clone(), alice.clone(), ConnectOptions::default()).unwrap();
+    let (bob_c, mut bob_ev) =
+        Client::spawn(url.clone(), bob.clone(), ConnectOptions::default()).unwrap();
     wait_for(&mut alice_ev, "alice connected", |e| {
         matches!(e, ClientEvent::Connected { .. })
     })
@@ -124,7 +126,8 @@ async fn offline_messages_wait_in_the_mailbox() {
     let bob = Arc::new(Identity::generate());
 
     // Bob registers once so his key is discoverable, then goes offline.
-    let (bob_c, mut bob_ev) = Client::spawn(url.clone(), bob.clone());
+    let (bob_c, mut bob_ev) =
+        Client::spawn(url.clone(), bob.clone(), ConnectOptions::default()).unwrap();
     wait_for(&mut bob_ev, "bob connected", |e| {
         matches!(e, ClientEvent::Connected { .. })
     })
@@ -133,7 +136,8 @@ async fn offline_messages_wait_in_the_mailbox() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(state.online_count(), 0);
 
-    let (alice_c, mut alice_ev) = Client::spawn(url.clone(), alice.clone());
+    let (alice_c, mut alice_ev) =
+        Client::spawn(url.clone(), alice.clone(), ConnectOptions::default()).unwrap();
     wait_for(&mut alice_ev, "alice connected", |e| {
         matches!(e, ClientEvent::Connected { .. })
     })
@@ -149,7 +153,8 @@ async fn offline_messages_wait_in_the_mailbox() {
     assert_eq!(state.queued_for(&bob.user_id()), 3);
 
     // Bob comes back and receives everything, in order.
-    let (bob_c, mut bob_ev) = Client::spawn(url.clone(), bob.clone());
+    let (bob_c, mut bob_ev) =
+        Client::spawn(url.clone(), bob.clone(), ConnectOptions::default()).unwrap();
     let mut texts = Vec::new();
     while texts.len() < 3 {
         let ev = wait_for(&mut bob_ev, "queued message", |e| body(e).is_some()).await;
@@ -182,7 +187,8 @@ async fn client_reconnects_after_relay_restart() {
     });
 
     let alice = Arc::new(Identity::generate());
-    let (alice_c, mut alice_ev) = Client::spawn(url.clone(), alice.clone());
+    let (alice_c, mut alice_ev) =
+        Client::spawn(url.clone(), alice.clone(), ConnectOptions::default()).unwrap();
     wait_for(&mut alice_ev, "first connect", |e| {
         matches!(e, ClientEvent::Connected { .. })
     })

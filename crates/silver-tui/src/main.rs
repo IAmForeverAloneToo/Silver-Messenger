@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use clap::Parser;
-use silver_client::{Client, DEFAULT_RELAY_URL, Store};
+use silver_client::{Client, ConnectOptions, DEFAULT_RELAY_URL, Store};
 use tracing_subscriber::EnvFilter;
 
 /// End-to-end encrypted messaging in your terminal.
@@ -19,6 +19,11 @@ struct Args {
     /// for later runs.
     #[arg(long, env = "SILVER_RELAY")]
     relay: Option<String>,
+
+    /// PEM file with extra trusted root certificates, for a wss:// relay
+    /// behind a private CA. Remembered for later runs.
+    #[arg(long, env = "SILVER_CA_CERT")]
+    ca_cert: Option<PathBuf>,
 
     /// Directory for keys, contacts and history (default: platform data dir).
     #[arg(long, env = "SILVER_DATA_DIR")]
@@ -46,10 +51,18 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let mut config = store.load_config()?;
-    if let Some(relay) = args.relay {
-        config.relay_url = Some(relay);
+    if args.relay.is_some() || args.ca_cert.is_some() {
+        if let Some(relay) = args.relay {
+            config.relay_url = Some(relay);
+        }
+        if let Some(ca_cert) = args.ca_cert {
+            config.ca_cert = Some(ca_cert);
+        }
         store.save_config(&config)?;
     }
+    let options = ConnectOptions {
+        extra_ca_certs: config.ca_cert.iter().cloned().collect(),
+    };
     let relay_url = config
         .relay_url
         .clone()
@@ -68,7 +81,7 @@ async fn main() -> anyhow::Result<()> {
             .init();
     }
 
-    let (client, events) = Client::spawn(relay_url.clone(), Arc::new(identity));
+    let (client, events) = Client::spawn(relay_url.clone(), Arc::new(identity), options)?;
     let app = app::App::new(store, client, relay_url, created)?;
 
     let terminal = ratatui::init();

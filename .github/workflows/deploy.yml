@@ -6,6 +6,8 @@ name: Deploy relay
 #   VPS_HOST     server IP or hostname
 #   VPS_SSH_KEY  private key whose public half is in the server's authorized_keys
 #   VPS_USER     optional, defaults to root
+# and optionally the repository variable VPS_DOMAIN (a hostname pointing at
+# the server) to serve the relay over HTTPS/wss on port 443.
 
 on:
   workflow_dispatch:
@@ -60,11 +62,12 @@ jobs:
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER || 'root' }}
+          DOMAIN: ${{ vars.VPS_DOMAIN }}
         run: |
           target="$VPS_USER@$VPS_HOST"
           ssh "$target" 'rm -rf /tmp/silver-deploy && mkdir -p /tmp/silver-deploy'
           scp "target/$TARGET/release/silver-relay" deploy/silver-relay.service deploy/install.sh "$target:/tmp/silver-deploy/"
-          ssh "$target" 'bash /tmp/silver-deploy/install.sh; rc=$?; rm -rf /tmp/silver-deploy; exit $rc'
+          ssh "$target" "SILVER_DOMAIN='$DOMAIN' bash /tmp/silver-deploy/install.sh; rc=\$?; rm -rf /tmp/silver-deploy; exit \$rc"
 
       - name: Run "${{ inputs.action }}" on the server
         if: inputs.action != 'deploy'

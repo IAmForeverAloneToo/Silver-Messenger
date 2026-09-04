@@ -25,7 +25,13 @@ tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "ti
 tokio-util = "0.7"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 axum = { version = "0.8", features = ["ws"] }
-tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots", "rustls-tls-native-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pki-types = { version = "1.12", features = ["std"] }
+rustls-native-certs = "0.8"
+webpki-roots = "1"
+rcgen = "0.14"
+axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
 
 # serialization
 serde = { version = "1", features = ["derive"] }

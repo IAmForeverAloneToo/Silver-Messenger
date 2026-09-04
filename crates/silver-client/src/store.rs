@@ -25,6 +25,10 @@ use silver_protocol::{Identity, IdentitySecrets, KeyBundle, UserId};
 pub struct Config {
     #[serde(default)]
     pub relay_url: Option<String>,
+    /// PEM file with extra trusted root certificates, for `wss://` relays
+    /// behind a private CA.
+    #[serde(default)]
+    pub ca_cert: Option<PathBuf>,
 }
 
 /// A known peer.
@@ -247,6 +251,7 @@ mod tests {
         store
             .save_config(&Config {
                 relay_url: Some("ws://example:7777/ws".into()),
+                ca_cert: None,
             })
             .unwrap();
         assert_eq!(

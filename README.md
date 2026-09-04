@@ -63,6 +63,7 @@ scroll, `Esc` clears the input line, `Ctrl-C` quits.
 ```
 silver --relay <URL>       relay WebSocket URL; remembered in config.json   (env SILVER_RELAY)
 silver --data-dir <DIR>    where keys, contacts and history live            (env SILVER_DATA_DIR)
+silver --ca-cert <PEM>     extra trusted root certificates for wss://; remembered (env SILVER_CA_CERT)
 silver --print-id          print your user id and exit
 SILVER_LOG=debug silver    write logs to <data-dir>/silver.log
 
@@ -102,11 +103,20 @@ updates to the latest `main`. With a `silver-relay` binary and
 `silver-relay.service` placed next to it, the same script installs those
 instead and needs no compiler.
 
-Clients then start with `silver --relay ws://<server-ip>:7777/ws`. The
-transport is plain WebSocket for now, which is safe for message content
-(everything is end-to-end encrypted before it leaves the client) but exposes
-recipient ids and timing to the network path; put the relay behind a
-TLS-terminating reverse proxy and use `wss://` once you have a domain name.
+Clients then start with `silver --relay ws://<server-ip>:7777/ws`.
+
+**HTTPS / port 443.** Plain WebSocket on port 7777 is safe for message
+content (everything is end-to-end encrypted before it leaves the client) but
+exposes recipient ids and timing to the network path, and corporate or campus
+proxies often block non-standard ports outright. Point a hostname at the
+server and run the installer with `SILVER_DOMAIN=relay.example.org` (or set
+the repository variable `VPS_DOMAIN` for the workflow). It installs Caddy as
+a TLS front with an automatic Let's Encrypt certificate, moves the relay to
+localhost, and opens ports 80 and 443 instead. Clients then use
+`silver --relay wss://relay.example.org/ws`. The client trusts both the
+operating system's certificate store and Mozilla's root bundle, so it also
+works behind TLS-inspecting proxies whose root certificate is installed on
+the machine.
 
 ## How the crypto works (v1)
 

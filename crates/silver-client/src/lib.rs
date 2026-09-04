@@ -7,7 +7,9 @@
 
 pub mod connection;
 pub mod store;
+pub mod tls;
 
 pub use connection::{Client, ClientError, ClientEvent, DEFAULT_RELAY_URL};
 pub use silver_protocol as protocol;
 pub use store::{Config, Contact, Direction, HistoryEntry, Store};
+pub use tls::ConnectOptions;

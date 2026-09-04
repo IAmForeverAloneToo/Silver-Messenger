@@ -6,10 +6,13 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use silver_protocol::wire::{ClientFrame, ServerFrame, auth_signature};
+
+use crate::tls::{ConnectOptions, connector};
 use silver_protocol::{
     Content, Envelope, Identity, KeyBundle, Message, ProtocolError, UserId, now_ms, open, seal,
 };
 use tokio::sync::{mpsc, oneshot};
+use tokio_tungstenite::Connector;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tracing::{debug, info, warn};
 
@@ -74,14 +77,18 @@ pub struct Client {
 
 impl Client {
     /// Start the connection task. Events arrive on the returned receiver.
+    /// Fails only if the TLS options cannot be applied (e.g. an unreadable
+    /// CA file); connection problems are reported as events.
     pub fn spawn(
         relay_url: String,
         identity: Arc<Identity>,
-    ) -> (Self, mpsc::Receiver<ClientEvent>) {
+        options: ConnectOptions,
+    ) -> anyhow::Result<(Self, mpsc::Receiver<ClientEvent>)> {
+        let connector = connector(&options)?;
         let (cmd_tx, cmd_rx) = mpsc::channel(64);
         let (ev_tx, ev_rx) = mpsc::channel(256);
-        tokio::spawn(run(relay_url, identity.clone(), cmd_rx, ev_tx));
-        (Self { identity, cmd_tx }, ev_rx)
+        tokio::spawn(run(relay_url, identity.clone(), connector, cmd_rx, ev_tx));
+        Ok((Self { identity, cmd_tx }, ev_rx))
     }
 
     pub fn identity(&self) -> &Identity {
@@ -145,12 +152,21 @@ enum Exit {
 async fn run(
     relay_url: String,
     identity: Arc<Identity>,
+    connector: Connector,
     mut cmd_rx: mpsc::Receiver<Command>,
     ev_tx: mpsc::Sender<ClientEvent>,
 ) {
     let mut backoff = Duration::from_secs(1);
     loop {
-        let outcome = session(&relay_url, &identity, &mut cmd_rx, &ev_tx, &mut backoff).await;
+        let outcome = session(
+            &relay_url,
+            &identity,
+            connector.clone(),
+            &mut cmd_rx,
+            &ev_tx,
+            &mut backoff,
+        )
+        .await;
         let reason = match outcome {
             Ok(Exit::Shutdown) => return,
             Ok(Exit::Disconnected(reason)) => reason,
@@ -197,6 +213,7 @@ type Pending = HashMap<UserId, Vec<oneshot::Sender<Result<Option<KeyBundle>, Cli
 async fn session(
     relay_url: &str,
     identity: &Identity,
+    connector: Connector,
     cmd_rx: &mut mpsc::Receiver<Command>,
     ev_tx: &mpsc::Sender<ClientEvent>,
     backoff: &mut Duration,
@@ -204,7 +221,7 @@ async fn session(
     debug!("connecting to {relay_url}");
     let (ws, _) = tokio::time::timeout(
         HANDSHAKE_TIMEOUT,
-        tokio_tungstenite::connect_async(relay_url),
+        tokio_tungstenite::connect_async_tls_with_config(relay_url, None, false, Some(connector)),
     )
     .await
     .map_err(|_| anyhow::anyhow!("connect timed out"))??;
