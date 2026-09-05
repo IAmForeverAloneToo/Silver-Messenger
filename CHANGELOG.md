@@ -4,7 +4,16 @@ Notable changes to Silver Messenger. Versions follow [semantic
 versioning](https://semver.org); while the major version is 0, a minor bump
 means behaviour or the wire protocol changed in a way worth reading about.
 
-## Unreleased
+## 0.9.0 - 2026-09-05
+
+Phase 9 of the roadmap: more than two people, more than one device.
+Groups run on MLS with a post-quantum hybrid suite, the relay as a dumb
+delivery service and every member's client checking every change; one
+identity runs on several devices, each with keys of its own certified by
+the identity key, every message reaching every device, and a linked
+device revocable without touching what contacts verified. The relay's
+schema moves to 3 and its backup format to 2; see UPGRADING.md before
+upgrading a relay.
 
 ### Added
 

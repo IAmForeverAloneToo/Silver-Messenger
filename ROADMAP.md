@@ -419,7 +419,12 @@ those who want to pay for it (46).
         unique on that relay, resolved by the relay and verified by the
         client against the signature, with the safety number still the
         truth. Last, and only if 47 and 48 show that people want
-        discovery beyond invite links.
+        discovery beyond invite links. Not done in 0.9.0: nothing yet
+        shows that need; a person is found by an invite link or a QR
+        code, a group by its link, and a device by the link it prints,
+        and each of those carries the relay. The item stays open for
+        the day people who use groups and devices ask for names, and is
+        not a condition of 1.0.
 
 ## Phase 10: a finished terminal client
 
