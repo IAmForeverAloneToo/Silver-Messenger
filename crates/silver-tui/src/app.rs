@@ -1,5 +1,6 @@
 //! Application state, key handling and command dispatch.
 
+mod devices;
 mod groups;
 
 use std::collections::{HashMap, HashSet};
@@ -290,6 +291,30 @@ enum Internal {
         info: FileInfo,
         result: Result<PathBuf, String>,
     },
+    /// A device was linked (or not).
+    DeviceLinked {
+        name: String,
+        result: Result<silver_protocol::DeviceCertificate, String>,
+    },
+    /// The relay answered for a device of ours, one key package per group
+    /// it is to be added to.
+    DeviceKeyPackages {
+        device: UserId,
+        attempt: u32,
+        packages: Vec<(silver_protocol::group::GroupId, KeyPackageAnswer)>,
+    },
+    /// A device was unlinked (or not).
+    DeviceRevoked {
+        device: UserId,
+        name: String,
+        result: Result<silver_protocol::DeviceRevocation, String>,
+    },
+    DeviceRenamed {
+        device: UserId,
+        result: Result<silver_protocol::DeviceCertificate, String>,
+    },
+    /// This device's leave is in the outbox under these envelope ids.
+    LeaveQueued { ids: Vec<String> },
 }
 
 /// What the relay answered to a key package request: the package and
@@ -301,7 +326,24 @@ pub struct App {
     store: Store,
     client: Client,
     pub relay_url: String,
+    /// This device's own id: the identity's on a primary.
     pub me: UserId,
+    /// The identity this device acts for: `me` on a primary, the
+    /// account on a linked device. Contacts know the account; safety
+    /// numbers, invite links and group membership go by it.
+    pub account: UserId,
+    /// On a linked device, its name as the primary certified it.
+    pub device_name: Option<String>,
+    /// This is a linked device, not the primary.
+    linked: bool,
+    /// `/devices leave` is under way: the leave's envelope ids the relay
+    /// has not taken yet, and since when.
+    leaving: Option<(HashSet<String>, Instant)>,
+    /// The data directory was erased; what to say once the screen is
+    /// given back.
+    wiped: Option<String>,
+    /// The relay refused this device as unlinked, and the user was told.
+    unlinked_noted: bool,
     pub connection: Connection,
     pub contacts: Vec<Contact>,
     /// Messages from unknown senders awaiting /accept or /block.
@@ -418,11 +460,14 @@ pub enum AtRest {
 }
 
 /// Why [`App::run`] returned.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Exit {
     Quit,
     /// Drop everything that holds keys and ask for the passphrase again.
     Lock,
+    /// This device unlinked itself and erased its data directory; what to
+    /// tell the user once the screen is given back.
+    Wiped(String),
 }
 
 impl App {
@@ -438,6 +483,14 @@ impl App {
         at_rest: AtRest,
     ) -> anyhow::Result<Self> {
         let me = client.user_id();
+        let (account, device_name) = client
+            .devices()
+            .map(|shared| {
+                let d = shared.lock().unwrap_or_else(|e| e.into_inner());
+                (d.account(), d.certificate().map(|c| c.name.clone()))
+            })
+            .unwrap_or((me, None));
+        let linked = device_name.is_some();
         let contacts = store.load_contacts()?;
         let requests = store.load_requests()?;
         let blocked = store.load_blocked()?;
@@ -521,6 +574,12 @@ impl App {
             client,
             relay_url,
             me,
+            account,
+            device_name,
+            linked,
+            leaving: None,
+            wiped: None,
+            unlinked_noted: false,
             connection: Connection::Connecting,
             contacts,
             requests,
@@ -602,12 +661,33 @@ impl App {
                 format!("Generated a new identity in {}", app.store.root().display()),
             );
         }
-        app.system(Level::Info, format!("Your id: {me}"));
-        app.system(
-            Level::Info,
-            "Share it with people who want to message you. F1 or /help lists every command and key.",
-        );
-        if fresh_identity || (app.contacts.is_empty() && app.requests.is_empty()) {
+        match &app.device_name {
+            Some(name) => {
+                let name = silver_client::files::printable(name, 32);
+                app.system(
+                    Level::Info,
+                    format!("This is the device \"{name}\" of the identity {account}; this device's own id is {me}."),
+                );
+                app.system(
+                    Level::Info,
+                    "Share the identity's id with people who want to message you; /devices lists the identity's devices. F1 or /help lists every command and key.",
+                );
+            }
+            None => {
+                app.system(Level::Info, format!("Your id: {me}"));
+                app.system(
+                    Level::Info,
+                    "Share it with people who want to message you. F1 or /help lists every command and key.",
+                );
+            }
+        }
+        if fresh_identity && !linked {
+            app.system(
+                Level::Info,
+                "Already using Silver Messenger elsewhere? Then quit, and run silver --link with an empty data directory to make this computer a device of that identity instead.",
+            );
+        }
+        if !linked && (fresh_identity || (app.contacts.is_empty() && app.requests.is_empty())) {
             for line in [
                 "Getting started:",
                 "  1. Share your id: /invite shows it as a link and a QR code, /copy id puts it on the clipboard.",
@@ -655,12 +735,16 @@ impl App {
                     self.flush_receipts();
                     self.flush_cover();
                     self.maintain_groups();
+                    self.tick_leave();
                     if let Some(after) = self.lock_after {
                         if self.can_lock() && self.last_activity.elapsed() >= after {
                             self.lock_requested = true;
                         }
                     }
                 }
+            }
+            if let Some(word) = self.wiped.take() {
+                break Exit::Wiped(word);
             }
             if self.lock_requested {
                 break Exit::Lock;
@@ -1525,6 +1609,14 @@ impl App {
         }
         if let Some(id) = self.selected_contact().map(|c| c.user_id) {
             let shown = self.unread.remove(&id).unwrap_or_default();
+            if !shown.is_empty() {
+                // This identity's other devices need not send read
+                // receipts for what was read here.
+                self.sync(silver_protocol::device::Sync::Read {
+                    peer: id,
+                    ids: shown.clone(),
+                });
+            }
             if self.read_receipts && self.contact_supports(&id, capability::RECEIPTS) {
                 for message_id in shown {
                     self.receipts.read(id, message_id);
@@ -1558,14 +1650,24 @@ impl App {
         match name {
             "help" | "h" | "?" => self.print_help(),
             "me" | "id" => {
-                let me = self.me;
-                self.system(Level::Info, format!("Your id: {me}"));
+                let account = self.account;
+                self.system(Level::Info, format!("Your id: {account}"));
+                if self.linked {
+                    self.system(
+                        Level::Info,
+                        format!(
+                            "This device's own id: {} (contacts see the identity's).",
+                            self.me
+                        ),
+                    );
+                }
                 self.system(
                     Level::Info,
                     format!("Your invite link: {}", self.invite_link()),
                 );
                 self.select(0);
             }
+            "devices" | "device" => self.cmd_devices(&rest),
             "invite" | "link" | "qr" if rest.first().is_some_and(|a| *a == "copy") => {
                 self.cmd_copy(&["link"])
             }
@@ -1750,7 +1852,7 @@ impl App {
     }
 
     fn invite_link(&self) -> InviteLink {
-        InviteLink::new(self.me, Some(self.relay_url.clone()))
+        InviteLink::new(self.account, Some(self.relay_url.clone()))
     }
 
     /// Show the invite link and a QR code of it in the System pane.
@@ -1798,7 +1900,7 @@ impl App {
                 }
             }
         };
-        if user_id == self.me {
+        if user_id == self.me || user_id == self.account {
             self.toast("That is your own id.");
             return;
         }
@@ -2121,6 +2223,9 @@ impl App {
             },
         };
         self.system(Level::Info, line);
+        if let Some(devices) = self.device_sessions_line(&self.contacts[index]) {
+            self.system(Level::Info, devices);
+        }
         self.select(0);
     }
 
@@ -2154,7 +2259,7 @@ impl App {
         let peer = contact.user_id;
         match args.first().map(|s| s.to_ascii_lowercase()).as_deref() {
             None => {
-                let number = silver_protocol::safety_number(&self.me, &peer);
+                let number = silver_protocol::safety_number(&self.account, &peer);
                 let groups: Vec<&str> = number.split(' ').collect();
                 let status = if contact.verified {
                     format!("verified {}", self.glyphs.verified)
@@ -2177,6 +2282,10 @@ impl App {
             Some("ok") | Some("yes") => {
                 self.contacts[index].verified = true;
                 self.persist_contacts();
+                self.sync_contact(silver_protocol::device::ContactAction::Verify {
+                    user: peer,
+                    verified: true,
+                });
                 let mark = self.glyphs.verified;
                 self.system(Level::Info, format!("Marked {name} as verified {mark}"));
                 self.toast(format!("{name} verified {mark}"));
@@ -2184,6 +2293,10 @@ impl App {
             Some("no") | Some("clear") => {
                 self.contacts[index].verified = false;
                 self.persist_contacts();
+                self.sync_contact(silver_protocol::device::ContactAction::Verify {
+                    user: peer,
+                    verified: false,
+                });
                 self.toast(format!("{name} is no longer marked verified"));
             }
             Some(_) => self.toast("Usage: /verify, /verify ok, /verify no"),
@@ -2214,8 +2327,13 @@ impl App {
             self.toast("An alias needs at least one visible character.");
             return;
         }
-        self.contacts[index].alias = Some(alias);
+        let user = self.contacts[index].user_id;
+        self.contacts[index].alias = Some(alias.clone());
         self.persist_contacts();
+        self.sync_contact(silver_protocol::device::ContactAction::Alias {
+            user,
+            alias: Some(alias),
+        });
     }
 
     fn cmd_remove(&mut self) {
@@ -2227,6 +2345,9 @@ impl App {
         self.threads.remove(&removed.user_id);
         self.unread.remove(&removed.user_id);
         self.persist_contacts();
+        self.sync_contact(silver_protocol::device::ContactAction::Remove {
+            user: removed.user_id,
+        });
         self.select(0);
         self.system(
             Level::Info,
@@ -2267,6 +2388,12 @@ impl App {
     /// the relay and, best-effort, to every contact that understands lifecycle
     /// statements. Needs `/revoke confirm`, because it cannot be undone.
     fn cmd_revoke(&mut self, args: &[&str]) {
+        if self.linked {
+            self.toast(
+                "The identity is revoked on your primary; /devices leave unlinks this device.",
+            );
+            return;
+        }
         if self.rotated {
             self.system(
                 Level::Warn,
@@ -2325,6 +2452,10 @@ impl App {
     /// Move to a fresh identity with a cross-signed succession, so contacts
     /// re-pin to the new key on their own. Needs `/rotate confirm`.
     fn cmd_rotate(&mut self, args: &[&str]) {
+        if self.linked {
+            self.toast("The identity is rotated on your primary.");
+            return;
+        }
         if self.rotated {
             self.system(
                 Level::Warn,
@@ -2547,12 +2678,17 @@ impl App {
                     None => {
                         let found = bundle.is_some();
                         let mut contact = Contact::new(user_id);
-                        contact.alias = alias;
-                        contact.bundle = bundle;
+                        contact.alias = alias.clone();
+                        contact.bundle = bundle.clone();
                         let name = contact.display_name();
                         self.contacts.push(contact);
                         self.threads.entry(user_id).or_default();
                         self.persist_contacts();
+                        self.sync_contact(silver_protocol::device::ContactAction::Add {
+                            user: user_id,
+                            alias,
+                            bundle: bundle.map(Box::new),
+                        });
                         self.select(self.contacts.len());
                         if found {
                             self.system(Level::Info, format!("Added {name} ({user_id})"));
@@ -2664,6 +2800,19 @@ impl App {
                 packages,
             } => self.on_key_packages_for(group, user, packages),
             Internal::KeyPackages { result } => self.on_key_packages(result),
+            Internal::DeviceLinked { name, result } => self.on_device_linked(name, result),
+            Internal::DeviceKeyPackages {
+                device,
+                attempt,
+                packages,
+            } => self.on_device_key_packages(device, attempt, packages),
+            Internal::DeviceRevoked {
+                device,
+                name,
+                result,
+            } => self.on_device_revoked(device, name, result),
+            Internal::DeviceRenamed { device, result } => self.on_device_renamed(device, result),
+            Internal::LeaveQueued { ids } => self.on_leave_queued(ids),
             Internal::GroupJoinLookup { link, result } => self.on_group_join_lookup(link, result),
             Internal::GroupUploaded { group, result } => self.on_group_uploaded(group, result),
             Internal::GroupDownloaded {
@@ -2742,8 +2891,17 @@ impl App {
                         retry_in.as_secs()
                     ),
                 );
+                if self.linked && !self.unlinked_noted && reason.contains("revoked") {
+                    self.unlinked_noted = true;
+                    self.system(
+                        Level::Warn,
+                        "The relay refuses this device as unlinked: your primary revoked it. Nothing more is sent or received here. The keys, contacts and history stay on disk until /devices leave confirm erases them; link the computer anew to use the identity here again.",
+                    );
+                    self.toast("This device was unlinked by your primary; see System.");
+                }
             }
             ClientEvent::Sent { id } => {
+                self.on_leave_sent(&id);
                 if !self.on_group_envelope_done(&id, true) {
                     self.mark_line(&id, |line| line.delivered = true);
                 }
@@ -2928,24 +3086,18 @@ impl App {
             ClientEvent::PeerSucceeded { succession } => self.handle_peer_succeeded(succession),
             ClientEvent::Transparency(event) => self.handle_transparency(event),
             ClientEvent::Group { from, id, body } => self.on_group_body(from, id, body),
-            // What this account's other devices say, and a device being
-            // linked or unlinked, are shown once the terminal client keeps
-            // devices of its own; the client library already applies the
-            // device list and drops sessions with a revoked device.
-            ClientEvent::Sync { .. } | ClientEvent::Provision { .. } => {}
+            ClientEvent::Sync { device, sync } => self.on_sync(device, *sync),
+            // A provisioning message is for `silver --link`; a running
+            // client that gets one is not waiting for a link.
+            ClientEvent::Provision { .. } => {}
+            // A contact's device was unlinked: the client dropped its
+            // sessions with it and sends it no copies; the pinned list is
+            // the account's signed word and the next lookup replaces it.
             ClientEvent::DeviceRevoked { revocation } => {
-                if let Some(index) = self.contact_index(&revocation.account)
-                    && let Some(bundle) = &mut self.contacts[index].bundle
-                    && bundle.devices.iter().any(|d| d.device == revocation.device)
-                {
-                    // The pinned list is the account's signed word; the
-                    // relay's next lookup replaces it whole. Until then the
-                    // client sends no copy to a device it saw revoked.
-                    tracing::debug!(
-                        "a device of {}'s was revoked",
-                        self.contacts[index].display_name()
-                    );
-                }
+                tracing::debug!(
+                    "a device of {}'s was revoked",
+                    self.contact_name(&revocation.account)
+                );
             }
             ClientEvent::DeviceGone { account, .. } => {
                 tracing::debug!("a device of {}… is gone", account.short());
@@ -3381,6 +3533,10 @@ impl App {
             Some("auto") | Some("on") => {
                 self.contacts[index].auto_files = true;
                 self.persist_contacts();
+                self.sync_contact(silver_protocol::device::ContactAction::Files {
+                    user: self.contacts[index].user_id,
+                    auto: true,
+                });
                 self.toast(format!(
                     "Files from {name} are fetched as they arrive, into downloads/. /files ask undoes that."
                 ));
@@ -3388,6 +3544,10 @@ impl App {
             Some("ask") | Some("off") => {
                 self.contacts[index].auto_files = false;
                 self.persist_contacts();
+                self.sync_contact(silver_protocol::device::ContactAction::Files {
+                    user: self.contacts[index].user_id,
+                    auto: false,
+                });
                 self.toast(format!("Files from {name} wait for /get."));
             }
             Some(_) => self.toast("Usage: /files auto|ask"),
@@ -3567,20 +3727,43 @@ impl App {
             self.toast("No such request. Numbers are shown in the Requests pane.");
             return;
         };
+        let (from, count) = self.take_request(index);
+        self.sync_contact(silver_protocol::device::ContactAction::Add {
+            user: from,
+            alias: None,
+            bundle: None,
+        });
+        self.select(self.contacts.len());
+        self.system(
+            Level::Info,
+            format!(
+                "Accepted {}… ({from}); {count} message(s) moved into the chat. Use /alias to name them and /verify to confirm who they are.",
+                from.short()
+            ),
+        );
+    }
+
+    /// Accept the request at `index`: its sender becomes a contact (or
+    /// was made one already) and its messages move into the chat. Whose,
+    /// and how many.
+    fn take_request(&mut self, index: usize) -> (UserId, usize) {
         let request = self.requests.remove(index);
         self.persist_requests();
         let from = request.from;
-        let mut contact = Contact::new(from);
-        if let Some(last) = request.messages.last() {
-            if last.sequence.seq != 0 {
-                contact.received = Some(last.sequence);
+        if self.contact_index(&from).is_none() {
+            let mut contact = Contact::new(from);
+            if let Some(last) = request.messages.last() {
+                if last.sequence.seq != 0 {
+                    contact.received = Some(last.sequence);
+                }
+                // Remember what their client can do, so a file or receipt
+                // can go to them at once rather than waiting for their
+                // next message.
+                contact.caps = last.caps.clone();
             }
-            // Remember what their client can do, so a file or receipt can go
-            // to them at once rather than waiting for their next message.
-            contact.caps = last.caps.clone();
+            self.contacts.push(contact);
+            self.persist_contacts();
         }
-        self.contacts.push(contact);
-        self.persist_contacts();
         let count = request.messages.len();
         for held in request.messages {
             // A file they sent while a stranger can be fetched now.
@@ -3607,14 +3790,7 @@ impl App {
                 },
             );
         }
-        self.select(self.contacts.len());
-        self.system(
-            Level::Info,
-            format!(
-                "Accepted {}… ({from}); {count} message(s) moved into the chat. Use /alias to name them and /verify to confirm who they are.",
-                from.short()
-            ),
-        );
+        (from, count)
     }
 
     fn cmd_block(&mut self, args: &[&str]) {
@@ -3647,6 +3823,7 @@ impl App {
             self.persist_blocked();
         }
         self.client.forget_sessions(&id);
+        self.sync_contact(silver_protocol::device::ContactAction::Block { user: id });
         self.select(0);
         self.system(
             Level::Info,
@@ -3669,6 +3846,7 @@ impl App {
             return;
         }
         self.persist_blocked();
+        self.sync_contact(silver_protocol::device::ContactAction::Unblock { user: id });
         self.system(Level::Info, format!("Unblocked {id}."));
     }
 

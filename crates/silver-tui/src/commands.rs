@@ -167,6 +167,12 @@ pub const COMMANDS: &[CommandInfo] = &[
     ),
     cmd("me", &["id"], "", "show your own id and invite link"),
     cmd(
+        "devices",
+        &["device"],
+        "[link <link> [days] | remove <n> | name <n> <name> | join | leave]",
+        "your identity's devices: list them; link one that printed a link with silver --link (with that many days of history, default 30), unlink or rename one, add them to your groups, or unlink this one",
+    ),
+    cmd(
         "relay",
         &[],
         "<ws-url>",

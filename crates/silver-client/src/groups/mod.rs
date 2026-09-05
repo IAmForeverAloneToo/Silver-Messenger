@@ -76,8 +76,8 @@ const SEEN_IDS: usize = 256;
 /// Application messages from this many past epochs still decrypt.
 const PAST_EPOCHS: usize = 3;
 
-const GROUPS_FILE: &str = "groups.json";
-const MLS_FILE: &str = "groups.mls";
+pub(crate) const GROUPS_FILE: &str = "groups.json";
+pub(crate) const MLS_FILE: &str = "groups.mls";
 
 // --- what is stored ---------------------------------------------------------
 

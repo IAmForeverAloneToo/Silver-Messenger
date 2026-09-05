@@ -226,8 +226,10 @@ impl DeviceState {
     }
 
     /// Take the list as the primary synced it. Every certificate must be
-    /// the account's and verify, as must every revocation. Returns the
-    /// devices newly revoked by it, whose sessions the caller drops.
+    /// the account's and verify, as must every revocation. On a linked
+    /// device the list's certificate for this key, when it differs (the
+    /// primary renamed the device), becomes this device's own. Returns
+    /// the devices newly revoked by it, whose sessions the caller drops.
     pub fn set_list(
         &mut self,
         devices: Vec<DeviceCertificate>,
@@ -240,9 +242,49 @@ impl DeviceState {
             .map(|r| r.device)
             .filter(|d| !self.is_revoked(d))
             .collect();
+        if let Some(linked) = &mut self.linked
+            && let Some(mine) = list.devices.iter().find(|d| d.device == self.me)
+            && *mine != linked.certificate
+        {
+            linked.certificate = mine.clone();
+            if let Some(store) = &self.store {
+                store.save_linked(Some(linked))?;
+            }
+        }
         self.list = list;
         self.persist()?;
         Ok(new)
+    }
+
+    /// The primary gives a listed device a new name: `certificate`, its
+    /// word for the same key with the new name, replaces the old.
+    pub fn rename(&mut self, certificate: DeviceCertificate) -> anyhow::Result<()> {
+        if self.linked.is_some() {
+            anyhow::bail!("only the primary names devices");
+        }
+        certificate.verify()?;
+        if certificate.account != self.me {
+            anyhow::bail!("the certificate is for another account");
+        }
+        let Some(entry) = self
+            .list
+            .devices
+            .iter_mut()
+            .find(|d| d.device == certificate.device)
+        else {
+            anyhow::bail!("that device is not linked");
+        };
+        *entry = certificate;
+        self.persist()
+    }
+
+    /// The name the primary gave `device`, if it is listed.
+    pub fn name_of(&self, device: &UserId) -> Option<&str> {
+        self.list
+            .devices
+            .iter()
+            .find(|d| d.device == *device)
+            .map(|d| d.name.as_str())
     }
 
     /// The `sync` content that tells the account's other devices the list.
@@ -379,10 +421,25 @@ mod tests {
                 .is_err()
         );
 
+        // A rename keeps the key and the place, with the new word for it.
+        assert_eq!(state.name_of(&laptop.user_id()), Some("laptop"));
+        state
+            .rename(certified(&alice, &laptop, "desk laptop"))
+            .unwrap();
+        assert_eq!(state.name_of(&laptop.user_id()), Some("desk laptop"));
+        assert!(state.rename(certified(&alice, &phone, "x")).is_ok());
+        assert!(
+            state
+                .rename(certified(&alice, &Identity::generate(), "nobody"))
+                .is_err()
+        );
+        assert!(state.rename(certified(&other, &laptop, "theirs")).is_err());
+
         state
             .revoke(alice.revoke_device(&laptop.user_id(), 2))
             .unwrap();
         assert!(state.is_revoked(&laptop.user_id()));
+        assert_eq!(state.name_of(&laptop.user_id()), None);
         assert!(!state.siblings().contains(&laptop.user_id()));
         assert!(state.link(certified(&alice, &laptop, "back")).is_err());
         assert_eq!(state.revoked().len(), 1);
@@ -447,6 +504,14 @@ mod tests {
         assert_eq!(newly, vec![phone.user_id()]);
         assert!(state.is_revoked(&phone.user_id()));
         assert_eq!(state.siblings(), vec![alice.user_id()]);
+        // A new certificate for this key in the list (the primary renamed
+        // the device) becomes this device's own.
+        let renamed = alice
+            .certify_device(&laptop.user_id(), "desk laptop", 1)
+            .unwrap();
+        state.set_list(vec![renamed.clone()], vec![]).unwrap();
+        assert_eq!(state.certificate(), Some(&renamed));
+        assert_eq!(state.name_of(&laptop.user_id()), Some("desk laptop"));
         // Another account's list or statements are refused whole.
         let other = Identity::generate();
         assert!(

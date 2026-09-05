@@ -258,6 +258,9 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
     }
 
     let (mut identity, mut created) = store.load_or_create_identity()?;
+    // A first run may be a second computer: offer to link it rather than
+    // start an identity of its own.
+    let link = args.link || (created && offer_link(&secrets)?);
     if created {
         offer_passphrase(&mut store, &secrets)?;
     }
@@ -446,7 +449,7 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
         })
     };
 
-    if args.link {
+    if link {
         let options = connect_options(&store, &identity)?;
         return link::run(store, identity, relay_url, options, args.device_name).await;
     }
@@ -484,6 +487,10 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
         ratatui::restore();
         match result? {
             Exit::Quit => return Ok(()),
+            Exit::Wiped(word) => {
+                println!("{word}");
+                return Ok(());
+            }
             Exit::Lock => {
                 // `app` is gone, and with it the client, the identity, the
                 // sessions and the data key.
@@ -593,6 +600,24 @@ fn new_passphrase(secrets: &EnvSecrets) -> anyhow::Result<String> {
         }
         eprintln!("They do not match; try again.");
     }
+}
+
+/// First run, at a terminal: ask whether this computer should join an
+/// identity kept elsewhere instead of starting one. Scripts and tests,
+/// which give no terminal, start one.
+fn offer_link(secrets: &EnvSecrets) -> anyhow::Result<bool> {
+    if secrets.passphrase.is_some() || !std::io::stdin().is_terminal() {
+        return Ok(false);
+    }
+    println!("This is a new installation. If you already use Silver Messenger on another");
+    println!("computer, this one can become a device of that identity: it gets the same");
+    println!("contacts, and messages reach both. Otherwise it starts an identity of its own.");
+    let answer =
+        rpassword::prompt_password("Link this computer to an identity you already have? [y/N] ")?;
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
 }
 
 /// First run: offer to protect the brand-new data directory.

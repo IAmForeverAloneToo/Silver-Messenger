@@ -34,6 +34,9 @@ pub(super) enum Purpose {
     LinkReset,
     Refresh,
     Rejoin(UserId),
+    /// A device of this identity's added to, or taken out of, the group:
+    /// nothing to say in the group, since its members are identities.
+    Device(UserId),
 }
 
 /// Key package deposits wait this long after the relay said the deposit
@@ -105,7 +108,7 @@ impl App {
             format!("# {name}"),
             format!("{} members", record.identities().len()),
         ];
-        if record.is_admin(&self.me) {
+        if record.is_admin(&self.account) {
             parts.push("you are an admin".into());
         }
         if let Some(state) = self.group_state_label(group) {
@@ -116,7 +119,7 @@ impl App {
 
     /// A member's name as the group pane shows it.
     pub fn member_name(&self, user: &UserId) -> String {
-        if *user == self.me {
+        if *user == self.account || *user == self.me {
             "you".into()
         } else {
             self.contact_name(user)
@@ -779,7 +782,7 @@ impl App {
         });
     }
 
-    fn run_staged(&mut self, staged: Staged, purpose: Purpose) {
+    pub(super) fn run_staged(&mut self, staged: Staged, purpose: Purpose) {
         let client = self.client.clone();
         let tx = self.internal_tx.clone();
         tokio::spawn(async move {
@@ -890,7 +893,7 @@ impl App {
                         Purpose::LinkReset => {
                             "you reset the invite link; old links are void".into()
                         }
-                        Purpose::Refresh => String::new(),
+                        Purpose::Refresh | Purpose::Device(_) => String::new(),
                         Purpose::Rejoin(user) => format!("you re-added {}", self.member_name(user)),
                         Purpose::Create => unreachable!("handled above"),
                     };
@@ -910,6 +913,15 @@ impl App {
                     // Quiet: a self-update is tried again later, and a
                     // leaver is taken out by whichever admin's commit won.
                     Purpose::Refresh | Purpose::Leave(_) => return,
+                    // A device that lost the race is added or taken out
+                    // again by /devices join or the next unlink.
+                    Purpose::Device(device) => {
+                        tracing::warn!(
+                            "a change for the device {}… to {name} lost a commit race",
+                            device.short()
+                        );
+                        return;
+                    }
                     Purpose::Join(user) | Purpose::Rejoin(user) => {
                         format!("adding {}", self.member_name(user))
                     }
@@ -1390,7 +1402,7 @@ impl App {
                     let admin = self
                         .groups
                         .get(&group)
-                        .is_some_and(|r| r.is_admin(&self.me));
+                        .is_some_and(|r| r.is_admin(&self.account));
                     if !admin || self.groups.has_staged(&group) {
                         continue;
                     }

@@ -649,6 +649,12 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled(format!(" {dot} {label} "), style),
         Span::styled(app.relay_url.clone(), app.theme.dim),
     ];
+    if let Some(name) = &app.device_name {
+        spans.push(Span::styled(
+            format!("  device {}", silver_client::files::printable(name, 32)),
+            app.theme.dim,
+        ));
+    }
     let pending = app.pending_count();
     if pending > 0 {
         spans.push(Span::styled(format!("  {pending} queued"), app.theme.warn));

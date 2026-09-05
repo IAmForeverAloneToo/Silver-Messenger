@@ -19,6 +19,7 @@ import fcntl
 import json
 import os
 import pty
+import select
 import shutil
 import socket
 import struct
@@ -303,6 +304,56 @@ def config(data_dir):
 def history(data_dir, peer_id):
     path = os.path.join(data_dir, "history", f"{peer_id}.jsonl")
     return [json.loads(line) for line in open(path) if line.strip()]
+
+
+class Linking:
+    """`silver --link` as a child process, its output read line by line."""
+
+    def __init__(self, data_dir, relay_url, name=None):
+        args = [os.path.join(BIN, "silver"), "--data-dir", data_dir, "--relay", relay_url, "--link"]
+        if name:
+            args += ["--device-name", name]
+        self.p = subprocess.Popen(
+            args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            env=client_env(),
+        )
+        self.buf = b""
+        self.lines = []
+
+    def wait_line(self, needle, timeout=30):
+        """Read until a line containing `needle` arrives; the line."""
+        deadline = time.time() + timeout
+        fd = self.p.stdout.fileno()
+        while True:
+            for line in self.lines:
+                if needle in line:
+                    return line
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise AssertionError(f"no line with {needle!r} within {timeout}s; got {self.lines!r}")
+            ready, _, _ = select.select([fd], [], [], min(remaining, 0.5))
+            if not ready:
+                if self.p.poll() is not None:
+                    raise AssertionError(f"silver --link exited with {self.p.returncode}: {self.lines!r}")
+                continue
+            chunk = os.read(fd, 4096)
+            if not chunk:
+                raise AssertionError(f"silver --link closed its output: {self.lines!r}")
+            self.buf += chunk
+            *done, self.buf = self.buf.split(b"\n")
+            self.lines.extend(l.decode("utf-8", "replace") for l in done)
+
+    def link(self):
+        """The link it printed, for /devices link."""
+        line = self.wait_line("/devices link silver://link/")
+        return line.split("/devices link ", 1)[1].strip()
+
+    def stop(self):
+        self.p.terminate()
+        try:
+            self.p.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.p.kill()
 
 
 class Pair:

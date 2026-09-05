@@ -262,17 +262,20 @@ own line in that conversation; and
 { "type": "sync", "kind": "contact", "action": "add|remove|alias|verify|block|unblock|files", ... }
 { "type": "sync", "kind": "devices", "devices": [ <certificate>, ... ], "revoked": [ <revocation>, ... ] }
 { "type": "sync", "kind": "received", "from": "<user id>", "id": "...", "sent_at_ms": n, "content": { ... } }
+{ "type": "sync", "kind": "leave" }
 ```
 
 for read marks, contact list changes, device list changes (so a linked
-device knows its siblings and the primary's revocations reach it), and
+device knows its siblings and the primary's revocations reach it),
 messages received from a sender that did not address the other devices
 (a client before 0.9.0, which seals to the account only: the primary
 forwards those, and only those; a sender that advertises the `devices`
-capability in its body has sent to every device itself). `sync` content
-is accepted only from a device certified for one's own account and is
-never sent to anyone else; a client that receives one from a contact
-ignores it. Group messages need no sync: every leaf gets its own copy.
+capability in its body has sent to every device itself), and a device
+asking to be unlinked (7.2: the primary revokes it on receipt, the other
+devices ignore it). `sync` content is accepted only from a device
+certified for one's own account and is never sent to anyone else; a
+client that receives one from a contact ignores it. Group messages need
+no sync: every leaf gets its own copy.
 
 Receipts go to every device of the sender's account, so each device
 marks its copy; `read` receipts leave from the device that showed the
@@ -455,10 +458,15 @@ the remaining devices, the device's leaves removed from every group by
 the primary's next commit in each, and the revocation pushed to
 contacts inside their next message. The device itself, on seeing the
 revocation (the relay closes its connection with a message that says
-so, and refuses its next login), wipes its keys and history and prints
-why. `/devices leave` on a linked device asks the primary the same by a
-`sync` message and wipes itself; a linked device that can no longer
-reach the primary is removed from the primary when the owner gets to it.
+so, and refuses its next login), says so and stops; it does not erase
+itself on the relay's word alone, since a relay could say so falsely,
+and `/devices leave confirm` erases it. `/devices leave confirm` on a
+linked device asks the primary the same by a `sync leave` message,
+waits for the relay to take it, erases its keys, contacts and history
+(the settings and the files saved in `downloads/` stay) and exits; the
+primary revokes the device on receipt. A linked device that can no
+longer reach the primary is removed from the primary when the owner
+gets to it.
 
 ### 7.3 Losing a device
 
@@ -551,12 +559,20 @@ one device today.
 `/devices` lists this account's devices with names, which one this is,
 and when each was linked; `/devices link <link> [days]` (primary; `days`
 of history to send, default 30, 0 for none), `/devices remove <n>`
-(primary), `/devices name <name>` (any device, its own name, re-certified
-by the primary on the next sync), `/devices leave` (linked device).
-`silver --link` on a fresh data directory prints the link and waits. The
-System pane announces links and removals; a sibling's reading is not
-announced, the marks show it. `/session` names the device a session is
-with.
+(primary), `/devices name <n> <name>` (primary: a fresh certificate for
+the same key, which the renamed device takes as its own from the next
+`sync devices`; there is no sync kind for a device to ask for a name, so
+naming stays on the primary), `/devices join` (primary: every linked
+device into the groups it is not in yet, for one that had no key
+packages on the relay when it was linked), `/devices leave confirm`
+(linked device). `silver --link` on a fresh data directory prints the
+link and waits, and a first run at a terminal asks whether to link the
+computer instead of starting an identity. On a linked device the status
+line names the device, and the identity's id is what `/me`, the invite
+link, the safety number and group membership go by. The System pane
+announces links and removals; a sibling's reading is not announced, the
+marks show it. `/session` says how many devices a contact has and how
+many are under a session.
 
 ## 9. Relay
 

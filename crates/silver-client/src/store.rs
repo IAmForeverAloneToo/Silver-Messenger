@@ -898,6 +898,43 @@ impl Store {
         Ok(())
     }
 
+    /// Erase the keys, the contacts, the history and everything else that
+    /// belongs to the identity, keeping the settings and the files saved
+    /// in `downloads/`: what a device does once it is unlinked.
+    pub fn wipe(&self) -> anyhow::Result<()> {
+        for name in [
+            IDENTITY_FILE,
+            REVOCATION_FILE,
+            PREKEYS_FILE,
+            SESSIONS_FILE,
+            CONTACTS_FILE,
+            OUTBOX_FILE,
+            TRANSPARENCY_FILE,
+            REQUESTS_FILE,
+            BLOCKED_FILE,
+            DEVICES_FILE,
+            crate::groups::GROUPS_FILE,
+            crate::groups::MLS_FILE,
+            VAULT_FILE,
+        ] {
+            let path = self.root.join(name);
+            if path.exists() {
+                fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+            }
+        }
+        let history = self.root.join(HISTORY_DIR);
+        if history.exists() {
+            for entry in fs::read_dir(&history)? {
+                let path = entry?.path();
+                if path.is_file() {
+                    fs::remove_file(&path)
+                        .with_context(|| format!("removing {}", path.display()))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn load_config(&self) -> anyhow::Result<Config> {
         self.read_json_or_default(CONFIG_FILE)
     }

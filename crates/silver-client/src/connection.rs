@@ -1555,6 +1555,39 @@ impl Client {
         Ok(certificate)
     }
 
+    /// Give `device`, one of this account's (the primary only), the name
+    /// `name`: a fresh certificate for the same key, the bundle published
+    /// again with it, and the devices told, the renamed one included,
+    /// which takes the certificate as its own.
+    pub async fn rename_device(
+        &self,
+        device: UserId,
+        name: &str,
+    ) -> Result<DeviceCertificate, ClientError> {
+        let devices = self
+            .devices
+            .as_ref()
+            .ok_or_else(|| ClientError::Relay("this client keeps no device state".into()))?;
+        let created_at_ms = {
+            let d = lock(devices);
+            if d.is_linked() {
+                return Err(ClientError::Relay("only the primary names devices".into()));
+            }
+            d.devices()
+                .iter()
+                .find(|c| c.device == device)
+                .map(|c| c.created_at_ms)
+                .ok_or_else(|| ClientError::Relay("that device is not linked".into()))?
+        };
+        let certificate = self.identity.certify_device(&device, name, created_at_ms)?;
+        lock(devices)
+            .rename(certificate.clone())
+            .map_err(|e| ClientError::Relay(e.to_string()))?;
+        self.republish().await?;
+        self.sync_device_list().await;
+        Ok(certificate)
+    }
+
     /// Encrypt `bytes` as a file called `name` and park it on the relay,
     /// as [`Client::upload_file`] does with a file on disk.
     pub async fn upload_bytes(
@@ -2955,6 +2988,12 @@ async fn plain_received(
                     )))
                     .await;
                 return;
+            }
+            // A device of theirs this client has no bundle for: the
+            // account's list is fetched afresh before the next message
+            // to it, so the device gets its copies (5.2).
+            if !lock(&setup.device_bundles).contains_key(&from) {
+                lock(&setup.device_checks).remove(&certificate.account);
             }
             certificate.account
         }

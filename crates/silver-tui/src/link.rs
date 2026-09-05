@@ -88,22 +88,31 @@ pub async fn run(
         silver_client::files::printable(&taken.certificate.name, 40),
         taken.account
     );
+    // Key packages on deposit, so the primary can add this device to
+    // its groups right away.
+    let mut groups = Groups::load(&store, identity.clone())?;
+    match groups.deposit(silver_protocol::now_ms()) {
+        Ok((packages, last_resort)) => {
+            if let Err(e) = client.deposit_key_packages(packages, last_resort).await {
+                eprintln!("Could not put key packages on the relay ({e}); groups follow later.");
+            }
+        }
+        Err(e) => eprintln!("Could not make key packages ({e}); groups follow later."),
+    }
     match taken.snapshot {
         Some(info) => match fetch_snapshot(&client, &info).await {
             Ok(snapshot) => {
                 let imported = snapshot.import(&store)?;
                 if !snapshot.groups.is_empty() {
-                    Groups::load(&store, identity.clone())?.expect_groups(
-                        snapshot.groups.iter().map(|g| {
-                            (
-                                g.id,
-                                ExpectedGroup {
-                                    name: g.name.clone(),
-                                    alias: g.alias.clone(),
-                                },
-                            )
-                        }),
-                    )?;
+                    groups.expect_groups(snapshot.groups.iter().map(|g| {
+                        (
+                            g.id,
+                            ExpectedGroup {
+                                name: g.name.clone(),
+                                alias: g.alias.clone(),
+                            },
+                        )
+                    }))?;
                 }
                 println!(
                     "{} contact(s), {} group(s) and {} message(s) of history came along.",

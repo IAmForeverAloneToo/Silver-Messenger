@@ -379,6 +379,10 @@ pub enum Sync {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         revoked: Vec<DeviceRevocation>,
     },
+    /// This device asks to be unlinked: the primary revokes it on receipt.
+    /// Sent by a device that is wiping itself; the other devices ignore
+    /// it.
+    Leave,
 }
 
 /// A contact list change, as one device tells the others.
@@ -582,6 +586,7 @@ mod tests {
                 devices: Vec::new(),
                 revoked: Vec::new(),
             },
+            Sync::Leave,
         ];
         for sync in cases {
             let content = Content::Sync(sync.clone());
