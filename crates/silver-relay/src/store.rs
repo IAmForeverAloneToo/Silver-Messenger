@@ -2053,7 +2053,7 @@ mod tests {
         let second = alice.revoke_device(&phone.user_id(), 12);
         assert!(store.set_device_revocation(&second).unwrap());
         let mut expected = vec![first, second];
-        expected.sort_by(|a, b| a.device.cmp(&b.device));
+        expected.sort_by_key(|revocation| revocation.device);
         assert_eq!(
             store.device_revocations_by(&alice.user_id()).unwrap(),
             expected

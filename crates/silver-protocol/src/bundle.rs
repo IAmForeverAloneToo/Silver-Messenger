@@ -141,7 +141,7 @@ impl KeyBundle {
         identity: &Identity,
         mut devices: Vec<DeviceCertificate>,
     ) -> Result<Self, ProtocolError> {
-        devices.sort_by(|a, b| a.device.cmp(&b.device));
+        devices.sort_by_key(|device| device.device);
         if devices.is_empty() {
             self.devices = Vec::new();
             self.devices_signature = None;
