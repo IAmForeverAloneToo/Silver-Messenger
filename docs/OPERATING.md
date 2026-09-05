@@ -176,6 +176,7 @@ say:
 | `silver_relay_blobs`, `silver_relay_blob_bytes`, `silver_relay_blob_bytes_limit` | Files on deposit against the cap |
 | `silver_relay_key_packages`, `silver_relay_groups`, `silver_relay_groups_limit` | MLS key packages on deposit (the last-resort ones not counted), groups with a sequencer entry, and the cap |
 | `silver_relay_group_commits_total`, `silver_relay_group_rejections_total` | Group commits the sequencer accepted and refused; rejections are normal when two members change a group at once, a steady stream of them is a client stuck on a stale epoch |
+| `silver_relay_devices`, `silver_relay_device_revocations_total` | Linked devices (identities whose bundle carries a device certificate; each is one of the identities above too) and device revocations held, which nothing removes |
 | `silver_relay_certificate_expiry_seconds`, `silver_relay_acme_failures_total` | When the served certificate expires (0 while there is none), and renewals that failed |
 
 `deploy/alerts.yml` carries the rules worth waking up for: the relay

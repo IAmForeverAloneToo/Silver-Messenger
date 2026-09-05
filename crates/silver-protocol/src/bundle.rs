@@ -29,7 +29,7 @@ pub mod capability {
     pub const GROUPS: &str = "groups";
     /// The client reads `sync` content from its own devices and may be
     /// sent to per device (`docs/PROTOCOL.md` section 14): it is a primary
-    /// on 0.10.0 or later, or a linked device. A sender treats an account
+    /// on 0.9.0 or later, or a linked device. A sender treats an account
     /// whose bundle lacks it as one device, the bundle's own.
     pub const DEVICES: &str = "devices";
 }
@@ -61,7 +61,7 @@ pub struct KeyBundle {
     pub caps_signature: Option<[u8; 64]>,
     /// The account's linked devices (section 14), in ascending device id
     /// order, signed as a whole by `devices_signature`. Empty on a bundle
-    /// without devices and on one a relay before 0.10.0 served.
+    /// without devices and on one a relay before 0.9.0 served.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub devices: Vec<DeviceCertificate>,
     /// The identity key's signature over `devices`; present whenever

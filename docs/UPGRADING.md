@@ -113,15 +113,18 @@ routine step.
 
 ### 0.9.0
 
-* **The schema version moves to 3: key packages and the group
-  sequencer.** The relay keeps two more kinds of thing for groups
-  (`PROTOCOL.md` section 13): each identity's MLS key packages on
-  deposit, handed out like one-time prekeys, and one epoch counter with
+* **The schema version moves to 3: key packages, the group sequencer
+  and device revocations.** The relay keeps three more kinds of thing
+  (`PROTOCOL.md` sections 13 and 14): each identity's MLS key packages
+  on deposit, handed out like one-time prekeys; one epoch counter with
   one hash per group, which orders the group's commits and says nothing
-  else about it. Both live in new tables; the migration creates them and
+  else about it; and each account's signed statements that a linked
+  device is no longer its own, served and logged like identity
+  revocations. All live in new tables; the migration creates them and
   touches nothing else. **Rolling back to 0.8.0 needs a restore**: 0.8.0
-  refuses a version-3 database, as it would leave deposits to go stale and
-  every group without its sequencer. Take the backup before the upgrade.
+  refuses a version-3 database, as it would leave deposits to go stale,
+  every group without its sequencer and every revoked device alive. Take
+  the backup before the upgrade.
 * **The backup format moves to 2.** A backup taken by 0.9.0 carries the
   new tables; 0.9.0 reads backups in format 1 (0.7.0 and 0.8.0) and 2,
   but 0.8.0 refuses a format-2 backup. So a rollback restores a backup
@@ -129,7 +132,21 @@ routine step.
   Groups whose sequencer moved on since that backup are re-created by
   their members from where they stand (`PROTOCOL.md` section 13), and
   key packages deposited since are deposited again at the next login, so
-  a restore costs nothing beyond what it always cost.
+  a restore costs nothing beyond what it always cost. A device revoked
+  since that backup is revoked again by its owner's client, which keeps
+  the statement.
+* **Devices are served by default.** Every relay on 0.9.0 advertises the
+  `devices` feature: it keeps the device list in an account's bundle and
+  the certificate in a linked device's, checks the certificate on
+  publish, hands a client the linked devices' bundles with the account's,
+  takes `revoke_device` from the account and cuts the device off (its
+  connection closed, its mailbox and deposits dropped, its logins refused,
+  envelopes for it refused). A linked device is one more identity to the
+  relay: it counts against `--max-identities`, against the address's
+  registrations per hour when it registers, and needs the invite token
+  where one is required. There is no switch and no new limit; an account
+  lists at most eight devices, and the metrics `silver_relay_devices` and
+  `silver_relay_device_revocations_total` say how many there are.
 * **Groups are served by default.** Every relay on 0.9.0 advertises the
   `groups` feature; there is no switch, since a group is one small row and
   a key package deposit is a few tens of kilobytes per identity.

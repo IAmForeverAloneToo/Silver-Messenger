@@ -18,8 +18,8 @@ disagree, the code and PROTOCOL.md win and this note is corrected.
 | Linking | The new device prints a link with its device id and a one-time secret; the primary takes the link and answers, through the relay, with the certificate and what the device needs to start, under a key derived from the secret. The identity key never leaves the primary. |
 | Unlinking and compromise | The primary publishes a new device list without the device and a signed device revocation the relay serves and logs; contacts drop their sessions with it; the identity's other devices remove its leaves. The identity survives a linked device's loss. Losing the primary is losing the identity key: the backup restores it. |
 | History | Optional, at link time only: the primary offers a snapshot of history through the blob store, under a key inside the provisioning message. Nothing syncs history afterwards; what happens from then on reaches every device as it happens. |
-| Compatibility | A client from 0.9.0 keeps talking to a person with linked devices: it seals to the account's bundle, which is still the primary's, and the primary forwards to the other devices. Linked devices need a relay on 0.10.0, which keeps the device list in the bundle. |
-| Relay schema | Version 4: device revocations, served and logged like identity revocations. |
+| Compatibility | A client from 0.8.0 keeps talking to a person with linked devices: it seals to the account's bundle, which is still the primary's, and the primary forwards to the other devices. Linked devices need a relay on 0.9.0, which keeps the device list in the bundle. |
+| Relay schema | Version 3, the one groups brought (both are new in 0.9.0): device revocations, served and logged like identity revocations. |
 
 ## 2. Goals and non-goals
 
@@ -127,7 +127,7 @@ bundle change like a prekey rotation:
 || devices? : 0x00, or 0x01 || count (2 BE) || (device (32) || created_at_ms (8 BE))* || devices_signature (64)
 ```
 
-A relay that does not keep the field (before 0.10.0) drops it when it
+A relay that does not keep the field (before 0.9.0) drops it when it
 re-serialises the bundle, which is why linked devices need the `devices`
 relay feature: a client on such a relay does not link devices, and one
 that has devices and finds itself on such a relay says so and works from
@@ -159,12 +159,20 @@ owner unlinks a device or reports it lost; sent to the relay in a
 `revoke_device` frame on the primary's authenticated connection; stored
 under the device id; served in every `lookup_result` for the device and
 for the account (`device_revocations`); logged in the transparency log
-with a new entry kind; pushed inside messages to contacts that advertise
-`lifecycle`, as identity revocations are. The relay disconnects the
-device if it is online, refuses its later logins and publishes, and
-drops its mailbox and deposits. A contact that sees one for a device it
-has sessions with drops those sessions and stops sending to it. A device
-that sees its own revocation forgets its keys and says so.
+as a revocation of the device (6.1); pushed inside messages to contacts
+that advertise `lifecycle`, as identity revocations are. The relay
+disconnects the device if it is online, telling it why, refuses its
+later logins and publishes, drops its mailbox and deposits, and refuses
+envelopes for it with `not_found`. A contact that sees one for a device
+it has sessions with drops those sessions and stops sending to it. A
+device that sees its own revocation forgets its keys and says so.
+
+The relay takes the statement only for a device it knows as the
+account's: one on the account's published list, or one whose own bundle
+carries the account's certificate. Otherwise any account could cut any
+identity off by calling it a device of its own. A device already revoked
+is answered again without a second entry, so a client that lost the
+reply may repeat itself.
 
 An identity revocation (section 10.1) covers every device: a contact
 retires the contact, devices included, and the relay refuses the devices
@@ -235,7 +243,7 @@ own line in that conversation; and
 for read marks, contact list changes, device list changes (so a linked
 device knows its siblings and the primary's revocations reach it), and
 messages received from a sender that did not address the other devices
-(a client before 0.10.0, which seals to the account only: the primary
+(a client before 0.9.0, which seals to the account only: the primary
 forwards those, and only those; a sender that advertises the `devices`
 capability in its body has sent to every device itself). `sync` content
 is accepted only from a device certified for one's own account and is
@@ -272,9 +280,9 @@ whether to forward (5.3).
 
 | `type` | Fields | Notes |
 | --- | --- | --- |
-| `revoke_device` | `revocation` | A device revocation (4.4), on the account's authenticated connection. Stored, served, logged; the device is cut off. |
-| `lookup_result` gains | `device_bundles`?, `device_revocations`? | For an account with devices: the linked devices' bundles as the relay would serve them on their own lookups (a one-time prekey popped from each, under the same rules), and every device revocation the account has issued. For a device: its bundle carries `device_of`; `device_revocations` holds its own, if any. |
-| `auth_ok` features | `devices` | The relay keeps the device list and `device_of` in bundles, answers `revoke_device`, attaches device bundles to lookups. Absent before 0.10.0; clients then do not link. |
+| `revoke_device` | `revocation` | A device revocation (4.4), on the account's authenticated connection, for a device the relay knows as the account's. Stored, served, logged; the device is cut off. |
+| `lookup_result` gains | `device_bundles`?, `device_revocations`? | For an account with devices: the linked devices' bundles as the relay would serve them on their own lookups (a one-time prekey popped from each, under the same rules), attached for a client whose own published bundle advertises the `devices` capability, since any other would not use them and their prekeys would be wasted on it; and every device revocation the account has issued, for every client. For a device: its bundle carries `device_of`; `device_revocations` holds its own, if any. |
+| `auth_ok` features | `devices` | The relay keeps the device list and `device_of` in bundles, answers `revoke_device`, attaches device bundles to lookups. Absent before 0.9.0; clients then do not link. |
 | `publish` | unchanged frame | The relay verifies `device_of` when present and refuses a bundle whose certificate does not verify, whose account is unknown to it, revoked, or has revoked this device, or that lists more than 8 devices or a device it knows to be revoked. A device registers like any identity: it counts against the address's registrations and the identity cap, and takes an invite token where one is required (the primary's link carries it, 7.1). |
 
 Transparency: the bundle leaf grows by the device list (4.3), and only
@@ -299,11 +307,11 @@ the target's hand-out budget one prekey per device.
 
 * `device` (optional, any body version): the sender's certificate (5.4).
 * Content kind `sync` (5.3), with `kind` as listed.
-* In-body capability `devices`: the sender is a 0.10.0 client that seals
-  to every device it knows (5.3, 5.4). Advertised always from 0.10.0.
+* In-body capability `devices`: the sender is a 0.9.0 client that seals
+  to every device it knows (5.3, 5.4). Advertised always from 0.9.0.
 * Bundle capability `devices`: the identity's client reads `sync`, is a
   primary or a linked device, and may be sent to per device. A linked
-  device's bundle advertises it; a primary's does once it is on 0.10.0.
+  device's bundle advertises it; a primary's does once it is on 0.9.0.
   A sender treats an account whose bundle lacks it as one device, the
   bundle's own, as today.
 
@@ -317,17 +325,18 @@ the target's hand-out budget one prekey per device.
   signature key are the same key (a primary), or the leaf carries a
   `silver_device` whose `device` is the signature key, whose `account`
   is the credential identity, and whose signature verifies. Every
-  0.10.0 key package and leaf declares capability for `0xF002`; the
+  0.9.0 key package and leaf declares capability for `0xF002`; the
   required capabilities of existing groups are left as they are.
 * Membership rules (13.7) gain: a committer may add leaves whose
   credential identity is its own and remove leaves whose credential
   identity is its own, admin or not; the identity, not the leaf, is what
   the admin list names, and a group's members as shown are identities.
-* A 0.9.0 member cannot verify a device leaf and would mark the group
-  broken. A device is therefore added to a group only when every leaf in
-  the tree declares capability for `0xF002`; otherwise the device stays
-  out of that group and the owner is told which member is on an older
-  client. Groups made from 0.10.0 on are fine from the start.
+* No released client has groups without device leaves (both are new in
+  0.9.0), so every member of every group can verify one, and a device is
+  added to a group as soon as its account is in it; no check for members
+  on an older client is needed. Should a later leaf extension ever need
+  one, the capability every leaf declares is what such a check would
+  read.
 * Key packages are per device (each device deposits its own under its
   own id); an admin adding an account fetches the account's device list
   and one key package per device, and adds every device in one commit.
@@ -478,18 +487,28 @@ with.
 
 ## 9. Relay
 
-* Table `device_revocations` (`device id -> DeviceRevocation JSON`),
-  schema version 4; the migration creates it and nothing else; 0.9.0
-  refuses a version-4 database as it refuses version 3 (UPGRADING.md).
-  Backup format 3 carries it; 0.10.0 loads formats 1 to 3.
+* Tables `device_revocations` (`device id -> DeviceRevocation JSON`) and
+  `device_revocations_by_account` (`(account, device)`, so an account's
+  lookup finds the ones it issued without a walk), in schema version 3,
+  the one groups brought: both are new in 0.9.0, and 0.8.0 refuses the
+  database for the group tables already (UPGRADING.md). Backup format 2
+  carries them in two record kinds of its own.
 * Bundles keep `devices`, `devices_signature` and `device_of` (the bundle
   type gains the fields; the relay re-serialises what it parsed, so the
-  fields survive from 0.10.0 on).
-* `publish` verifies `device_of` and the device list's signature and
-  size; `lookup` attaches device bundles and revocations; `revoke_device`
-  stores, logs, cuts the device off.
-* Metrics: `silver_relay_devices` (linked devices with a bundle) and
-  `silver_relay_device_revocations_total`. Nothing per account.
+  fields survive from 0.9.0 on).
+* `publish` verifies `device_of` (the certificate, and that the account
+  is registered here and not revoked), refuses a revoked device whatever
+  it now says and a list that names one; `lookup` attaches device
+  bundles for a client whose bundle advertises `devices` and revocations
+  for every client; `revoke_device` stores, logs and cuts the device off;
+  `send` to a revoked device is refused with `not_found`; a revoked
+  device, and a device of a revoked account, is refused at login and
+  told why. An identity revocation closes the connections of the
+  account's listed devices.
+* Metrics: `silver_relay_devices` (bundles that carry `device_of`,
+  counted as bundles come and go rather than by a walk at every scrape)
+  and `silver_relay_device_revocations_total`; `admin status` shows both.
+  Nothing per account.
 * Limits: 8 devices per account; statements against the registration
   budget; the identity cap counts devices.
 
@@ -545,18 +564,18 @@ which is within what section 13.10 measured for 256 members times two.
   device certified and republished); fan-out to a contact's devices and
   one's own with sent copies shown; a contact's new device picked up
   before the next message and a revoked one dropped; the primary
-  forwarding a 0.9.0 sender's message; groups with device leaves added
+  forwarding a 0.8.0 sender's message; groups with device leaves added
   by the account's own device, the rule refused for another's device,
   and a group with an old member left alone; the transparency check on
   device bundles and revocations.
 * Relay: device bundles kept and served with the account, `device_of`
   verified, the list cap, `revoke_device` storing, logging and cutting
-  off, a revoked device's login refused, schema 3 to 4 and backup format
-  3.
+  off, a revoked device's login refused, the tables in the schema
+  migration and the backup.
 * Terminal: `silver --link` and `/devices link` between two clients
   through a relay, a message from a contact reaching both, a sent copy
   on the other device, a removal, and the older-client case with the
-  release binary of 0.9.0 when it is on the runner.
+  release binary of 0.8.0 when it is on the runner.
 
 ## 13. Implementation order
 
@@ -565,7 +584,8 @@ Each step is one commit on `main` with its tests:
 1. Protocol: device certificate, list, revocation, leaf hash, body field
    and `sync` content, capabilities and feature, link, vectors.
 2. Relay: bundle fields, `revoke_device`, lookups with device bundles,
-   log entry kind, schema 4, backup format 3, metrics, tests.
+   log entries, the tables in schema 3 and backup format 2, metrics,
+   tests.
 3. Client, sessions: per-device fan-out and sync, device list refresh,
    revocations, the primary's forwarding; tests.
 4. Client, linking: `--link`, the provisioning message, `devices.json`,
@@ -578,5 +598,5 @@ Each step is one commit on `main` with its tests:
 
 Compatibility through the steps: nothing sends a `sync` body or a
 certificate until step 3, nothing links until step 4, and no device leaf
-enters a group until step 5, so a partially landed tree is a 0.9.0
-client with more code, as with groups.
+enters a group until step 5, so a partially landed tree is the groups
+client with more code, as a partially landed groups tree was 0.8.0.

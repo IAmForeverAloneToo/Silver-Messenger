@@ -281,6 +281,16 @@ pub fn render(state: &RelayState, tls: Option<&CertStore>) -> String {
         "Group commits the epoch sequencer refused (stale, unknown or wrong token).",
         c.group_rejections,
     );
+    t.gauge(
+        "silver_relay_devices",
+        "Linked devices: identities whose bundle carries a device certificate.",
+        s.devices,
+    );
+    t.counter(
+        "silver_relay_device_revocations_total",
+        "Device revocations held, which nothing removes.",
+        s.device_revocations,
+    );
     if let Some(store) = tls {
         let expiry = store
             .current()
@@ -388,6 +398,8 @@ mod tests {
             "silver_relay_auth_failures_total",
             "silver_relay_identities",
             "silver_relay_blob_bytes_limit",
+            "silver_relay_devices",
+            "silver_relay_device_revocations_total",
         ] {
             assert!(text.contains(&format!("# TYPE {name} ")), "{name} typed");
         }

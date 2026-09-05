@@ -356,7 +356,7 @@ pub enum Sync {
         content: Box<Content>,
     },
     /// A copy of a message received from `from` by a sender that did not
-    /// address the other devices (a client before 0.10.0).
+    /// address the other devices (a client before 0.9.0).
     Received {
         from: UserId,
         id: String,

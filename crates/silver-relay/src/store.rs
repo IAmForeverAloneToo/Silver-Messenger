@@ -16,7 +16,8 @@ use silver_protocol::prekey::OneTimePrekey;
 use silver_protocol::transparency::{EntryKind, Hash, LogEntry, LogHead, LogPosition, subject};
 use silver_protocol::wire::KeyPackageDeposit;
 use silver_protocol::{
-    DhPublic, Envelope, KeyBundle, Revocation, SignedPqPrekey, Succession, UserId, now_ms,
+    DeviceRevocation, DhPublic, Envelope, KeyBundle, Revocation, SignedPqPrekey, Succession,
+    UserId, now_ms,
 };
 use subtle::ConstantTimeEq;
 
@@ -92,8 +93,21 @@ pub(crate) const KEY_PACKAGE_LAST_RESORT: TableDefinition<&[u8], &[u8]> =
 /// `group id -> GroupEntry JSON`: the epoch sequencer, one counter and one
 /// token hash per group the relay knows nothing else about.
 pub(crate) const GROUPS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("groups");
+/// `device id -> DeviceRevocation JSON`: an account's signed statement
+/// that the device is no longer its own (`docs/PROTOCOL.md` section 14),
+/// served on lookups of the device and of the account, and kept for good
+/// like an identity's revocation.
+pub(crate) const DEVICE_REVOCATIONS: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("device_revocations");
+/// `(account, device)` for every device revocation, so an account's lookup
+/// finds the ones it issued without a walk of the table.
+pub(crate) const DEVICE_REVOCATIONS_BY_ACCOUNT: TableDefinition<(&[u8], &[u8]), ()> =
+    TableDefinition::new("device_revocations_by_account");
 /// The next deposit sequence number for key packages.
 const NEXT_KEY_PACKAGE: &str = "next_key_package";
+/// Bundles that carry `device_of`: linked devices, counted for the
+/// metrics as bundles come and go rather than by a walk at every scrape.
+const DEVICES: &str = "devices";
 
 /// The layout of the tables, stamped into the database. It moves when a
 /// change needs more than opening a table that was not there before, with
@@ -138,10 +152,11 @@ pub(crate) fn migrate(txn: &redb::WriteTransaction, from: u64) -> anyhow::Result
         // version moves so that an older relay, which would serve changes
         // without logging them, refuses this database instead.
         1 => seed_log(txn),
-        // 3 added the key package deposit and the group sequencer tables,
-        // which opening creates. The version moves so that an older relay,
-        // which would leave deposits to go stale and every group without a
-        // sequencer, refuses this database instead of half-serving it.
+        // 3 added the key package deposit, the group sequencer and the
+        // device revocation tables, which opening creates. The version
+        // moves so that an older relay, which would leave deposits to go
+        // stale, every group without a sequencer and every revoked device
+        // alive, refuses this database instead of half-serving it.
         2 => Ok(()),
         other => anyhow::bail!("no migration from schema version {other}"),
     }
@@ -322,6 +337,12 @@ pub struct Stats {
     /// Groups with a sequencer entry.
     #[serde(default)]
     pub groups: u64,
+    /// Linked devices: bundles that carry a device certificate.
+    #[serde(default)]
+    pub devices: u64,
+    /// Device revocations held, which nothing removes.
+    #[serde(default)]
+    pub device_revocations: u64,
 }
 
 /// What the epoch sequencer says to a create or a commit.
@@ -496,6 +517,8 @@ impl Store {
         txn.open_table(KEY_PACKAGES_USED)?;
         txn.open_table(KEY_PACKAGE_LAST_RESORT)?;
         txn.open_table(GROUPS)?;
+        txn.open_table(DEVICE_REVOCATIONS)?;
+        txn.open_table(DEVICE_REVOCATIONS_BY_ACCOUNT)?;
         Ok(())
     }
 
@@ -564,68 +587,31 @@ impl Store {
         let txn = self.db.begin_write()?;
         let mut removed = Removed::default();
         {
-            removed.had_bundle = txn.open_table(BUNDLES)?.remove(key)?.is_some();
-            let mut mailbox = txn.open_table(MAILBOX)?;
-            let mut by_id = txn.open_table(BY_ID)?;
-            let entries = mailbox
-                .range((key, 0u64)..=(key, u64::MAX))?
-                .map(|item| {
-                    let (k, v) = item?;
-                    let (_, envelope) = decode_entry(v.value())?;
-                    Ok((k.value().1, envelope.id, v.value().len() as u64))
-                })
-                .collect::<anyhow::Result<Vec<(u64, String, u64)>>>()?;
-            for (seq, id, size) in entries {
-                mailbox.remove((key, seq))?;
-                by_id.remove(id.as_str())?;
-                removed.messages += 1;
-                removed.bytes += size;
+            let mut bundles = txn.open_table(BUNDLES)?;
+            let was_device = bundles
+                .get(key)?
+                .map(|g| serde_json::from_slice::<KeyBundle>(g.value()))
+                .transpose()?
+                .is_some_and(|b| b.device_of.is_some());
+            removed.had_bundle = bundles.remove(key)?.is_some();
+            drop(bundles);
+            if was_device {
+                adjust_count(&mut txn.open_table(META)?, DEVICES, -1)?;
             }
-            txn.open_table(USAGE)?.remove(key)?;
-            for (deposit, used) in [(ONE_TIME, ONE_TIME_USED), (PQ_ONE_TIME, PQ_ONE_TIME_USED)] {
-                let mut table = txn.open_table(deposit)?;
-                let ids = table
-                    .range((key, 0u32)..=(key, u32::MAX))?
-                    .map(|item| item.map(|(k, _)| k.value().1))
-                    .collect::<Result<Vec<u32>, _>>()?;
-                for id in ids {
-                    table.remove((key, id))?;
-                    removed.prekeys += 1;
-                }
-                let mut table = txn.open_table(used)?;
-                let ids = table
-                    .range((key, 0u32)..=(key, u32::MAX))?
-                    .map(|item| item.map(|(k, _)| k.value().1))
-                    .collect::<Result<Vec<u32>, _>>()?;
-                for id in ids {
-                    table.remove((key, id))?;
-                }
-            }
-            let mut packages = txn.open_table(KEY_PACKAGES)?;
-            let seqs = packages
-                .range((key, 0u64)..=(key, u64::MAX))?
-                .map(|item| item.map(|(k, _)| k.value().1))
-                .collect::<Result<Vec<u64>, _>>()?;
-            for seq in seqs {
-                packages.remove((key, seq))?;
-                removed.key_packages += 1;
-            }
-            let mut used = txn.open_table(KEY_PACKAGES_USED)?;
-            let refs = used
-                .range((key, REF_LOW)..=(key, REF_HIGH))?
-                .map(|item| item.map(|(k, _)| k.value().1.to_vec()))
-                .collect::<Result<Vec<Vec<u8>>, _>>()?;
-            for r in refs {
-                used.remove((key, r.as_slice()))?;
-            }
-            if txn
-                .open_table(KEY_PACKAGE_LAST_RESORT)?
-                .remove(key)?
-                .is_some()
-            {
-                removed.key_packages += 1;
-            }
+            remove_user_data(&txn, key, &mut removed)?;
         }
+        txn.commit()?;
+        Ok(removed)
+    }
+
+    /// Delete everything kept for `user` but the bundle: the mailbox and
+    /// the deposits of prekeys and key packages. What a device loses when
+    /// its account revokes it; its bundle stays, as a revoked identity's
+    /// does, so a lookup still answers with the bundle the log covers.
+    pub fn cut_off(&self, user: &UserId) -> anyhow::Result<Removed> {
+        let txn = self.db.begin_write()?;
+        let mut removed = Removed::default();
+        remove_user_data(&txn, user.as_bytes().as_slice(), &mut removed)?;
         txn.commit()?;
         Ok(removed)
     }
@@ -729,6 +715,79 @@ impl Store {
         }
     }
 
+    // --- devices ---------------------------------------------------------------
+
+    /// Record an account's revocation of one of its devices, keyed by the
+    /// device, indexed by the account, and logged in the same transaction
+    /// as a revocation entry whose subject is the device. A device already
+    /// revoked stays as it was, whatever the new statement says: `false`
+    /// then, and nothing is written or logged.
+    pub fn set_device_revocation(&self, revocation: &DeviceRevocation) -> anyhow::Result<bool> {
+        let bytes = serde_json::to_vec(revocation)?;
+        let device = revocation.device.as_bytes().as_slice();
+        let account = revocation.account.as_bytes().as_slice();
+        let txn = self.db.begin_write()?;
+        let new = {
+            let mut table = txn.open_table(DEVICE_REVOCATIONS)?;
+            if table.get(device)?.is_some() {
+                false
+            } else {
+                table.insert(device, bytes.as_slice())?;
+                txn.open_table(DEVICE_REVOCATIONS_BY_ACCOUNT)?
+                    .insert((account, device), ())?;
+                true
+            }
+        };
+        if new {
+            append_log(
+                &txn,
+                subject(&revocation.device),
+                EntryKind::Revocation,
+                revocation.transparency_leaf(),
+                now_ms(),
+            )?;
+        }
+        txn.commit()?;
+        Ok(new)
+    }
+
+    /// The revocation of `device`, if its account issued one.
+    pub fn device_revocation(&self, device: &UserId) -> anyhow::Result<Option<DeviceRevocation>> {
+        let txn = self.db.begin_read()?;
+        match txn
+            .open_table(DEVICE_REVOCATIONS)?
+            .get(device.as_bytes().as_slice())?
+        {
+            Some(guard) => Ok(Some(serde_json::from_slice(guard.value())?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Whether `device` has been revoked by its account.
+    pub fn is_device_revoked(&self, device: &UserId) -> anyhow::Result<bool> {
+        let txn = self.db.begin_read()?;
+        Ok(txn
+            .open_table(DEVICE_REVOCATIONS)?
+            .get(device.as_bytes().as_slice())?
+            .is_some())
+    }
+
+    /// Every device revocation `account` issued, in device id order.
+    pub fn device_revocations_by(&self, account: &UserId) -> anyhow::Result<Vec<DeviceRevocation>> {
+        let account = account.as_bytes().as_slice();
+        let txn = self.db.begin_read()?;
+        let index = txn.open_table(DEVICE_REVOCATIONS_BY_ACCOUNT)?;
+        let table = txn.open_table(DEVICE_REVOCATIONS)?;
+        let mut out = Vec::new();
+        for item in index.range((account, REF_LOW)..=(account, REF_HIGH))? {
+            let (key, _) = item?;
+            if let Some(guard) = table.get(key.value().1)? {
+                out.push(serde_json::from_slice(guard.value())?);
+            }
+        }
+        Ok(out)
+    }
+
     pub fn admin_setting(&self, key: &str) -> anyhow::Result<Option<String>> {
         let txn = self.db.begin_read()?;
         Ok(txn
@@ -754,7 +813,79 @@ impl Store {
         txn.commit()?;
         Ok(())
     }
+}
 
+/// Everything kept for `key` but its bundle: the mailbox, the prekey
+/// deposits of both kinds, the key packages; counted into `removed`.
+fn remove_user_data(
+    txn: &redb::WriteTransaction,
+    key: &[u8],
+    removed: &mut Removed,
+) -> anyhow::Result<()> {
+    let mut mailbox = txn.open_table(MAILBOX)?;
+    let mut by_id = txn.open_table(BY_ID)?;
+    let entries = mailbox
+        .range((key, 0u64)..=(key, u64::MAX))?
+        .map(|item| {
+            let (k, v) = item?;
+            let (_, envelope) = decode_entry(v.value())?;
+            Ok((k.value().1, envelope.id, v.value().len() as u64))
+        })
+        .collect::<anyhow::Result<Vec<(u64, String, u64)>>>()?;
+    for (seq, id, size) in entries {
+        mailbox.remove((key, seq))?;
+        by_id.remove(id.as_str())?;
+        removed.messages += 1;
+        removed.bytes += size;
+    }
+    txn.open_table(USAGE)?.remove(key)?;
+    for (deposit, used) in [(ONE_TIME, ONE_TIME_USED), (PQ_ONE_TIME, PQ_ONE_TIME_USED)] {
+        let mut table = txn.open_table(deposit)?;
+        let ids = table
+            .range((key, 0u32)..=(key, u32::MAX))?
+            .map(|item| item.map(|(k, _)| k.value().1))
+            .collect::<Result<Vec<u32>, _>>()?;
+        for id in ids {
+            table.remove((key, id))?;
+            removed.prekeys += 1;
+        }
+        let mut table = txn.open_table(used)?;
+        let ids = table
+            .range((key, 0u32)..=(key, u32::MAX))?
+            .map(|item| item.map(|(k, _)| k.value().1))
+            .collect::<Result<Vec<u32>, _>>()?;
+        for id in ids {
+            table.remove((key, id))?;
+        }
+    }
+    let mut packages = txn.open_table(KEY_PACKAGES)?;
+    let seqs = packages
+        .range((key, 0u64)..=(key, u64::MAX))?
+        .map(|item| item.map(|(k, _)| k.value().1))
+        .collect::<Result<Vec<u64>, _>>()?;
+    for seq in seqs {
+        packages.remove((key, seq))?;
+        removed.key_packages += 1;
+    }
+    let mut used = txn.open_table(KEY_PACKAGES_USED)?;
+    let refs = used
+        .range((key, REF_LOW)..=(key, REF_HIGH))?
+        .map(|item| item.map(|(k, _)| k.value().1.to_vec()))
+        .collect::<Result<Vec<Vec<u8>>, _>>()?;
+    for r in refs {
+        used.remove((key, r.as_slice()))?;
+    }
+    if txn
+        .open_table(KEY_PACKAGE_LAST_RESORT)?
+        .remove(key)?
+        .is_some()
+    {
+        removed.key_packages += 1;
+    }
+    Ok(())
+}
+
+impl Store {
     // --- blobs ---------------------------------------------------------------
 
     /// Store one chunk of a blob, creating the blob on its first chunk.
@@ -863,10 +994,8 @@ impl Store {
     /// log it in the same transaction, so nothing served is ever missing
     /// from the log.
     pub fn put_bundle(&self, bundle: &KeyBundle) -> anyhow::Result<()> {
-        let bytes = serde_json::to_vec(bundle)?;
         let txn = self.db.begin_write()?;
-        txn.open_table(BUNDLES)?
-            .insert(bundle.user_id.as_bytes().as_slice(), bytes.as_slice())?;
+        store_bundle_in(&txn, bundle)?;
         log_bundle_in(&txn, bundle, now_ms())?;
         txn.commit()?;
         Ok(())
@@ -876,10 +1005,8 @@ impl Store {
     /// would do. For tests of the client's checks only.
     #[doc(hidden)]
     pub fn put_bundle_unlogged(&self, bundle: &KeyBundle) -> anyhow::Result<()> {
-        let bytes = serde_json::to_vec(bundle)?;
         let txn = self.db.begin_write()?;
-        txn.open_table(BUNDLES)?
-            .insert(bundle.user_id.as_bytes().as_slice(), bytes.as_slice())?;
+        store_bundle_in(&txn, bundle)?;
         txn.commit()?;
         Ok(())
     }
@@ -1537,12 +1664,20 @@ impl Store {
         let usage = txn.open_table(USAGE)?;
         let key_packages = txn.open_table(KEY_PACKAGES)?.len()?;
         let groups = txn.open_table(GROUPS)?.len()?;
+        let devices = txn
+            .open_table(META)?
+            .get(DEVICES)?
+            .map(|g| g.value())
+            .unwrap_or(0);
+        let device_revocations = txn.open_table(DEVICE_REVOCATIONS)?.len()?;
         let mut stats = Stats {
             bundles,
             blobs,
             blob_bytes,
             key_packages,
             groups,
+            devices,
+            device_revocations,
             ..Stats::default()
         };
         for item in usage.iter()? {
@@ -1577,6 +1712,39 @@ fn last_resort_in(
         return Ok(None);
     }
     Ok(Some(deposit))
+}
+
+/// Store `bundle` under its owner, keeping the count of linked devices
+/// right: one more when a bundle gains `device_of`, one fewer when a
+/// bundle loses it.
+fn store_bundle_in(txn: &redb::WriteTransaction, bundle: &KeyBundle) -> anyhow::Result<()> {
+    let bytes = serde_json::to_vec(bundle)?;
+    let key = bundle.user_id.as_bytes().as_slice();
+    let mut bundles = txn.open_table(BUNDLES)?;
+    let was_device = bundles
+        .get(key)?
+        .map(|g| serde_json::from_slice::<KeyBundle>(g.value()))
+        .transpose()?
+        .is_some_and(|b| b.device_of.is_some());
+    bundles.insert(key, bytes.as_slice())?;
+    drop(bundles);
+    let change = i64::from(bundle.device_of.is_some()) - i64::from(was_device);
+    if change != 0 {
+        adjust_count(&mut txn.open_table(META)?, DEVICES, change)?;
+    }
+    Ok(())
+}
+
+/// Move a counter in the meta table by `by`, never below zero.
+fn adjust_count(meta: &mut redb::Table<'_, &str, u64>, key: &str, by: i64) -> anyhow::Result<()> {
+    let count = meta.get(key)?.map(|g| g.value()).unwrap_or(0);
+    let next = if by < 0 {
+        count.saturating_sub(by.unsigned_abs())
+    } else {
+        count.saturating_add(by as u64)
+    };
+    meta.insert(key, next)?;
+    Ok(())
 }
 
 fn adjust_usage(
@@ -1809,12 +1977,14 @@ mod tests {
         {
             let store = Store::open(&path).unwrap();
             store.put_bundle(&alice.key_bundle()).unwrap();
-            // As 0.8.0 left it: no group tables, schema 2.
+            // As 0.8.0 left it: no group or device tables, schema 2.
             let txn = store.db.begin_write().unwrap();
             txn.delete_table(KEY_PACKAGES).unwrap();
             txn.delete_table(KEY_PACKAGES_USED).unwrap();
             txn.delete_table(KEY_PACKAGE_LAST_RESORT).unwrap();
             txn.delete_table(GROUPS).unwrap();
+            txn.delete_table(DEVICE_REVOCATIONS).unwrap();
+            txn.delete_table(DEVICE_REVOCATIONS_BY_ACCOUNT).unwrap();
             txn.commit().unwrap();
             store.stamp_schema(Some(2)).unwrap();
         }
@@ -1826,7 +1996,153 @@ mod tests {
             (0, vec![])
         );
         assert_eq!(store.group_count().unwrap(), 0);
+        assert!(!store.is_device_revoked(&alice.user_id()).unwrap());
+        assert_eq!(store.stats().unwrap().device_revocations, 0);
         assert_eq!(store.log_head().unwrap().index, 1, "the log is untouched");
+    }
+
+    #[test]
+    fn device_revocations_are_kept_once_indexed_by_account_and_logged() {
+        use silver_protocol::transparency::{EntryKind, subject};
+        let store = Store::in_memory().unwrap();
+        let alice = Identity::generate();
+        let laptop = Identity::generate();
+        let phone = Identity::generate();
+        store.put_bundle(&alice.key_bundle()).unwrap();
+        assert!(!store.is_device_revoked(&laptop.user_id()).unwrap());
+        assert!(
+            store
+                .device_revocation(&laptop.user_id())
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .device_revocations_by(&alice.user_id())
+                .unwrap()
+                .is_empty()
+        );
+
+        let first = alice.revoke_device(&laptop.user_id(), 10);
+        assert!(store.set_device_revocation(&first).unwrap());
+        assert!(store.is_device_revoked(&laptop.user_id()).unwrap());
+        assert_eq!(
+            store.device_revocation(&laptop.user_id()).unwrap(),
+            Some(first.clone())
+        );
+        // Logged under the device, as a revocation, with the device leaf.
+        let entries = store.log_since(0, 10).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[1].kind, EntryKind::Revocation);
+        assert_eq!(entries[1].subject, subject(&laptop.user_id()));
+        assert_eq!(entries[1].leaf, first.transparency_leaf());
+        assert_eq!(
+            store.log_latest(&laptop.user_id()).unwrap().unwrap().index,
+            2
+        );
+        // A second statement about the same device changes nothing.
+        let again = alice.revoke_device(&laptop.user_id(), 11);
+        assert!(!store.set_device_revocation(&again).unwrap());
+        assert_eq!(
+            store.device_revocation(&laptop.user_id()).unwrap(),
+            Some(first.clone())
+        );
+        assert_eq!(store.log_head().unwrap().index, 2);
+        // The account's lookup finds every one it issued, in device order,
+        // and another account's finds none of them.
+        let second = alice.revoke_device(&phone.user_id(), 12);
+        assert!(store.set_device_revocation(&second).unwrap());
+        let mut expected = vec![first, second];
+        expected.sort_by(|a, b| a.device.cmp(&b.device));
+        assert_eq!(
+            store.device_revocations_by(&alice.user_id()).unwrap(),
+            expected
+        );
+        assert!(
+            store
+                .device_revocations_by(&laptop.user_id())
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(store.stats().unwrap().device_revocations, 2);
+        // A revocation outlives the device's bundle, as an identity's does.
+        store.put_bundle(&laptop.key_bundle()).unwrap();
+        store.remove_user(&laptop.user_id()).unwrap();
+        assert!(store.is_device_revoked(&laptop.user_id()).unwrap());
+    }
+
+    #[test]
+    fn a_cut_off_device_keeps_its_bundle_and_loses_the_rest() {
+        let store = Store::in_memory().unwrap();
+        let alice = Identity::generate();
+        let laptop = Identity::generate();
+        let certificate = alice
+            .certify_device(&laptop.user_id(), "laptop", 1)
+            .unwrap();
+        store
+            .put_bundle(&laptop.key_bundle().as_device_of(certificate))
+            .unwrap();
+        store
+            .set_one_time_prekeys(
+                &laptop.user_id(),
+                &[silver_protocol::PrekeySecret::generate(2, 0).one_time()],
+            )
+            .unwrap();
+        store
+            .set_key_packages(
+                &laptop.user_id(),
+                &[package(1, 100)],
+                Some(&package(9, 100)),
+            )
+            .unwrap();
+        store
+            .enqueue(&envelope(&alice, &laptop, "hello"), 1, Limits::default())
+            .unwrap();
+        assert_eq!(store.stats().unwrap().devices, 1);
+
+        let removed = store.cut_off(&laptop.user_id()).unwrap();
+        assert_eq!(
+            removed,
+            Removed {
+                had_bundle: false,
+                messages: 1,
+                bytes: removed.bytes,
+                prekeys: 1,
+                key_packages: 2,
+            }
+        );
+        assert!(removed.bytes > 0);
+        assert!(store.bundle(&laptop.user_id()).unwrap().is_some());
+        assert!(store.queued(&laptop.user_id()).unwrap().is_empty());
+        assert_eq!(
+            store.one_time_status(&laptop.user_id()).unwrap(),
+            (0, vec![])
+        );
+        assert_eq!(
+            store.key_package_status(&laptop.user_id()).unwrap(),
+            (0, vec![])
+        );
+        assert_eq!(store.stats().unwrap().devices, 1, "still a device");
+        // The count follows the bundles: a device that drops its certificate
+        // or goes altogether is one fewer; a plain identity is none.
+        store.put_bundle(&laptop.key_bundle()).unwrap();
+        assert_eq!(store.stats().unwrap().devices, 0);
+        store.put_bundle(&alice.key_bundle()).unwrap();
+        let phone = Identity::generate();
+        let certificate = alice.certify_device(&phone.user_id(), "phone", 2).unwrap();
+        store
+            .put_bundle(&phone.key_bundle().as_device_of(certificate.clone()))
+            .unwrap();
+        store
+            .put_bundle(&phone.key_bundle().as_device_of(certificate))
+            .unwrap();
+        assert_eq!(
+            store.stats().unwrap().devices,
+            1,
+            "republished, not doubled"
+        );
+        store.remove_user(&phone.user_id()).unwrap();
+        assert_eq!(store.stats().unwrap().devices, 0);
     }
 
     #[test]

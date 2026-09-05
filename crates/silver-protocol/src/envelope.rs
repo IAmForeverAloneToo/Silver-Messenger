@@ -189,7 +189,7 @@ struct PlainBody {
     /// The sender's device certificate when the sender is a linked device
     /// (section 14), so the recipient can attribute the message to the
     /// account and verify the device without a lookup. Absent from a
-    /// primary and from clients before 0.10.0.
+    /// primary and from clients before 0.9.0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     device: Option<crate::device::DeviceCertificate>,
 }

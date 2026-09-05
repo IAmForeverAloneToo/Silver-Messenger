@@ -48,8 +48,8 @@ use silver_protocol::wire::{
     verify_auth_bound,
 };
 use silver_protocol::{
-    Envelope, KeyBundle, LogEntry, LogHead, LogPosition, MAX_CIPHERTEXT_BYTES, Revocation,
-    Succession, UserId, now_ms,
+    DeviceRevocation, Envelope, KeyBundle, LogEntry, LogHead, LogPosition, MAX_CIPHERTEXT_BYTES,
+    Revocation, Succession, UserId, now_ms,
 };
 use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
@@ -322,6 +322,10 @@ struct Conn {
     /// The client deposited key packages, so it may ask for others'.
     key_packages: bool,
     deposits: Bucket,
+    /// The client's bundle advertises the `devices` capability, so it
+    /// seals per device: its lookups get the linked devices' bundles, one
+    /// prekey popped from each. A client that does not would waste them.
+    devices: bool,
 }
 
 impl Conn {
@@ -334,6 +338,7 @@ impl Conn {
             prekeys: false,
             key_packages: false,
             deposits: Bucket::per_minute(KEY_PACKAGE_DEPOSITS_PER_MINUTE),
+            devices: false,
         }
     }
 }
@@ -457,6 +462,7 @@ enum Outbound {
 type Rejection = (ErrorCode, &'static str);
 
 /// What a client that published prekeys is told afterwards.
+#[derive(Debug)]
 struct PrekeyReport {
     one_time_remaining: u32,
     consumed: Vec<u32>,
@@ -846,6 +852,18 @@ impl RelayState {
         }
     }
 
+    /// [`disconnect`](Self::disconnect), with `why` sent to the client
+    /// first, so a device learns from its relay that it is no longer one.
+    fn close_with(&self, user: &UserId, why: &'static str) {
+        if let Some(session) = self.online().remove(user) {
+            let _ = session.tx.send(Outbound::Frame(Box::new(ServerFrame::error(
+                ErrorCode::Forbidden,
+                why,
+            ))));
+            let _ = session.tx.send(Outbound::Close(why));
+        }
+    }
+
     pub fn uptime(&self) -> Duration {
         self.started.elapsed()
     }
@@ -899,6 +917,7 @@ impl RelayState {
             features.push(feature::BLOBS.to_owned());
         }
         features.push(feature::GROUPS.to_owned());
+        features.push(feature::DEVICES.to_owned());
         features
     }
 
@@ -1099,7 +1118,8 @@ impl RelayState {
     /// Store a self-signed revocation for its identity: the identity is
     /// dead. Verified by its own signature, so no connection auth is needed
     /// (the key may be lost). A revoked identity that is online is
-    /// disconnected and cannot publish again.
+    /// disconnected and cannot publish again, and so are its linked
+    /// devices, whose certificates name a dead account.
     ///
     /// Only an identity registered here can be revoked here, so the store
     /// holds at most one statement per identity it already knows and nobody
@@ -1116,15 +1136,147 @@ impl RelayState {
         if revocation.verify().is_err() {
             return Err((ErrorCode::BadSignature, "revocation signature is invalid"));
         }
-        if self.bundle(&revocation.identity).is_none() {
+        let Some(bundle) = self.bundle(&revocation.identity) else {
             return Err((ErrorCode::Forbidden, "no such identity on this relay"));
-        }
+        };
         self.store.set_revocation(&revocation).map_err(|e| {
             error!("storing revocation: {e:#}");
             (ErrorCode::Internal, "storage error")
         })?;
         self.disconnect(&revocation.identity, "revoked by its owner");
+        for device in &bundle.devices {
+            self.close_with(&device.device, "this device's account has been revoked");
+        }
         Ok(())
+    }
+
+    /// Store an account's revocation of one of its devices
+    /// (`docs/PROTOCOL.md` section 14), sent by `me`, the account, on its
+    /// own connection: the device is cut off (disconnected, its mailbox
+    /// and deposits dropped, its later logins and publishes refused), the
+    /// statement is logged and served on lookups of the device and of the
+    /// account. A device already revoked is left as it was and the frame
+    /// still answered, so a client that lost the reply may repeat itself.
+    ///
+    /// Only a device the relay knows as this account's can be revoked: one
+    /// on the account's published list, or one whose own bundle carries
+    /// the account's certificate. Otherwise any account could cut off any
+    /// identity by calling it a device of its own. Each statement costs
+    /// `addr` one of its hourly registrations.
+    pub fn apply_device_revocation(
+        &self,
+        me: &UserId,
+        revocation: DeviceRevocation,
+        addr: IpAddr,
+    ) -> Result<(), Rejection> {
+        if !self.registration_allowed(addr) {
+            return Err((
+                ErrorCode::RateLimited,
+                "this address has made its share of identity changes for the hour",
+            ));
+        }
+        if revocation.account != *me {
+            return Err((
+                ErrorCode::Forbidden,
+                "a device is revoked by its own account",
+            ));
+        }
+        if revocation.verify().is_err() {
+            return Err((
+                ErrorCode::BadSignature,
+                "device revocation signature is invalid",
+            ));
+        }
+        let Some(mine) = self.bundle(me) else {
+            return Err((ErrorCode::Forbidden, "publish a bundle first"));
+        };
+        let listed = mine.devices.iter().any(|d| d.device == revocation.device);
+        let claims_me = self
+            .bundle(&revocation.device)
+            .is_some_and(|b| b.account() == Some(me));
+        if !listed && !claims_me {
+            return Err((
+                ErrorCode::Forbidden,
+                "that is not a device of this account on this relay",
+            ));
+        }
+        let new = self.store.set_device_revocation(&revocation).map_err(|e| {
+            error!("storing device revocation: {e:#}");
+            (ErrorCode::Internal, "storage error")
+        })?;
+        if new {
+            match self.store.cut_off(&revocation.device) {
+                Ok(removed) => info!(
+                    device = %self.who(&revocation.device),
+                    "device revoked by its account; {} queued envelopes and {} prekeys dropped",
+                    removed.messages,
+                    removed.prekeys
+                ),
+                Err(e) => error!("dropping a revoked device's mailbox: {e:#}"),
+            }
+        }
+        self.close_with(
+            &revocation.device,
+            "this device has been revoked by its account",
+        );
+        Ok(())
+    }
+
+    fn is_device_revoked(&self, device: &UserId) -> bool {
+        self.store.is_device_revoked(device).unwrap_or_else(|e| {
+            error!("reading device revocation: {e:#}");
+            false
+        })
+    }
+
+    /// Why `user` may not log in as a device, if it may not: its account
+    /// revoked it, or its account is dead. `None` for anyone else,
+    /// identities that are no device included.
+    fn device_refusal(&self, user: &UserId) -> Option<&'static str> {
+        if self.is_device_revoked(user) {
+            return Some("this device has been revoked by its account");
+        }
+        let account = self.bundle(user)?.account().copied()?;
+        self.is_revoked(&account)
+            .then_some("this device's account has been revoked")
+    }
+
+    /// The linked devices' bundles to attach to a lookup of `account`
+    /// whose bundle is `bundle`: every device on the list that has a
+    /// bundle claiming the account and is not revoked, a one-time prekey
+    /// popped from each as on its own lookup.
+    fn device_bundles(&self, account: &UserId, bundle: Option<&KeyBundle>) -> Vec<KeyBundle> {
+        let Some(bundle) = bundle else {
+            return Vec::new();
+        };
+        bundle
+            .devices
+            .iter()
+            .filter(|device| !self.is_device_revoked(&device.device))
+            .filter_map(|device| {
+                let mut bundle = self.bundle(&device.device)?;
+                if bundle.account() != Some(account) {
+                    return None;
+                }
+                self.pop_one_time_prekeys(&mut bundle);
+                Some(bundle)
+            })
+            .collect()
+    }
+
+    /// The device revocations to attach to a lookup of `user`: every one
+    /// it issued as an account, and its own if it is a revoked device.
+    fn device_revocations(&self, user: &UserId) -> Vec<DeviceRevocation> {
+        let mut out = self.store.device_revocations_by(user).unwrap_or_else(|e| {
+            error!("reading device revocations: {e:#}");
+            Vec::new()
+        });
+        match self.store.device_revocation(user) {
+            Ok(Some(own)) => out.push(own),
+            Ok(None) => {}
+            Err(e) => error!("reading device revocation: {e:#}"),
+        }
+        out
     }
 
     /// Store a cross-signed succession, keyed by the old identity. The old
@@ -1436,9 +1588,45 @@ impl RelayState {
         if bundle.verify().is_err() {
             return Err((ErrorCode::BadSignature, "bundle signature is invalid"));
         }
-        // A revoked identity is dead: it cannot be published again.
+        // A revoked identity is dead: it cannot be published again. Nor can
+        // a revoked device, whatever its bundle now says.
         if self.store.is_revoked(me).unwrap_or(false) {
             return Err((ErrorCode::Forbidden, "this identity has been revoked"));
+        }
+        if self.is_device_revoked(me) {
+            return Err((
+                ErrorCode::Forbidden,
+                "this device has been revoked by its account",
+            ));
+        }
+        // A device's claim to an account is checked here as a courtesy to
+        // clients, which check it again: the certificate verified above,
+        // and the account must be one this relay knows and still serves.
+        if let Some(certificate) = &bundle.device_of {
+            if self.bundle(&certificate.account).is_none() {
+                return Err((
+                    ErrorCode::Forbidden,
+                    "the account this device claims is not on this relay",
+                ));
+            }
+            if self.is_revoked(&certificate.account) {
+                return Err((
+                    ErrorCode::Forbidden,
+                    "the account this device claims has been revoked",
+                ));
+            }
+        }
+        // The list verified as signed and within its cap; a device the
+        // relay holds a revocation for cannot be listed back in.
+        if bundle
+            .devices
+            .iter()
+            .any(|device| self.is_device_revoked(&device.device))
+        {
+            return Err((
+                ErrorCode::Forbidden,
+                "the device list names a device that has been revoked",
+            ));
         }
         // A new identity: the invite token, the registration rate for the
         // address, and the room left all have a say.
@@ -1525,27 +1713,43 @@ impl RelayState {
     /// than the policy allows.
     fn bundle_with_one_time_prekey(&self, user: &UserId) -> Option<KeyBundle> {
         let mut bundle = self.bundle(user)?;
+        self.pop_one_time_prekeys(&mut bundle);
+        Some(bundle)
+    }
+
+    /// Put one one-time prekey of each kind into `bundle`, from its owner's
+    /// deposit, if the owner has any left and they are not being handed out
+    /// faster than the policy allows.
+    fn pop_one_time_prekeys(&self, bundle: &mut KeyBundle) {
+        let user = bundle.user_id;
         if let Some(prekeys) = bundle.prekeys.as_mut() {
-            if !self.handout_allowed(user) {
+            if !self.handout_allowed(&user) {
                 debug!("one-time prekeys for one user are being asked for quickly; serving none");
-                return Some(bundle);
+                return;
             }
-            match self.store.take_one_time_prekey(user) {
+            match self.store.take_one_time_prekey(&user) {
                 Ok(taken) => prekeys.one_time = taken.into_iter().collect(),
                 Err(e) => error!("taking one-time prekey: {e:#}"),
             }
-            match self.store.take_pq_one_time_prekey(user) {
+            match self.store.take_pq_one_time_prekey(&user) {
                 Ok(taken) => prekeys.pq_one_time = taken.into_iter().collect(),
                 Err(e) => error!("taking one-time ML-KEM prekey: {e:#}"),
             }
         }
-        Some(bundle)
     }
 
     /// Queue an envelope for its recipient and push it if they are online.
     fn route(&self, envelope: Envelope) -> Result<(), Rejection> {
         if envelope.ciphertext.len() > MAX_CIPHERTEXT_BYTES {
             return Err((ErrorCode::TooLarge, "ciphertext too large"));
+        }
+        // A revoked device is gone: the refusal tells a sender that its
+        // copy of the recipient's device list is stale.
+        if self.is_device_revoked(&envelope.to) {
+            return Err((
+                ErrorCode::NotFound,
+                "the recipient device has been revoked by its account",
+            ));
         }
         let outcome = self
             .store
@@ -1765,6 +1969,12 @@ async fn handle_socket(
                 .await;
                 return;
             }
+            // A device its account revoked, or whose account is dead, is
+            // told so and gets no session: its mailbox is not its to read.
+            if let Some(why) = state.device_refusal(&user_id) {
+                let _ = send(&mut sink, &ServerFrame::error(ErrorCode::Forbidden, why)).await;
+                return;
+            }
             user_id
         }
         // A revocation or a succession authenticates itself, so the relay
@@ -1959,8 +2169,13 @@ fn handle_frame(
             "already authenticated",
         )],
         ClientFrame::Publish { bundle, invite } => {
+            let devices = bundle
+                .caps
+                .iter()
+                .any(|c| c == silver_protocol::bundle::capability::DEVICES);
             match state.publish(me, bundle, invite.as_deref(), conn.addr) {
                 Ok(report) => {
+                    conn.devices = devices;
                     let mut replies = vec![ServerFrame::Published];
                     if let Some(report) = report {
                         conn.prekeys = true;
@@ -2003,6 +2218,15 @@ fn handle_frame(
             };
             let (revocation, succession) = state.lifecycle(&user_id);
             let (head, logged) = state.log_view(&user_id);
+            // Only a client that seals per device gets the devices' bundles
+            // (and costs them a prekey each); the revocations are cheap and
+            // go to everyone.
+            let device_bundles = if conn.devices {
+                state.device_bundles(&user_id, bundle.as_ref())
+            } else {
+                Vec::new()
+            };
+            let device_revocations = state.device_revocations(&user_id);
             vec![ServerFrame::LookupResult {
                 user_id,
                 bundle,
@@ -2010,8 +2234,8 @@ fn handle_frame(
                 succession,
                 head,
                 logged,
-                device_bundles: Vec::new(),
-                device_revocations: Vec::new(),
+                device_bundles,
+                device_revocations,
             }]
         }
         ClientFrame::Revoke { revocation } => match state.apply_revocation(revocation, conn.addr) {
@@ -2024,13 +2248,12 @@ fn handle_frame(
                 Err((code, message)) => vec![ServerFrame::error(code, message)],
             }
         }
-        // Served once the relay keeps devices (`docs/PROTOCOL.md` section
-        // 14); until then a client sees the feature missing and never
-        // sends one.
-        ClientFrame::RevokeDevice { .. } => vec![ServerFrame::error(
-            ErrorCode::Forbidden,
-            "this relay does not keep devices",
-        )],
+        ClientFrame::RevokeDevice { revocation } => {
+            match state.apply_device_revocation(me, revocation, conn.addr) {
+                Ok(()) => vec![ServerFrame::Published],
+                Err((code, message)) => vec![ServerFrame::error(code, message)],
+            }
+        }
         ClientFrame::Send { envelope } => vec![state.submit(envelope, &mut conn.sends, Some(me))],
         ClientFrame::Ack { id } => {
             state.ack(me, &id);
@@ -2171,6 +2394,277 @@ mod lifecycle_tests {
             .unwrap_err();
         assert!(matches!(code, ErrorCode::Forbidden));
         assert!(state.lifecycle(&other.user_id()).1.is_none());
+    }
+
+    #[test]
+    fn a_device_revocation_takes_only_a_device_of_the_account() {
+        let state = RelayState::new();
+        let here = addr(5);
+        let alice = Identity::generate();
+        let laptop = Identity::generate();
+        let stranger = Identity::generate();
+        let revoke = |by: &Identity, device: &Identity, at| {
+            state.apply_device_revocation(
+                &by.user_id(),
+                by.revoke_device(&device.user_id(), at),
+                here,
+            )
+        };
+        // An account with no bundle here has no devices here.
+        let (code, _) = revoke(&alice, &laptop, 1).unwrap_err();
+        assert!(matches!(code, ErrorCode::Forbidden));
+        state.store.put_bundle(&alice.key_bundle()).unwrap();
+        state.store.put_bundle(&stranger.key_bundle()).unwrap();
+        // A device the relay does not know as alice's: refused, so that no
+        // account can cut an identity off by calling it a device of its own.
+        let (code, _) = revoke(&alice, &laptop, 1).unwrap_err();
+        assert!(matches!(code, ErrorCode::Forbidden));
+        assert!(!state.is_device_revoked(&laptop.user_id()));
+        // The laptop claims alice. Alice's statement on someone else's
+        // connection, someone else's statement, and a forged one are all
+        // refused.
+        let certificate = alice
+            .certify_device(&laptop.user_id(), "laptop", 1)
+            .unwrap();
+        state
+            .store
+            .put_bundle(&laptop.key_bundle().as_device_of(certificate))
+            .unwrap();
+        let (code, _) = state
+            .apply_device_revocation(
+                &stranger.user_id(),
+                alice.revoke_device(&laptop.user_id(), 2),
+                here,
+            )
+            .unwrap_err();
+        assert!(matches!(code, ErrorCode::Forbidden));
+        let (code, _) = revoke(&stranger, &laptop, 2).unwrap_err();
+        assert!(matches!(code, ErrorCode::Forbidden));
+        let mut forged = alice.revoke_device(&laptop.user_id(), 2);
+        forged.created_at_ms += 1;
+        let (code, _) = state
+            .apply_device_revocation(&alice.user_id(), forged, here)
+            .unwrap_err();
+        assert!(matches!(code, ErrorCode::BadSignature));
+        assert!(!state.is_device_revoked(&laptop.user_id()));
+        // Alice's own is taken, and served for the account and the device.
+        revoke(&alice, &laptop, 2).unwrap();
+        assert!(state.is_device_revoked(&laptop.user_id()));
+        assert_eq!(state.device_revocations(&alice.user_id()).len(), 1);
+        assert_eq!(state.device_revocations(&laptop.user_id()).len(), 1);
+        assert_eq!(state.device_revocations(&stranger.user_id()).len(), 0);
+        // Said again: answered, and nothing doubled.
+        let logged = state.store.log_len().unwrap();
+        revoke(&alice, &laptop, 3).unwrap();
+        assert_eq!(state.device_revocations(&alice.user_id()).len(), 1);
+        assert_eq!(state.store.log_len().unwrap(), logged);
+        // A device on the published list that never published a bundle of
+        // its own (a link that did not finish) is alice's to revoke too.
+        let phone = Identity::generate();
+        let certificate = alice.certify_device(&phone.user_id(), "phone", 4).unwrap();
+        state
+            .store
+            .put_bundle(
+                &alice
+                    .key_bundle()
+                    .with_devices(&alice, vec![certificate])
+                    .unwrap(),
+            )
+            .unwrap();
+        revoke(&alice, &phone, 5).unwrap();
+        assert!(state.is_device_revoked(&phone.user_id()));
+        assert_eq!(state.device_revocations(&alice.user_id()).len(), 2);
+    }
+
+    #[test]
+    fn a_revoked_device_is_cut_off_for_good() {
+        use silver_protocol::{Content, seal};
+        let state = RelayState::new();
+        let here = addr(6);
+        let alice = Identity::generate();
+        let laptop = Identity::generate();
+        let certificate = alice
+            .certify_device(&laptop.user_id(), "laptop", 1)
+            .unwrap();
+        state.store.put_bundle(&alice.key_bundle()).unwrap();
+        state
+            .publish(
+                &laptop.user_id(),
+                laptop.key_bundle().as_device_of(certificate.clone()),
+                None,
+                here,
+            )
+            .unwrap();
+        assert_eq!(state.stats().devices, 1);
+        let to_laptop = |text: &str| {
+            seal(
+                &alice,
+                &laptop.key_bundle(),
+                Content::Text { body: text.into() },
+                0,
+            )
+            .unwrap()
+        };
+        // Online, with mail waiting.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        state.register(laptop.user_id(), tx);
+        state.route(to_laptop("one")).unwrap();
+        assert_eq!(state.queued_for(&laptop.user_id()), 1);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Outbound::Frame(frame)) if matches!(*frame, ServerFrame::Deliver { .. })
+        ));
+
+        state
+            .apply_device_revocation(
+                &alice.user_id(),
+                alice.revoke_device(&laptop.user_id(), 2),
+                here,
+            )
+            .unwrap();
+        // Told why, then closed; the mailbox is gone.
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Outbound::Frame(frame)) if matches!(*frame, ServerFrame::Error { code: ErrorCode::Forbidden, .. })
+        ));
+        assert!(matches!(rx.try_recv(), Ok(Outbound::Close(_))));
+        assert!(state.online().get(&laptop.user_id()).is_none());
+        assert_eq!(state.queued_for(&laptop.user_id()), 0);
+        // No login, no publish, no mail, and not back on the list.
+        assert_eq!(
+            state.device_refusal(&laptop.user_id()),
+            Some("this device has been revoked by its account")
+        );
+        let (code, _) = state
+            .publish(&laptop.user_id(), laptop.key_bundle(), None, here)
+            .unwrap_err();
+        assert!(matches!(code, ErrorCode::Forbidden));
+        let (code, _) = state.route(to_laptop("two")).unwrap_err();
+        assert!(matches!(code, ErrorCode::NotFound));
+        let (code, _) = state
+            .publish(
+                &alice.user_id(),
+                alice
+                    .key_bundle()
+                    .with_devices(&alice, vec![certificate])
+                    .unwrap(),
+                None,
+                here,
+            )
+            .unwrap_err();
+        assert!(matches!(code, ErrorCode::Forbidden));
+        // The bundle the log covers is still served, with the statement.
+        assert!(state.bundle(&laptop.user_id()).is_some());
+        assert_eq!(state.device_revocations(&laptop.user_id()).len(), 1);
+        assert_eq!(state.stats().devices, 1);
+        assert_eq!(state.stats().device_revocations, 1);
+    }
+
+    #[test]
+    fn a_device_claim_needs_a_live_account_here() {
+        let state = RelayState::new();
+        let here = addr(7);
+        let alice = Identity::generate();
+        let laptop = Identity::generate();
+        let certificate = alice
+            .certify_device(&laptop.user_id(), "laptop", 1)
+            .unwrap();
+        let claim = || laptop.key_bundle().as_device_of(certificate.clone());
+        // An account the relay does not know.
+        let (code, _) = state
+            .publish(&laptop.user_id(), claim(), None, here)
+            .unwrap_err();
+        assert!(matches!(code, ErrorCode::Forbidden));
+        state.store.put_bundle(&alice.key_bundle()).unwrap();
+        state
+            .publish(&laptop.user_id(), claim(), None, here)
+            .unwrap();
+        assert_eq!(state.device_refusal(&laptop.user_id()), None);
+        // The account dies: the device is told, and refused from then on.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        state.register(laptop.user_id(), tx);
+        state
+            .store
+            .put_bundle(
+                &alice
+                    .key_bundle()
+                    .with_devices(&alice, vec![certificate.clone()])
+                    .unwrap(),
+            )
+            .unwrap();
+        state.apply_revocation(alice.revocation(2), here).unwrap();
+        assert!(matches!(rx.try_recv(), Ok(Outbound::Frame(_))));
+        assert!(matches!(rx.try_recv(), Ok(Outbound::Close(_))));
+        assert_eq!(
+            state.device_refusal(&laptop.user_id()),
+            Some("this device's account has been revoked")
+        );
+        let (code, _) = state
+            .publish(&laptop.user_id(), claim(), None, here)
+            .unwrap_err();
+        assert!(matches!(code, ErrorCode::Forbidden));
+        // An identity that is no device is refused nothing.
+        assert_eq!(state.device_refusal(&Identity::generate().user_id()), None);
+    }
+
+    #[test]
+    fn device_bundles_ride_along_with_the_account() {
+        use silver_protocol::{PrekeySecret, Prekeys};
+        let state = RelayState::new();
+        let alice = Identity::generate();
+        let laptop = Identity::generate();
+        let phone = Identity::generate();
+        let ghost = Identity::generate();
+        let certificates: Vec<_> = [&laptop, &phone, &ghost]
+            .iter()
+            .map(|d| alice.certify_device(&d.user_id(), "", 1).unwrap())
+            .collect();
+        // The laptop is linked and has a prekey on deposit; the phone
+        // registered but never claimed the account; the ghost never came.
+        let signed = PrekeySecret::generate(1, 0).signed_by(&laptop);
+        let one_time = PrekeySecret::generate(2, 0).one_time();
+        state
+            .store
+            .put_bundle(
+                &laptop
+                    .key_bundle_with(Prekeys::classical(signed, Vec::new()))
+                    .as_device_of(certificates[0].clone()),
+            )
+            .unwrap();
+        state
+            .store
+            .set_one_time_prekeys(&laptop.user_id(), &[one_time])
+            .unwrap();
+        state.store.put_bundle(&phone.key_bundle()).unwrap();
+        let account = alice
+            .key_bundle()
+            .with_devices(&alice, certificates)
+            .unwrap();
+        state.store.put_bundle(&account).unwrap();
+
+        let served = state.device_bundles(&alice.user_id(), Some(&account));
+        assert_eq!(served.len(), 1, "the laptop alone");
+        assert_eq!(served[0].user_id, laptop.user_id());
+        assert_eq!(
+            served[0].prekeys.as_ref().unwrap().one_time.len(),
+            1,
+            "a prekey popped as on its own lookup"
+        );
+        assert_eq!(state.one_time_prekeys_left(&laptop.user_id()), 0);
+        assert!(state.device_bundles(&alice.user_id(), None).is_empty());
+        // Revoked: no longer along.
+        state
+            .apply_device_revocation(
+                &alice.user_id(),
+                alice.revoke_device(&laptop.user_id(), 3),
+                addr(8),
+            )
+            .unwrap();
+        assert!(
+            state
+                .device_bundles(&alice.user_id(), Some(&account))
+                .is_empty()
+        );
     }
 
     #[test]

@@ -431,8 +431,10 @@ async fn run_admin(socket: PathBuf, action: AdminAction) -> anyhow::Result<()> {
                 s.anonymous_submissions
             );
             println!(
-                "store: {} identities, {} messages in {} mailboxes ({}), {} files ({})",
+                "store: {} identities ({} linked devices, {} revoked), {} messages in {} mailboxes ({}), {} files ({})",
                 s.stats.bundles,
+                s.stats.devices,
+                s.stats.device_revocations,
                 s.stats.messages,
                 s.stats.mailboxes,
                 bytes_text(s.stats.bytes),

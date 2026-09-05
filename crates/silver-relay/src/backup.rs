@@ -148,7 +148,8 @@ enum Record {
         subject: Vec<u8>,
         json: Vec<u8>,
     },
-    /// Format 2: key packages on deposit and the group sequencer.
+    /// Format 2: key packages on deposit, the group sequencer and device
+    /// revocations.
     KeyPackage {
         user: Vec<u8>,
         seq: u64,
@@ -165,6 +166,14 @@ enum Record {
     Group {
         id: Vec<u8>,
         json: Vec<u8>,
+    },
+    DeviceRevocation {
+        device: Vec<u8>,
+        json: Vec<u8>,
+    },
+    DeviceRevocationByAccount {
+        account: Vec<u8>,
+        device: Vec<u8>,
     },
 }
 
@@ -192,6 +201,8 @@ impl Record {
             Self::KeyPackageUsed { .. } => 19,
             Self::KeyPackageLastResort { .. } => 20,
             Self::Group { .. } => 21,
+            Self::DeviceRevocation { .. } => 22,
+            Self::DeviceRevocationByAccount { .. } => 23,
         }
     }
 
@@ -279,6 +290,14 @@ impl Record {
             Self::Group { id, json } => {
                 put_bytes(w, id)?;
                 put_bytes(w, json)
+            }
+            Self::DeviceRevocation { device, json } => {
+                put_bytes(w, device)?;
+                put_bytes(w, json)
+            }
+            Self::DeviceRevocationByAccount { account, device } => {
+                put_bytes(w, account)?;
+                put_bytes(w, device)
             }
         }
     }
@@ -376,6 +395,14 @@ impl Record {
             21 => Self::Group {
                 id: get_bytes(r)?,
                 json: get_bytes(r)?,
+            },
+            22 => Self::DeviceRevocation {
+                device: get_bytes(r)?,
+                json: get_bytes(r)?,
+            },
+            23 => Self::DeviceRevocationByAccount {
+                account: get_bytes(r)?,
+                device: get_bytes(r)?,
             },
             other => bail!("record type {other} is not in backup format {FORMAT}"),
         })
@@ -551,6 +578,24 @@ fn each_record(
             json: v.value().to_vec(),
         })?;
     }
+    for item in txn.open_table(store::DEVICE_REVOCATIONS)?.iter()? {
+        let (k, v) = item?;
+        emit(Record::DeviceRevocation {
+            device: k.value().to_vec(),
+            json: v.value().to_vec(),
+        })?;
+    }
+    for item in txn
+        .open_table(store::DEVICE_REVOCATIONS_BY_ACCOUNT)?
+        .iter()?
+    {
+        let (k, _) = item?;
+        let (account, device) = k.value();
+        emit(Record::DeviceRevocationByAccount {
+            account: account.to_vec(),
+            device: device.to_vec(),
+        })?;
+    }
     Ok(())
 }
 
@@ -577,6 +622,8 @@ struct Tables<'t> {
     key_packages_used: Table<'t, (&'static [u8], &'static [u8]), ()>,
     key_package_last_resort: Table<'t, &'static [u8], &'static [u8]>,
     groups: Table<'t, &'static [u8], &'static [u8]>,
+    device_revocations: Table<'t, &'static [u8], &'static [u8]>,
+    device_revocations_by_account: Table<'t, (&'static [u8], &'static [u8]), ()>,
 }
 
 impl<'t> Tables<'t> {
@@ -603,6 +650,8 @@ impl<'t> Tables<'t> {
         txn.delete_table(store::KEY_PACKAGES_USED)?;
         txn.delete_table(store::KEY_PACKAGE_LAST_RESORT)?;
         txn.delete_table(store::GROUPS)?;
+        txn.delete_table(store::DEVICE_REVOCATIONS)?;
+        txn.delete_table(store::DEVICE_REVOCATIONS_BY_ACCOUNT)?;
         Ok(Self {
             bundles: txn.open_table(store::BUNDLES)?,
             one_time: txn.open_table(store::ONE_TIME)?,
@@ -625,6 +674,8 @@ impl<'t> Tables<'t> {
             key_packages_used: txn.open_table(store::KEY_PACKAGES_USED)?,
             key_package_last_resort: txn.open_table(store::KEY_PACKAGE_LAST_RESORT)?,
             groups: txn.open_table(store::GROUPS)?,
+            device_revocations: txn.open_table(store::DEVICE_REVOCATIONS)?,
+            device_revocations_by_account: txn.open_table(store::DEVICE_REVOCATIONS_BY_ACCOUNT)?,
         })
     }
 
@@ -704,6 +755,14 @@ impl<'t> Tables<'t> {
             }
             Record::Group { id, json } => {
                 self.groups.insert(id.as_slice(), json.as_slice())?;
+            }
+            Record::DeviceRevocation { device, json } => {
+                self.device_revocations
+                    .insert(device.as_slice(), json.as_slice())?;
+            }
+            Record::DeviceRevocationByAccount { account, device } => {
+                self.device_revocations_by_account
+                    .insert((account.as_slice(), device.as_slice()), ())?;
             }
         }
         Ok(())
@@ -1181,10 +1240,15 @@ mod tests {
         store
             .set_admin_setting("invite_token", Some("kept"))
             .unwrap();
-        // Lifecycle statements: bob revoked, carol handed over to a successor.
+        // Lifecycle statements: bob revoked, carol handed over to a successor,
+        // and a device of carol's revoked.
         store.set_revocation(&bob.revocation(40)).unwrap();
         let dave = Identity::generate();
         store.set_succession(&carol.succeed_to(&dave, 50)).unwrap();
+        let laptop = Identity::generate();
+        store
+            .set_device_revocation(&carol.revoke_device(&laptop.user_id(), 55))
+            .unwrap();
         (store, bob, carol)
     }
 
@@ -1268,6 +1332,13 @@ mod tests {
             store.succession(&carol.user_id()).unwrap()
         );
         assert!(restored.succession(&carol.user_id()).unwrap().is_some());
+        let revoked_devices = restored.device_revocations_by(&carol.user_id()).unwrap();
+        assert_eq!(revoked_devices.len(), 1);
+        assert!(
+            restored
+                .is_device_revoked(&revoked_devices[0].device)
+                .unwrap()
+        );
         assert_eq!(restored.schema_version().unwrap(), SCHEMA_VERSION);
         // An acknowledgement finds the restored index.
         let first = restored.queued(&bob.user_id()).unwrap().remove(0);
