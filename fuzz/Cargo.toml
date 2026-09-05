@@ -66,3 +66,10 @@ path = "fuzz_targets/stored.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "group_body"
+path = "fuzz_targets/group_body.rs"
+test = false
+doc = false
+bench = false

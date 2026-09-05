@@ -1,0 +1,128 @@
+{
+  "description": "What surrounds MLS in a group (PROTOCOL.md section 13): the group context extension and the leaf seal-key extension as bytes, the invite link key and join proof, the sequencer token hash, and the plaintext of an application message. The MLS messages themselves follow RFC 9420 and are not fixed here.",
+  "cases": [
+    {
+      "name": "extension",
+      "inputs": {
+        "kind": "extension",
+        "name": "the papers",
+        "admins": [
+          {
+            "signing_seed": "BIsT39RgarB5ig+jiTdH7qqhm1324Tazmk4MXGbcZGo=",
+            "dh_secret": "ivF7/NVZVxgo68ET180l9VuoxGhe1O9WctzPHYea7uE="
+          },
+          {
+            "signing_seed": "SVcuyb98jLsfLrds24qkphgcKqgasRtjjMa6R1ER84c=",
+            "dh_secret": "9VJKXsZLeSVCDYZmqEF7xXFEfzmjbsduJ0fhs+E/I0c="
+          },
+          {
+            "signing_seed": "ZNboRNQGYFq9YwY8qeVZ+pryafKPMVzG6a5nh72dxcQ=",
+            "dh_secret": "n1m5gH28HErp/fhXFmGolcIKeRwGwZ9MuqMcghCL03E="
+          }
+        ],
+        "invite_key": "9jidX8mpD3QlBB1X585lSB58MomwV4BvNeQOcbSWA7A=",
+        "created_at_ms": 1700000000000
+      },
+      "outputs": {
+        "kind": "extension",
+        "extension_type": 61440,
+        "admins": [
+          "2fYtRY8g36vouXvfE2ysTB9foJeA5L7AAZNEF5faBhsC",
+          "4dVZfkJ6UWtVBWpXSRTMMZ1xZdVACThwV39wpijLeUeN",
+          "BMnz2CXfYkwNGcm7fYd6cXv8GLkE2WZbdjwtvCnPhv3U"
+        ],
+        "encoded": "AQp0aGUgcGFwZXJzAGAYu8/dPUcJ/lfuu1SvPHC8UlhiimcjwrF6LPuhOLg2XzXsRDcnT1huqo+WayfiUybSRKSPUlSHW9Y9Z/mEyXM7meh6jVIXlsWbqezs2y5qbzoe2A6giL4QSrNPJg6tRAP2OJ1fyakPdCUEHVfnzmVIHnwyibBXgG815A5xtJYDsAAAAYvP5WgA"
+      }
+    },
+    {
+      "name": "extension_unnamed",
+      "inputs": {
+        "kind": "extension",
+        "name": "",
+        "admins": [
+          {
+            "signing_seed": "BIsT39RgarB5ig+jiTdH7qqhm1324Tazmk4MXGbcZGo=",
+            "dh_secret": "ivF7/NVZVxgo68ET180l9VuoxGhe1O9WctzPHYea7uE="
+          }
+        ],
+        "invite_key": "9jidX8mpD3QlBB1X585lSB58MomwV4BvNeQOcbSWA7A=",
+        "created_at_ms": 1700000000000
+      },
+      "outputs": {
+        "kind": "extension",
+        "extension_type": 61440,
+        "admins": [
+          "BMnz2CXfYkwNGcm7fYd6cXv8GLkE2WZbdjwtvCnPhv3U"
+        ],
+        "encoded": "AQAAIJnoeo1SF5bFm6ns7Nsuam86HtgOoIi+EEqzTyYOrUQD9jidX8mpD3QlBB1X585lSB58MomwV4BvNeQOcbSWA7AAAAGLz+VoAA=="
+      }
+    },
+    {
+      "name": "seal_key",
+      "inputs": {
+        "kind": "seal_key",
+        "member": {
+          "signing_seed": "SVcuyb98jLsfLrds24qkphgcKqgasRtjjMa6R1ER84c=",
+          "dh_secret": "9VJKXsZLeSVCDYZmqEF7xXFEfzmjbsduJ0fhs+E/I0c="
+        }
+      },
+      "outputs": {
+        "kind": "seal_key",
+        "extension_type": 61441,
+        "encoded": "SD8bZDwfg16MqEu8hSXTvBayTuYTzXn0NuPxfi+BISY="
+      }
+    },
+    {
+      "name": "invite",
+      "inputs": {
+        "kind": "invite",
+        "invite_key": "9jidX8mpD3QlBB1X585lSB58MomwV4BvNeQOcbSWA7A=",
+        "group": "nzOcxTaMQOTIY/1n4a58lL2467EL2Y9MPtak/kIG+ek=",
+        "joiner": {
+          "signing_seed": "BIsT39RgarB5ig+jiTdH7qqhm1324Tazmk4MXGbcZGo=",
+          "dh_secret": "ivF7/NVZVxgo68ET180l9VuoxGhe1O9WctzPHYea7uE="
+        }
+      },
+      "outputs": {
+        "kind": "invite",
+        "link_domain": "silver-messenger/v1/group-invite",
+        "link_key": "qmjNROxquC0jhwSGhKBhOg==",
+        "proof_domain": "silver-messenger/v1/group-join",
+        "joiner": "BMnz2CXfYkwNGcm7fYd6cXv8GLkE2WZbdjwtvCnPhv3U",
+        "proof": "vobnoQfCw5Miqbnowh6f9zLFloHECIAVnG+uFIvOuqY="
+      }
+    },
+    {
+      "name": "token",
+      "inputs": {
+        "kind": "token",
+        "token": "ujMPt2PClyLhy5kpZCsGLf7aPx1cfXyzv/Jtzd+luhY="
+      },
+      "outputs": {
+        "kind": "token",
+        "exporter_label": "silver-messenger/v1/group-sequencer",
+        "hash": "peHDPjyM6/blk6KAm08z51OEBg8q86cRsE4YzfX8lms="
+      }
+    },
+    {
+      "name": "plaintext",
+      "inputs": {
+        "kind": "plaintext",
+        "id": "0f0e0d0c-0b0a-4908-8706-050403020100",
+        "sent_at_ms": 1700000000000,
+        "content": {
+          "type": "text",
+          "body": "hello, everyone"
+        },
+        "head": {
+          "index": 12,
+          "hash": "g/BENDsXfcu3CIg2PbKq2edeXA3k+qRo8xb/nKLKick="
+        }
+      },
+      "outputs": {
+        "kind": "plaintext",
+        "encoded": "{\"id\":\"0f0e0d0c-0b0a-4908-8706-050403020100\",\"sent_at_ms\":1700000000000,\"content\":{\"type\":\"text\",\"body\":\"hello, everyone\"},\"head\":{\"index\":12,\"hash\":\"g/BENDsXfcu3CIg2PbKq2edeXA3k+qRo8xb/nKLKick=\"}}"
+      }
+    }
+  ]
+}

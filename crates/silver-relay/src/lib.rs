@@ -1776,6 +1776,13 @@ fn handle_frame(
             data,
         } => vec![state.put_blob(blob, index, total, &data, &mut conn.blobs, conn.addr)],
         ClientFrame::BlobGet { blob } => state.get_blob(&blob, &mut conn.blobs),
+        ClientFrame::KeyPackages { .. }
+        | ClientFrame::KeyPackage { .. }
+        | ClientFrame::GroupCreate { .. }
+        | ClientFrame::GroupCommit { .. } => vec![ServerFrame::error(
+            ErrorCode::Malformed,
+            "this relay does not serve groups",
+        )],
         ClientFrame::Ping => vec![ServerFrame::Pong],
     }
 }

@@ -33,6 +33,11 @@ use silver_protocol::envelope::{
     Body, Content, ENVELOPE_DOMAIN, Envelope, RatchetBody, ReceiptKind, Sequence, capability,
     open_bytes, seal_bytes_unsigned_with_rng, seal_bytes_with_rng,
 };
+use silver_protocol::group::{
+    BlobRef, EXTENSION_GROUP, EXTENSION_SEAL, GroupBody, GroupId, GroupKind, GroupPlaintext,
+    INVITE_LINK_DOMAIN, JOIN_PROOF_DOMAIN, SEQUENCER_LABEL, SilverGroup, decode_seal_key,
+    encode_seal_key, join_proof, link_key, token_hash, verify_join_proof,
+};
 use silver_protocol::identity::IdentitySecrets;
 use silver_protocol::lifecycle::{
     REVOCATION_DOMAIN, Revocation, SUCCESSION_ACCEPT_DOMAIN, SUCCESSION_DOMAIN, Succession,
@@ -1779,6 +1784,10 @@ enum BodyIn {
         head: Option<LogHead>,
     },
     Ratchet(RatchetBody),
+    /// Wrapped in a field: a group body has a `kind` of its own.
+    Group {
+        body: GroupBody,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1816,8 +1825,10 @@ fn body() {
         "body.json",
         "Bodies as encoded before sealing: JSON in the field order given, \
          padded with spaces to a multiple of 160 bytes. Plain (v1) bodies \
-         for each content kind, and ratchet bodies (v2, with and without \
-         the InitHeader).",
+         for each content kind, ratchet bodies (v2, with and without the \
+         InitHeader), and group bodies (v5: an application message inline, \
+         a Welcome parked in the blob store, a join request with its \
+         proof).",
         vec![
             ("text", plain(text("hello"), vec![], None)),
             (
@@ -1912,6 +1923,50 @@ fn body() {
                     message: first,
                 }),
             ),
+            (
+                "group_message_inline",
+                BodyIn::Group {
+                    body: GroupBody::inline(
+                        group_id(),
+                        GroupKind::Message,
+                        label32("an mls private message")[..24].to_vec(),
+                    ),
+                },
+            ),
+            (
+                "group_welcome_parked",
+                BodyIn::Group {
+                    body: GroupBody::parked(
+                        group_id(),
+                        GroupKind::Welcome,
+                        BlobRef {
+                            blob: "00112233445566778899aabbccddeeff".into(),
+                            key: BlobKey::from_parts(
+                                label32("welcome blob key"),
+                                label32("welcome blob nonce")[..24].try_into().unwrap(),
+                            ),
+                            chunks: 2,
+                            size: 70_000,
+                            sha256: label32("welcome hash"),
+                        },
+                    ),
+                },
+            ),
+            (
+                "group_join",
+                BodyIn::Group {
+                    body: GroupBody::inline(
+                        group_id(),
+                        GroupKind::Join,
+                        label32("a key package")[..24].to_vec(),
+                    )
+                    .with_join_proof(join_proof(
+                        &link_key(&label32("invite key"), &group_id()),
+                        &group_id(),
+                        &alice().identity().user_id(),
+                    )),
+                },
+            ),
         ],
         |input| {
             let body = match input {
@@ -1933,6 +1988,7 @@ fn body() {
                     *head,
                 ),
                 BodyIn::Ratchet(body) => Body::Ratchet(body.clone()),
+                BodyIn::Group { body } => Body::Group(body.clone()),
             };
             let encoded = body.encode().unwrap();
             assert_eq!(encoded.len() % 160, 0);
@@ -1962,6 +2018,7 @@ fn body() {
                     assert_eq!((&content, &caps, &head), (c, cs, h));
                 }
                 (Body::Ratchet(decoded), BodyIn::Ratchet(body)) => assert_eq!(&decoded, body),
+                (Body::Group(decoded), BodyIn::Group { body }) => assert_eq!(&decoded, body),
                 _ => panic!("decoded as the other kind"),
             }
             BodyOut {
@@ -1969,6 +2026,198 @@ fn body() {
                 encoded: String::from_utf8(encoded).unwrap(),
             }
         },
+    );
+}
+
+// ---------------------------------------------------------------------------
+// group.json
+
+fn group_id() -> GroupId {
+    GroupId(label32("group id"))
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum GroupIn {
+    /// The group context extension from its fields.
+    Extension {
+        name: String,
+        /// Identities whose user ids are the admins; sorted by the harness.
+        admins: Vec<Seeds>,
+        #[serde(with = "b64_array")]
+        invite_key: [u8; 32],
+        created_at_ms: u64,
+    },
+    /// The leaf node extension from an identity.
+    SealKey { member: Seeds },
+    /// The link key from an invite key, and the join proof from the link.
+    Invite {
+        #[serde(with = "b64_array")]
+        invite_key: [u8; 32],
+        group: GroupId,
+        joiner: Seeds,
+    },
+    /// What the relay stores of a sequencer token.
+    Token {
+        #[serde(with = "b64_array")]
+        token: [u8; 32],
+    },
+    /// The plaintext of an application message.
+    Plaintext(GroupPlaintext),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum GroupOut {
+    Extension {
+        extension_type: u16,
+        admins: Vec<UserId>,
+        encoded: Bytes,
+    },
+    SealKey {
+        extension_type: u16,
+        encoded: Bytes,
+    },
+    Invite {
+        link_domain: String,
+        #[serde(with = "b64_array")]
+        link_key: [u8; 16],
+        proof_domain: String,
+        joiner: UserId,
+        #[serde(with = "b64_array")]
+        proof: [u8; 32],
+    },
+    Token {
+        exporter_label: String,
+        #[serde(with = "b64_array")]
+        hash: [u8; 32],
+    },
+    Plaintext {
+        encoded: String,
+    },
+}
+
+fn replay_group(input: &GroupIn) -> GroupOut {
+    match input {
+        GroupIn::Extension {
+            name,
+            admins,
+            invite_key,
+            created_at_ms,
+        } => {
+            let mut ids: Vec<UserId> = admins.iter().map(|s| s.identity().user_id()).collect();
+            ids.sort();
+            let group = SilverGroup {
+                name: name.clone(),
+                admins: ids.clone(),
+                invite_key: *invite_key,
+                created_at_ms: *created_at_ms,
+            };
+            let encoded = group.encode().unwrap();
+            assert_eq!(SilverGroup::decode(&encoded).unwrap(), group);
+            GroupOut::Extension {
+                extension_type: EXTENSION_GROUP,
+                admins: ids,
+                encoded: Bytes(encoded),
+            }
+        }
+        GroupIn::SealKey { member } => {
+            let dh = member.identity().dh_public();
+            let encoded = encode_seal_key(&dh);
+            assert_eq!(decode_seal_key(&encoded).unwrap(), dh);
+            GroupOut::SealKey {
+                extension_type: EXTENSION_SEAL,
+                encoded: Bytes(encoded),
+            }
+        }
+        GroupIn::Invite {
+            invite_key,
+            group,
+            joiner,
+        } => {
+            let joiner = joiner.identity().user_id();
+            let key = link_key(invite_key, group);
+            let proof = join_proof(&key, group, &joiner);
+            assert!(verify_join_proof(invite_key, group, &joiner, &proof));
+            GroupOut::Invite {
+                link_domain: utf8(INVITE_LINK_DOMAIN),
+                link_key: key,
+                proof_domain: utf8(JOIN_PROOF_DOMAIN),
+                joiner,
+                proof,
+            }
+        }
+        GroupIn::Token { token } => GroupOut::Token {
+            exporter_label: SEQUENCER_LABEL.to_owned(),
+            hash: token_hash(token),
+        },
+        GroupIn::Plaintext(plain) => {
+            let encoded = plain.encode().unwrap();
+            assert_eq!(&GroupPlaintext::decode(&encoded).unwrap(), plain);
+            GroupOut::Plaintext {
+                encoded: String::from_utf8(encoded).unwrap(),
+            }
+        }
+    }
+}
+
+#[test]
+fn group() {
+    run(
+        "group.json",
+        "What surrounds MLS in a group (PROTOCOL.md section 13): the group \
+         context extension and the leaf seal-key extension as bytes, the \
+         invite link key and join proof, the sequencer token hash, and the \
+         plaintext of an application message. The MLS messages themselves \
+         follow RFC 9420 and are not fixed here.",
+        vec![
+            (
+                "extension",
+                GroupIn::Extension {
+                    name: "the papers".into(),
+                    admins: vec![alice(), bob(), seeds("carol")],
+                    invite_key: label32("invite key"),
+                    created_at_ms: 1_700_000_000_000,
+                },
+            ),
+            (
+                "extension_unnamed",
+                GroupIn::Extension {
+                    name: String::new(),
+                    admins: vec![alice()],
+                    invite_key: label32("invite key"),
+                    created_at_ms: 1_700_000_000_000,
+                },
+            ),
+            ("seal_key", GroupIn::SealKey { member: bob() }),
+            (
+                "invite",
+                GroupIn::Invite {
+                    invite_key: label32("invite key"),
+                    group: group_id(),
+                    joiner: alice(),
+                },
+            ),
+            (
+                "token",
+                GroupIn::Token {
+                    token: label32("sequencer token"),
+                },
+            ),
+            (
+                "plaintext",
+                GroupIn::Plaintext(GroupPlaintext {
+                    id: "0f0e0d0c-0b0a-4908-8706-050403020100".into(),
+                    sent_at_ms: 1_700_000_000_000,
+                    content: text("hello, everyone"),
+                    head: Some(LogHead {
+                        index: 12,
+                        hash: label32("log head"),
+                    }),
+                }),
+            ),
+        ],
+        replay_group,
     );
 }
 

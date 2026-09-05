@@ -4,13 +4,14 @@
 //! Diffie–Hellman with the recipient's long-term key, and an AEAD over
 //! `sender id || signature || body`. The relay sees only the recipient.
 //!
-//! The body inside is one of two things ([`Body`]): a plain v1 body (the
-//! message itself), or a ratchet body (v2, or the post-quantum and deniable
+//! The body inside is one of three things ([`Body`]): a plain v1 body (the
+//! message itself), a ratchet body (v2, or the post-quantum and deniable
 //! v4) carrying a message encrypted once more under a forward-secret
-//! [`Session`](crate::session::Session). The sealed layer is the same for
-//! all of them, so relays and v1 clients cannot tell them apart from the
-//! outside; a v4 body alone omits the sealed-layer signature, which the
-//! relay cannot see either.
+//! [`Session`](crate::session::Session), or a group body (v5) carrying one
+//! MLS message for one group ([`crate::group`]). The sealed layer is the
+//! same for all of them, so relays and v1 clients cannot tell them apart
+//! from the outside; v4 and v5 bodies omit the sealed-layer signature,
+//! which the relay cannot see either.
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
@@ -26,6 +27,7 @@ use crate::ProtocolError;
 use crate::blob::BlobKey;
 use crate::bundle::KeyBundle;
 use crate::encoding::{b64, b64_array};
+use crate::group::GroupBody;
 use crate::identity::{DhPublic, Identity, UserId};
 use crate::session::{InitHeader, RatchetMessage, SessionId};
 
@@ -198,6 +200,8 @@ pub enum Body {
         head: Option<crate::transparency::LogHead>,
     },
     Ratchet(RatchetBody),
+    /// One MLS message for one group (v5); see [`crate::group`].
+    Group(GroupBody),
 }
 
 /// Peek at the version before choosing how to parse.
@@ -258,6 +262,10 @@ impl Body {
                 head: *head,
             }),
             Self::Ratchet(body) => serde_json::to_vec(body),
+            Self::Group(body) => {
+                body.validate()?;
+                serde_json::to_vec(body)
+            }
         }
         .map_err(|e| ProtocolError::Malformed(e.to_string()))?;
         pad(&mut bytes);
@@ -287,6 +295,11 @@ impl Body {
             2 | 4 => Ok(Self::Ratchet(
                 serde_json::from_slice(bytes).map_err(malformed)?,
             )),
+            5 => {
+                let body: GroupBody = serde_json::from_slice(bytes).map_err(malformed)?;
+                body.validate()?;
+                Ok(Self::Group(body))
+            }
             other => Err(ProtocolError::Malformed(format!(
                 "unsupported body version {other}"
             ))),
@@ -378,10 +391,11 @@ pub fn seal_bytes_with_rng<R: RngCore + CryptoRng>(
 }
 
 /// Seal an already encoded [`Body`] for `recipient` *without* a sealed-layer
-/// signature (protocol v4, deniable). The sender's id still travels inside
-/// the ciphertext for routing; the session's AEAD and the handshake's
-/// key-binding are what authenticate it, and neither lets the recipient
-/// prove to anyone else who wrote it.
+/// signature (protocol v4, deniable; and v5, whose MLS message carries its
+/// own signature). The sender's id still travels inside the ciphertext for
+/// routing; for v4 the session's AEAD and the handshake's key-binding are
+/// what authenticate it, and neither lets the recipient prove to anyone
+/// else who wrote it.
 pub fn seal_bytes_unsigned(
     sender: &Identity,
     recipient: &KeyBundle,
@@ -464,8 +478,8 @@ fn seal_bytes_inner<R: RngCore + CryptoRng>(
 }
 
 /// Decrypt a v1 envelope addressed to `recipient` and verify the sender's
-/// signature. Fails on a v2 body; use [`open_bytes`] and [`Body::decode`]
-/// to handle both.
+/// signature. Fails on a v2 or v5 body; use [`open_bytes`] and
+/// [`Body::decode`] to handle every kind.
 pub fn open(recipient: &Identity, envelope: &Envelope) -> Result<Message, ProtocolError> {
     let opened = open_bytes(recipient, envelope)?;
     match Body::decode(&opened.body)? {
@@ -490,6 +504,7 @@ pub fn open(recipient: &Identity, envelope: &Envelope) -> Result<Message, Protoc
         Body::Ratchet(_) => Err(ProtocolError::Malformed(
             "body is encrypted under a session".into(),
         )),
+        Body::Group(_) => Err(ProtocolError::Malformed("body is a group message".into())),
     }
 }
 
@@ -537,14 +552,16 @@ pub fn open_bytes(recipient: &Identity, envelope: &Envelope) -> Result<Opened, P
     let body = &plaintext[96..];
 
     // A v4 body is deniable: it carries no sealed-layer signature, and is
-    // authenticated by the session it decrypts under instead. Every other
-    // version is signed by the sender's identity key, and that signature is
-    // required. The version is a field of the body, which is inside the
-    // ciphertext the AEAD authenticates, so a relay cannot flip a signed
-    // body to "deniable" to strip the check without breaking decryption.
+    // authenticated by the session it decrypts under instead. A v5 body
+    // carries none either: the MLS message inside is signed by the
+    // sender's leaf. Every other version is signed by the sender's identity
+    // key, and that signature is required. The version is a field of the
+    // body, which is inside the ciphertext the AEAD authenticates, so a
+    // relay cannot flip a signed body to "deniable" to strip the check
+    // without breaking decryption.
     let version: Version =
         serde_json::from_slice(body).map_err(|e| ProtocolError::Malformed(e.to_string()))?;
-    let signed = version.v != 4;
+    let signed = !matches!(version.v, 4 | 5);
     if signed {
         from.verify(
             ENVELOPE_DOMAIN,
@@ -837,6 +854,46 @@ mod tests {
             open_bytes(&bob, &plain).err(),
             Some(ProtocolError::InvalidSignature)
         );
+    }
+
+    #[test]
+    fn a_group_body_is_unsigned_at_the_sealed_layer_and_sized_like_a_text() {
+        use crate::group::{GroupBody, GroupId, GroupKind};
+        let alice = Identity::generate();
+        let bob = Identity::generate();
+        let group = GroupId::generate();
+        // An application message the size the spike measured for a short text.
+        let body = Body::Group(GroupBody::inline(
+            group,
+            GroupKind::Message,
+            vec![0x17; 156],
+        ));
+        let env = seal_bytes_unsigned(&alice, &bob.key_bundle(), &body.encode().unwrap()).unwrap();
+        let opened = open_bytes(&bob, &env).unwrap();
+        assert!(!opened.signed);
+        assert_eq!(opened.from, alice.user_id());
+        let Body::Group(back) = Body::decode(&opened.body).unwrap() else {
+            panic!("expected a group body");
+        };
+        assert_eq!(back.group, group);
+        assert_eq!(back.mls.as_deref(), Some(&[0x17u8; 156][..]));
+        // The same size on the wire as a short one-to-one text.
+        let text_size = seal(&alice, &bob.key_bundle(), text("hi"), 0)
+            .unwrap()
+            .ciphertext
+            .len();
+        assert_eq!(env.ciphertext.len(), text_size + PAD_BLOCK);
+        // A signed group body opens too (the signature is simply not needed).
+        let signed = seal_bytes(&alice, &bob.key_bundle(), &body.encode().unwrap()).unwrap();
+        assert!(!open_bytes(&bob, &signed).unwrap().signed);
+        // The v1 opener refuses it, and a malformed group body never encodes.
+        assert!(open(&bob, &env).is_err());
+        assert!(
+            Body::Group(GroupBody::inline(group, GroupKind::Join, vec![1]))
+                .encode()
+                .is_err()
+        );
+        assert!(Body::decode(br#"{"v":5,"group":"AAAA","kind":"message"}"#).is_err());
     }
 
     #[test]

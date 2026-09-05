@@ -19,6 +19,11 @@ pub mod capability {
     /// The client reads protocol-v4 ratchet bodies: the post-quantum
     /// ratchet, and the deniable body without the inner signature.
     pub const PQ_RATCHET: &str = "pq_ratchet";
+    /// The client takes part in groups (`docs/PROTOCOL.md` section 13): it
+    /// keeps key packages on deposit at its relay, reads v5 bodies, and can
+    /// be added to a group. Advertised only while a deposit exists, so a
+    /// contact whose bundle lacks it is not looked up for a key package.
+    pub const GROUPS: &str = "groups";
 }
 
 /// A user's X25519 public key, signed by their identity key, plus (for

@@ -43,14 +43,24 @@
 //!   ([`seal_bytes_unsigned`]) authenticate it without letting the
 //!   recipient prove to anyone else who wrote it.
 //!
-//! What is deliberately not provided: cover traffic. Deniability applies to
-//! v4 sessions; v1 and v2 bodies are still signed.
+//! * **Groups** (v5) – conversations of more than two people run on MLS
+//!   (RFC 9420) through OpenMLS in the client; this crate defines the
+//!   [`group`] body that carries one MLS message to one member inside the
+//!   same sealed envelope, the plaintext an application message holds, the
+//!   group's own extensions, the invite-link proofs and the epoch
+//!   sequencer's labels. Group messages are signed by the sender's MLS
+//!   leaf and are not deniable, which is why one-to-one conversations stay
+//!   on the ratchet.
+//!
+//! Deniability applies to v4 sessions; v1 and v2 bodies are still signed,
+//! and so are MLS messages.
 
 pub mod blob;
 pub mod bundle;
 pub mod encoding;
 pub mod envelope;
 mod error;
+pub mod group;
 pub mod identity;
 pub mod lifecycle;
 pub mod pq;
@@ -67,6 +77,7 @@ pub use envelope::{
     Sequence, open, open_bytes, seal, seal_bytes, seal_bytes_unsigned, seal_with,
 };
 pub use error::ProtocolError;
+pub use group::{GroupBody, GroupId, GroupKind, GroupPlaintext, SilverGroup};
 pub use identity::{DhPublic, Identity, IdentitySecrets, UserId};
 pub use lifecycle::{Revocation, Succession};
 pub use pq::{KemPublic, KemRatchetKey, PqPrekeySecret, SignedPqPrekey};

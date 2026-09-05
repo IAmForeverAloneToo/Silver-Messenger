@@ -256,7 +256,7 @@ mod tests {
             .unwrap();
         match Body::decode(&encoded).unwrap() {
             Body::Plain { content: c, .. } => assert_eq!(c, content),
-            Body::Ratchet(_) => panic!("plain expected"),
+            _ => panic!("plain expected"),
         }
     }
 }

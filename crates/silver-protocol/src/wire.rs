@@ -9,6 +9,7 @@ use crate::ProtocolError;
 use crate::bundle::KeyBundle;
 use crate::encoding::{b64, b64_array};
 use crate::envelope::Envelope;
+use crate::group::GroupId;
 use crate::identity::{Identity, UserId};
 use crate::lifecycle::{Revocation, Succession};
 
@@ -53,6 +54,27 @@ pub mod feature {
     /// on login and lookup, and hands out entries on `LogSince`, so clients
     /// can check what they were shown and gossip the head to each other.
     pub const TRANSPARENCY: &str = "transparency";
+    /// The relay keeps key packages on deposit and hands them out
+    /// (`KeyPackages`, `KeyPackage`) and runs the group epoch sequencer
+    /// (`GroupCreate`, `GroupCommit`); `docs/PROTOCOL.md` section 13.
+    /// Without it, clients show groups as unavailable on this relay.
+    pub const GROUPS: &str = "groups";
+}
+
+/// One key package on deposit, as the relay stores it: opaque bytes with
+/// the reference and the lifetime the owner states. The relay never parses
+/// MLS; the fetcher verifies what it gets.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyPackageDeposit {
+    /// The MLS `KeyPackageRef` (32 bytes for the one ciphersuite).
+    #[serde(with = "b64_array")]
+    pub r#ref: [u8; 32],
+    /// When the package's lifetime ends; the relay drops it then.
+    pub expires_at_ms: u64,
+    /// The TLS-serialised `KeyPackage`, at most
+    /// [`crate::group::MAX_KEY_PACKAGE_BYTES`].
+    #[serde(with = "b64")]
+    pub data: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,6 +148,43 @@ pub enum ClientFrame {
     BlobGet {
         blob: String,
     },
+    /// Replace our key package deposit (section 13): whatever is not
+    /// listed is forgotten, as for prekeys. At most
+    /// [`crate::group::MAX_KEY_PACKAGES`] plus the last-resort one, which is
+    /// handed out again and again once the others are gone. Authenticated
+    /// connections only; answered with `KeyPackageStatus`.
+    KeyPackages {
+        packages: Vec<KeyPackageDeposit>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        last_resort: Option<KeyPackageDeposit>,
+    },
+    /// Ask for one of `user_id`'s key packages, to add them to a group.
+    /// Only for connections that deposited their own; answered with
+    /// `KeyPackageResult`.
+    KeyPackage {
+        user_id: UserId,
+    },
+    /// Create the sequencer entry for `group` at `epoch`, with the hash of
+    /// the token that moves it on. Idempotent for the same three values;
+    /// `exists` otherwise. On any connection.
+    GroupCreate {
+        group: GroupId,
+        epoch: u64,
+        #[serde(with = "b64_array")]
+        next: [u8; 32],
+    },
+    /// Move `group` from `epoch` to `epoch + 1`: `token` must hash to what
+    /// the entry holds, and `next` is the hash of the token for the epoch
+    /// after. The first committer wins; the second gets `stale`. On any
+    /// connection.
+    GroupCommit {
+        group: GroupId,
+        epoch: u64,
+        #[serde(with = "b64_array")]
+        token: [u8; 32],
+        #[serde(with = "b64_array")]
+        next: [u8; 32],
+    },
     Ping,
 }
 
@@ -146,6 +205,11 @@ pub enum ErrorCode {
     NotFound,
     /// The relay has no room for more file chunks.
     StorageFull,
+    /// A `GroupCommit` named an epoch the sequencer is not at; the answer
+    /// says where it stands.
+    Stale,
+    /// A `GroupCreate` for an entry that exists with other values.
+    Exists,
     Internal,
 }
 
@@ -246,12 +310,46 @@ pub enum ServerFrame {
         #[serde(with = "b64")]
         data: Vec<u8>,
     },
+    /// After `KeyPackages`: how many packages are on deposit and which
+    /// refs were handed out since the last deposit.
+    KeyPackageStatus {
+        remaining: u32,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        consumed: Vec<KeyPackageRef>,
+    },
+    /// One of `user_id`'s key packages, or `null` when they have none on
+    /// deposit; `last_resort` says whether it is the one that is handed
+    /// out again and again.
+    KeyPackageResult {
+        user_id: UserId,
+        package: Option<KeyPackageDeposit>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        last_resort: bool,
+    },
+    /// The sequencer entry for `group` now stands at `epoch`.
+    GroupState {
+        group: GroupId,
+        epoch: u64,
+    },
+    /// A `GroupCreate` or `GroupCommit` was refused; on `stale`, `epoch` is
+    /// where the entry stands.
+    GroupRejected {
+        group: GroupId,
+        code: ErrorCode,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        epoch: Option<u64>,
+    },
     Pong,
     Error {
         code: ErrorCode,
         message: String,
     },
 }
+
+/// A key package reference, as it appears in `KeyPackageStatus`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct KeyPackageRef(#[serde(with = "b64_array")] pub [u8; 32]);
 
 impl ClientFrame {
     pub fn encode(&self) -> String {
@@ -425,6 +523,86 @@ mod tests {
                 pq_consumed: Vec::new(),
             }
         );
+    }
+
+    #[test]
+    fn group_frames_round_trip() {
+        let group = GroupId([3; 32]);
+        let deposit = KeyPackageDeposit {
+            r#ref: [1; 32],
+            expires_at_ms: 5,
+            data: vec![9; 40],
+        };
+        for frame in [
+            ClientFrame::KeyPackages {
+                packages: vec![deposit.clone()],
+                last_resort: Some(deposit.clone()),
+            },
+            ClientFrame::KeyPackages {
+                packages: Vec::new(),
+                last_resort: None,
+            },
+            ClientFrame::KeyPackage {
+                user_id: Identity::generate().user_id(),
+            },
+            ClientFrame::GroupCreate {
+                group,
+                epoch: 0,
+                next: [2; 32],
+            },
+            ClientFrame::GroupCommit {
+                group,
+                epoch: 7,
+                token: [4; 32],
+                next: [5; 32],
+            },
+        ] {
+            let json = frame.encode();
+            assert_eq!(ClientFrame::decode(&json).unwrap(), frame, "{json}");
+        }
+        let none = ClientFrame::KeyPackages {
+            packages: Vec::new(),
+            last_resort: None,
+        }
+        .encode();
+        assert!(!none.contains("last_resort"));
+        for frame in [
+            ServerFrame::KeyPackageStatus {
+                remaining: 3,
+                consumed: vec![KeyPackageRef([1; 32])],
+            },
+            ServerFrame::KeyPackageResult {
+                user_id: Identity::generate().user_id(),
+                package: Some(deposit),
+                last_resort: true,
+            },
+            ServerFrame::KeyPackageResult {
+                user_id: Identity::generate().user_id(),
+                package: None,
+                last_resort: false,
+            },
+            ServerFrame::GroupState { group, epoch: 8 },
+            ServerFrame::GroupRejected {
+                group,
+                code: ErrorCode::Stale,
+                epoch: Some(9),
+            },
+            ServerFrame::GroupRejected {
+                group,
+                code: ErrorCode::NotFound,
+                epoch: None,
+            },
+        ] {
+            let json = frame.encode();
+            assert_eq!(ServerFrame::decode(&json).unwrap(), frame, "{json}");
+        }
+        let rejected = ServerFrame::GroupRejected {
+            group,
+            code: ErrorCode::Stale,
+            epoch: Some(9),
+        }
+        .encode();
+        assert!(rejected.contains("\"code\":\"stale\""));
     }
 
     #[test]

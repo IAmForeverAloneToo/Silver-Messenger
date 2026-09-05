@@ -65,6 +65,7 @@ ML-KEM interface reproduces the ciphertexts exactly.
 | `envelope.json` | the sealed-sender layer from a fixed seed: signed (v1) and deniable (v4) |
 | `body.json` | the padded encoding of each body kind |
 | `transparency.json` | the subject, bundle and statement leaves, and a three-entry chain with every hash and head |
+| `group.json` | the group context and leaf seal-key extensions as bytes, the invite link key and join proof, the sequencer token hash, and an application message's plaintext (section 13); the MLS messages themselves follow RFC 9420 |
 | `blob.json` | file chunk nonces, associated data and ciphertexts |
 
 ## Changing them

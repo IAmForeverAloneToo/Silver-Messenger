@@ -11,6 +11,10 @@ use silver_protocol::envelope::{
     Body, Content, MAX_BODY_BYTES, PAD_BLOCK, ReceiptKind, Sequence, capability, open_bytes,
     seal_bytes, seal_bytes_unsigned,
 };
+use silver_protocol::group::{
+    BlobRef, GroupBody, GroupId, GroupKind, GroupPlaintext, MAX_INLINE_MLS_BYTES, MAX_MEMBERS,
+    MAX_NAME_BYTES, SilverGroup, join_proof, link_key, verify_join_proof,
+};
 use silver_protocol::identity::IdentitySecrets;
 use silver_protocol::prekey::{PrekeySecret, Prekeys};
 use silver_protocol::session::Session;
@@ -149,7 +153,9 @@ proptest! {
                         prop_assert_eq!(cs, caps);
                         prop_assert_eq!(h, head);
                     }
-                    Body::Ratchet(_) => prop_assert!(false, "a plain body decoded as a ratchet body"),
+                    Body::Ratchet(_) | Body::Group(_) => {
+                        prop_assert!(false, "a plain body decoded as another kind")
+                    }
                 }
             }
             Err(ProtocolError::TooLarge(n)) => prop_assert!(n > MAX_BODY_BYTES),
@@ -175,6 +181,171 @@ proptest! {
                 prop_assert_eq!(n % PAD_BLOCK, 0);
                 prop_assert!(len + FRAMING + PAD_BLOCK > MAX_BODY_BYTES);
             }
+            Err(e) => prop_assert!(false, "unexpected error {e:?}"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Group bodies and extensions
+
+fn group_kind() -> impl Strategy<Value = GroupKind> {
+    prop_oneof![
+        Just(GroupKind::Welcome),
+        Just(GroupKind::Handshake),
+        Just(GroupKind::Message),
+        Just(GroupKind::Join),
+        Just(GroupKind::Rejoin),
+    ]
+}
+
+fn blob_ref() -> impl Strategy<Value = BlobRef> {
+    (1u64..=silver_protocol::blob::MAX_FILE_BYTES, hash()).prop_map(|(size, sha256)| BlobRef {
+        blob: "00112233445566778899aabbccddeeff".into(),
+        key: BlobKey::from_parts(sha256, [7u8; 24]),
+        chunks: silver_protocol::blob::chunk_count(size),
+        size,
+        sha256,
+    })
+}
+
+fn group_body() -> impl Strategy<Value = GroupBody> {
+    (
+        hash(),
+        group_kind(),
+        prop::option::of(bytes(1..40_000)),
+        blob_ref(),
+        hash(),
+    )
+        .prop_map(|(id, kind, inline, blob, proof)| {
+            let body = match inline {
+                Some(mls) => GroupBody::inline(GroupId(id), kind, mls),
+                None => GroupBody::parked(GroupId(id), kind, blob),
+            };
+            if kind == GroupKind::Join {
+                body.with_join_proof(proof)
+            } else {
+                body
+            }
+        })
+}
+
+/// A group extension with admins drawn from a small pool of identities.
+fn silver_group() -> impl Strategy<Value = SilverGroup> {
+    let pool: Vec<UserId> = (1u8..=8).map(|seed| identity(seed).user_id()).collect();
+    (
+        text(MAX_NAME_BYTES).prop_filter("fits and has no control characters", |name| {
+            name.len() <= MAX_NAME_BYTES && !name.chars().any(char::is_control)
+        }),
+        prop::collection::btree_set(0usize..8, 1..=8),
+        hash(),
+        any::<u64>(),
+    )
+        .prop_map(
+            move |(name, picks, invite_key, created_at_ms)| SilverGroup {
+                name,
+                admins: {
+                    let mut admins: Vec<UserId> = picks.into_iter().map(|i| pool[i]).collect();
+                    admins.sort();
+                    admins
+                },
+                invite_key,
+                created_at_ms,
+            },
+        )
+}
+
+proptest! {
+    /// A group body of any shape encodes to padded steps and decodes back,
+    /// or is too large; the inline limit is a client policy, not a wire
+    /// rule, so a body over it still round-trips while it fits the body.
+    #[test]
+    fn group_body_round_trips_or_is_too_large(body in group_body()) {
+        match Body::Group(body.clone()).encode() {
+            Ok(encoded) => {
+                prop_assert_eq!(encoded.len() % PAD_BLOCK, 0);
+                prop_assert!(encoded.len() <= MAX_BODY_BYTES);
+                match Body::decode(&encoded).unwrap() {
+                    Body::Group(back) => prop_assert_eq!(back, body),
+                    _ => prop_assert!(false, "a group body decoded as another kind"),
+                }
+            }
+            Err(ProtocolError::TooLarge(n)) => {
+                prop_assert!(n > MAX_BODY_BYTES || body.mls.as_ref().is_some_and(|m| m.len() > MAX_BODY_BYTES));
+                prop_assert!(body.mls.as_ref().is_some_and(|m| m.len() > MAX_INLINE_MLS_BYTES / 2));
+            }
+            Err(e) => prop_assert!(false, "unexpected error {e:?}"),
+        }
+    }
+
+    /// A body with both payloads, neither, or a proof on the wrong kind never encodes.
+    #[test]
+    fn a_group_body_needs_one_payload_and_a_proof_only_for_a_join(
+        body in group_body(),
+        blob in blob_ref(),
+        proof in hash(),
+    ) {
+        let both = GroupBody { mls: Some(vec![1]), blob: Some(blob), ..body.clone() };
+        prop_assert!(Body::Group(both).encode().is_err());
+        let neither = GroupBody { mls: None, blob: None, ..body.clone() };
+        prop_assert!(Body::Group(neither).encode().is_err());
+        let flipped = if body.kind == GroupKind::Join {
+            GroupBody { join: None, ..body }
+        } else {
+            body.with_join_proof(proof)
+        };
+        prop_assert!(Body::Group(flipped).encode().is_err());
+    }
+
+    /// The group extension encodes and decodes to itself for any valid
+    /// contents, and any single damaged byte either changes the meaning
+    /// visibly or is refused, never read as the same group.
+    #[test]
+    fn group_extension_round_trips(group in silver_group(), at in any::<usize>()) {
+        let encoded = group.encode().unwrap();
+        prop_assert_eq!(SilverGroup::decode(&encoded).unwrap(), group.clone());
+        prop_assert!(group.admins.len() <= MAX_MEMBERS);
+        let mut damaged = encoded.clone();
+        flip(&mut damaged, at);
+        if let Ok(other) = SilverGroup::decode(&damaged) {
+            prop_assert_ne!(other, group);
+        }
+    }
+
+    /// A join proof verifies for exactly the link, group and joiner it was
+    /// made for.
+    #[test]
+    fn join_proofs_bind_link_group_and_joiner(
+        invite_key in hash(),
+        other_key in hash(),
+        group in hash(),
+        other_group in hash(),
+        joiner in 1u8..4,
+        other in 1u8..4,
+    ) {
+        let group = GroupId(group);
+        let joiner_id = identity(joiner).user_id();
+        let proof = join_proof(&link_key(&invite_key, &group), &group, &joiner_id);
+        prop_assert!(verify_join_proof(&invite_key, &group, &joiner_id, &proof));
+        if other_key != invite_key {
+            prop_assert!(!verify_join_proof(&other_key, &group, &joiner_id, &proof));
+        }
+        if other_group != group.0 {
+            prop_assert!(!verify_join_proof(&invite_key, &GroupId(other_group), &joiner_id, &proof));
+        }
+        if other != joiner {
+            prop_assert!(!verify_join_proof(&invite_key, &group, &identity(other).user_id(), &proof));
+        }
+    }
+
+    /// An application message's plaintext round-trips for any content.
+    #[test]
+    fn group_plaintext_round_trips(content in content(), id in text(30), sent_at_ms in any::<u64>(), head in head()) {
+        prop_assume!(!id.is_empty() && id.len() <= 64);
+        let plain = GroupPlaintext { id, sent_at_ms, content, head };
+        match plain.encode() {
+            Ok(encoded) => prop_assert_eq!(GroupPlaintext::decode(&encoded).unwrap(), plain),
+            Err(ProtocolError::TooLarge(n)) => prop_assert!(n > MAX_BODY_BYTES),
             Err(e) => prop_assert!(false, "unexpected error {e:?}"),
         }
     }

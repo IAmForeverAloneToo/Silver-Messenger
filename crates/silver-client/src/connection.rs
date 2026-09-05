@@ -1199,6 +1199,12 @@ async fn session(
                         }
                     }
                     ServerFrame::Pong => {}
+                    ServerFrame::KeyPackageStatus { .. }
+                    | ServerFrame::KeyPackageResult { .. }
+                    | ServerFrame::GroupState { .. }
+                    | ServerFrame::GroupRejected { .. } => {
+                        debug!("ignoring a group frame; this client keeps no groups yet");
+                    }
                     ServerFrame::Challenge { .. } | ServerFrame::AuthOk { .. } => {
                         debug!("ignoring unexpected handshake frame mid-session");
                     }
@@ -1597,6 +1603,17 @@ async fn deliver(
                 }
             }
         }
+        Ok(Body::Group(_)) => {
+            let _ = ev_tx
+                .send(ClientEvent::Undecryptable {
+                    from,
+                    id,
+                    reason: "it is a group message, which this client does not take part in yet"
+                        .into(),
+                })
+                .await;
+            return;
+        }
         Err(e) => {
             warn!("malformed body in envelope {id} from {from}: {e}");
             let _ = ev_tx
@@ -1635,10 +1652,10 @@ async fn deliver(
                 })))
                 .await;
         }
-        Ok(Body::Ratchet(_)) => {
+        Ok(Body::Ratchet(_) | Body::Group(_)) => {
             let _ = ev_tx
                 .send(ClientEvent::Error(format!(
-                    "envelope {id} nests a session inside a session; dropped"
+                    "envelope {id} nests another body inside a session; dropped"
                 )))
                 .await;
         }

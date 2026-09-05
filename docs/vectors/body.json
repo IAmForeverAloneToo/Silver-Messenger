@@ -1,5 +1,5 @@
 {
-  "description": "Bodies as encoded before sealing: JSON in the field order given, padded with spaces to a multiple of 160 bytes. Plain (v1) bodies for each content kind, and ratchet bodies (v2, with and without the InitHeader).",
+  "description": "Bodies as encoded before sealing: JSON in the field order given, padded with spaces to a multiple of 160 bytes. Plain (v1) bodies for each content kind, ratchet bodies (v2, with and without the InitHeader), and group bodies (v5: an application message inline, a Welcome parked in the blob store, a join request with its proof).",
   "cases": [
     {
       "name": "text",
@@ -194,6 +194,66 @@
       },
       "outputs": {
         "encoded": "{\"v\":2,\"session\":\"NuFUNG1i4gD3iZc72kLg0Q==\",\"message\":{\"header\":{\"dh\":\"YlMA9lLbc2F0EpF+2Vq2OdrJ2B8xyayvBmUqVebTYRk=\",\"pn\":0,\"n\":0},\"ciphertext\":\"XDdVjh2Zb7D6Ko/T2QVhxtNYK6Yu\"}}                                                                                                                                                ",
+        "encoded_len": 320
+      }
+    },
+    {
+      "name": "group_message_inline",
+      "inputs": {
+        "kind": "group",
+        "body": {
+          "v": 5,
+          "group": "nzOcxTaMQOTIY/1n4a58lL2467EL2Y9MPtak/kIG+ek=",
+          "kind": "message",
+          "mls": "Nx9jK4IcilCZKGO1f14hFDW1NwlaJCxb"
+        }
+      },
+      "outputs": {
+        "encoded": "{\"v\":5,\"group\":\"nzOcxTaMQOTIY/1n4a58lL2467EL2Y9MPtak/kIG+ek=\",\"kind\":\"message\",\"mls\":\"Nx9jK4IcilCZKGO1f14hFDW1NwlaJCxb\"}                                        ",
+        "encoded_len": 160
+      }
+    },
+    {
+      "name": "group_welcome_parked",
+      "inputs": {
+        "kind": "group",
+        "body": {
+          "v": 5,
+          "group": "nzOcxTaMQOTIY/1n4a58lL2467EL2Y9MPtak/kIG+ek=",
+          "kind": "welcome",
+          "blob": {
+            "blob": "00112233445566778899aabbccddeeff",
+            "key": {
+              "key": "X54QSTKFe5UsZVIfRjCpI6Uww7ss4t8mvFPejaRok+s=",
+              "nonce": "6X39knO8IuROSbJ190Zf1oqaAlHtUSr3"
+            },
+            "chunks": 2,
+            "size": 70000,
+            "sha256": "kHw79hohJMmD5VdrEvBkL5akZkNFWGPL97/lC57wU2w="
+          }
+        }
+      },
+      "outputs": {
+        "encoded": "{\"v\":5,\"group\":\"nzOcxTaMQOTIY/1n4a58lL2467EL2Y9MPtak/kIG+ek=\",\"kind\":\"welcome\",\"blob\":{\"blob\":\"00112233445566778899aabbccddeeff\",\"key\":{\"key\":\"X54QSTKFe5UsZVIfRjCpI6Uww7ss4t8mvFPejaRok+s=\",\"nonce\":\"6X39knO8IuROSbJ190Zf1oqaAlHtUSr3\"},\"chunks\":2,\"size\":70000,\"sha256\":\"kHw79hohJMmD5VdrEvBkL5akZkNFWGPL97/lC57wU2w=\"}}      ",
+        "encoded_len": 320
+      }
+    },
+    {
+      "name": "group_join",
+      "inputs": {
+        "kind": "group",
+        "body": {
+          "v": 5,
+          "group": "nzOcxTaMQOTIY/1n4a58lL2467EL2Y9MPtak/kIG+ek=",
+          "kind": "join",
+          "mls": "G5evzgnzrBdoIS3yUiGgB/60NogAY0AM",
+          "join": {
+            "proof": "vobnoQfCw5Miqbnowh6f9zLFloHECIAVnG+uFIvOuqY="
+          }
+        }
+      },
+      "outputs": {
+        "encoded": "{\"v\":5,\"group\":\"nzOcxTaMQOTIY/1n4a58lL2467EL2Y9MPtak/kIG+ek=\",\"kind\":\"join\",\"mls\":\"G5evzgnzrBdoIS3yUiGgB/60NogAY0AM\",\"join\":{\"proof\":\"vobnoQfCw5Miqbnowh6f9zLFloHECIAVnG+uFIvOuqY=\"}}                                                                                                                                           ",
         "encoded_len": 320
       }
     }
