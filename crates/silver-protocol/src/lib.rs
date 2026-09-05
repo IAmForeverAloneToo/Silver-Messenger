@@ -56,6 +56,7 @@ pub mod lifecycle;
 pub mod pq;
 pub mod prekey;
 pub mod session;
+pub mod transparency;
 pub mod verify;
 pub mod wire;
 
@@ -71,6 +72,7 @@ pub use lifecycle::{Revocation, Succession};
 pub use pq::{KemPublic, KemRatchetKey, PqPrekeySecret, SignedPqPrekey};
 pub use prekey::{OneTimePrekey, PrekeySecret, Prekeys, SignedPrekey};
 pub use session::{InitHeader, RatchetHeader, RatchetMessage, Session, SessionId};
+pub use transparency::{EntryKind, LogEntry, LogHead, LogPosition};
 pub use verify::safety_number;
 pub use wire::{ClientFrame, ErrorCode, ServerFrame};
 

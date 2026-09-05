@@ -1435,6 +1435,7 @@ impl App {
             "relay" => self.cmd_relay(&rest),
             "revoke" => self.cmd_revoke(&rest),
             "rotate" => self.cmd_rotate(&rest),
+            "log" | "keylog" => self.cmd_log(),
             "lock" => self.cmd_lock(),
             "quit" | "q" | "exit" => self.should_quit = true,
             other => match commands::closest(other) {
@@ -2602,6 +2603,7 @@ impl App {
             }
             ClientEvent::PeerRevoked { revocation } => self.handle_peer_revoked(revocation),
             ClientEvent::PeerSucceeded { succession } => self.handle_peer_succeeded(succession),
+            ClientEvent::Transparency(event) => self.handle_transparency(event),
             ClientEvent::Error(text) => {
                 self.system(Level::Warn, text.clone());
                 self.toast(text);
@@ -2697,6 +2699,145 @@ impl App {
         self.toast(format!("{name} rotated their identity. See System."));
         // Fetch and pin the successor's key so messages can flow again.
         self.lookup_contact(new, None);
+    }
+
+    // --- key transparency ------------------------------------------------------
+
+    /// The client checked the relay's key log: say what it found. A first
+    /// sync is a quiet note; everything else means the relay's story to us
+    /// and to a contact differ, which is the one thing the log is for.
+    fn handle_transparency(&mut self, event: silver_client::TransparencyEvent) {
+        use silver_client::TransparencyEvent as T;
+        match event {
+            T::Synced { head } => {
+                self.system(
+                    Level::Info,
+                    format!(
+                        "The relay's key log checks out up to entry {} ({}). /log shows where a contact's keys stand in it.",
+                        head.index,
+                        short_hash(&head.hash)
+                    ),
+                );
+            }
+            T::Lookup { who, problem } => {
+                let name = self.contact_name(&who);
+                self.system(
+                    Level::Warn,
+                    format!(
+                        "KEY LOG: {problem} (looking up {name}). The key was refused and nothing was sent with it. The relay is showing you something it is not showing everyone; do not trust keys from it until this is explained."
+                    ),
+                );
+                self.toast(format!(
+                    "Key refused for {name}: the relay's log disagrees. See System."
+                ));
+            }
+            T::Fork { peer, at } => {
+                let whose = match peer {
+                    Some(peer) => format!("{} was shown", self.contact_name(&peer)),
+                    None => "the relay itself now shows".to_owned(),
+                };
+                self.system(
+                    Level::Warn,
+                    format!(
+                        "KEY LOG FORK at entry {at}: {whose} a different key log than you have. The relay keeps two versions of its log, so it is lying to one of you about somebody's keys. Compare safety numbers (/verify) with the contacts that matter before trusting any key from this relay."
+                    ),
+                );
+                self.toast("The relay's key log forks! See System.");
+            }
+            T::Withheld { peer, index } => {
+                let whose = match peer {
+                    Some(peer) => format!("{} has verified", self.contact_name(&peer)),
+                    None => "it itself claims".to_owned(),
+                };
+                self.system(
+                    Level::Warn,
+                    format!(
+                        "KEY LOG: the relay will not hand over its key log up to entry {index}, which {whose}. It is hiding entries from you; do not trust keys from it until this is explained."
+                    ),
+                );
+                self.toast("The relay is withholding its key log. See System.");
+            }
+            T::Rewound { from, to } => {
+                self.system(
+                    Level::Warn,
+                    format!(
+                        "KEY LOG: the relay's key log went backwards, from {from} entries to {to}. Either it was restored from an older backup or its log was replaced. It is being replayed from the start; compare safety numbers (/verify) with any contact whose key changes from here."
+                    ),
+                );
+                self.toast("The relay's key log went backwards. See System.");
+            }
+        }
+    }
+
+    /// Where the relay's key log stands, and where the selected contact
+    /// appears in it.
+    fn cmd_log(&mut self) {
+        let Some(log) = self.client.transparency().cloned() else {
+            self.toast("This client keeps no key log.");
+            return;
+        };
+        if !self
+            .client
+            .relay_supports(silver_protocol::wire::feature::TRANSPARENCY)
+        {
+            self.system(
+                Level::Info,
+                "This relay keeps no key transparency log (it is older than 0.8.0), so what it shows about keys cannot be checked against one; safety numbers (/verify) are the only check.",
+            );
+            self.select(0);
+            return;
+        }
+        let selected = self
+            .selected_contact()
+            .map(|c| (c.user_id, c.display_name()));
+        let (head, verified_at, latest) = {
+            let log = log.lock().unwrap_or_else(|e| e.into_inner());
+            let latest = selected.as_ref().map(|(id, _)| log.latest(id));
+            (log.head(), log.verified_at_ms(), latest)
+        };
+        let checked = if verified_at == 0 {
+            "not verified yet".to_owned()
+        } else {
+            format!(
+                "verified {}s ago",
+                now_ms().saturating_sub(verified_at) / 1000
+            )
+        };
+        self.system(
+            Level::Info,
+            format!(
+                "Relay key log: {} entries, head {}, {checked}. Every key you are shown is checked against it, and contacts compare heads inside their messages.",
+                head.index,
+                short_hash(&head.hash)
+            ),
+        );
+        if let (Some((_, name)), Some(latest)) = (selected, latest) {
+            match latest {
+                Some(l) => {
+                    let what = match l.kind {
+                        Some(silver_protocol::EntryKind::Bundle) => "a key",
+                        Some(silver_protocol::EntryKind::Revocation) => "a revocation",
+                        Some(silver_protocol::EntryKind::Succession) => "a handover",
+                        None => "an entry",
+                    };
+                    self.system(
+                        Level::Info,
+                        format!(
+                            "{name} last appears at entry {} ({what}){}.",
+                            l.last.index,
+                            l.bundle
+                                .map(|b| format!(", current key logged at entry {}", b.index))
+                                .unwrap_or_default()
+                        ),
+                    );
+                }
+                None => self.system(
+                    Level::Info,
+                    format!("{name} does not appear in the log yet (they have not published a key on this relay since it started logging)."),
+                ),
+            }
+        }
+        self.select(0);
     }
 
     // --- contact requests ------------------------------------------------------
@@ -3233,6 +3374,11 @@ async fn with_progress<T>(
             },
         }
     }
+}
+
+/// The first bytes of a log hash, for telling heads apart by eye.
+fn short_hash(hash: &[u8; 32]) -> String {
+    hash[..4].iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Crossterm's reader blocks, so it gets a thread of its own.

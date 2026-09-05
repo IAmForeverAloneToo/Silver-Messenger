@@ -148,6 +148,13 @@ struct PlainBody {
     /// What the sending client understands beyond text; see [`capability`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     caps: Vec<String>,
+    /// The head of the relay's transparency log as the sender last verified
+    /// it, for the recipient to compare with its own view (section 11).
+    /// Inside the encrypted body, so the relay can neither read nor alter
+    /// it. Absent from clients before 0.8.0 and from clients whose relay
+    /// keeps no log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    head: Option<crate::transparency::LogHead>,
 }
 
 /// A ratchet body: a plain body encrypted again under a session.
@@ -171,6 +178,8 @@ pub enum Body {
         sequence: Sequence,
         content: Content,
         caps: Vec<String>,
+        /// The sender's last verified transparency log head, if any.
+        head: Option<crate::transparency::LogHead>,
     },
     Ratchet(RatchetBody),
 }
@@ -194,11 +203,24 @@ impl Body {
         sequence: Sequence,
         caps: &[&str],
     ) -> Self {
+        Self::plain_with_caps_and_head(content, sent_at_ms, sequence, caps, None)
+    }
+
+    /// A plain body that advertises capabilities and carries the sender's
+    /// last verified transparency log head for the recipient to compare.
+    pub fn plain_with_caps_and_head(
+        content: Content,
+        sent_at_ms: u64,
+        sequence: Sequence,
+        caps: &[&str],
+        head: Option<crate::transparency::LogHead>,
+    ) -> Self {
         Self::Plain {
             sent_at_ms,
             sequence,
             content,
             caps: caps.iter().map(|c| (*c).to_owned()).collect(),
+            head,
         }
     }
 
@@ -210,12 +232,14 @@ impl Body {
                 sequence,
                 content,
                 caps,
+                head,
             } => serde_json::to_vec(&PlainBody {
                 sent_at_ms: *sent_at_ms,
                 epoch: sequence.epoch,
                 seq: sequence.seq,
                 content: content.clone(),
                 caps: caps.clone(),
+                head: *head,
             }),
             Self::Ratchet(body) => serde_json::to_vec(body),
         }
@@ -241,6 +265,7 @@ impl Body {
                     },
                     content: body.content,
                     caps: body.caps,
+                    head: body.head,
                 })
             }
             2 | 4 => Ok(Self::Ratchet(
@@ -272,6 +297,10 @@ pub struct Message {
     pub signed: bool,
     /// Capabilities the sender advertised; see [`capability`].
     pub caps: Vec<String>,
+    /// The relay's transparency log head as the sender last verified it,
+    /// for the recipient to compare with its own; see
+    /// [`crate::transparency`]. Absent from older clients.
+    pub head: Option<crate::transparency::LogHead>,
 }
 
 /// The sealed layer of an envelope, opened: who sent it and the raw body.
@@ -401,6 +430,7 @@ pub fn open(recipient: &Identity, envelope: &Envelope) -> Result<Message, Protoc
             sequence,
             content,
             caps,
+            head,
         } => Ok(Message {
             id: opened.id,
             from: opened.from,
@@ -411,6 +441,7 @@ pub fn open(recipient: &Identity, envelope: &Envelope) -> Result<Message, Protoc
             forward_secret: false,
             signed: opened.signed,
             caps,
+            head,
         }),
         Body::Ratchet(_) => Err(ProtocolError::Malformed(
             "body is encrypted under a session".into(),

@@ -45,7 +45,7 @@ all. The gaps that matter are listed at the end with what closes them.
 | 1.5.2 Serialisation not used with untrusted clients unless protected | Met | JSON only (serde), no native serialisation; every peer-controlled object is signed or AEAD-authenticated before its contents are used. |
 | 1.5.3 Input validation in a trusted layer | Met | Relay validates frames before acting; the client validates bodies after decrypting, in `silver-client`, not the UI. |
 | 1.5.4 Output encoding near the interpreter | Met | Text is sanitised for the terminal at the rendering layer, with a test that drives the real backend and asserts no escape reaches it. |
-| 1.6.1 Key management policy | Met | PROTOCOL.md sections 1, 2, 5 and 8: what each key is, who signs it, how long it lives, when it rotates. |
+| 1.6.1 Key management policy | Met | PROTOCOL.md sections 1, 2, 5 and 8: what each key is, who signs it, how long it lives, when it rotates; section 10 for retiring or replacing a key, section 11 for the log every served key is checked against. |
 | 1.6.2 Key consumers protected from key exposure | Partly | Secrets are `Zeroize`d on drop and kept out of `Debug` output; the running process holds them in memory (threat model: device thief with memory). |
 | 1.6.3 Key replacement | Met | Prekeys rotate on a schedule; an identity key is revoked with a pre-signed certificate (`/revoke`) or replaced with a cross-signed succession (`/rotate`), served by the relay and verified by contacts (PROTOCOL.md section 10). |
 | 1.6.4 Client-side secrets | Met | The data key is wrapped by the OS key store or a passphrase; nothing is embedded in the binary. |

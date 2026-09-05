@@ -418,6 +418,11 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
             invite_token: config.invite_token.clone(),
             sessions: Some(sessions),
             submit_authenticated: args.submit_authenticated,
+            transparency: Some(
+                silver_client::LogStore::load(Some(store.transparency_path()), store.cipher())
+                    .context("loading the relay's key log")?
+                    .shared(),
+            ),
         };
         let (client, events) = Client::spawn(relay_url.clone(), Arc::new(identity), options)?;
         let app = app::App::new(

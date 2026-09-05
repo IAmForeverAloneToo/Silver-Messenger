@@ -253,6 +253,18 @@ data directory and are not in the backup; copy the directory along with
 the backups if the relay terminates TLS itself, or accept that a rebuilt
 relay presents a new key and pinned clients need the new pin.
 
+The backup also carries the key transparency log (`PROTOCOL.md` section
+11): one small entry per key change or lifecycle statement, which never
+shrinks (a few hundred bytes per identity per prekey rotation; not a
+sizing concern for the networks a single relay serves). Restoring an older
+backup puts the log back to where it stood then. Every client that had
+verified further reports once that the relay's key log went backwards and
+replays it from the start; that is the expected consequence of a restore,
+and a reason to restore the newest backup you have. A relay whose log went
+backwards *without* a restore is a relay whose database was tampered with
+or replaced, and clients treat the two alike, so if you see the report
+without having restored, look for the cause.
+
 ## Updates
 
 New versions are announced on the releases page and its feed. Read the

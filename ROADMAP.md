@@ -320,9 +320,10 @@ container story. Operations come before reach.
 Each item here is a line in the threat model's table of gaps. The
 handshake was post-quantum; the ratchet after it was not, and now is (41).
 Messages were not deniable, and now are (42). An identity could not be
-rotated or revoked, and now can (43). A relay that shows one person a
-substitute key is still caught only when two people compare safety numbers
-by hand (44). Nothing has been formally modelled yet (45).
+rotated or revoked, and now can (43). A relay that showed one person a
+stale key or a different log was caught only when two people compared
+safety numbers by hand, and is now caught by their clients gossiping the
+log head (44). Nothing has been formally modelled yet (45).
 
 41. [x] **Post-quantum ratchet** (L). An ML-KEM ratchet next to the
         Diffie–Hellman one, so healing after a compromise is post-quantum
@@ -350,15 +351,19 @@ by hand (44). Nothing has been formally modelled yet (45).
         `/rotate` drive them; the relay refuses to publish a revoked
         identity ever again. OpenPGP revocation certificates and Matrix
         cross-signing are the references.
-44. [ ] **Key transparency, small edition** (L). The relay keeps a
-        hash-chained, append-only log of every bundle it serves, and
-        clients carry the log head inside their encrypted messages and
+44. [x] **Key transparency, small edition** (L). The relay keeps a
+        hash-chained, append-only log of every bundle change and
+        lifecycle statement it serves, and clients replay it, refuse a
+        key that is not the latest logged one or a statement the relay
+        hides, and carry the log head inside their encrypted messages to
         compare what they were shown. A relay that shows one person a
-        substitute key is then caught by the two clients gossiping, with
-        nobody reading numbers aloud. CONIKS and Signal's key
-        transparency are the references; with one relay per network the
-        gossip between clients is the essential part, since the relay is
-        the only log server.
+        stale key or a different log is then caught by the two clients
+        gossiping, with nobody reading numbers aloud. CONIKS and Signal's
+        key transparency are the references; with one relay per network
+        the gossip between clients is the essential part, since the relay
+        is the only log server. (The id being the key, the relay never
+        could substitute an identity; the log catches freshness and
+        equivocation, which signatures cannot.)
 45. [ ] **Formal model and test vectors** (M). The handshake and the
         ratchet modelled in Verifpal or Tamarin with the properties the
         threat model claims; published test vectors for the envelope, the

@@ -48,7 +48,8 @@ use silver_protocol::wire::{
     verify_auth_bound,
 };
 use silver_protocol::{
-    Envelope, KeyBundle, MAX_CIPHERTEXT_BYTES, Revocation, Succession, UserId, now_ms,
+    Envelope, KeyBundle, LogEntry, LogHead, LogPosition, MAX_CIPHERTEXT_BYTES, Revocation,
+    Succession, UserId, now_ms,
 };
 use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
@@ -511,7 +512,10 @@ impl RelayState {
         &self.policy
     }
 
-    pub(crate) fn store(&self) -> &Store {
+    /// The store itself. Public for tests that make the relay misbehave
+    /// (a key served but never logged); not part of the operator surface.
+    #[doc(hidden)]
+    pub fn store(&self) -> &Store {
         &self.store
     }
 
@@ -851,6 +855,7 @@ impl RelayState {
             feature::PREKEYS.to_owned(),
             feature::PQ_PREKEYS.to_owned(),
             feature::LIFECYCLE.to_owned(),
+            feature::TRANSPARENCY.to_owned(),
         ];
         if self.policy.anonymous_sends_per_minute > 0 {
             features.push(feature::ANONYMOUS_SEND.to_owned());
@@ -930,6 +935,36 @@ impl RelayState {
             error!("reading revocation: {e:#}");
             false
         })
+    }
+
+    /// Where the transparency log stands.
+    pub fn log_head(&self) -> LogHead {
+        self.store.log_head().unwrap_or_else(|e| {
+            error!("reading the log head: {e:#}");
+            LogHead::EMPTY
+        })
+    }
+
+    /// The log head and where `user` last appears in the log, for a
+    /// lookup result.
+    pub fn log_view(&self, user: &UserId) -> (Option<LogHead>, Option<LogPosition>) {
+        let logged = self.store.log_latest(user).unwrap_or_else(|e| {
+            error!("reading the log: {e:#}");
+            None
+        });
+        (Some(self.log_head()), logged)
+    }
+
+    /// A page of log entries after `index`, and the head.
+    pub fn log_since(&self, index: u64) -> (Vec<LogEntry>, LogHead) {
+        let entries = self
+            .store
+            .log_since(index, silver_protocol::transparency::LOG_PAGE)
+            .unwrap_or_else(|e| {
+                error!("reading the log: {e:#}");
+                Vec::new()
+            });
+        (entries, self.log_head())
     }
 
     /// The lifecycle statements the relay holds for `user`, to attach to a
@@ -1539,6 +1574,7 @@ async fn handle_socket(
     let auth_ok = ServerFrame::AuthOk {
         user_id: user,
         features: state.features(),
+        head: Some(state.log_head()),
     };
     if send(&mut sink, &auth_ok).await.is_err() {
         state.unregister(&user, session_id);
@@ -1682,6 +1718,17 @@ fn handle_frame(
                 Err((code, message)) => vec![ServerFrame::error(code, message)],
             }
         }
+        ClientFrame::LogSince { index } => {
+            if !conn.lookups.try_take() {
+                warn!(who = %state.who(me), "lookup rate limit hit");
+                return vec![ServerFrame::error(
+                    ErrorCode::RateLimited,
+                    "too many lookups; slow down",
+                )];
+            }
+            let (entries, head) = state.log_since(index);
+            vec![ServerFrame::LogEntries { entries, head }]
+        }
         ClientFrame::Lookup { user_id } => {
             if !conn.lookups.try_take() {
                 warn!(who = %state.who(me), "lookup rate limit hit");
@@ -1697,11 +1744,14 @@ fn handle_frame(
                 state.bundle(&user_id)
             };
             let (revocation, succession) = state.lifecycle(&user_id);
+            let (head, logged) = state.log_view(&user_id);
             vec![ServerFrame::LookupResult {
                 user_id,
                 bundle,
                 revocation,
                 succession,
+                head,
+                logged,
             }]
         }
         ClientFrame::Revoke { revocation } => match state.apply_revocation(revocation, conn.addr) {

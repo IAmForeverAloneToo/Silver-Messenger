@@ -528,6 +528,17 @@ it does not, is in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
   re-pinned and its conversation carried across, with a nudge to compare
   safety numbers again. Needs a relay on 0.8.0; older relays still pass on
   the copy pushed inside a message.
+* **Key transparency**: the relay keeps a hash-chained, append-only log of
+  every key it serves and every revocation or handover, and the client
+  replays it. A key the relay shows that is not the latest one in its log
+  (an old prekey, or one it never logged) is refused, as is a hidden
+  revocation, and every message carries the log head inside its encrypted
+  body so two contacts compare what the relay told each of them: a relay
+  keeping two versions of its log is reported as a fork by the next
+  message between them. `/log` shows where the log stands. Since your id
+  *is* your key, the relay never could substitute an identity; the log
+  catches what signatures cannot, staleness and different stories to
+  different people. Needs a relay on 0.8.0.
 * **Sequence numbers**: every message carries, inside the encrypted body, a
   per-conversation counter plus a random per-installation epoch. The
   recipient drops replays, points out gaps, and notices when a contact has
@@ -545,10 +556,8 @@ it does not, is in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
   connection; it shows a pending mark (`⋯`) until the relay accepts it, and a
   failure mark (`✗`) if the relay refuses it for good.
 
-What it does **not** do yet: cover traffic; key transparency, so a relay
-that shows one person a substitute key is still caught only when two people
-compare safety numbers by hand; a formal model of the handshake and
-ratchet. The ordered plan is in [ROADMAP.md](ROADMAP.md).
+What it does **not** do yet: cover traffic; a formal model of the handshake
+and ratchet. The ordered plan is in [ROADMAP.md](ROADMAP.md).
 
 ## Development
 

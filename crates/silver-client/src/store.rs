@@ -43,6 +43,7 @@ const SESSIONS_FILE: &str = "sessions.json";
 const CONFIG_FILE: &str = "config.json";
 const CONTACTS_FILE: &str = "contacts.json";
 const OUTBOX_FILE: &str = "outbox.json";
+const TRANSPARENCY_FILE: &str = crate::transparency::LOG_NAME;
 const REQUESTS_FILE: &str = "requests.json";
 const BLOCKED_FILE: &str = "blocked.json";
 const HISTORY_DIR: &str = "history";
@@ -594,6 +595,7 @@ impl Store {
             CONFIG_FILE,
             CONTACTS_FILE,
             OUTBOX_FILE,
+            TRANSPARENCY_FILE,
             REQUESTS_FILE,
             BLOCKED_FILE,
         ] {
@@ -953,6 +955,11 @@ impl Store {
     /// Where the client keeps not-yet-accepted outgoing envelopes.
     pub fn outbox_path(&self) -> PathBuf {
         self.root.join(OUTBOX_FILE)
+    }
+
+    /// Where the relay's transparency log, as replayed, is kept.
+    pub fn transparency_path(&self) -> PathBuf {
+        self.root.join(TRANSPARENCY_FILE)
     }
 
     /// Where received files are saved.

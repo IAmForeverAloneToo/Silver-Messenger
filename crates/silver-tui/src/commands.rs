@@ -161,6 +161,12 @@ pub const COMMANDS: &[CommandInfo] = &[
         "confirm",
         "move to a new identity; contacts re-pin automatically, then restart (needs /rotate confirm)",
     ),
+    cmd(
+        "log",
+        &["keylog"],
+        "",
+        "where the relay's key transparency log stands, and where the selected contact appears in it",
+    ),
     cmd("help", &["h", "?"], "", "show this help"),
     cmd(
         "lock",

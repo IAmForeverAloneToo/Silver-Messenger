@@ -26,6 +26,8 @@ pub const MAX_FRAME_BYTES: usize = 128 * 1024;
 /// Default WebSocket path served by the relay.
 pub const WS_PATH: &str = "/ws";
 
+use crate::transparency::{LogEntry, LogHead, LogPosition};
+
 /// Relay feature names advertised in [`ServerFrame::AuthOk`].
 pub mod feature {
     /// The relay stores prekeys, hands out one-time prekeys on lookup and
@@ -46,6 +48,11 @@ pub mod feature {
     /// their next lookup. A relay without this drops them; contacts still
     /// learn from statements pushed inside messages.
     pub const LIFECYCLE: &str = "lifecycle";
+    /// The relay keeps a hash-chained log of every bundle and lifecycle
+    /// statement it serves (`docs/PROTOCOL.md` section 11), tells its head
+    /// on login and lookup, and hands out entries on `LogSince`, so clients
+    /// can check what they were shown and gossip the head to each other.
+    pub const TRANSPARENCY: &str = "transparency";
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +82,12 @@ pub enum ClientFrame {
     /// Ask for someone's key bundle.
     Lookup {
         user_id: UserId,
+    },
+    /// Ask for the transparency log entries after `index` (section 11),
+    /// answered with `LogEntries`; a page at a time, so the client asks
+    /// again from the last index it got until it reaches the head.
+    LogSince {
+        index: u64,
     },
     /// Declare an identity dead. The revocation is self-signed, so the
     /// relay accepts it without the connection authenticating as that
@@ -154,6 +167,10 @@ pub enum ServerFrame {
         /// omit the field.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         features: Vec<String>,
+        /// The head of the relay's transparency log right now; absent on
+        /// relays without [`feature::TRANSPARENCY`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        head: Option<LogHead>,
     },
     Published,
     /// Sent after `Published` to clients that publish prekeys: how many
@@ -179,6 +196,21 @@ pub enum ServerFrame {
         /// A succession the relay holds for this identity (it moved).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         succession: Option<Succession>,
+        /// The head of the transparency log at the time of the answer, and
+        /// where this identity last appears in it; both absent on relays
+        /// without [`feature::TRANSPARENCY`], `logged` also when nothing
+        /// has been logged for the identity.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        head: Option<LogHead>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        logged: Option<LogPosition>,
+    },
+    /// Transparency log entries in answer to `LogSince`, in order, and the
+    /// head the relay stands at; `entries` is empty when `index` was the
+    /// head already.
+    LogEntries {
+        entries: Vec<LogEntry>,
+        head: LogHead,
     },
     /// The relay accepted the envelope with this id for delivery.
     Sent {
@@ -350,9 +382,13 @@ mod tests {
         let auth_ok = ServerFrame::AuthOk {
             user_id: id,
             features: vec![feature::PREKEYS.into(), feature::ANONYMOUS_SEND.into()],
+            head: Some(LogHead {
+                index: 3,
+                hash: [7; 32],
+            }),
         }
         .encode();
-        assert!(auth_ok.contains("\"features\""));
+        assert!(auth_ok.contains("\"features\"") && auth_ok.contains("\"head\""));
         assert!(matches!(
             serde_json::from_str(&auth_ok).unwrap(),
             OldServerFrame::AuthOk { user_id } if user_id == id
@@ -367,7 +403,8 @@ mod tests {
             ServerFrame::decode(&bare).unwrap(),
             ServerFrame::AuthOk {
                 user_id: id,
-                features: Vec::new()
+                features: Vec::new(),
+                head: None,
             }
         );
         let status = ServerFrame::PrekeyStatus {

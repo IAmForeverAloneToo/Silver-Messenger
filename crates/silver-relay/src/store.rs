@@ -11,8 +11,9 @@ use std::path::Path;
 use anyhow::Context;
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use silver_protocol::prekey::OneTimePrekey;
+use silver_protocol::transparency::{EntryKind, Hash, LogEntry, LogHead, LogPosition, subject};
 use silver_protocol::{
-    DhPublic, Envelope, KeyBundle, Revocation, SignedPqPrekey, Succession, UserId,
+    DhPublic, Envelope, KeyBundle, Revocation, SignedPqPrekey, Succession, UserId, now_ms,
 };
 
 /// A deposit of one-time keys: `(owner, key id) -> encoded public key` for
@@ -55,6 +56,15 @@ pub(crate) const REVOCATIONS: TableDefinition<&[u8], &[u8]> = TableDefinition::n
 /// `old identity -> Succession JSON`: a cross-signed statement that the
 /// identity moved to a new one, served on lookups of the old identity.
 pub(crate) const SUCCESSIONS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("successions");
+/// `index -> LogEntry JSON`: the transparency log, one entry per bundle
+/// change or lifecycle statement, each hashing the one before
+/// (`docs/PROTOCOL.md` section 11). Append-only; nothing removes from it.
+pub(crate) const LOG: TableDefinition<u64, &[u8]> = TableDefinition::new("transparency_log");
+/// `subject -> Latest JSON`: where each identity last appears in the log
+/// and the leaf of its last logged bundle, so a republished, unchanged
+/// bundle adds no entry.
+pub(crate) const LOG_LATEST: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("transparency_latest");
 /// `blob id -> BlobMeta JSON` for encrypted file chunks on deposit.
 pub(crate) const BLOBS: TableDefinition<&str, &[u8]> = TableDefinition::new("blobs");
 /// `(blob id, chunk index) -> ciphertext`.
@@ -68,7 +78,7 @@ const BLOB_BYTES: &str = "blob_bytes";
 /// a step in [`migrate`] to bring older databases along; a database
 /// stamped with a higher version was written by a newer relay and is
 /// refused rather than misread.
-pub const SCHEMA_VERSION: u64 = 1;
+pub const SCHEMA_VERSION: u64 = 2;
 pub(crate) const SCHEMA: &str = "schema";
 
 /// The database was written by a newer relay than this one.
@@ -95,13 +105,134 @@ impl std::error::Error for SchemaTooNew {}
 /// One step of the schema, from `from` to `from + 1`. The caller has
 /// opened, and so created, every table already; a version whose only
 /// change is a new table has nothing left to do here.
-pub(crate) fn migrate(_txn: &redb::WriteTransaction, from: u64) -> anyhow::Result<()> {
+pub(crate) fn migrate(txn: &redb::WriteTransaction, from: u64) -> anyhow::Result<()> {
     match from {
         // 0 is the unstamped layout of 0.6.0 and before; 1 added the bans
         // and admin tables.
         0 => Ok(()),
+        // 2 added the transparency log. Every bundle and lifecycle statement
+        // the relay already holds is logged now, in one entry each, so that
+        // from here on nothing it serves is missing from the log. The
+        // version moves so that an older relay, which would serve changes
+        // without logging them, refuses this database instead.
+        1 => seed_log(txn),
         other => anyhow::bail!("no migration from schema version {other}"),
     }
+}
+
+/// Log everything already stored: bundles first, in key order, then
+/// revocations and successions. A database that already has a log (a
+/// backup taken with one but stamped older, say) is left alone: seeding
+/// it again would enter every statement twice.
+fn seed_log(txn: &redb::WriteTransaction) -> anyhow::Result<()> {
+    if head_in(&txn.open_table(LOG)?)?.index > 0 {
+        return Ok(());
+    }
+    let at_ms = now_ms();
+    let bundles: Vec<KeyBundle> = txn
+        .open_table(BUNDLES)?
+        .iter()?
+        .map(|item| Ok(serde_json::from_slice(item?.1.value())?))
+        .collect::<anyhow::Result<_>>()?;
+    for bundle in &bundles {
+        log_bundle_in(txn, bundle, at_ms)?;
+    }
+    let revocations: Vec<Revocation> = txn
+        .open_table(REVOCATIONS)?
+        .iter()?
+        .map(|item| Ok(serde_json::from_slice(item?.1.value())?))
+        .collect::<anyhow::Result<_>>()?;
+    for revocation in &revocations {
+        append_log(
+            txn,
+            subject(&revocation.identity),
+            EntryKind::Revocation,
+            revocation.transparency_leaf(),
+            at_ms,
+        )?;
+    }
+    let successions: Vec<Succession> = txn
+        .open_table(SUCCESSIONS)?
+        .iter()?
+        .map(|item| Ok(serde_json::from_slice(item?.1.value())?))
+        .collect::<anyhow::Result<_>>()?;
+    for succession in &successions {
+        append_log(
+            txn,
+            subject(&succession.old),
+            EntryKind::Succession,
+            succession.transparency_leaf(),
+            at_ms,
+        )?;
+    }
+    Ok(())
+}
+
+/// Where an identity last appears in the log, and the leaf of its last
+/// logged bundle (which a later statement entry does not replace).
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct Latest {
+    position: LogPosition,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bundle_leaf: Option<Hash>,
+}
+
+fn read_latest(txn: &redb::WriteTransaction, subject: &Hash) -> anyhow::Result<Option<Latest>> {
+    Ok(match txn.open_table(LOG_LATEST)?.get(subject.as_slice())? {
+        Some(guard) => Some(serde_json::from_slice(guard.value())?),
+        None => None,
+    })
+}
+
+fn head_in<T: ReadableTable<u64, &'static [u8]>>(log: &T) -> anyhow::Result<LogHead> {
+    Ok(match log.last()? {
+        Some((_, guard)) => serde_json::from_slice::<LogEntry>(guard.value())?.head(),
+        None => LogHead::EMPTY,
+    })
+}
+
+/// Append one entry after the current head and note it as the subject's
+/// latest. For a bundle the leaf is also kept as the subject's last
+/// bundle leaf.
+fn append_log(
+    txn: &redb::WriteTransaction,
+    subject: Hash,
+    kind: EntryKind,
+    leaf: Hash,
+    at_ms: u64,
+) -> anyhow::Result<LogEntry> {
+    let mut log = txn.open_table(LOG)?;
+    let head = head_in(&log)?;
+    let entry = LogEntry::after(&head, subject, kind, leaf, at_ms);
+    log.insert(entry.index, serde_json::to_vec(&entry)?.as_slice())?;
+    let previous = read_latest(txn, &subject)?.unwrap_or_default();
+    let latest = Latest {
+        position: LogPosition {
+            index: entry.index,
+            leaf,
+        },
+        bundle_leaf: match kind {
+            EntryKind::Bundle => Some(leaf),
+            _ => previous.bundle_leaf,
+        },
+    };
+    txn.open_table(LOG_LATEST)?
+        .insert(subject.as_slice(), serde_json::to_vec(&latest)?.as_slice())?;
+    Ok(entry)
+}
+
+/// Log `bundle` unless its leaf is the one already logged for its owner.
+fn log_bundle_in(
+    txn: &redb::WriteTransaction,
+    bundle: &KeyBundle,
+    at_ms: u64,
+) -> anyhow::Result<Option<LogEntry>> {
+    let subject = subject(&bundle.user_id);
+    let leaf = bundle.transparency_leaf();
+    if read_latest(txn, &subject)?.and_then(|l| l.bundle_leaf) == Some(leaf) {
+        return Ok(None);
+    }
+    append_log(txn, subject, EntryKind::Bundle, leaf, at_ms).map(Some)
 }
 
 /// Limits applied to each recipient's mailbox.
@@ -297,6 +428,8 @@ impl Store {
         txn.open_table(ADMIN)?;
         txn.open_table(REVOCATIONS)?;
         txn.open_table(SUCCESSIONS)?;
+        txn.open_table(LOG)?;
+        txn.open_table(LOG_LATEST)?;
         Ok(())
     }
 
@@ -439,12 +572,20 @@ impl Store {
 
     // --- identity lifecycle ----------------------------------------------------
 
-    /// Record a self-signed revocation for its identity.
+    /// Record a self-signed revocation for its identity, logging it in the
+    /// same transaction.
     pub fn set_revocation(&self, revocation: &Revocation) -> anyhow::Result<()> {
         let bytes = serde_json::to_vec(revocation)?;
         let txn = self.db.begin_write()?;
         txn.open_table(REVOCATIONS)?
             .insert(revocation.identity.as_bytes().as_slice(), bytes.as_slice())?;
+        append_log(
+            &txn,
+            subject(&revocation.identity),
+            EntryKind::Revocation,
+            revocation.transparency_leaf(),
+            now_ms(),
+        )?;
         txn.commit()?;
         Ok(())
     }
@@ -469,12 +610,20 @@ impl Store {
             .is_some())
     }
 
-    /// Record a cross-signed succession, keyed by the old identity.
+    /// Record a cross-signed succession, keyed by the old identity, logging
+    /// it in the same transaction.
     pub fn set_succession(&self, succession: &Succession) -> anyhow::Result<()> {
         let bytes = serde_json::to_vec(succession)?;
         let txn = self.db.begin_write()?;
         txn.open_table(SUCCESSIONS)?
             .insert(succession.old.as_bytes().as_slice(), bytes.as_slice())?;
+        append_log(
+            &txn,
+            subject(&succession.old),
+            EntryKind::Succession,
+            succession.transparency_leaf(),
+            now_ms(),
+        )?;
         txn.commit()?;
         Ok(())
     }
@@ -620,13 +769,63 @@ impl Store {
         Ok(victims.len())
     }
 
+    /// Store `bundle` and, if it differs from the owner's last logged one,
+    /// log it in the same transaction, so nothing served is ever missing
+    /// from the log.
     pub fn put_bundle(&self, bundle: &KeyBundle) -> anyhow::Result<()> {
+        let bytes = serde_json::to_vec(bundle)?;
+        let txn = self.db.begin_write()?;
+        txn.open_table(BUNDLES)?
+            .insert(bundle.user_id.as_bytes().as_slice(), bytes.as_slice())?;
+        log_bundle_in(&txn, bundle, now_ms())?;
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// Store `bundle` *without* logging it: what a relay lying to one client
+    /// would do. For tests of the client's checks only.
+    #[doc(hidden)]
+    pub fn put_bundle_unlogged(&self, bundle: &KeyBundle) -> anyhow::Result<()> {
         let bytes = serde_json::to_vec(bundle)?;
         let txn = self.db.begin_write()?;
         txn.open_table(BUNDLES)?
             .insert(bundle.user_id.as_bytes().as_slice(), bytes.as_slice())?;
         txn.commit()?;
         Ok(())
+    }
+
+    // --- transparency log --------------------------------------------------------
+
+    /// Where the log stands.
+    pub fn log_head(&self) -> anyhow::Result<LogHead> {
+        let txn = self.db.begin_read()?;
+        head_in(&txn.open_table(LOG)?)
+    }
+
+    /// Where `user` last appears in the log, if anywhere.
+    pub fn log_latest(&self, user: &UserId) -> anyhow::Result<Option<LogPosition>> {
+        let txn = self.db.begin_read()?;
+        Ok(
+            match txn.open_table(LOG_LATEST)?.get(subject(user).as_slice())? {
+                Some(guard) => Some(serde_json::from_slice::<Latest>(guard.value())?.position),
+                None => None,
+            },
+        )
+    }
+
+    /// Up to `limit` entries after `index`, in order.
+    pub fn log_since(&self, index: u64, limit: usize) -> anyhow::Result<Vec<LogEntry>> {
+        let txn = self.db.begin_read()?;
+        txn.open_table(LOG)?
+            .range(index.saturating_add(1)..)?
+            .take(limit)
+            .map(|item| Ok(serde_json::from_slice(item?.1.value())?))
+            .collect()
+    }
+
+    /// How many entries the log has.
+    pub fn log_len(&self) -> anyhow::Result<u64> {
+        Ok(self.log_head()?.index)
     }
 
     pub fn bundle(&self, user: &UserId) -> anyhow::Result<Option<KeyBundle>> {
@@ -1066,6 +1265,110 @@ mod tests {
         store.remove_user(&old.user_id()).unwrap();
         assert!(store.is_revoked(&old.user_id()).unwrap());
         assert_eq!(store.succession(&old.user_id()).unwrap(), Some(succession));
+    }
+
+    #[test]
+    fn the_log_records_each_change_once_and_pages_in_order() {
+        use silver_protocol::transparency::{EntryKind, LogHead};
+        let store = Store::in_memory().unwrap();
+        assert_eq!(store.log_head().unwrap(), LogHead::EMPTY);
+        let alice = Identity::generate();
+        let bundle = |prekey_id| {
+            alice.key_bundle_with(silver_protocol::Prekeys::classical(
+                silver_protocol::PrekeySecret::generate(prekey_id, 0).signed_by(&alice),
+                Vec::new(),
+            ))
+        };
+        let b1 = bundle(1);
+        store.put_bundle(&b1).unwrap();
+        store.put_bundle(&b1).unwrap(); // the same again: nothing new to log
+        assert_eq!(store.log_head().unwrap().index, 1);
+        let b2 = bundle(2);
+        store.put_bundle(&b2).unwrap();
+        assert_eq!(store.log_head().unwrap().index, 2);
+        let latest = store.log_latest(&alice.user_id()).unwrap().unwrap();
+        assert_eq!(latest.index, 2);
+        assert_eq!(latest.leaf, b2.transparency_leaf());
+        assert!(
+            store
+                .log_latest(&Identity::generate().user_id())
+                .unwrap()
+                .is_none()
+        );
+
+        // Statements are logged too, and do not count as a bundle change.
+        store.set_revocation(&alice.revocation(5)).unwrap();
+        assert_eq!(store.log_head().unwrap().index, 3);
+        assert_eq!(
+            store.log_latest(&alice.user_id()).unwrap().unwrap().index,
+            3
+        );
+        store.put_bundle(&b2).unwrap();
+        assert_eq!(store.log_head().unwrap().index, 3);
+
+        // Pages chain, in order.
+        let page = store.log_since(0, 2).unwrap();
+        assert_eq!(page.len(), 2);
+        assert!(page[0].follows(&LogHead::EMPTY));
+        assert!(page[1].follows(&page[0].head()));
+        assert_eq!(page[0].kind, EntryKind::Bundle);
+        let rest = store.log_since(2, 10).unwrap();
+        assert_eq!(rest.len(), 1);
+        assert_eq!(rest[0].kind, EntryKind::Revocation);
+        assert_eq!(rest[0].head(), store.log_head().unwrap());
+        assert!(store.log_since(3, 10).unwrap().is_empty());
+
+        // Append-only: removing the user removes nothing from it.
+        store.remove_user(&alice.user_id()).unwrap();
+        assert_eq!(store.log_head().unwrap().index, 3);
+        assert_eq!(store.log_len().unwrap(), 3);
+    }
+
+    #[test]
+    fn an_older_database_gets_its_log_seeded_on_opening() {
+        use silver_protocol::transparency::EntryKind;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("relay.redb");
+        let alice = Identity::generate();
+        let bob = Identity::generate();
+        let successor = Identity::generate();
+        {
+            let store = Store::open(&path).unwrap();
+            store.put_bundle(&alice.key_bundle()).unwrap();
+            store.put_bundle(&bob.key_bundle()).unwrap();
+            store
+                .set_succession(&bob.succeed_to(&successor, 1))
+                .unwrap();
+            // As a relay before the log left it: no log tables, schema 1.
+            let txn = store.db.begin_write().unwrap();
+            txn.delete_table(LOG).unwrap();
+            txn.delete_table(LOG_LATEST).unwrap();
+            txn.commit().unwrap();
+            store.stamp_schema(Some(1)).unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+        assert_eq!(
+            store.log_head().unwrap().index,
+            3,
+            "two bundles, one succession"
+        );
+        let entries = store.log_since(0, 10).unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| e.kind == EntryKind::Bundle)
+                .count(),
+            2
+        );
+        assert_eq!(entries[2].kind, EntryKind::Succession);
+        assert_eq!(
+            store.log_latest(&alice.user_id()).unwrap().unwrap().leaf,
+            alice.key_bundle().transparency_leaf()
+        );
+        // Republishing an unchanged bundle after seeding adds nothing.
+        store.put_bundle(&alice.key_bundle()).unwrap();
+        assert_eq!(store.log_head().unwrap().index, 3);
     }
 
     #[test]

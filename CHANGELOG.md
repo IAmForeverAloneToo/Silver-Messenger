@@ -41,6 +41,20 @@ means behaviour or the wire protocol changed in a way worth reading about.
   against the address's hourly registrations. Needs a relay on 0.8.0 (the
   `lifecycle` feature); older relays still carry the pushed copies. See
   protocol section 10.
+- **Key transparency, small edition.** The relay keeps an append-only,
+  hash-chained log of every key bundle change and lifecycle statement it
+  serves, tells its head on login and with every lookup, and hands out the
+  entries on request. The client replays the log, refuses a key the relay
+  shows it that is not the latest one logged (a stale prekey, or one never
+  logged) and a hidden revocation or handover, and carries the log head
+  inside every encrypted message, so two contacts compare what the relay
+  told each of them without reading numbers aloud: a relay that keeps two
+  versions of its log is reported as a fork by the next message between
+  them. `/log` shows where the log stands and where a contact appears in
+  it. The relay's database schema moves to version 2, with the log seeded
+  from what the relay already holds; a relay older than 0.8.0 refuses the
+  database rather than serve changes it would not log. See protocol
+  section 11 and UPGRADING.md.
 
 ## 0.7.0 - 2026-09-04
 

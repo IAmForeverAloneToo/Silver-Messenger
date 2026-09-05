@@ -140,6 +140,14 @@ enum Record {
         user: Vec<u8>,
         json: Vec<u8>,
     },
+    LogEntry {
+        index: u64,
+        json: Vec<u8>,
+    },
+    LogLatest {
+        subject: Vec<u8>,
+        json: Vec<u8>,
+    },
 }
 
 impl Record {
@@ -160,6 +168,8 @@ impl Record {
             Self::Admin { .. } => 13,
             Self::Revocation { .. } => 14,
             Self::Succession { .. } => 15,
+            Self::LogEntry { .. } => 16,
+            Self::LogLatest { .. } => 17,
         }
     }
 
@@ -221,6 +231,14 @@ impl Record {
             }
             Self::Revocation { user, json } | Self::Succession { user, json } => {
                 put_bytes(w, user)?;
+                put_bytes(w, json)
+            }
+            Self::LogEntry { index, json } => {
+                put_u64(w, *index)?;
+                put_bytes(w, json)
+            }
+            Self::LogLatest { subject, json } => {
+                put_bytes(w, subject)?;
                 put_bytes(w, json)
             }
         }
@@ -293,6 +311,14 @@ impl Record {
             },
             15 => Self::Succession {
                 user: get_bytes(r)?,
+                json: get_bytes(r)?,
+            },
+            16 => Self::LogEntry {
+                index: get_u64(r)?,
+                json: get_bytes(r)?,
+            },
+            17 => Self::LogLatest {
+                subject: get_bytes(r)?,
                 json: get_bytes(r)?,
             },
             other => bail!("record type {other} is not in backup format {FORMAT}"),
@@ -424,6 +450,20 @@ fn each_record(
             json: v.value().to_vec(),
         })?;
     }
+    for item in txn.open_table(store::LOG)?.iter()? {
+        let (k, v) = item?;
+        emit(Record::LogEntry {
+            index: k.value(),
+            json: v.value().to_vec(),
+        })?;
+    }
+    for item in txn.open_table(store::LOG_LATEST)?.iter()? {
+        let (k, v) = item?;
+        emit(Record::LogLatest {
+            subject: k.value().to_vec(),
+            json: v.value().to_vec(),
+        })?;
+    }
     Ok(())
 }
 
@@ -444,6 +484,8 @@ struct Tables<'t> {
     admin: Table<'t, &'static str, &'static str>,
     revocations: Table<'t, &'static [u8], &'static [u8]>,
     successions: Table<'t, &'static [u8], &'static [u8]>,
+    log: Table<'t, u64, &'static [u8]>,
+    log_latest: Table<'t, &'static [u8], &'static [u8]>,
 }
 
 impl<'t> Tables<'t> {
@@ -464,6 +506,8 @@ impl<'t> Tables<'t> {
         txn.delete_table(store::ADMIN)?;
         txn.delete_table(store::REVOCATIONS)?;
         txn.delete_table(store::SUCCESSIONS)?;
+        txn.delete_table(store::LOG)?;
+        txn.delete_table(store::LOG_LATEST)?;
         Ok(Self {
             bundles: txn.open_table(store::BUNDLES)?,
             one_time: txn.open_table(store::ONE_TIME)?,
@@ -480,6 +524,8 @@ impl<'t> Tables<'t> {
             admin: txn.open_table(store::ADMIN)?,
             revocations: txn.open_table(store::REVOCATIONS)?,
             successions: txn.open_table(store::SUCCESSIONS)?,
+            log: txn.open_table(store::LOG)?,
+            log_latest: txn.open_table(store::LOG_LATEST)?,
         })
     }
 
@@ -537,6 +583,13 @@ impl<'t> Tables<'t> {
             }
             Record::Succession { user, json } => {
                 self.successions.insert(user.as_slice(), json.as_slice())?;
+            }
+            Record::LogEntry { index, json } => {
+                self.log.insert(*index, json.as_slice())?;
+            }
+            Record::LogLatest { subject, json } => {
+                self.log_latest
+                    .insert(subject.as_slice(), json.as_slice())?;
             }
         }
         Ok(())
@@ -1157,6 +1210,10 @@ mod tests {
         load(&restored, bytes.as_slice()).unwrap();
         assert_eq!(restored.schema_version().unwrap(), SCHEMA_VERSION);
         assert!(restored.bundle(&bob.user_id()).unwrap().is_some());
+        // The log came with the backup, and bringing the layout up to date
+        // did not seed it a second time.
+        assert_eq!(restored.log_head().unwrap(), store.log_head().unwrap());
+        assert!(restored.log_head().unwrap().index > 0);
     }
 
     #[test]

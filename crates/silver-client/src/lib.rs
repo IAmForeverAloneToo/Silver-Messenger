@@ -20,19 +20,23 @@ pub mod sequence;
 pub mod sessions;
 pub mod store;
 mod submitter;
+mod tail;
 pub mod tls;
+pub mod transparency;
 pub mod update;
 pub mod vault;
 
 pub use backup::{BackupPayload, export_backup, import_backup, read_backup};
 pub use connection::{
-    Client, ClientError, ClientEvent, DEFAULT_RELAY_URL, Delivery, Progress, observe_relay,
+    Client, ClientError, ClientEvent, DEFAULT_RELAY_URL, Delivery, Progress, TransparencyEvent,
+    observe_relay,
 };
 pub use files::{FileInfo, human_size};
 pub use invite::InviteLink;
 pub use proxy::Proxy;
 pub use receipts::ReceiptQueue;
 pub use sessions::{SessionError, SessionInfo, SessionStore, SharedSessions};
+pub use transparency::{Discrepancy, LogStore, SharedLog};
 
 /// What this client understands beyond plain text, advertised inside every
 /// body it sends; see [`silver_protocol::envelope::capability`].

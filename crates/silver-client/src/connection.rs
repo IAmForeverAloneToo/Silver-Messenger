@@ -16,7 +16,9 @@ use crate::outbox::Outbox;
 use crate::proxy::Proxy;
 use crate::sessions::{SessionError, SessionInfo, SharedSessions};
 use crate::submitter::{SubmitEvent, Submitter};
+use crate::tail::{Answer, Step, Tail};
 use crate::tls::{ConnectOptions, Connectors, Observed, connectors, observing_connector};
+use crate::transparency::SharedLog;
 use silver_protocol::{
     Body, Content, Envelope, Identity, KeyBundle, Message, ProtocolError, Revocation, Sequence,
     Succession, UserId, now_ms, open_bytes, seal_bytes, seal_bytes_unsigned,
@@ -78,6 +80,29 @@ pub enum ClientEvent {
     Rejected { id: String, reason: String },
     /// A non-fatal problem worth surfacing (undecryptable envelope, relay error).
     Error(String),
+    /// The relay's transparency log, checked: what it showed us, what a
+    /// contact saw, or the log itself, does not add up — or does, on first
+    /// sync. See [`TransparencyEvent`].
+    Transparency(TransparencyEvent),
+}
+
+/// What checking the relay's transparency log turned up.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TransparencyEvent {
+    /// The log was replayed up to `head` and agrees with the relay.
+    Synced { head: silver_protocol::LogHead },
+    /// A lookup of `who` showed something the log does not bear out; the
+    /// answer was refused.
+    Lookup { who: UserId, problem: String },
+    /// A contact's head (or the relay's own, on `peer: None`) is not on the
+    /// chain we replayed: the relay keeps two versions of its log.
+    Fork { peer: Option<UserId>, at: u64 },
+    /// A contact (or the relay's own claim, on `peer: None`) has the log at
+    /// `index`, but the relay will not hand us the entries up to there.
+    Withheld { peer: Option<UserId>, index: u64 },
+    /// The relay's log is shorter than the one we replayed: it was rewound,
+    /// by a restore from an older backup or by design.
+    Rewound { from: u64, to: u64 },
 }
 
 /// Ids of envelopes the relay has not accepted yet, shared with the front end.
@@ -107,6 +132,10 @@ pub enum ClientError {
     Timeout,
     #[error("client task has stopped")]
     Stopped,
+    /// What the relay showed does not agree with its transparency log; the
+    /// answer was refused. See [`ClientEvent::Transparency`].
+    #[error("refused: {0}")]
+    Transparency(String),
 }
 
 enum Command {
@@ -257,6 +286,8 @@ pub struct Client {
     upgrade_checks: Arc<Mutex<HashMap<UserId, Instant>>>,
     /// Features the relay advertised on the last handshake.
     relay_features: Arc<Mutex<Vec<String>>>,
+    /// The relay's transparency log as replayed, when one is kept.
+    log: Option<SharedLog>,
 }
 
 impl Client {
@@ -285,6 +316,7 @@ impl Client {
                 sessions: options.sessions.clone(),
                 submit_authenticated: options.submit_authenticated,
                 relay_features: relay_features.clone(),
+                log: options.transparency.clone(),
             },
             outbox,
             pending.clone(),
@@ -300,6 +332,7 @@ impl Client {
                 sessions: options.sessions,
                 upgrade_checks: Arc::new(Mutex::new(HashMap::new())),
                 relay_features,
+                log: options.transparency,
             },
             ev_rx,
         ))
@@ -313,6 +346,24 @@ impl Client {
             .unwrap_or_else(|e| e.into_inner())
             .iter()
             .any(|f| f == feature)
+    }
+
+    /// The relay's transparency log as this client last verified it, to
+    /// carry inside every message for the recipient to compare; nothing
+    /// until the log has been replayed once, or when no log is kept.
+    fn gossip_head(&self) -> Option<silver_protocol::LogHead> {
+        let log = self.log.as_ref()?;
+        if !self.relay_supports(feature::TRANSPARENCY) {
+            return None;
+        }
+        let head = log.lock().unwrap_or_else(|e| e.into_inner()).head();
+        (head.index > 0).then_some(head)
+    }
+
+    /// The relay's transparency log as this client has replayed it, if it
+    /// keeps one.
+    pub fn transparency(&self) -> Option<&SharedLog> {
+        self.log.as_ref()
     }
 
     pub fn identity(&self) -> &Identity {
@@ -428,7 +479,14 @@ impl Client {
         content: Content,
         sequence: Sequence,
     ) -> Result<Envelope, ClientError> {
-        let plain = Body::plain_with_caps(content, now_ms(), sequence, CAPABILITIES).encode()?;
+        let plain = Body::plain_with_caps_and_head(
+            content,
+            now_ms(),
+            sequence,
+            CAPABILITIES,
+            self.gossip_head(),
+        )
+        .encode()?;
         // Whether the body carries its own signature at the sealed layer.
         // A protocol-v4 ratchet body does not (it is deniable); every other
         // body is signed by our identity key.
@@ -688,6 +746,7 @@ struct Setup {
     sessions: Option<SharedSessions>,
     submit_authenticated: bool,
     relay_features: Arc<Mutex<Vec<String>>>,
+    log: Option<SharedLog>,
 }
 
 enum Exit {
@@ -819,16 +878,17 @@ async fn session(
         };
         sink.send(text(&auth)).await?;
         match read_frame(&mut stream).await? {
-            ServerFrame::AuthOk { features, .. } => anyhow::Ok(features),
+            ServerFrame::AuthOk { features, head, .. } => anyhow::Ok((features, head)),
             ServerFrame::Error { code, message } => {
                 anyhow::bail!("auth rejected ({code:?}): {message}")
             }
             other => anyhow::bail!("expected auth_ok, got {other:?}"),
         }
     };
-    let features = tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake)
+    let (features, relay_head) = tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake)
         .await
         .map_err(|_| anyhow::anyhow!("handshake timed out"))??;
+    let keeps_log = features.iter().any(|f| f == feature::TRANSPARENCY);
     let anonymous_offered = features.iter().any(|f| f == feature::ANONYMOUS_SEND);
     *setup
         .relay_features
@@ -850,6 +910,14 @@ async fn session(
     // Set when the relay rate-limited us; the outbox is resent at that time.
     let mut retry_at: Option<tokio::time::Instant> = None;
     let mut submission = Submission::Authenticated;
+
+    // --- transparency: tail the relay's log and check what it shows ------
+    let mut tail = Tail::new(setup.log.clone().filter(|_| keeps_log));
+    if let Some(head) = relay_head
+        && !dispatch(tail.on_relay_head(head), &mut sink, ev_tx).await
+    {
+        return Ok(Exit::Disconnected("send failed".into()));
+    }
 
     loop {
         let retry = async {
@@ -977,8 +1045,15 @@ async fn session(
                     ServerFrame::Deliver { envelope } => {
                         let id = envelope.id.clone();
                         debug!(%id, "envelope delivered by the relay");
-                        deliver(setup, envelope, ev_tx).await;
+                        let mut peer_head = None;
+                        deliver(setup, envelope, ev_tx, &mut peer_head).await;
                         debug!(%id, "envelope handed to the front end; acknowledging");
+                        // The sender's view of the relay's log, to compare.
+                        if let Some((peer, head)) = peer_head
+                            && !dispatch(tail.on_peer_head(peer, head), &mut sink, ev_tx).await
+                        {
+                            return Ok(Exit::Disconnected("send failed".into()));
+                        }
                         // Ack either way so a poison envelope cannot wedge the mailbox.
                         if sink.send(text(&ClientFrame::Ack { id })).await.is_err() {
                             return Ok(Exit::Disconnected("ack failed".into()));
@@ -995,22 +1070,29 @@ async fn session(
                         bundle,
                         revocation,
                         succession,
+                        head,
+                        logged,
                     } => {
-                        for reply in lookups.remove(&user_id).unwrap_or_default() {
-                            let _ = reply.send(Ok(bundle.clone()));
+                        // Handed over (and any lifecycle statement raised)
+                        // once checked against the transparency log, when
+                        // one is kept; at once otherwise.
+                        let replies = lookups.remove(&user_id).unwrap_or_default();
+                        let step = tail.on_answer(Answer {
+                            user_id,
+                            bundle,
+                            revocation,
+                            succession,
+                            head,
+                            logged,
+                            replies,
+                        });
+                        if !dispatch(step, &mut sink, ev_tx).await {
+                            return Ok(Exit::Disconnected("send failed".into()));
                         }
-                        // A lifecycle statement the relay holds for this
-                        // identity: forward it if it is validly signed, for
-                        // the front end to match against a pinned contact.
-                        if let Some(revocation) = revocation
-                            && revocation.verify().is_ok()
-                        {
-                            let _ = ev_tx.send(ClientEvent::PeerRevoked { revocation }).await;
-                        }
-                        if let Some(succession) = succession
-                            && succession.verify().is_ok()
-                        {
-                            let _ = ev_tx.send(ClientEvent::PeerSucceeded { succession }).await;
+                    }
+                    ServerFrame::LogEntries { entries, head } => {
+                        if !dispatch(tail.on_entries(entries, head), &mut sink, ev_tx).await {
+                            return Ok(Exit::Disconnected("send failed".into()));
                         }
                     }
                     frame @ (ServerFrame::BlobAck { .. }
@@ -1398,8 +1480,14 @@ fn lifecycle_event(content: &Content) -> Option<ClientEvent> {
     }
 }
 
-/// Open an incoming envelope and report what it held.
-async fn deliver(setup: &Setup, envelope: Envelope, ev_tx: &mpsc::Sender<ClientEvent>) {
+/// Open an incoming envelope and report what it held. `peer_head` is set
+/// to the sender and the transparency log head their message carried.
+async fn deliver(
+    setup: &Setup,
+    envelope: Envelope,
+    ev_tx: &mpsc::Sender<ClientEvent>,
+    peer_head: &mut Option<(UserId, silver_protocol::LogHead)>,
+) {
     let id = envelope.id.clone();
     let opened = match open_bytes(&setup.identity, &envelope) {
         Ok(opened) => opened,
@@ -1420,11 +1508,13 @@ async fn deliver(setup: &Setup, envelope: Envelope, ev_tx: &mpsc::Sender<ClientE
             sequence,
             content,
             caps,
+            head,
         }) => {
             if let Some(event) = lifecycle_event(&content) {
                 let _ = ev_tx.send(event).await;
                 return;
             }
+            *peer_head = head.map(|h| (from, h));
             let _ = ev_tx
                 .send(ClientEvent::Message(Box::new(Message {
                     id,
@@ -1436,6 +1526,7 @@ async fn deliver(setup: &Setup, envelope: Envelope, ev_tx: &mpsc::Sender<ClientE
                     forward_secret: false,
                     signed: opened.signed,
                     caps,
+                    head,
                 })))
                 .await;
             return;
@@ -1500,11 +1591,13 @@ async fn deliver(setup: &Setup, envelope: Envelope, ev_tx: &mpsc::Sender<ClientE
             sequence,
             content,
             caps,
+            head,
         }) => {
             if let Some(event) = lifecycle_event(&content) {
                 let _ = ev_tx.send(event).await;
                 return;
             }
+            *peer_head = head.map(|h| (from, h));
             let _ = ev_tx
                 .send(ClientEvent::Message(Box::new(Message {
                     id,
@@ -1516,6 +1609,7 @@ async fn deliver(setup: &Setup, envelope: Envelope, ev_tx: &mpsc::Sender<ClientE
                     forward_secret,
                     signed: opened.signed,
                     caps,
+                    head,
                 })))
                 .await;
         }
@@ -1680,6 +1774,20 @@ fn text_excerpt(html: &str, max: usize) -> String {
 
 fn text(frame: &ClientFrame) -> WsMessage {
     WsMessage::Text(frame.encode().into())
+}
+
+/// Send the frames a tail step asked for and raise its events. `false`
+/// when the relay connection is gone.
+async fn dispatch(step: Step, sink: &mut WsSink, ev_tx: &mpsc::Sender<ClientEvent>) -> bool {
+    for frame in &step.send {
+        if sink.send(text(frame)).await.is_err() {
+            return false;
+        }
+    }
+    for event in step.events {
+        let _ = ev_tx.send(event).await;
+    }
+    true
 }
 
 pub(crate) type WsStream = futures_util::stream::SplitStream<Ws>;

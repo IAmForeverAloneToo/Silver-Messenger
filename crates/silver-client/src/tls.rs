@@ -50,6 +50,11 @@ pub struct ConnectOptions {
     /// Refuse to use the relay's anonymous submission connection even when
     /// it offers one, and submit on the authenticated connection instead.
     pub submit_authenticated: bool,
+    /// The relay's transparency log as this client has replayed it. With
+    /// one, and a relay that keeps a log, every lookup is checked against
+    /// the log and heads are exchanged with contacts; without one nothing
+    /// is checked.
+    pub transparency: Option<crate::transparency::SharedLog>,
 }
 
 impl std::fmt::Debug for ConnectOptions {

@@ -157,16 +157,22 @@ around it.
 ```json
 { "sent_at_ms": 1700000000000, "epoch": 8271, "seq": 12,
   "content": { "type": "text", "body": "hello" },
-  "caps": ["receipts", "files"] }
+  "caps": ["receipts", "files"],
+  "head": { "index": 4093, "hash": "<b64 32 bytes>" } }
 ```
 
 `seq` counts messages from this sender to this recipient from 1; `epoch` is
 a random 64-bit value fixed for one installation, so a reinstall (which
 restarts `seq`) is distinguishable from a replay. `seq = 0` means the sender
 does not number messages. `caps` (absent or empty on clients before 0.4.0)
-is described in 4.3. `content.type` is one of `text`, `receipt` (4.4) and
-`file` (4.5); unknown types are rejected by this implementation, which is
-why a sender only uses the latter two towards peers that advertised them.
+is described in 4.3. `head` (absent on clients before 0.8.0 and on clients
+whose relay keeps no log) is the head of the relay's transparency log as
+the sender last verified it, for the recipient to compare with its own
+(section 11); inside the encrypted body, the relay can neither read nor
+alter it. `content.type` is one of `text`, `receipt` (4.4), `file` (4.5),
+`revocation` and `succession` (section 10); unknown types are rejected by
+this implementation, which is why a sender only uses the latter four
+towards peers that advertised them.
 
 ### 4.2 Ratchet body (v2 and v4)
 
@@ -462,6 +468,7 @@ first.
 | `blob_get` | `blob` | Ask for every chunk of a blob. |
 | `revoke` | `revocation` | A self-signed revocation (section 10). Accepted without `auth`, since the key may be lost; a one-shot, the connection then closes. |
 | `succeed` | `succession` | A cross-signed succession (section 10). Accepted without `auth`; a one-shot. |
+| `log_since` | `index` | The transparency log entries after `index` (section 11), a page at a time; the client asks again from the last index it got until it reaches the head. Rate limited with `lookup`. |
 | `ping` | | |
 
 ### Relay → client
@@ -469,10 +476,11 @@ first.
 | `type` | Fields | Notes |
 | --- | --- | --- |
 | `challenge` | `nonce` (b64, 32 bytes), `bound`? | First frame on every connection. `bound: true` says the relay takes the bound login; a client that sees it answers with `host`. Relays before 0.6.0 omit it. |
-| `auth_ok` | `user_id`, `features`? | `features` lists strings from section 7.3; absent on older relays. |
+| `auth_ok` | `user_id`, `features`?, `head`? | `features` lists strings from section 7.3; absent on older relays. `head` is the transparency log's head (section 11); absent without the `transparency` feature. |
 | `published` | | |
 | `prekey_status` | `one_time_remaining`, `consumed`? | After `published`, only to clients whose bundle carried prekeys: how many one-time keys are on deposit and which ids were handed out since they were published. |
-| `lookup_result` | `user_id`, `bundle` (or `null`), `revocation`?, `succession`? | `revocation` and `succession` carry the lifecycle statements the relay holds for `user_id` (section 10), if any; older relays omit both fields. |
+| `lookup_result` | `user_id`, `bundle` (or `null`), `revocation`?, `succession`?, `head`?, `logged`? | `revocation` and `succession` carry the lifecycle statements the relay holds for `user_id` (section 10), if any; older relays omit both fields. `head` is the transparency log's head at the time of the answer and `logged` where `user_id` last appears in it (section 11); absent without the `transparency` feature, `logged` also when nothing is logged for the identity. |
+| `log_entries` | `entries`, `head` | In answer to `log_since`: up to 256 entries in order (section 11), and the head the relay stands at. `entries` is empty when the index asked for was the head already. |
 | `sent` | `id` | The envelope is queued for delivery. |
 | `rejected` | `id`, `code`, `message` | The envelope was not queued. `rate_limited` means try again later; any other code is final. |
 | `deliver` | `envelope` | Delivered in mailbox order; acknowledge with `ack`. |
@@ -539,6 +547,7 @@ be linked through a resumed session.
 | `blobs` | Section 7.5: the relay stores encrypted file chunks. Absent when the operator set the largest blob to 0. |
 | `pq_prekeys` | The relay keeps `pq_signed` and `pq_one_time` (section 2), hands out one-time ML-KEM keys on lookup and reports them in `prekey_status` (`pq_one_time_remaining`, `pq_consumed`). |
 | `lifecycle` | The relay accepts `revoke` and `succeed`, keeps the statements, refuses to publish a revoked identity, and attaches the statements to `lookup_result` (section 10). Absent on relays before 0.8.0; contacts then learn only from the copy pushed inside a message. |
+| `transparency` | The relay keeps the hash-chained log of section 11, tells its head in `auth_ok` and `lookup_result`, and answers `log_since`. Absent on relays before 0.8.0; clients then check nothing against a log and send no `head` in their bodies. |
 
 A relay without the field is a v1 relay: it stores bundles as v1 (dropping
 `prekeys`, since it re-serialises what it parsed), so clients behind it
@@ -790,8 +799,146 @@ the race.
 ### 10.3 What it does not do
 
 A revocation is permanent; a key retired by mistake is recovered by making
-a new identity, as before. Neither statement is carried in a transparency
-log yet, so a relay may withhold one it holds (a contact still learns from
-the copy pushed inside a message, and withholding cannot forge a statement,
-only delay it); a hash-chained bundle log is future work. Lifecycle applies
-to one-to-one identities; group membership is separate.
+a new identity, as before. Both statements are entered in the transparency
+log (section 11), so a relay that withholds one it holds is caught by the
+next contact who tails the log (a contact still learns from the copy pushed
+inside a message too, and withholding cannot forge a statement, only delay
+it). Lifecycle applies to one-to-one identities; group membership is
+separate.
+
+## 11. Key transparency
+
+The user id is the identity key and every field of a bundle is signed by
+it, so a relay cannot substitute an identity or a key: a lookup for X
+returns only what X signed. What a relay can still do to one person and
+not another is serve a *stale* bundle (an old signed prekey whose private
+half may later leak, or a stripped capability list), *withhold* a
+revocation or succession, or keep two versions of its state and show each
+to different people. Those are failures of freshness and consistency, which
+signatures cannot catch and a transparency log can: the relay keeps an
+append-only, hash-chained log of every change it serves, clients replay it
+and check what they were shown against it, and every message carries the
+sender's view of the log head inside its encrypted body, so a relay that
+shows two people two different logs is caught by the next message between
+them, with nobody reading numbers aloud. CONIKS and Signal's key
+transparency are the references; with one relay per network, the clients
+are the auditors, and the gossip between them is the essential part.
+
+### 11.1 The log
+
+An entry records one change:
+
+```json
+{ "index": 4093, "prev": "<b64 32 bytes>", "subject": "<b64 32 bytes>",
+  "kind": "bundle", "leaf": "<b64 32 bytes>", "at_ms": 1700000000000 }
+```
+
+* `index` counts from 1. `prev` is the hash of the entry before; the first
+  entry's is 32 zero bytes.
+* `subject = SHA-256("silver-messenger/v4/transparency-subject" || id)`
+  with `id` the 32 raw bytes of the identity key. Ids are random, so a
+  reader learns nothing about whom an entry concerns unless it already
+  knows the id; a contact computes the subject of the ids it has pinned.
+* `kind` is `bundle`, `revocation` or `succession`.
+* `leaf` is the hash of the bundle or statement (11.2).
+* The entry's hash is
+  `SHA-256("silver-messenger/v4/transparency-entry" || prev || index || subject || kind || leaf || at_ms)`,
+  with `index` and `at_ms` as 8 big-endian bytes and `kind` one byte (1
+  bundle, 2 revocation, 3 succession).
+
+The **head** is `{ "index": N, "hash": <hash of entry N> }`; the empty
+log's head is index 0 with 32 zero bytes. The head commits to the whole
+log: whoever holds the head and replays the entries recomputes it.
+
+### 11.2 Leaves
+
+A **bundle's leaf** hashes everything in it that its owner signed, in a
+fixed byte layout, so relay and client compute the same value whatever
+version serialised the bundle, and one-time prekeys (which change with
+every lookup and are not part of the stored bundle) are left out:
+
+```
+SHA-256("silver-messenger/v4/transparency-bundle"
+        || user_id (32) || dh_public (32) || signature (64)
+        || prekeys? : 0x00, or 0x01 || signed.id (4 BE) || signed.public (32)
+                      || signed.created_at_ms (8 BE) || signed.signature (64)
+                      || pq_signed? : 0x00, or 0x01 || pq.id (4 BE)
+                                      || len (4 BE) || pq.public
+                                      || pq.created_at_ms (8 BE) || pq.signature (64)
+        || caps.len (4 BE) || (len (4 BE) || cap)*
+        || caps_signature? : 0x00, or 0x01 || caps_signature (64))
+```
+
+A **revocation's leaf** is
+`SHA-256("silver-messenger/v4/transparency-revocation" || identity || created_at_ms || signature)`
+and a **succession's**
+`SHA-256("silver-messenger/v4/transparency-succession" || old || new || created_at_ms || old_signature || new_signature)`,
+integers as 8 big-endian bytes.
+
+### 11.3 What the relay logs and serves
+
+The relay appends, in the same database transaction as the write it
+records: a bundle on `publish` when its leaf differs from the identity's
+last logged bundle leaf (a reconnect that republishes the same bundle adds
+nothing); every revocation and succession it accepts. Nothing is ever
+removed from the log, not even when the identity is removed. A relay that
+starts logging with state already in its database enters one entry per
+bundle and statement it holds first, so from then on nothing it serves is
+missing from the log. Restoring a backup restores the log with it; a
+restore of an older backup shortens the log, which clients notice (11.4).
+
+It advertises `transparency` (7.3), tells its head in `auth_ok` and in
+every `lookup_result` together with `logged`, where the looked-up identity
+last appears (its latest entry's index and leaf), and answers `log_since`
+with the entries after an index, up to 256 at a time, under the lookup
+rate limit.
+
+### 11.4 What the client checks
+
+A client keeps the head it last verified, the hash at every index of the
+last 4096 entries and at every 256th before that (checkpoints), and, per
+subject, where that identity last appears and its latest bundle leaf.
+
+**Tailing.** On login, and whenever an answer or a contact's head is ahead
+of its own, the client asks `log_since` from its head, page by page, and
+replays: every entry must have the head's index plus one and the head's
+hash as `prev`; the entry's hash becomes the new head. A page that does not
+chain, or a relay that claims a head it will not hand out the entries up
+to, is reported (a *fork* or *withholding*) and every answer waiting on the
+replay is refused.
+
+**A lookup.** The answer is held until the log is replayed up to the head
+it came with, then checked: the bundle's leaf must be the identity's latest
+logged bundle leaf (one that was never logged, or is not the latest, is
+refused: a stale prekey is the attack); `logged` must be the position the
+client replayed; a logged revocation must be in the answer, as must a
+logged succession when no revocation is logged, and a statement served must
+be the logged one. A refused answer reaches the front end as a refusal
+naming the problem, and nothing is sent with the key.
+
+**Gossip.** Every body carries the sender's verified head (4.1). On
+receipt: at the same index the hashes must match; at a lower index the
+hash must match the checkpoint, or the chain recomputed from the nearest
+checkpoint below it with entries fetched from the relay; at a higher
+index the client tails to it, and the chain it gets must pass through that
+head. A mismatch is a fork, reported with the contact's name: the relay
+showed the two of them different logs. A relay whose head is lower than
+the client's last verified head has been *rewound* (a restore of an older
+backup, or a replaced log); that is reported, and the client replays the
+log from the start.
+
+Nothing here changes what a key change means (8): a contact whose key
+changes is still warned about loudly, and the safety number (`/verify`) is
+still the check that needs no relay at all.
+
+### 11.5 What it does not do
+
+There are no inclusion proofs: the log is a chain, not a tree, and a client
+tails it whole, which suits a network of one relay whose log grows by one
+entry per prekey rotation or lifecycle event. The relay does not sign its
+heads; its word is checked against the clients', not against itself. Two
+contacts who never message each other never compare heads, and a relay
+that forks its log for exactly one client *and everyone that client talks
+to* is caught only when one of them also talks to someone on the other
+side. The log's subjects are hashed, but its timing is not: a reader sees
+that some identity published at some time.

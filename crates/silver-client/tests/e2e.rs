@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use silver_client::{Client, ClientEvent, ConnectOptions, SessionStore, SharedSessions, Store};
+use silver_client::{
+    Client, ClientError, ClientEvent, ConnectOptions, LogStore, SessionStore, SharedSessions,
+    Store, TransparencyEvent,
+};
 use silver_protocol::{Content, Identity, Sequence};
 use silver_relay::{Limits, RelayState};
 use tokio::net::TcpListener;
@@ -1420,4 +1423,119 @@ async fn a_succession_reaches_a_contact_through_the_relay() {
 
     alice_c.shutdown().await;
     bob_c.shutdown().await;
+}
+
+/// Options for a client that keeps sessions and tails the relay's key log.
+fn with_log(identity: &Identity) -> ConnectOptions {
+    ConnectOptions {
+        sessions: Some(SessionStore::ephemeral(identity.user_id()).shared()),
+        transparency: Some(LogStore::ephemeral().shared()),
+        ..Default::default()
+    }
+}
+
+/// Every complaint the key-log check has raised so far, without waiting.
+fn complaints(rx: &mut mpsc::Receiver<ClientEvent>) -> Vec<TransparencyEvent> {
+    let mut found = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        if let ClientEvent::Transparency(t) = ev
+            && !matches!(t, TransparencyEvent::Synced { .. })
+        {
+            found.push(t);
+        }
+    }
+    found
+}
+
+#[tokio::test]
+async fn clients_tail_the_key_log_and_gossip_its_head() {
+    let (url, _state) = start_relay().await;
+    let alice = Arc::new(Identity::generate());
+    let bob = Arc::new(Identity::generate());
+    let (alice_c, mut alice_ev) =
+        Client::spawn(url.clone(), alice.clone(), with_log(&alice)).unwrap();
+    let (bob_c, mut bob_ev) = Client::spawn(url.clone(), bob.clone(), with_log(&bob)).unwrap();
+    connected(&mut alice_ev, "alice").await;
+    connected(&mut bob_ev, "bob").await;
+    assert!(bob_c.relay_supports(silver_protocol::wire::feature::TRANSPARENCY));
+
+    // A lookup is checked against the log, replayed up to the head the
+    // answer came with: both bundles are in it by now.
+    let bundle = bob_c
+        .lookup(alice.user_id())
+        .await
+        .unwrap()
+        .expect("alice published");
+    wait_for(&mut bob_ev, "bob synced", |e| {
+        matches!(e, ClientEvent::Transparency(TransparencyEvent::Synced { head }) if head.index >= 2)
+    })
+    .await;
+
+    // The head travels inside every message, and the other side compares
+    // it with its own chain without a word when they agree.
+    bob_c.send_text(&bundle, "hello".into()).await.unwrap();
+    let got = wait_for(&mut alice_ev, "alice's message", |e| body(e).is_some()).await;
+    let ClientEvent::Message(m) = got else {
+        unreachable!()
+    };
+    assert!(m.head.is_some(), "the head travels inside the message");
+    let alice_view = alice_c.lookup(bob.user_id()).await.unwrap().unwrap();
+    alice_c.send_text(&alice_view, "hi".into()).await.unwrap();
+    let got = wait_for(&mut bob_ev, "bob's message", |e| body(e).is_some()).await;
+    let ClientEvent::Message(m) = got else {
+        unreachable!()
+    };
+    assert!(m.head.is_some());
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(complaints(&mut alice_ev).is_empty());
+    assert!(complaints(&mut bob_ev).is_empty());
+
+    alice_c.shutdown().await;
+    bob_c.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_key_the_relay_did_not_log_is_refused() {
+    let (url, state) = start_relay().await;
+    let alice = Arc::new(Identity::generate());
+    let bob = Arc::new(Identity::generate());
+    let (alice_c, mut alice_ev) =
+        Client::spawn(url.clone(), alice.clone(), with_log(&alice)).unwrap();
+    let (bob_c, mut bob_ev) = Client::spawn(url.clone(), bob.clone(), with_log(&bob)).unwrap();
+    connected(&mut alice_ev, "alice").await;
+    connected(&mut bob_ev, "bob").await;
+
+    // The relay swaps in another (validly signed) key for Alice without
+    // logging it, as a relay lying to Bob would. Bob's lookup is refused
+    // and he is told; a client without the log would have taken it.
+    state
+        .store()
+        .put_bundle_unlogged(&alice.key_bundle())
+        .unwrap();
+    let err = bob_c.lookup(alice.user_id()).await.unwrap_err();
+    assert!(matches!(err, ClientError::Transparency(_)), "{err}");
+    let ev = wait_for(&mut bob_ev, "bob's complaint", |e| {
+        matches!(
+            e,
+            ClientEvent::Transparency(TransparencyEvent::Lookup { .. })
+        )
+    })
+    .await;
+    let ClientEvent::Transparency(TransparencyEvent::Lookup { who, problem }) = ev else {
+        unreachable!()
+    };
+    assert_eq!(who, alice.user_id());
+    assert!(problem.contains("not the latest"), "{problem}");
+    let (plain_c, mut plain_ev) = Client::spawn(
+        url.clone(),
+        Arc::new(Identity::generate()),
+        ConnectOptions::default(),
+    )
+    .unwrap();
+    connected(&mut plain_ev, "plain").await;
+    assert!(plain_c.lookup(alice.user_id()).await.unwrap().is_some());
+
+    alice_c.shutdown().await;
+    bob_c.shutdown().await;
+    plain_c.shutdown().await;
 }

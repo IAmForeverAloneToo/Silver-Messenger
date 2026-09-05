@@ -111,6 +111,30 @@ routine step.
 
 ## Version notes
 
+### 0.8.0
+
+* **The schema version moves to 2: the key transparency log.** The relay
+  now keeps an append-only, hash-chained log of every key bundle change
+  and lifecycle statement it serves (`PROTOCOL.md` section 11), in two
+  new tables. At its first start 0.8.0 enters one entry for every bundle,
+  revocation and succession already in the database, in one transaction,
+  and stamps version 2. **Rolling back to 0.7.0 needs a restore**: 0.7.0
+  refuses a version-2 database rather than serve key changes it would not
+  log, which clients on 0.8.0 would report as the relay hiding entries. So
+  take the backup before the upgrade (as always), and restore it if you
+  roll back.
+* **A restore shortens the log.** A backup carries the log as it stood
+  when it was taken. Restoring an older one puts the relay's log back to
+  that point; every client that had verified further sees the log go
+  backwards, says so ("the relay's key log went backwards"), and replays
+  the log from the start. That is the expected consequence of a restore,
+  not a fault, but it is one more reason to restore the newest backup you
+  have, and to expect clients to mention it once afterwards.
+* **Identity lifecycle statements** (revocations and successions) are
+  accepted and served; a relay before 0.8.0 drops them, so clients behind
+  one learn of a revoked or rotated key only from copies pushed inside
+  messages.
+
 ### 0.7.0
 
 * **TLS in the relay.** The relay can obtain and renew its own
