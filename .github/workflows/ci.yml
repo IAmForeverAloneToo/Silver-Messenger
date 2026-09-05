@@ -163,7 +163,7 @@ jobs:
         run: |
           brew tap iamforeveralonetoo/silver "$PWD"
           brew audit --strict iamforeveralonetoo/silver/silver-messenger
-          brew style iamforeveralonetoo/silver
+          brew style iamforeveralonetoo/silver/silver-messenger
           brew install --formula iamforeveralonetoo/silver/silver-messenger
           brew test iamforeveralonetoo/silver/silver-messenger
           silver --version
