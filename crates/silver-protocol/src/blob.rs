@@ -45,6 +45,11 @@ impl BlobKey {
         Self { key, nonce }
     }
 
+    /// A key from fixed parts, for reproducible test vectors.
+    pub fn from_parts(key: [u8; 32], nonce: [u8; 24]) -> Self {
+        Self { key, nonce }
+    }
+
     /// The chunk's nonce: the file nonce with the index folded into its
     /// last four bytes.
     fn chunk_nonce(&self, index: u32) -> [u8; 24] {

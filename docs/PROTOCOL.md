@@ -945,3 +945,64 @@ that forks its log for exactly one client *and everyone that client talks
 to* is caught only when one of them also talks to someone on the other
 side. The log's subjects are hashed, but its timing is not: a reader sees
 that some identity published at some time.
+
+## 12. Conformance
+
+### 12.1 Test vectors
+
+`docs/vectors/` holds known-answer vectors for every operation in this
+document: identities and every signature, the key derivations one by one,
+a whole handshake (v2, v3 and v4), two round trips of the ratchet with
+late and out-of-order delivery, the sealed layer (signed and deniable),
+the padded body encodings, the transparency log's hashes, and file
+chunks. Each case gives its inputs, every intermediate value on the way
+(each Diffie–Hellman output, each KDF input and output, each AEAD's
+associated data, the exact bytes under each signature) and its outputs.
+Where an operation draws randomness the vector fixes it with a seeded
+generator and states the order in which the operation consumes it;
+`docs/vectors/README.md` has the format, the generator and that order.
+
+`crates/silver-protocol/tests/vectors.rs` replays the vectors against this
+implementation on every test run, and re-derives the intermediates by
+hand from the byte layouts given here, so the vectors, the code and this
+text are checked against one another. A vector that moves is a wire
+change: it gets a version, a note here and a changelog entry. A second
+implementation that reproduces the files conforms to the parts they
+cover; what they do not cover is the client behaviour of section 8.
+
+Two byte layouts the vectors pin that the sections above give in prose:
+
+* The ratchet header as associated data (section 6) is `dh (32) ||
+  pn (4 BE) || n (4 BE) || kem (1184, when present) || kem_ct (1088, when
+  present)`, a fixed-length concatenation with no separators.
+* The capability list is signed (section 2) as `dh_public (32) || caps
+  joined by "\n"`, so a capability name never contains a newline.
+
+Known and left as it is: the envelope `id` (section 3) is outside every
+AEAD and signature. A relay can rename an envelope, which lets it defeat
+de-duplication of that envelope or make a receipt name an id its sender
+does not know, and nothing more than dropping the envelope would; the
+content and the sender are unaffected. It stays for wire compatibility
+and is recorded here so that nothing else comes to rely on it.
+
+### 12.2 Formal models
+
+`formal/` holds Verifpal models of the handshake and the ratchet: the v4
+handshake (section 5 with 6.1 and 4.2.1) with and without a one-time
+prekey, against an adversary that later obtains every kept key and
+against one that breaks X25519 outright, plus one variant without the
+key-binding signature that is expected to break; the v2 handshake with
+its envelope signature; the v4 ratchet against a passive adversary that
+reads both devices between two messages, against one that also breaks
+X25519, and against an active one; and the v2 ratchet against the
+X25519-breaking adversary, which is expected to fail where v4 holds.
+`formal/expected.txt` records the outcome every query must have, the
+expected failures included, `formal/check.sh` checks them, and CI runs
+it on every push. `formal/README.md` maps each query to the claim in
+`THREAT_MODEL.md` it backs, gives the modelling choices (ML-KEM is
+Verifpal's KEM; the pinned identity keys are the only guarded values;
+constants are left out), and says what the models do not cover:
+sealed-sender anonymity and deniability (section 9), the transparency
+log (section 11), the client's replay protection (section 8), and
+anything beyond Verifpal's bound, which finds attacks within a bounded
+number of sessions and proves nothing about what lies past it.

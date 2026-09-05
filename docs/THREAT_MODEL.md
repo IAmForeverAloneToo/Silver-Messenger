@@ -113,8 +113,13 @@ Cannot:
 
 - Read message content, sequence numbers, timestamps, capabilities or
   receipts inside the body, or the content and name of a file.
-- Forge a message from anyone: every body is signed by the sender's identity
-  key and the signature is checked on the recipient.
+- Forge a message from anyone. A v1 or v2 body is signed by the sender's
+  identity key and the signature is checked by the recipient. A v4 body
+  is authenticated by the session's AEAD, whose keys only the two peers
+  hold, together with the handshake's key-binding signature (protocol
+  section 4.2.1), which is what stops a third party from standing in as
+  the sender at the start; `formal/handshake_unbound.vp` is the model
+  without it, and finds exactly that attack.
 - Impersonate a user to the relay, or to another relay: authentication is
   a signature over a fresh nonce and the relay's own host name, so a login
   collected by one relay is worthless at another. (The older login without
@@ -297,8 +302,11 @@ independent rebuild is the answer to that.
   root key; a Double Ratchet (HKDF-SHA256 root chain, HMAC-SHA256 message
   chains, XChaCha20-Poly1305 per message) encrypts the body under a key
   used once and discarded. A new DH step whenever the conversation changes
-  direction heals a compromised chain. The result is carried as the
-  envelope body, so the sealed layer still hides the sender.
+  direction heals a compromised chain against an attacker who, after the
+  compromise, only listens; one who keeps injecting ratchet keys of its
+  own stays in, which no ratchet prevents and the models in `formal/`
+  state. The result is carried as the envelope body, so the sealed layer
+  still hides the sender.
 - **Post-quantum handshake** (0.6.0 on): the session key also depends on
   an ML-KEM-768 secret encapsulated to a signed key the recipient
   published (PQXDH-style), so a recording of today's traffic cannot be
@@ -396,6 +404,30 @@ maintainer's account plus signing key both being taken.
 
 ## What backs these claims
 
+- Formal models: Verifpal models of the handshake (v2 and v4, with and
+  without a one-time prekey, against a classical and a quantum-capable
+  adversary) and of the ratchet (v2 and v4, against a passive adversary
+  that reads both devices mid-conversation, a quantum-capable one, and an
+  active one), in `formal/`. Each query's outcome is recorded and checked
+  in CI on every push, including the models that are meant to break (the
+  v4 handshake without its key-binding signature, a handshake without a
+  one-time prekey under a later compromise of the signed prekeys, the v2
+  ratchet against an adversary that breaks X25519), which show why the
+  protocol is as it is. `formal/README.md` maps each query to the claim
+  above it backs, and says what the models leave out: Verifpal finds
+  attacks within a bounded number of sessions and proves nothing beyond
+  that bound; sealed-sender anonymity, deniability and the transparency
+  log are argued in `PROTOCOL.md`, not modelled.
+- Known-answer vectors for every operation in `docs/vectors/`, replayed
+  against the code on every test run by a harness that also re-derives
+  each intermediate value from the byte layouts in `PROTOCOL.md`, so the
+  specification, the code and the vectors are checked against each other
+  and a second implementation can check itself.
+- Property tests: bodies of any content round-trip or are refused at the
+  size limit, the sealed layer opens only intact and only for its
+  recipient, sessions read every message under any schedule of reordered
+  delivery and refuse any damaged one, every statement and log entry is
+  broken by any change, file chunks open only in their place.
 - The test suite: unit tests on every cryptographic operation with
   tampering cases, end-to-end tests through a real relay (sessions,
   handshakes waiting in the mailbox, restarts, lost state, anonymous

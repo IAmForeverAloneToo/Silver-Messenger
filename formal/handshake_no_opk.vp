@@ -1,0 +1,77 @@
+// handshake_prekeys.vp without a one-time prekey: Bob's supply ran out
+// and the relay served the signed prekeys alone (docs/PROTOCOL.md
+// section 5). The same leak afterwards: both identity keys, both
+// Diffie–Hellman identity keys, and Bob's signed prekeys, taken before
+// they were rotated out.
+//
+// Expected c1a0: confidentiality? m1 FAILS. With no one-time prekey,
+// every Diffie–Hellman input and the ML-KEM secret are recoverable from
+// the keys that leak (dh1 from id_a, dh2 and dh3 from id_b and spk_b
+// against the recorded ephemeral, the ML-KEM secret from pq_b against
+// the recorded ciphertext), so a compromise of Bob's signed prekeys
+// before they are rotated out opens the handshakes made against them.
+// This is X3DH's known limit and why the client rotates and deletes
+// signed prekeys (section 8) and keeps one-time prekeys on deposit; it
+// is what handshake_prekeys.vp shows the one-time prekey closes.
+// authentication? c1 holds against this listening adversary.
+
+attacker[passive]
+
+principal Bob[
+    knows public d_bundle, d_spk, d_pq, info_pqxdh, info_root
+    knows private ik_b, id_b, spk_b, pq_b
+    gik_b = PUBKEY(ik_b)
+    gid_b = PUBKEY(id_b)
+    gspk_b = PUBKEY(spk_b)
+    ek_b = PUBKEY(pq_b)
+    sig_id_b = SIGN(ik_b, HASH(d_bundle, gid_b))
+    sig_spk_b = SIGN(ik_b, HASH(d_spk, gspk_b))
+    sig_pq_b = SIGN(ik_b, HASH(d_pq, ek_b))
+]
+
+Bob -> Alice: [gik_b], gid_b, sig_id_b, gspk_b, sig_spk_b, ek_b, sig_pq_b
+
+principal Alice[
+    knows public d_bundle, d_spk, d_pq, info_pqxdh, info_root
+    knows private ik_a, id_a
+    gik_a = PUBKEY(ik_a)
+    gid_a = PUBKEY(id_a)
+    sig_id_a = SIGN(ik_a, HASH(d_bundle, gid_a))
+    _ = SIGNVERIF(gik_b, HASH(d_bundle, gid_b), sig_id_b)?
+    _ = SIGNVERIF(gik_b, HASH(d_spk, gspk_b), sig_spk_b)?
+    _ = SIGNVERIF(gik_b, HASH(d_pq, ek_b), sig_pq_b)?
+    generates e_a, kem_r, r_a, m1
+    ge_a = PUBKEY(e_a)
+    gr_a = PUBKEY(r_a)
+    ss_a, ct_a = KEM_ENCAP(ek_b, kem_r)
+    sk_a = HKDF(nil, HASH(DH_KEX(gspk_b, id_a), DH_KEX(gid_b, e_a), DH_KEX(gspk_b, e_a), ss_a), info_pqxdh)
+    rk1_a, ck1_a = HKDF(sk_a, DH_KEX(gspk_b, r_a), info_root)
+    mk1_a = HKDF(nil, MAC(ck1_a, nil), nil)
+    c1 = AEAD_ENC(mk1_a, m1, HASH(gik_a, gid_a, gik_b, gid_b, gr_a))
+]
+
+Alice -> Bob: [gik_a], gid_a, sig_id_a, ge_a, ct_a, gr_a, c1
+
+principal Bob[
+    _ = SIGNVERIF(gik_a, HASH(d_bundle, gid_a), sig_id_a)?
+    ss_b = KEM_DECAP(pq_b, ct_a)
+    sk_b = HKDF(nil, HASH(DH_KEX(gid_a, spk_b), DH_KEX(ge_a, id_b), DH_KEX(ge_a, spk_b), ss_b), info_pqxdh)
+    rk1_b, ck1_b = HKDF(sk_b, DH_KEX(gr_a, spk_b), info_root)
+    mk1_b = HKDF(nil, MAC(ck1_b, nil), nil)
+    m1_b = AEAD_DEC(mk1_b, c1, HASH(gik_a, gid_a, gik_b, gid_b, gr_a))?
+]
+
+phase[1]
+
+principal Alice[
+    leaks ik_a, id_a
+]
+
+principal Bob[
+    leaks ik_b, id_b, spk_b, pq_b
+]
+
+queries[
+    confidentiality? m1
+    authentication? Alice -> Bob: c1
+]

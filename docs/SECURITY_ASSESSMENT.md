@@ -29,7 +29,7 @@ all. The gaps that matter are listed at the end with what closes them.
 
 | Control | Verdict | Evidence |
 | --- | --- | --- |
-| 1.1.1 Secure development lifecycle | Partly | Every change runs `cargo test`, `clippy -D warnings`, `cargo fmt`, `cargo deny`, `cargo audit`, a minute of fuzzing per parser and the terminal tests in CI; there is no formal review step because there is one author. |
+| 1.1.1 Secure development lifecycle | Partly | Every change runs `cargo test` (the known-answer vectors in `docs/vectors/` and the property tests among them), `clippy -D warnings`, `cargo fmt`, `cargo deny`, `cargo audit`, a minute of fuzzing per parser, the Verifpal models in `formal/` against their recorded outcomes, and the terminal tests in CI; there is no formal review step because there is one author. |
 | 1.1.2 Threat modelling | Met | [THREAT_MODEL.md](THREAT_MODEL.md), kept in step with the code; every Phase 6 item updated it. |
 | 1.1.3 Security in user stories | Met | ROADMAP items state the attacker and the property gained before the work; Phase 6 is entirely such items. |
 | 1.1.4 Trust boundaries documented | Met | The threat model's actors and the protocol's "what the relay sees" sections. |
@@ -139,7 +139,7 @@ V6 and the threat model.
 | --- | --- | --- |
 | 6.1.1 Private data encrypted at rest | Met | The data directory is encrypted under a data key wrapped by the OS key store (Credential Manager, Keychain, Secret Service) or, with a passphrase, by Argon2id (64 MiB, 3 passes) and XChaCha20-Poly1305. `downloads/` is the documented exception (plain files for other programs). Where there is no key store and no passphrase, files are plain and the client says so. |
 | 6.2.1 Cryptographic modules fail securely | Met | Every failure is a `Result`; a failed decryption leaves session state untouched (trial decrypt on a clone). |
-| 6.2.2 Approved algorithms | Met | Ed25519, X25519, ML-KEM-768 (FIPS 203), XChaCha20-Poly1305, HKDF-SHA256, HMAC-SHA256, SHA-256, Argon2id; all from RustCrypto or dalek crates. |
+| 6.2.2 Approved algorithms | Met | Ed25519, X25519, ML-KEM-768 (FIPS 203), XChaCha20-Poly1305, HKDF-SHA256, HMAC-SHA256, SHA-256, Argon2id; all from RustCrypto or dalek crates. Their composition (the handshake and the ratchet) is modelled in Verifpal (`formal/`) with every query's outcome checked in CI, and every operation has known-answer vectors (`docs/vectors/`) replayed by the test suite. |
 | 6.2.3 No insecure modes or padding | Met | AEAD only; message padding is JSON whitespace under the AEAD, not a cryptographic padding scheme. |
 | 6.2.4 Algorithms replaceable | Partly | Versioned domain strings and body versions (v1, v2, and the v4 post-quantum, deniable ratchet) let the handshake and body formats change; signed bundle capabilities negotiate them without a downgrade a relay could force. The envelope layer is v1 only. |
 | 6.2.6 Nonces never reused | Met | Random 24-byte nonces for envelopes and files; ratchet message nonces are derived from single-use message keys. |

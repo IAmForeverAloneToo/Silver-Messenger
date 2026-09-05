@@ -15,8 +15,8 @@
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use hkdf::Hkdf;
-use rand::RngCore;
 use rand::rngs::OsRng;
+use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use x25519_dalek::{EphemeralSecret, PublicKey};
@@ -345,7 +345,20 @@ pub fn seal_bytes(
     recipient: &KeyBundle,
     body: &[u8],
 ) -> Result<Envelope, ProtocolError> {
-    seal_bytes_inner(sender, recipient, body, true)
+    seal_bytes_inner(sender, recipient, body, true, &mut OsRng)
+}
+
+/// [`seal_bytes`] with every random choice drawn from `rng`, in this
+/// order: the ephemeral key (32 bytes), the nonce (24 bytes), then the 16
+/// bytes the envelope id is made from. Exists so the published test
+/// vectors can replay an envelope; every other caller wants `seal_bytes`.
+pub fn seal_bytes_with_rng<R: RngCore + CryptoRng>(
+    sender: &Identity,
+    recipient: &KeyBundle,
+    body: &[u8],
+    rng: &mut R,
+) -> Result<Envelope, ProtocolError> {
+    seal_bytes_inner(sender, recipient, body, true, rng)
 }
 
 /// Seal an already encoded [`Body`] for `recipient` *without* a sealed-layer
@@ -358,20 +371,32 @@ pub fn seal_bytes_unsigned(
     recipient: &KeyBundle,
     body: &[u8],
 ) -> Result<Envelope, ProtocolError> {
-    seal_bytes_inner(sender, recipient, body, false)
+    seal_bytes_inner(sender, recipient, body, false, &mut OsRng)
 }
 
-fn seal_bytes_inner(
+/// [`seal_bytes_unsigned`] with its random choices drawn from `rng`, in
+/// the order [`seal_bytes_with_rng`] documents. For the test vectors.
+pub fn seal_bytes_unsigned_with_rng<R: RngCore + CryptoRng>(
+    sender: &Identity,
+    recipient: &KeyBundle,
+    body: &[u8],
+    rng: &mut R,
+) -> Result<Envelope, ProtocolError> {
+    seal_bytes_inner(sender, recipient, body, false, rng)
+}
+
+fn seal_bytes_inner<R: RngCore + CryptoRng>(
     sender: &Identity,
     recipient: &KeyBundle,
     body: &[u8],
     sign: bool,
+    rng: &mut R,
 ) -> Result<Envelope, ProtocolError> {
     if body.len() > MAX_BODY_BYTES {
         return Err(ProtocolError::TooLarge(body.len()));
     }
 
-    let ephemeral = EphemeralSecret::random_from_rng(OsRng);
+    let ephemeral = EphemeralSecret::random_from_rng(&mut *rng);
     let ephemeral_public = PublicKey::from(&ephemeral).to_bytes();
     let shared = ephemeral.diffie_hellman(&recipient.dh_public.as_x25519());
     if !shared.was_contributory() {
@@ -380,7 +405,7 @@ fn seal_bytes_inner(
     let key = derive_key(shared.as_bytes(), &ephemeral_public, &recipient.dh_public.0);
 
     let mut nonce = [0u8; 24];
-    OsRng.fill_bytes(&mut nonce);
+    rng.fill_bytes(&mut nonce);
 
     // A deniable body carries a zero signature: the 96-byte prefix layout
     // (id, signature, body) is unchanged, so the message is the same size on
@@ -410,8 +435,11 @@ fn seal_bytes_inner(
         )
         .map_err(|_| ProtocolError::Malformed("encryption failed".into()))?;
 
+    // The same v4 UUID `Uuid::new_v4` would make, from bytes we control.
+    let mut id = [0u8; 16];
+    rng.fill_bytes(&mut id);
     Ok(Envelope {
-        id: uuid::Uuid::new_v4().to_string(),
+        id: uuid::Builder::from_random_bytes(id).into_uuid().to_string(),
         to: recipient.user_id,
         ephemeral_public: DhPublic(ephemeral_public),
         nonce,

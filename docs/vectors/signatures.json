@@ -1,0 +1,145 @@
+{
+  "description": "Every signed statement other than the key bundle and the envelope: the exact bytes signed and the domain they are signed under, Ed25519 over domain || 0x00 || message.",
+  "cases": [
+    {
+      "name": "signed_prekey",
+      "inputs": {
+        "kind": "signed_prekey",
+        "signer": {
+          "signing_seed": "SVcuyb98jLsfLrds24qkphgcKqgasRtjjMa6R1ER84c=",
+          "dh_secret": "9VJKXsZLeSVCDYZmqEF7xXFEfzmjbsduJ0fhs+E/I0c="
+        },
+        "id": 7,
+        "secret": "+xy0/ppcQRCYI/CWCFr8eN8xEolqQ0ulL1VdkacqqwY=",
+        "created_at_ms": 1700000000000
+      },
+      "outputs": {
+        "kind": "signed_prekey",
+        "public": "XUDeA9gveyh0Vo+pDm8N0NVYXls7SA6G/IhdRIKUhXo=",
+        "domain": "silver-messenger/v2/signed-prekey",
+        "message": "AAAAB11A3gPYL3sodFaPqQ5vDdDVWF5bO0gOhvyIXUSClIV6AAABi8/laAA=",
+        "signature": "ah53HdN0qQXjFvnuF+kO3okoTpNBrcz5v05pVjFVAZa3zQ5EBWKQOGyiu530PGqLzcLt7qSi36XwlZuT+G9xAA=="
+      }
+    },
+    {
+      "name": "pq_signed_prekey",
+      "inputs": {
+        "kind": "pq_signed_prekey",
+        "signer": {
+          "signing_seed": "SVcuyb98jLsfLrds24qkphgcKqgasRtjjMa6R1ER84c=",
+          "dh_secret": "9VJKXsZLeSVCDYZmqEF7xXFEfzmjbsduJ0fhs+E/I0c="
+        },
+        "id": 200,
+        "seed": "k/eFxkXh1SiuJFX30c9HV4SzK4Y8TZ1zbkY37ogIV17w7k4CCTvBBfptlZChV0lDlR4th+7+a7fKJrRdNDIuMA==",
+        "created_at_ms": 1700000000000
+      },
+      "outputs": {
+        "kind": "pq_signed_prekey",
+        "public": "c6p5e5OH35yTOBAujzI5CndYa+XOxqh+qwNizSw2lLNzUerAjDjIsSw7JrLOzIYCify8SwNwBcu1eVY3R6S23aBid2wQutXINran8UKi7wO0f6N8nEgrMiNG/YXOfXON8LuUkOpIETotg2aIa5t6zyxeRVEbwGJNldtAA4EopQS9VYHBFjGBlVzCfxiSDlBRyBagXrkyHxRgkOSBA/t9cVQ4BwFBzveqXlsb5rqmWdKuZWooIQsImBEsymEId3o2jGh1mSUjDWeT5FEsJIGxhReoytoK0/IAimYmW3JGT+okBZNiN9s9dsQk78RMhSN7/CAM6lJKY8Qus0k3ScpeyFstf2M5QHSqmASZAtoKjPzImKJE9kQ5J4Bf0hY1eKyp+nNzFyAM9Ox7zJac2YMyzht0X5Y3cos3IomRlPyglxGjbDND2EgWyftd/YvKmRGozqBrW6JJk6GaxKCdVUGq/MgoQEbIwOcBShir4xCcCJU3PpAlIhtfhPkv7uxxYGw9S3QD0eg4Gtyha5EelBmErHce4tJnwJmo1Uo0PRyjrOjLnvIHYqMI5OBnufGwSMZmLRFgx2eEh9VgLKvM+EgXkWjFDBcel8pu3HCZA9dQr5A6BvsKocqFB2bCOiJ0yzCgWCjJJ9ageLtAcwoAv+hYoMIzplZnS4rM12sMFGhFc6YJbTLHnjpMaphWZuKqlGqS3iR8PRMaSainlKOQRnUFbhJHUpCxyESQyPs12Eu/W3mC99V7+jSzZBVdzeSEzoqTzEIsEoqa4AUhUNDDRyicAwm6dOEM4BylEkhtCIAalHc46Ftc4cnOG3dfagebcYYihqp00NucfHdtPFsf4bKAfWBJ78DAmlW/BkGhPxmY2iQMZeI8k9ZQ/thoIICxmEmfI8az0Egg3SeJT4YKxuN3EDqYusNAlDW5ECyF/oAcSXOMz5Qc/EmWwMWFNOOO/yswYLlQ4eQpHHkdE3I1bgMEVFgoO5uldkCvetoSSYUANARliMFOelG9CJZSyDgpqJolq/lOOjIqo7tW5hoYCQVgMkaD7fHClCpu5nHK4wrQX6uoHqdHmVwKalBTzhFwTmEZymGigsRrvTC2soNwelm5fFDICWtJh0IJd5YXUkGyn3cAPYR3yKjD/Gxcymy0odinUVZIkHu4QfBL/1WR1pCGemEJHpA3Z+ZwwNZVo2LMnoNHcFUXW8OKgeJe83h/sPBfJHyx8jCRk0FktbwgXngRJcRsl1YUFKlDk1CGpRiouTIOW0ModfRrD9wFJxCyUlwa2oh/uGBLmcZSKgrAd2YLD9AZktC7OkUAnEERoJF7dferHeMlWjZvcRO/qFZD6/kgj3euLRoRwxFawumtR6QReGwwn4iq+yqFdrdUB6yPsIDHk9eWXUumvSSuN9Bj4Zl8yMGjvbmDEzNZM7O0JfAcXXGL+iVHZheAVfGphTvLTHrMiEadEqZiJCN63rhsiptk+qqceNNURERL3HkzTSFCjHF9GPTPuaAs+mx16deDPHKqn4t+bGiLXZnF5bHJgBFDJcFBiMm3TRDJma/6Y1Y6iKYBJCRBVJUK9xumQxC5zks=",
+        "domain": "silver-messenger/v3/pq-prekey",
+        "message": "AAAAyHOqeXuTh9+ckzgQLo8yOQp3WGvlzsaofqsDYs0sNpSzc1HqwIw4yLEsOyayzsyGAon8vEsDcAXLtXlWN0ektt2gYndsELrVyDa2p/FCou8DtH+jfJxIKzIjRv2Fzn1zjfC7lJDqSBE6LYNmiGubes8sXkVRG8BiTZXbQAOBKKUEvVWBwRYxgZVcwn8Ykg5QUcgWoF65Mh8UYJDkgQP7fXFUOAcBQc73ql5bG+a6plnSrmVqKCELCJgRLMphCHd6NoxodZklIw1nk+RRLCSBsYUXqMraCtPyAIpmJltyRk/qJAWTYjfbPXbEJO/ETIUje/wgDOpSSmPELrNJN0nKXshbLX9jOUB0qpgEmQLaCoz8yJiiRPZEOSeAX9IWNXisqfpzcxcgDPTse8yWnNmDMs4bdF+WN3KLNyKJkZT8oJcRo2wzQ9hIFsn7Xf2LypkRqM6ga1uiSZOhmsSgnVVBqvzIKEBGyMDnAUoYq+MQnAiVNz6QJSIbX4T5L+7scWBsPUt0A9HoOBrcoWuRHpQZhKx3HuLSZ8CZqNVKND0co6zoy57yB2KjCOTgZ7nxsEjGZi0RYMdnhIfVYCyrzPhIF5FoxQwXHpfKbtxwmQPXUK+QOgb7CqHKhQdmwjoidMswoFgoySfWoHi7QHMKAL/oWKDCM6ZWZ0uKzNdrDBRoRXOmCW0yx546TGqYVmbiqpRqkt4kfD0TGkmop5SjkEZ1BW4SR1KQschEkMj7NdhLv1t5gvfVe/o0s2QVXc3khM6Kk8xCLBKKmuAFIVDQw0conAMJunThDOAcpRJIbQiAGpR3OOhbXOHJzht3X2oHm3GGIoaqdNDbnHx3bTxbH+GygH1gSe/AwJpVvwZBoT8ZmNokDGXiPJPWUP7YaCCAsZhJnyPGs9BIIN0niU+GCsbjdxA6mLrDQJQ1uRAshf6AHElzjM+UHPxJlsDFhTTjjv8rMGC5UOHkKRx5HRNyNW4DBFRYKDubpXZAr3raEkmFADQEZYjBTnpRvQiWUsg4KaiaJav5TjoyKqO7VuYaGAkFYDJGg+3xwpQqbuZxyuMK0F+rqB6nR5lcCmpQU84RcE5hGcphooLEa70wtrKDcHpZuXxQyAlrSYdCCXeWF1JBsp93AD2Ed8iow/xsXMpstKHYp1FWSJB7uEHwS/9VkdaQhnphCR6QN2fmcMDWVaNizJ6DR3BVF1vDioHiXvN4f7DwXyR8sfIwkZNBZLW8IF54ESXEbJdWFBSpQ5NQhqUYqLkyDltDKHX0aw/cBScQslJcGtqIf7hgS5nGUioKwHdmCw/QGZLQuzpFAJxBEaCRe3X3qx3jJVo2b3ETv6hWQ+v5II93ri0aEcMRWsLprUekEXhsMJ+IqvsqhXa3VAesj7CAx5PXll1Lpr0krjfQY+GZfMjBo725gxMzWTOztCXwHF1xi/olR2YXgFXxqYU7y0x6zIhGnRKmYiQjet64bIqbZPqqnHjTVERES9x5M00hQoxxfRj0z7mgLPpsdenXgzxyqp+Lfmxoi12ZxeWxyYARQyXBQYjJt00QyZmv+mNWOoimASQkQVSVCvcbpkMQuc5LAAABi8/laAA=",
+        "signature": "zOu63ZFTE/bJ/9nYUkK5kLuiQ7vaXj0C2+Xpxi5tb5YQmVEonfHinxwkQ8osAXkGe/VqoEXHekOfbloTO4ZZAA=="
+      }
+    },
+    {
+      "name": "bundle_caps",
+      "inputs": {
+        "kind": "bundle_caps",
+        "signer": {
+          "signing_seed": "SVcuyb98jLsfLrds24qkphgcKqgasRtjjMa6R1ER84c=",
+          "dh_secret": "9VJKXsZLeSVCDYZmqEF7xXFEfzmjbsduJ0fhs+E/I0c="
+        },
+        "caps": [
+          "pq_ratchet"
+        ]
+      },
+      "outputs": {
+        "kind": "bundle_caps",
+        "domain": "silver-messenger/v4/bundle-caps",
+        "message": "SD8bZDwfg16MqEu8hSXTvBayTuYTzXn0NuPxfi+BISZwcV9yYXRjaGV0",
+        "signature": "9kd2ivOzWFx2Nh7ORQSnBWMkCdDGDq/sM600jwgyni5A3liF4kGh9KH4F4BR8GsMjVHLmjD4Ha6dp1uOkzWzAg=="
+      }
+    },
+    {
+      "name": "revocation",
+      "inputs": {
+        "kind": "revocation",
+        "signer": {
+          "signing_seed": "BIsT39RgarB5ig+jiTdH7qqhm1324Tazmk4MXGbcZGo=",
+          "dh_secret": "ivF7/NVZVxgo68ET180l9VuoxGhe1O9WctzPHYea7uE="
+        },
+        "created_at_ms": 1700000001000
+      },
+      "outputs": {
+        "kind": "revocation",
+        "domain": "silver-messenger/v4/revocation",
+        "message": "meh6jVIXlsWbqezs2y5qbzoe2A6giL4QSrNPJg6tRAMAAAGLz+Vr6A==",
+        "signature": "CMRnTTxVGRKRJ6v4lvMLStI/WqQuqu7emWnsFtGDY2T74TCMs5E2t+qQTaXQBpmUydWzr4t2Su70gtHpPf55DQ=="
+      }
+    },
+    {
+      "name": "succession",
+      "inputs": {
+        "kind": "succession",
+        "old": {
+          "signing_seed": "BIsT39RgarB5ig+jiTdH7qqhm1324Tazmk4MXGbcZGo=",
+          "dh_secret": "ivF7/NVZVxgo68ET180l9VuoxGhe1O9WctzPHYea7uE="
+        },
+        "new": {
+          "signing_seed": "sAineh7OWaRIZj7wkuvFlZtbfHmfGgta66ubMUyUxjo=",
+          "dh_secret": "jslI1+PuvgO5YscY5SEDD+xZFJzzP6dlxProMuhb5ls="
+        },
+        "created_at_ms": 1700000002000
+      },
+      "outputs": {
+        "kind": "succession",
+        "old": {
+          "domain": "silver-messenger/v4/succession",
+          "message": "meh6jVIXlsWbqezs2y5qbzoe2A6giL4QSrNPJg6tRAMN7MOMOUhWR028D/asmMirD7qMcRUh5Q++2oAs8tKhNgAAAYvP5W/Q",
+          "signature": "+7rdaNFNSKnSYjb6bV5K70pjo3eobWa8NE+n9wpgimBB+68vtu0ve746XP/WPqAy2PCtTGETjQkCl8iloH9sBA=="
+        },
+        "new": {
+          "domain": "silver-messenger/v4/succession-accept",
+          "message": "meh6jVIXlsWbqezs2y5qbzoe2A6giL4QSrNPJg6tRAMN7MOMOUhWR028D/asmMirD7qMcRUh5Q++2oAs8tKhNgAAAYvP5W/Q",
+          "signature": "ETNpDBXIXP4IjkhNiZgyjqJ+cAZFB+xYdUh2fWeYmfe/qliaRQDOFti6N0+2w3YdoGjPNc2t7HEdM35hhrnOAg=="
+        }
+      }
+    },
+    {
+      "name": "relay_auth_v1",
+      "inputs": {
+        "kind": "relay_auth",
+        "signer": {
+          "signing_seed": "BIsT39RgarB5ig+jiTdH7qqhm1324Tazmk4MXGbcZGo=",
+          "dh_secret": "ivF7/NVZVxgo68ET180l9VuoxGhe1O9WctzPHYea7uE="
+        },
+        "nonce": "f9FpBm8wCzBrnFNtEfsQWjunVeps1dwmMYlXfaZ7cuw="
+      },
+      "outputs": {
+        "kind": "relay_auth",
+        "domain": "silver-messenger/v1/relay-auth",
+        "message": "f9FpBm8wCzBrnFNtEfsQWjunVeps1dwmMYlXfaZ7cuw=",
+        "signature": "8WyF17YpFKv5ggijbdFXG8rbvwvO/biTdV6r+DYYgO5giHJz/RU79R7RgvqEFMvddflZwUIG5lsD/ozuPwHNAw=="
+      }
+    },
+    {
+      "name": "relay_auth_bound",
+      "inputs": {
+        "kind": "relay_auth_bound",
+        "signer": {
+          "signing_seed": "BIsT39RgarB5ig+jiTdH7qqhm1324Tazmk4MXGbcZGo=",
+          "dh_secret": "ivF7/NVZVxgo68ET180l9VuoxGhe1O9WctzPHYea7uE="
+        },
+        "host": "Relay.Example:8443",
+        "nonce": "f9FpBm8wCzBrnFNtEfsQWjunVeps1dwmMYlXfaZ7cuw="
+      },
+      "outputs": {
+        "kind": "relay_auth_bound",
+        "normalized_host": "relay.example",
+        "domain": "silver-messenger/v2/relay-auth",
+        "message": "cmVsYXkuZXhhbXBsZX/RaQZvMAswa5xTbRH7EFo7p1XqbNXcJjGJV32me3Ls",
+        "signature": "nOeqUdtqG8EsYfdr0ubXfwrVvX1wX8vFwkzTjDSsx8JT8CxQxeKyevv24r63f8TWl5geeBRYv0AZtxOmR270Ag=="
+      }
+    }
+  ]
+}

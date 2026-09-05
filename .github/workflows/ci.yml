@@ -168,6 +168,24 @@ jobs:
           docker logs relay
           docker rm -f relay
 
+  formal:
+    # The Verifpal models of the handshake and the ratchet (formal/), each
+    # query checked against the outcome expected.txt records, including
+    # the ones a model is meant to break. Verifpal is built from its pinned
+    # crates.io release with its own lockfile.
+    name: formal models
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-bin: true
+      - run: cargo install --locked verifpal --version 1.4.2
+      - run: formal/check.sh
+
   fuzz:
     name: fuzz (${{ matrix.target }})
     runs-on: ubuntu-latest

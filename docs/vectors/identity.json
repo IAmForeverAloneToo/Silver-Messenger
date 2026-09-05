@@ -1,0 +1,33 @@
+{
+  "description": "An identity from its two secrets: the Ed25519 signing seed (whose public key, base58, is the user id) and the X25519 secret; the bundle signature over the X25519 public key under the key-bundle domain; the safety number of the identity and a peer.",
+  "cases": [
+    {
+      "name": "alice",
+      "inputs": {
+        "signing_seed": "BIsT39RgarB5ig+jiTdH7qqhm1324Tazmk4MXGbcZGo=",
+        "dh_secret": "ivF7/NVZVxgo68ET180l9VuoxGhe1O9WctzPHYea7uE=",
+        "peer": "2fYtRY8g36vouXvfE2ysTB9foJeA5L7AAZNEF5faBhsC"
+      },
+      "outputs": {
+        "user_id": "BMnz2CXfYkwNGcm7fYd6cXv8GLkE2WZbdjwtvCnPhv3U",
+        "dh_public": "hfONDEWnbp+RhDaf/Cgoc5Tdfc2VbuQIxDm5wepqymY=",
+        "bundle_signature": "qkos4t0pDw91x3a6CCEuCf8WmPFJAVVGIZm0iEsQJgRNoSDuEtKhu4Vl5oIVkGIbBOz+kt3vnc31njGLL70lDg==",
+        "safety_number": "02221 73519 36385 91368 80724 50078 68383 23466 58491 23191 84360 80942"
+      }
+    },
+    {
+      "name": "bob",
+      "inputs": {
+        "signing_seed": "SVcuyb98jLsfLrds24qkphgcKqgasRtjjMa6R1ER84c=",
+        "dh_secret": "9VJKXsZLeSVCDYZmqEF7xXFEfzmjbsduJ0fhs+E/I0c=",
+        "peer": "BMnz2CXfYkwNGcm7fYd6cXv8GLkE2WZbdjwtvCnPhv3U"
+      },
+      "outputs": {
+        "user_id": "2fYtRY8g36vouXvfE2ysTB9foJeA5L7AAZNEF5faBhsC",
+        "dh_public": "SD8bZDwfg16MqEu8hSXTvBayTuYTzXn0NuPxfi+BISY=",
+        "bundle_signature": "RYxerO8hF4QMgXjSQHWGBlegOnmzG7O9M4gXNNV9WBy+JiJKIlz53OPzkedSt9ZRIEcruBG4cL5Njx9XsRPGCg==",
+        "safety_number": "02221 73519 36385 91368 80724 50078 68383 23466 58491 23191 84360 80942"
+      }
+    }
+  ]
+}

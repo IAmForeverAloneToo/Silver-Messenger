@@ -23,6 +23,7 @@ use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use rand::rngs::OsRng;
+use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
@@ -204,12 +205,26 @@ impl Session {
     /// Start a session with `peer`, who must have published prekeys. Returns
     /// the session and the header the peer needs to derive it.
     pub fn initiate(me: &Identity, peer: &KeyBundle) -> Result<(Self, InitHeader), ProtocolError> {
+        Self::initiate_with_rng(me, peer, &mut OsRng)
+    }
+
+    /// [`Self::initiate`] with every random choice drawn from `rng`, in
+    /// this order: the ephemeral key (32 bytes), the ML-KEM encapsulation
+    /// randomness (32 bytes, only for a post-quantum peer), the ML-KEM
+    /// ratchet key seed (64 bytes, only for the post-quantum ratchet), then
+    /// the first ratchet key (32 bytes). Exists so the published test
+    /// vectors can replay a handshake; every other caller wants `initiate`.
+    pub fn initiate_with_rng<R: RngCore + CryptoRng>(
+        me: &Identity,
+        peer: &KeyBundle,
+        rng: &mut R,
+    ) -> Result<(Self, InitHeader), ProtocolError> {
         let prekeys = peer.prekeys.as_ref().ok_or(ProtocolError::MissingPrekeys)?;
         prekeys.verify(&peer.user_id)?;
         let spk = prekeys.signed.public.as_x25519();
         let opk = prekeys.one_time.first();
 
-        let ephemeral = StaticSecret::random_from_rng(OsRng);
+        let ephemeral = StaticSecret::random_from_rng(&mut *rng);
         let ephemeral_public = DhPublic(PublicKey::from(&ephemeral).to_bytes());
         let dh1 = me.dh_secret().diffie_hellman(&spk);
         let dh2 = ephemeral.diffie_hellman(&peer.dh_public.as_x25519());
@@ -219,7 +234,7 @@ impl Session {
         // only the holder of that key can recover from the ciphertext.
         let kem = match prekeys.pq_key() {
             Some(key) => {
-                let (ciphertext, secret) = key.public.encapsulate()?;
+                let (ciphertext, secret) = key.public.encapsulate_with_rng(rng)?;
                 Some((key.id, ciphertext, secret))
             }
             None => None,
@@ -243,7 +258,7 @@ impl Session {
         // and the peer advertises that it reads v4 bodies.
         let pq_ratchet = kem.is_some() && peer.supports_pq_ratchet();
         let (kem_self, kem_self_public) = if pq_ratchet {
-            let key = KemRatchetKey::generate();
+            let key = KemRatchetKey::generate_with_rng(rng);
             let public = key.public();
             (Some(key), Some(public))
         } else {
@@ -254,7 +269,7 @@ impl Session {
         // sending chain has no ML-KEM step: the handshake secret is already
         // post-quantum, and there is no peer ratchet key to encapsulate to
         // yet. The ratchet becomes post-quantum on the next round trip.
-        let ratchet = StaticSecret::random_from_rng(OsRng);
+        let ratchet = StaticSecret::random_from_rng(&mut *rng);
         let ratchet_public = PublicKey::from(&ratchet).to_bytes();
         let shared = ratchet.diffie_hellman(&spk);
         if !shared.was_contributory() {
@@ -443,15 +458,31 @@ impl Session {
         &mut self,
         message: &RatchetMessage,
     ) -> Result<Zeroizing<Vec<u8>>, ProtocolError> {
+        self.decrypt_with_rng(message, &mut OsRng)
+    }
+
+    /// [`Self::decrypt`] with the ratchet step's random choices drawn from
+    /// `rng`, in this order: the fresh Diffie–Hellman key (32 bytes), then
+    /// on the post-quantum ratchet the ML-KEM ratchet key seed (64 bytes)
+    /// and the encapsulation randomness (32 bytes, once there is a peer key
+    /// to encapsulate to). A message that does not start a new chain draws
+    /// nothing. Exists for the published test vectors; every other caller
+    /// wants `decrypt`.
+    pub fn decrypt_with_rng<R: RngCore + CryptoRng>(
+        &mut self,
+        message: &RatchetMessage,
+        rng: &mut R,
+    ) -> Result<Zeroizing<Vec<u8>>, ProtocolError> {
         let mut trial = self.clone();
-        let plaintext = trial.decrypt_advancing(message)?;
+        let plaintext = trial.decrypt_advancing(message, rng)?;
         *self = trial;
         Ok(plaintext)
     }
 
-    fn decrypt_advancing(
+    fn decrypt_advancing<R: RngCore + CryptoRng>(
         &mut self,
         message: &RatchetMessage,
+        rng: &mut R,
     ) -> Result<Zeroizing<Vec<u8>>, ProtocolError> {
         let header = &message.header;
         let aad = self.aad(header);
@@ -460,7 +491,7 @@ impl Session {
         }
         if self.dh_remote.as_ref() != Some(&header.dh) {
             self.skip_message_keys(header.pn)?;
-            self.dh_ratchet(header)?;
+            self.dh_ratchet(header, rng)?;
         }
         self.skip_message_keys(header.n)?;
         let chain = self
@@ -527,7 +558,11 @@ impl Session {
     /// post-quantum-ratchet session each half also does an ML-KEM step: the
     /// receiving chain mixes in the secret from the peer's ciphertext, the
     /// sending chain a fresh secret we encapsulate to the peer's key.
-    fn dh_ratchet(&mut self, header: &RatchetHeader) -> Result<(), ProtocolError> {
+    fn dh_ratchet<R: RngCore + CryptoRng>(
+        &mut self,
+        header: &RatchetHeader,
+        rng: &mut R,
+    ) -> Result<(), ProtocolError> {
         self.pn = self.n_send;
         self.n_send = 0;
         self.n_recv = 0;
@@ -570,18 +605,18 @@ impl Session {
 
         // Sending chain: a fresh key pair, and a fresh ML-KEM secret
         // encapsulated to the peer's latest ratchet key.
-        let fresh = StaticSecret::random_from_rng(OsRng);
+        let fresh = StaticSecret::random_from_rng(&mut *rng);
         let shared = fresh.diffie_hellman(&remote);
         if !shared.was_contributory() {
             return Err(ProtocolError::WeakKey);
         }
         let send_ss = if self.pq_ratchet {
-            let key = KemRatchetKey::generate();
+            let key = KemRatchetKey::generate_with_rng(rng);
             self.kem_self_public = Some(key.public());
             self.kem_self = Some(key);
             match &self.kem_remote {
                 Some(peer) => {
-                    let (ciphertext, secret) = peer.encapsulate()?;
+                    let (ciphertext, secret) = peer.encapsulate_with_rng(rng)?;
                     self.kem_ct_send = Some(ciphertext);
                     Some(secret)
                 }
@@ -646,15 +681,33 @@ fn x3dh_secret(
             return Err(ProtocolError::WeakKey);
         }
     }
+    Ok(x3dh_kdf(
+        dh1.as_bytes(),
+        dh2.as_bytes(),
+        dh3.as_bytes(),
+        dh4.map(SharedSecret::as_bytes),
+        kem,
+    ))
+}
+
+/// The KDF half of [`x3dh_secret`], over the raw Diffie–Hellman outputs
+/// (already checked to be contributory).
+fn x3dh_kdf(
+    dh1: &[u8; 32],
+    dh2: &[u8; 32],
+    dh3: &[u8; 32],
+    dh4: Option<&[u8; 32]>,
+    kem: Option<&[u8; KEM_SECRET_LEN]>,
+) -> Key32 {
     // X3DH prepends 32 bytes of 0xFF for X25519 so the input cannot be
     // confused with an encoded point.
     let mut ikm = Zeroizing::new(Vec::with_capacity(32 * 6));
     ikm.extend_from_slice(&[0xFF; 32]);
-    ikm.extend_from_slice(dh1.as_bytes());
-    ikm.extend_from_slice(dh2.as_bytes());
-    ikm.extend_from_slice(dh3.as_bytes());
+    ikm.extend_from_slice(dh1);
+    ikm.extend_from_slice(dh2);
+    ikm.extend_from_slice(dh3);
     if let Some(dh4) = dh4 {
-        ikm.extend_from_slice(dh4.as_bytes());
+        ikm.extend_from_slice(dh4);
     }
     let info = match kem {
         Some(secret) => {
@@ -667,7 +720,7 @@ fn x3dh_secret(
     let mut out = Key32([0u8; 32]);
     hk.expand(info, &mut out.0)
         .expect("32 bytes is a valid HKDF-SHA256 output length");
-    Ok(out)
+    out
 }
 
 fn x3dh_ad(
@@ -727,6 +780,55 @@ fn message_key_material(message_key: &Key32) -> Zeroizing<[u8; 56]> {
     hk.expand(MESSAGE_INFO, out.as_mut_slice())
         .expect("56 bytes is a valid HKDF-SHA256 output length");
     out
+}
+
+/// The key derivations behind a session, over raw bytes, so the published
+/// test vectors (`docs/vectors`) can pin each one on its own. Not part of
+/// the API: nothing outside the conformance harness should call these.
+#[doc(hidden)]
+pub mod internals {
+    use super::{KEM_SECRET_LEN, Key32};
+
+    pub const X3DH_INFO: &[u8] = super::X3DH_INFO;
+    pub const PQXDH_INFO: &[u8] = super::PQXDH_INFO;
+    pub const SESSION_ID_DOMAIN: &[u8] = super::SESSION_ID_DOMAIN;
+    pub const ROOT_INFO: &[u8] = super::ROOT_INFO;
+    pub const ROOT_INFO_V4: &[u8] = super::ROOT_INFO_V4;
+    pub const MESSAGE_INFO: &[u8] = super::MESSAGE_INFO;
+
+    /// The handshake secret from the Diffie–Hellman outputs and, for the
+    /// hybrid handshake, the ML-KEM secret.
+    pub fn x3dh_secret(
+        dh1: &[u8; 32],
+        dh2: &[u8; 32],
+        dh3: &[u8; 32],
+        dh4: Option<&[u8; 32]>,
+        kem: Option<&[u8; KEM_SECRET_LEN]>,
+    ) -> [u8; 32] {
+        super::x3dh_kdf(dh1, dh2, dh3, dh4, kem).0
+    }
+
+    /// The root KDF: `(new root, chain key)`.
+    pub fn kdf_root(
+        root: &[u8; 32],
+        dh_out: &[u8; 32],
+        kem: Option<&[u8; 32]>,
+        pq: bool,
+    ) -> ([u8; 32], [u8; 32]) {
+        let (root, chain) = super::kdf_root(&Key32(*root), dh_out, kem, pq);
+        (root.0, chain.0)
+    }
+
+    /// The chain KDF: `(next chain key, message key)`.
+    pub fn kdf_chain(chain: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
+        let (next, key) = super::kdf_chain(&Key32(*chain));
+        (next.0, key.0)
+    }
+
+    /// A message key's AEAD key (32 bytes) and nonce (24 bytes).
+    pub fn message_key_material(message_key: &[u8; 32]) -> [u8; 56] {
+        *super::message_key_material(&Key32(*message_key))
+    }
 }
 
 fn aead_encrypt(

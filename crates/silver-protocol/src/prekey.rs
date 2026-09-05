@@ -115,9 +115,18 @@ pub struct PrekeySecret {
 
 impl PrekeySecret {
     pub fn generate(id: u32, created_at_ms: u64) -> Self {
+        Self::from_bytes(
+            id,
+            StaticSecret::random_from_rng(rand::rngs::OsRng).to_bytes(),
+            created_at_ms,
+        )
+    }
+
+    /// A prekey from a fixed secret scalar, for reproducible test vectors.
+    pub fn from_bytes(id: u32, secret: [u8; 32], created_at_ms: u64) -> Self {
         Self {
             id,
-            secret: StaticSecret::random_from_rng(rand::rngs::OsRng).to_bytes(),
+            secret,
             created_at_ms,
         }
     }

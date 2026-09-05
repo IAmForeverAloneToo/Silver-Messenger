@@ -556,8 +556,16 @@ it does not, is in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
   connection; it shows a pending mark (`⋯`) until the relay accepts it, and a
   failure mark (`✗`) if the relay refuses it for good.
 
-What it does **not** do yet: cover traffic; a formal model of the handshake
-and ratchet. The ordered plan is in [ROADMAP.md](ROADMAP.md).
+* **Checked against a model and vectors**: the handshake and the ratchet
+  are modelled in Verifpal ([`formal/`](formal/)), with the outcome of
+  every query, including the ones a model is meant to break, recorded and
+  checked in CI; every operation has known-answer vectors
+  ([`docs/vectors/`](docs/vectors/)) that the test suite replays and a
+  second implementation can check itself against; property tests cover
+  what must hold for every input.
+
+What it does **not** do yet: cover traffic. The ordered plan is in
+[ROADMAP.md](ROADMAP.md).
 
 ## Development
 

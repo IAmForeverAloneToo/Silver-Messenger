@@ -1,0 +1,85 @@
+{
+  "description": "The sealed-sender layer from fixed keys and a fixed generator seed: what seal draws and in what order, the shared secret, the HKDF info and key, the associated data, the bytes signed, the plaintext layout and the envelope. A signed v1 body and a deniable v4 body.",
+  "cases": [
+    {
+      "name": "v1_signed",
+      "inputs": {
+        "sender": {
+          "signing_seed": "BIsT39RgarB5ig+jiTdH7qqhm1324Tazmk4MXGbcZGo=",
+          "dh_secret": "ivF7/NVZVxgo68ET180l9VuoxGhe1O9WctzPHYea7uE="
+        },
+        "recipient": {
+          "signing_seed": "SVcuyb98jLsfLrds24qkphgcKqgasRtjjMa6R1ER84c=",
+          "dh_secret": "9VJKXsZLeSVCDYZmqEF7xXFEfzmjbsduJ0fhs+E/I0c="
+        },
+        "body": "eyJzZW50X2F0X21zIjoxNzAwMDAwMDAwMDAwLCJlcG9jaCI6MCwic2VxIjowLCJjb250ZW50Ijp7InR5cGUiOiJ0ZXh0IiwiYm9keSI6ImhlbGxvLCBib2IifX0gICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIA==",
+        "signed": true,
+        "rng_seed": "gWiUCL8wsk0dr2YZFkwVoTzz7QIhC2oJEvede7hquns="
+      },
+      "outputs": {
+        "draws": {
+          "ephemeral_secret": "eXdTBoZDbUAc8dPVp7cgbTIBibAlRVmiooJfyIaOR54=",
+          "nonce": "sQfgTxSk3jRAnH2x1G6sq1ldZj8K2HHY",
+          "id_bytes": "hGw4jObdIxQoBKhdhyhshw=="
+        },
+        "shared": "GrToYHSJn98K78XdDJuQFLab2QvUYi6R2/B4vn0CbC8=",
+        "kdf_info": "c2lsdmVyLW1lc3Nlbmdlci92MS94Y2hhY2hhMjBwb2x5MTMwNdw5O+U4CE6rj0GIdQEYxMoE1hUTXDQI2BqRnvKjC/12SD8bZDwfg16MqEu8hSXTvBayTuYTzXn0NuPxfi+BISY=",
+        "key": "Eh1vyR10aiW4Ut+MaJd/QGPPl7Li+S+55wTmnRteVQw=",
+        "aad": "GLvP3T1HCf5X7rtUrzxwvFJYYopnI8Kxeiz7oTi4Nl/cOTvlOAhOq49BiHUBGMTKBNYVE1w0CNgakZ7yowv9dg==",
+        "signature_domain": "silver-messenger/v1/envelope",
+        "signed_bytes": "GLvP3T1HCf5X7rtUrzxwvFJYYopnI8Kxeiz7oTi4Nl/cOTvlOAhOq49BiHUBGMTKBNYVE1w0CNgakZ7yowv9drEH4E8UpN40QJx9sdRurKtZXWY/Cthx2Hsic2VudF9hdF9tcyI6MTcwMDAwMDAwMDAwMCwiZXBvY2giOjAsInNlcSI6MCwiY29udGVudCI6eyJ0eXBlIjoidGV4dCIsImJvZHkiOiJoZWxsbywgYm9iIn19ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICA=",
+        "signature": "VgdlsrAPopmuRIyW3S216kAQATIxmneqAun393QDORQEwo0WyD9Uvoo0J42/vSTcSIMP29mKDxiceSrXa5KJDw==",
+        "plaintext": "meh6jVIXlsWbqezs2y5qbzoe2A6giL4QSrNPJg6tRANWB2WysA+ima5EjJbdLbXqQBABMjGad6oC6ff3dAM5FATCjRbIP1S+ijQnjb+9JNxIgw/b2YoPGJx5KtdrkokPeyJzZW50X2F0X21zIjoxNzAwMDAwMDAwMDAwLCJlcG9jaCI6MCwic2VxIjowLCJjb250ZW50Ijp7InR5cGUiOiJ0ZXh0IiwiYm9keSI6ImhlbGxvLCBib2IifX0gICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIA==",
+        "envelope": {
+          "id": "846c388c-e6dd-4314-a804-a85d87286c87",
+          "to": "2fYtRY8g36vouXvfE2ysTB9foJeA5L7AAZNEF5faBhsC",
+          "ephemeral_public": "3Dk75TgITquPQYh1ARjEygTWFRNcNAjYGpGe8qML/XY=",
+          "nonce": "sQfgTxSk3jRAnH2x1G6sq1ldZj8K2HHY",
+          "ciphertext": "VlDQy+nBpWAwsWUjJ4gTISWZBxXlebnfAdJ/jz2FHcKUJr2ue0yGfWbQT/+hkVYiAES5AyeMaKG8ORYq074cb2fZ4bjSIBRvjH7TjJYAHh+I9Z+5F43XpZofxSiEIQmz62VL9fcQm1BWfiFrpWgaEcaMkIGhAuhTmWk+z/gJBbg7h0wtdMlCsouCGeb1epT9kH3TltDy4NbVJ368a12ojPX1QBcWEwcXh868qGwHVitJj1V5BM8b2eY4TBTRqFth2VDx8UwM5pzxvCLZ7A6ETfnEairknh1/nMPkf8FhKPyARb44xDrdj0TNtVXt07LubS7aylonLs7MK5HroKwTtdA44FvodIFA+w+tMtp0mX4="
+        },
+        "opened_from": "BMnz2CXfYkwNGcm7fYd6cXv8GLkE2WZbdjwtvCnPhv3U",
+        "opened_signed": true
+      }
+    },
+    {
+      "name": "v4_deniable",
+      "inputs": {
+        "sender": {
+          "signing_seed": "BIsT39RgarB5ig+jiTdH7qqhm1324Tazmk4MXGbcZGo=",
+          "dh_secret": "ivF7/NVZVxgo68ET180l9VuoxGhe1O9WctzPHYea7uE="
+        },
+        "recipient": {
+          "signing_seed": "SVcuyb98jLsfLrds24qkphgcKqgasRtjjMa6R1ER84c=",
+          "dh_secret": "9VJKXsZLeSVCDYZmqEF7xXFEfzmjbsduJ0fhs+E/I0c="
+        },
+        "body": "eyJ2Ijo0LCJzZXNzaW9uIjoiUnk2aGhDNGc5ZWNKeGpQMmJvR3pmZz09IiwibWVzc2FnZSI6eyJoZWFkZXIiOnsiZGgiOiJLQ3JiYmNLS2toZHpQWXNzSjdvRzVqTS9KSUtpSGkxZSsyQzNHOTdEV3lrPSIsInBuIjowLCJuIjozfSwiY2lwaGVydGV4dCI6Im8vb0RwemE0empQYWVKRFRkMVIyQkViMitWWWdoUHE0S2RrUG5WbnhxTVk9In19ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICA=",
+        "signed": false,
+        "rng_seed": "gWiUCL8wsk0dr2YZFkwVoTzz7QIhC2oJEvede7hquns="
+      },
+      "outputs": {
+        "draws": {
+          "ephemeral_secret": "eXdTBoZDbUAc8dPVp7cgbTIBibAlRVmiooJfyIaOR54=",
+          "nonce": "sQfgTxSk3jRAnH2x1G6sq1ldZj8K2HHY",
+          "id_bytes": "hGw4jObdIxQoBKhdhyhshw=="
+        },
+        "shared": "GrToYHSJn98K78XdDJuQFLab2QvUYi6R2/B4vn0CbC8=",
+        "kdf_info": "c2lsdmVyLW1lc3Nlbmdlci92MS94Y2hhY2hhMjBwb2x5MTMwNdw5O+U4CE6rj0GIdQEYxMoE1hUTXDQI2BqRnvKjC/12SD8bZDwfg16MqEu8hSXTvBayTuYTzXn0NuPxfi+BISY=",
+        "key": "Eh1vyR10aiW4Ut+MaJd/QGPPl7Li+S+55wTmnRteVQw=",
+        "aad": "GLvP3T1HCf5X7rtUrzxwvFJYYopnI8Kxeiz7oTi4Nl/cOTvlOAhOq49BiHUBGMTKBNYVE1w0CNgakZ7yowv9dg==",
+        "signature_domain": "silver-messenger/v1/envelope",
+        "signed_bytes": "GLvP3T1HCf5X7rtUrzxwvFJYYopnI8Kxeiz7oTi4Nl/cOTvlOAhOq49BiHUBGMTKBNYVE1w0CNgakZ7yowv9drEH4E8UpN40QJx9sdRurKtZXWY/Cthx2HsidiI6NCwic2Vzc2lvbiI6IlJ5NmhoQzRnOWVjSnhqUDJib0d6Zmc9PSIsIm1lc3NhZ2UiOnsiaGVhZGVyIjp7ImRoIjoiS0NyYmJjS0traGR6UFlzc0o3b0c1ak0vSklLaUhpMWUrMkMzRzk3RFd5az0iLCJwbiI6MCwibiI6M30sImNpcGhlcnRleHQiOiJvL29EcHphNHpqUGFlSkRUZDFSMkJFYjIrVllnaFBxNEtka1BuVm54cU1ZPSJ9fSAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg",
+        "signature": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+        "plaintext": "meh6jVIXlsWbqezs2y5qbzoe2A6giL4QSrNPJg6tRAMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAeyJ2Ijo0LCJzZXNzaW9uIjoiUnk2aGhDNGc5ZWNKeGpQMmJvR3pmZz09IiwibWVzc2FnZSI6eyJoZWFkZXIiOnsiZGgiOiJLQ3JiYmNLS2toZHpQWXNzSjdvRzVqTS9KSUtpSGkxZSsyQzNHOTdEV3lrPSIsInBuIjowLCJuIjozfSwiY2lwaGVydGV4dCI6Im8vb0RwemE0empQYWVKRFRkMVIyQkViMitWWWdoUHE0S2RrUG5WbnhxTVk9In19ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICA=",
+        "envelope": {
+          "id": "846c388c-e6dd-4314-a804-a85d87286c87",
+          "to": "2fYtRY8g36vouXvfE2ysTB9foJeA5L7AAZNEF5faBhsC",
+          "ephemeral_public": "3Dk75TgITquPQYh1ARjEygTWFRNcNAjYGpGe8qML/XY=",
+          "nonce": "sQfgTxSk3jRAnH2x1G6sq1ldZj8K2HHY",
+          "ciphertext": "VlDQy+nBpWAwsWUjJ4gTISWZBxXlebnfAdJ/jz2FHcLCIdgcy0Mk5MiUw2l8vOPIQFS4MRYWHwu+0OHdp70le2MbbK4aH0DRBkr0ASm9OsPAdpBizgfYvQZm7//vs4C862VOsqNQ6BNRRD9r7j1FBMye8sinWrAgnT43hrkmDb0I3Qx4A58GptPOGfDnO9PtjHLAlpy8uc7GYGuhfkqojKyjQQdACwl+ptO6sy12PyhEh0NGcZwK/LN1dlybxVQLsDu4mQUdo5fj3zG+9RngOqCPdyjonE0xntn0c8MvKuaTGLI6h3ONxwGf4RC1h7D0b2HVhT53dI/Ycdub4el50bjPkfeuZi3t/K/asyDRaTGHrZMcfuzhEpY2y1GMGmEStSK0F1REw4znXG4J02ICdktcOcGE/dPwL0edQRvb5QkH1iWLQc9/Ut0kErL4fkOTGhEh48z2JXnrbpOFzgtyjU2o/ku0j+U/YIRk8QXFGFCeIRpYms4dPvaQffewfpNV2ASVZZGbr/kCPZf68HOB6vhEgM+/UeV6CFmcGq++SxgxQamT7U62nNGdIkfDVa74"
+        },
+        "opened_from": "BMnz2CXfYkwNGcm7fYd6cXv8GLkE2WZbdjwtvCnPhv3U",
+        "opened_signed": false
+      }
+    }
+  ]
+}

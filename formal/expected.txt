@@ -1,0 +1,46 @@
+# What Verifpal must find for each query, one per line:
+# model <TAB> query <TAB> holds|fails, in the order the model asks them.
+# "fails" marks a query the model is expected to break, documented in the
+# model's header comment. A line "options <TAB> model <TAB> flags" gives
+# extra flags for that model. check.sh compares this file with Verifpal's
+# result code and refuses any difference.
+handshake.vp	confidentiality? m1	holds
+handshake.vp	authentication? Alice -> Bob: c1	holds
+handshake_prekeys.vp	confidentiality? m1	holds
+handshake_prekeys.vp	authentication? Alice -> Bob: c1	holds
+handshake_no_opk.vp	confidentiality? m1	fails
+handshake_no_opk.vp	authentication? Alice -> Bob: c1	holds
+handshake_pq.vp	confidentiality? m1	holds
+handshake_pq.vp	authentication? Alice -> Bob: c1	holds
+handshake_unbound.vp	confidentiality? m1	holds
+handshake_unbound.vp	authentication? Alice -> Bob: c1	fails
+# One session: Bob adds nothing fresh to a v2 first flight (his one-time
+# prekey is used after the envelope signature is checked), so with two
+# sessions Verifpal reports that the flight can be replayed at the
+# signature check. Replay of an envelope is the client's job (protocol
+# section 8: envelope ids, sequence numbers, and a session that refuses a
+# used message key), which the model does not include; with one session
+# the query asks about forgery alone.
+options	handshake_v2.vp	--sessions 1
+handshake_v2.vp	confidentiality? m1	holds
+handshake_v2.vp	authentication? Alice -> Bob: c1	holds
+ratchet.vp	confidentiality? m1	holds
+ratchet.vp	confidentiality? m2	holds
+ratchet.vp	confidentiality? m3	fails
+ratchet.vp	confidentiality? m4	holds
+ratchet_active.vp	confidentiality? m1	holds
+ratchet_active.vp	confidentiality? m2	holds
+ratchet_active.vp	confidentiality? m3	holds
+ratchet_active.vp	confidentiality? m4	holds
+ratchet_active.vp	authentication? Alice -> Bob: c1	holds
+ratchet_active.vp	authentication? Bob -> Alice: c2	holds
+ratchet_active.vp	authentication? Alice -> Bob: c3	holds
+ratchet_active.vp	authentication? Bob -> Alice: c4	holds
+ratchet_quantum.vp	confidentiality? m1	holds
+ratchet_quantum.vp	confidentiality? m2	holds
+ratchet_quantum.vp	confidentiality? m3	fails
+ratchet_quantum.vp	confidentiality? m4	holds
+ratchet_v2_quantum.vp	confidentiality? m1	holds
+ratchet_v2_quantum.vp	confidentiality? m2	holds
+ratchet_v2_quantum.vp	confidentiality? m3	fails
+ratchet_v2_quantum.vp	confidentiality? m4	fails

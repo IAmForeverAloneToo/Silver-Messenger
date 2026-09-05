@@ -1,0 +1,110 @@
+// The protocol v2 ratchet (docs/PROTOCOL.md section 6: Diffie–Hellman
+// steps only, no ML-KEM) under the leak of ratchet_quantum.vp: both
+// devices read after turn 2, and every Diffie–Hellman secret of every
+// turn taken by an adversary that breaks X25519.
+//
+// Expected c0c0c1c1: confidentiality? m1 and m2 hold (nothing before the
+// compromise leaks, and rk0 does not), m3 FAILS (the window after a
+// compromise), and m4 FAILS: every later root key is a function of the
+// leaked one and Diffie–Hellman outputs the adversary can compute, so a
+// v2 session never heals against it. This is the gap the v4 ratchet
+// (ratchet_quantum.vp) closes, and what THREAT_MODEL.md says of v2
+// sessions under "Future quantum adversary with a recording".
+
+attacker[passive]
+
+principal Bob[
+    knows public info_root
+    knows private rk0, spk
+    gspk = PUBKEY(spk)
+]
+
+principal Alice[
+    knows public info_root
+    knows private rk0
+]
+
+Bob -> Alice: [gspk]
+
+principal Alice[
+    generates x1, m1
+    gx1 = PUBKEY(x1)
+    rk1_a, ck1_a = HKDF(rk0, DH_KEX(gspk, x1), info_root)
+    mk1_a = HKDF(nil, MAC(ck1_a, nil), nil)
+    c1 = AEAD_ENC(mk1_a, m1, gx1)
+]
+
+Alice -> Bob: gx1, c1
+
+principal Bob[
+    rk1_b, ck1_b = HKDF(rk0, DH_KEX(gx1, spk), info_root)
+    mk1_b = HKDF(nil, MAC(ck1_b, nil), nil)
+    m1_b = AEAD_DEC(mk1_b, c1, gx1)?
+]
+
+principal Bob[
+    generates y2, m2
+    gy2 = PUBKEY(y2)
+    rk2_b, ck2_b = HKDF(rk1_b, DH_KEX(gx1, y2), info_root)
+    mk2_b = HKDF(nil, MAC(ck2_b, nil), nil)
+    c2 = AEAD_ENC(mk2_b, m2, gy2)
+]
+
+Bob -> Alice: gy2, c2
+
+principal Alice[
+    rk2_a, ck2_a = HKDF(rk1_a, DH_KEX(gy2, x1), info_root)
+    mk2_a = HKDF(nil, MAC(ck2_a, nil), nil)
+    m2_a = AEAD_DEC(mk2_a, c2, gy2)?
+]
+
+phase[1]
+
+principal Alice[
+    leaks rk2_a, x1
+]
+
+principal Bob[
+    leaks rk2_b, y2, spk
+]
+
+principal Alice[
+    generates x3, m3
+    gx3 = PUBKEY(x3)
+    rk3_a, ck3_a = HKDF(rk2_a, DH_KEX(gy2, x3), info_root)
+    mk3_a = HKDF(nil, MAC(ck3_a, nil), nil)
+    c3 = AEAD_ENC(mk3_a, m3, gx3)
+    leaks x3
+]
+
+Alice -> Bob: gx3, c3
+
+principal Bob[
+    rk3_b, ck3_b = HKDF(rk2_b, DH_KEX(gx3, y2), info_root)
+    mk3_b = HKDF(nil, MAC(ck3_b, nil), nil)
+    m3_b = AEAD_DEC(mk3_b, c3, gx3)?
+]
+
+principal Bob[
+    generates y4, m4
+    gy4 = PUBKEY(y4)
+    rk4_b, ck4_b = HKDF(rk3_b, DH_KEX(gx3, y4), info_root)
+    mk4_b = HKDF(nil, MAC(ck4_b, nil), nil)
+    c4 = AEAD_ENC(mk4_b, m4, gy4)
+    leaks y4
+]
+
+Bob -> Alice: gy4, c4
+
+principal Alice[
+    rk4_a, ck4_a = HKDF(rk3_a, DH_KEX(gy4, x3), info_root)
+    mk4_a = HKDF(nil, MAC(ck4_a, nil), nil)
+    m4_a = AEAD_DEC(mk4_a, c4, gy4)?
+]
+
+queries[
+    confidentiality? m1
+    confidentiality? m2
+    confidentiality? m3
+    confidentiality? m4
+]

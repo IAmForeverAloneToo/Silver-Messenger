@@ -1,0 +1,142 @@
+// Silver Messenger, the protocol v4 ratchet (docs/PROTOCOL.md section 6
+// and 6.1): the Double Ratchet with an ML-KEM step beside every
+// Diffie–Hellman step, unrolled for two round trips after a handshake.
+// Verifpal 1.4.
+//
+// rk0 is the handshake secret both sides hold (handshake.vp); gspk is
+// Bob's signed prekey, which the handshake authenticated, so it is
+// guarded. Each turn is one message, the first of a new sending chain,
+// so the chain KDF is one step (MAC) and the message key one HKDF. x and
+// y are ratchet Diffie–Hellman keys, k the ML-KEM ratchet keys (public
+// half ek), kem_r the encapsulation randomness, ss the secret it makes.
+// The message header (the sender's ratchet key, ML-KEM key and
+// ciphertext) is the AEAD's associated data, as on the wire.
+//
+// The attacker is passive: it records everything and, between the second
+// and third message (phase 1), reads both devices: the current root key,
+// the current Diffie–Hellman key and the current ML-KEM key of each.
+// Older keys are gone, as they are in the implementation.
+//
+// Expected c0c0c1c0: confidentiality? m1 and m2 hold (forward secrecy:
+// what was read does not open what was already sent), confidentiality?
+// m3 FAILS (the message sent right after the compromise is made from the
+// compromised state and the peer's compromised keys, which is the
+// Double Ratchet's own statement of its limit), confidentiality? m4
+// holds (healing: one fresh step from each side and the compromise is
+// over). Healing is against an adversary that only listens; one that
+// keeps injecting its own ratchet keys stays in, which no ratchet
+// prevents and the threat model says.
+
+attacker[passive]
+
+principal Bob[
+    knows public info_root
+    knows private rk0, spk
+    gspk = PUBKEY(spk)
+]
+
+principal Alice[
+    knows public info_root
+    knows private rk0
+]
+
+Bob -> Alice: [gspk]
+
+// Turn 1, Alice -> Bob: the first chain, a Diffie–Hellman step against
+// Bob's signed prekey only (there is no ML-KEM key of Bob's to
+// encapsulate to yet), carrying Alice's first ML-KEM ratchet key.
+principal Alice[
+    generates x1, k1, m1
+    gx1 = PUBKEY(x1)
+    ek1 = PUBKEY(k1)
+    rk1_a, ck1_a = HKDF(rk0, DH_KEX(gspk, x1), info_root)
+    mk1_a = HKDF(nil, MAC(ck1_a, nil), nil)
+    c1 = AEAD_ENC(mk1_a, m1, HASH(gx1, ek1))
+]
+
+Alice -> Bob: gx1, ek1, c1
+
+principal Bob[
+    rk1_b, ck1_b = HKDF(rk0, DH_KEX(gx1, spk), info_root)
+    mk1_b = HKDF(nil, MAC(ck1_b, nil), nil)
+    m1_b = AEAD_DEC(mk1_b, c1, HASH(gx1, ek1))?
+]
+
+// Turn 2, Bob -> Alice: a fresh Diffie–Hellman key, a fresh ML-KEM key,
+// and a secret encapsulated to Alice's key. From here every step is both.
+principal Bob[
+    generates y2, k2, kem_r2, m2
+    gy2 = PUBKEY(y2)
+    ek2 = PUBKEY(k2)
+    ss2, ct2 = KEM_ENCAP(ek1, kem_r2)
+    rk2_b, ck2_b = HKDF(rk1_b, HASH(DH_KEX(gx1, y2), ss2), info_root)
+    mk2_b = HKDF(nil, MAC(ck2_b, nil), nil)
+    c2 = AEAD_ENC(mk2_b, m2, HASH(gy2, ek2, ct2))
+]
+
+Bob -> Alice: gy2, ek2, ct2, c2
+
+principal Alice[
+    ss2_a = KEM_DECAP(k1, ct2)
+    rk2_a, ck2_a = HKDF(rk1_a, HASH(DH_KEX(gy2, x1), ss2_a), info_root)
+    mk2_a = HKDF(nil, MAC(ck2_a, nil), nil)
+    m2_a = AEAD_DEC(mk2_a, c2, HASH(gy2, ek2, ct2))?
+]
+
+phase[1]
+
+// Both devices are read: the state as it stands after turn 2.
+principal Alice[
+    leaks rk2_a, x1, k1
+]
+
+principal Bob[
+    leaks rk2_b, y2, k2
+]
+
+// Turn 3, Alice -> Bob.
+principal Alice[
+    generates x3, k3, kem_r3, m3
+    gx3 = PUBKEY(x3)
+    ek3 = PUBKEY(k3)
+    ss3, ct3 = KEM_ENCAP(ek2, kem_r3)
+    rk3_a, ck3_a = HKDF(rk2_a, HASH(DH_KEX(gy2, x3), ss3), info_root)
+    mk3_a = HKDF(nil, MAC(ck3_a, nil), nil)
+    c3 = AEAD_ENC(mk3_a, m3, HASH(gx3, ek3, ct3))
+]
+
+Alice -> Bob: gx3, ek3, ct3, c3
+
+principal Bob[
+    ss3_b = KEM_DECAP(k2, ct3)
+    rk3_b, ck3_b = HKDF(rk2_b, HASH(DH_KEX(gx3, y2), ss3_b), info_root)
+    mk3_b = HKDF(nil, MAC(ck3_b, nil), nil)
+    m3_b = AEAD_DEC(mk3_b, c3, HASH(gx3, ek3, ct3))?
+]
+
+// Turn 4, Bob -> Alice.
+principal Bob[
+    generates y4, k4, kem_r4, m4
+    gy4 = PUBKEY(y4)
+    ek4 = PUBKEY(k4)
+    ss4, ct4 = KEM_ENCAP(ek3, kem_r4)
+    rk4_b, ck4_b = HKDF(rk3_b, HASH(DH_KEX(gx3, y4), ss4), info_root)
+    mk4_b = HKDF(nil, MAC(ck4_b, nil), nil)
+    c4 = AEAD_ENC(mk4_b, m4, HASH(gy4, ek4, ct4))
+]
+
+Bob -> Alice: gy4, ek4, ct4, c4
+
+principal Alice[
+    ss4_a = KEM_DECAP(k3, ct4)
+    rk4_a, ck4_a = HKDF(rk3_a, HASH(DH_KEX(gy4, x3), ss4_a), info_root)
+    mk4_a = HKDF(nil, MAC(ck4_a, nil), nil)
+    m4_a = AEAD_DEC(mk4_a, c4, HASH(gy4, ek4, ct4))?
+]
+
+queries[
+    confidentiality? m1
+    confidentiality? m2
+    confidentiality? m3
+    confidentiality? m4
+]

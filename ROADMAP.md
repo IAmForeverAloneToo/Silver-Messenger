@@ -323,7 +323,8 @@ Messages were not deniable, and now are (42). An identity could not be
 rotated or revoked, and now can (43). A relay that showed one person a
 stale key or a different log was caught only when two people compared
 safety numbers by hand, and is now caught by their clients gossiping the
-log head (44). Nothing has been formally modelled yet (45).
+log head (44). The handshake and the ratchet are modelled, with published
+vectors and a harness that replays them (45).
 
 41. [x] **Post-quantum ratchet** (L). An ML-KEM ratchet next to the
         Diffie–Hellman one, so healing after a compromise is post-quantum
@@ -364,7 +365,7 @@ log head (44). Nothing has been formally modelled yet (45).
         is the only log server. (The id being the key, the relay never
         could substitute an identity; the log catches freshness and
         equivocation, which signatures cannot.)
-45. [ ] **Formal model and test vectors** (M). The handshake and the
+45. [x] **Formal model and test vectors** (M). The handshake and the
         ratchet modelled in Verifpal or Tamarin with the properties the
         threat model claims; published test vectors for the envelope, the
         handshake and the ratchet; a conformance harness a second

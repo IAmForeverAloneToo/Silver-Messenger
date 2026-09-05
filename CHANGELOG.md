@@ -8,6 +8,26 @@ means behaviour or the wire protocol changed in a way worth reading about.
 
 ### Added
 
+- **Formal models and test vectors.** The handshake (v2 and v4) and the
+  ratchet (v2 and v4) are modelled in Verifpal under `formal/`, against a
+  classical, a quantum-capable and an active adversary and with a
+  mid-conversation compromise; the outcome of every query is recorded in
+  `formal/expected.txt`, the ones a model is meant to break included (the
+  v4 handshake without its key-binding signature, a handshake without a
+  one-time prekey under a later compromise, the v2 ratchet against an
+  adversary that breaks X25519), and CI checks them on every push.
+  Known-answer vectors for every operation live in `docs/vectors/`, with
+  every intermediate value and the randomness fixed by a documented
+  seeded generator; `cargo test` replays them and re-derives the
+  intermediates from the byte layouts in `docs/PROTOCOL.md`. Property
+  tests cover bodies, the sealed layer, sessions under random reordered
+  schedules, statements, the transparency log and file chunks. Protocol
+  section 12 says how to use the vectors and what the models leave out.
+  For this, the protocol crate gained seeded variants of every operation
+  that draws randomness (`initiate_with_rng`, `decrypt_with_rng`,
+  `seal_bytes_with_rng` and friends, `from_seed` and `from_bytes`
+  constructors); nothing on the wire changed.
+
 - **Post-quantum ratchet (protocol v4).** When both clients advertise it
   (a signed `pq_ratchet` capability in the key bundle) and publish ML-KEM
   keys, a forward-secret session does an ML-KEM-768 step beside every

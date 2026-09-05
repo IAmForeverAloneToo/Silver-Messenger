@@ -1,0 +1,53 @@
+{
+  "description": "Encrypted file chunks: the per-chunk nonce, the associated data that binds a chunk to its blob and place, and the ciphertext.",
+  "cases": [
+    {
+      "name": "chunk_0_of_2",
+      "inputs": {
+        "key": "fW/bHNf2mT0H0crLEXKY54451qgN7KcwZmE6YPQsYq4=",
+        "nonce": "FaoX59MDPKoStydx6bikYhJm0lbL9OK2",
+        "blob": "00112233445566778899aabbccddeeff",
+        "index": 0,
+        "total": 2,
+        "plaintext": "dGhlIGZpcnN0IGNodW5r"
+      },
+      "outputs": {
+        "chunk_nonce": "FaoX59MDPKoStydx6bikYhJm0lbL9OK2",
+        "aad": "c2lsdmVyLW1lc3Nlbmdlci92MS9ibG9iLWNodW5rMDAxMTIyMzM0NDU1NjY3Nzg4OTlhYWJiY2NkZGVlZmYAAAAAAAAAAg==",
+        "ciphertext": "pZkTrpU1WPwaLZIZQem5BJIaDcOBEAqwHG/I4AKOPA=="
+      }
+    },
+    {
+      "name": "chunk_1_of_2",
+      "inputs": {
+        "key": "fW/bHNf2mT0H0crLEXKY54451qgN7KcwZmE6YPQsYq4=",
+        "nonce": "FaoX59MDPKoStydx6bikYhJm0lbL9OK2",
+        "blob": "00112233445566778899aabbccddeeff",
+        "index": 1,
+        "total": 2,
+        "plaintext": "dGhlIHNlY29uZCBjaHVuaw=="
+      },
+      "outputs": {
+        "chunk_nonce": "FaoX59MDPKoStydx6bikYhJm0lbL9OK3",
+        "aad": "c2lsdmVyLW1lc3Nlbmdlci92MS9ibG9iLWNodW5rMDAxMTIyMzM0NDU1NjY3Nzg4OTlhYWJiY2NkZGVlZmYAAAABAAAAAg==",
+        "ciphertext": "di9bmFAK4pTrpTJPjaXEJG6QVyJt0ud9z7VOlL1cxeE="
+      }
+    },
+    {
+      "name": "empty_file",
+      "inputs": {
+        "key": "fW/bHNf2mT0H0crLEXKY54451qgN7KcwZmE6YPQsYq4=",
+        "nonce": "FaoX59MDPKoStydx6bikYhJm0lbL9OK2",
+        "blob": "00112233445566778899aabbccddeeff",
+        "index": 0,
+        "total": 1,
+        "plaintext": ""
+      },
+      "outputs": {
+        "chunk_nonce": "FaoX59MDPKoStydx6bikYhJm0lbL9OK2",
+        "aad": "c2lsdmVyLW1lc3Nlbmdlci92MS9ibG9iLWNodW5rMDAxMTIyMzM0NDU1NjY3Nzg4OTlhYWJiY2NkZGVlZmYAAAAAAAAAAQ==",
+        "ciphertext": "mt65wdChJIjE6enCg3ZVAQ=="
+      }
+    }
+  ]
+}

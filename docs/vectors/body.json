@@ -1,0 +1,181 @@
+{
+  "description": "Bodies as encoded before sealing: JSON in the field order given, padded with spaces to a multiple of 160 bytes. Plain (v1) bodies for each content kind, and ratchet bodies (v2, with and without the InitHeader).",
+  "cases": [
+    {
+      "name": "text",
+      "inputs": {
+        "kind": "plain",
+        "content": {
+          "type": "text",
+          "body": "hello"
+        },
+        "sent_at_ms": 1700000000000,
+        "epoch": 81985529216486895,
+        "seq": 42
+      },
+      "outputs": {
+        "encoded": "{\"sent_at_ms\":1700000000000,\"epoch\":81985529216486895,\"seq\":42,\"content\":{\"type\":\"text\",\"body\":\"hello\"}}                                                        ",
+        "encoded_len": 160
+      }
+    },
+    {
+      "name": "text_with_caps_and_head",
+      "inputs": {
+        "kind": "plain",
+        "content": {
+          "type": "text",
+          "body": "hello"
+        },
+        "sent_at_ms": 1700000000000,
+        "epoch": 81985529216486895,
+        "seq": 42,
+        "caps": [
+          "receipts",
+          "files",
+          "padded_files",
+          "lifecycle"
+        ],
+        "head": {
+          "index": 12,
+          "hash": "g/BENDsXfcu3CIg2PbKq2edeXA3k+qRo8xb/nKLKick="
+        }
+      },
+      "outputs": {
+        "encoded": "{\"sent_at_ms\":1700000000000,\"epoch\":81985529216486895,\"seq\":42,\"content\":{\"type\":\"text\",\"body\":\"hello\"},\"caps\":[\"receipts\",\"files\",\"padded_files\",\"lifecycle\"],\"head\":{\"index\":12,\"hash\":\"g/BENDsXfcu3CIg2PbKq2edeXA3k+qRo8xb/nKLKick=\"}}                                                                                       ",
+        "encoded_len": 320
+      }
+    },
+    {
+      "name": "receipt",
+      "inputs": {
+        "kind": "plain",
+        "content": {
+          "type": "receipt",
+          "kind": "read",
+          "ids": [
+            "0f0e0d0c-0b0a-4908-8706-050403020100",
+            "00000000-0000-4000-8000-000000000001"
+          ]
+        },
+        "sent_at_ms": 1700000000000,
+        "epoch": 81985529216486895,
+        "seq": 42
+      },
+      "outputs": {
+        "encoded": "{\"sent_at_ms\":1700000000000,\"epoch\":81985529216486895,\"seq\":42,\"content\":{\"type\":\"receipt\",\"kind\":\"read\",\"ids\":[\"0f0e0d0c-0b0a-4908-8706-050403020100\",\"00000000-0000-4000-8000-000000000001\"]}}                                                                                                                                ",
+        "encoded_len": 320
+      }
+    },
+    {
+      "name": "file",
+      "inputs": {
+        "kind": "plain",
+        "content": {
+          "type": "file",
+          "name": "notes.txt",
+          "size": 70000,
+          "blob": "00112233445566778899aabbccddeeff",
+          "key": {
+            "key": "fW/bHNf2mT0H0crLEXKY54451qgN7KcwZmE6YPQsYq4=",
+            "nonce": "FaoX59MDPKoStydx6bikYhJm0lbL9OK2"
+          },
+          "chunks": 2,
+          "sha256": "0f8Ks3pUcYOOgKQxBdIut3MT3stFClmpxXvB+spTa1s="
+        },
+        "sent_at_ms": 1700000000000,
+        "epoch": 81985529216486895,
+        "seq": 42
+      },
+      "outputs": {
+        "encoded": "{\"sent_at_ms\":1700000000000,\"epoch\":81985529216486895,\"seq\":42,\"content\":{\"type\":\"file\",\"name\":\"notes.txt\",\"size\":70000,\"blob\":\"00112233445566778899aabbccddeeff\",\"key\":{\"key\":\"fW/bHNf2mT0H0crLEXKY54451qgN7KcwZmE6YPQsYq4=\",\"nonce\":\"FaoX59MDPKoStydx6bikYhJm0lbL9OK2\"},\"chunks\":2,\"sha256\":\"0f8Ks3pUcYOOgKQxBdIut3MT3stFClmpxXvB+spTa1s=\"}}                                                                                                                                                  ",
+        "encoded_len": 480
+      }
+    },
+    {
+      "name": "revocation",
+      "inputs": {
+        "kind": "plain",
+        "content": {
+          "type": "revocation",
+          "identity": "BMnz2CXfYkwNGcm7fYd6cXv8GLkE2WZbdjwtvCnPhv3U",
+          "created_at_ms": 1700000001000,
+          "signature": "CMRnTTxVGRKRJ6v4lvMLStI/WqQuqu7emWnsFtGDY2T74TCMs5E2t+qQTaXQBpmUydWzr4t2Su70gtHpPf55DQ=="
+        },
+        "sent_at_ms": 1700000000000,
+        "epoch": 81985529216486895,
+        "seq": 42
+      },
+      "outputs": {
+        "encoded": "{\"sent_at_ms\":1700000000000,\"epoch\":81985529216486895,\"seq\":42,\"content\":{\"type\":\"revocation\",\"identity\":\"BMnz2CXfYkwNGcm7fYd6cXv8GLkE2WZbdjwtvCnPhv3U\",\"created_at_ms\":1700000001000,\"signature\":\"CMRnTTxVGRKRJ6v4lvMLStI/WqQuqu7emWnsFtGDY2T74TCMs5E2t+qQTaXQBpmUydWzr4t2Su70gtHpPf55DQ==\"}}                                  ",
+        "encoded_len": 320
+      }
+    },
+    {
+      "name": "succession",
+      "inputs": {
+        "kind": "plain",
+        "content": {
+          "type": "succession",
+          "old": "BMnz2CXfYkwNGcm7fYd6cXv8GLkE2WZbdjwtvCnPhv3U",
+          "new": "wMhKkEJCJWwrSEcEKWT8wGGienoARedtr6zvpfnBZwT",
+          "created_at_ms": 1700000002000,
+          "old_signature": "+7rdaNFNSKnSYjb6bV5K70pjo3eobWa8NE+n9wpgimBB+68vtu0ve746XP/WPqAy2PCtTGETjQkCl8iloH9sBA==",
+          "new_signature": "ETNpDBXIXP4IjkhNiZgyjqJ+cAZFB+xYdUh2fWeYmfe/qliaRQDOFti6N0+2w3YdoGjPNc2t7HEdM35hhrnOAg=="
+        },
+        "sent_at_ms": 1700000000000,
+        "epoch": 81985529216486895,
+        "seq": 42
+      },
+      "outputs": {
+        "encoded": "{\"sent_at_ms\":1700000000000,\"epoch\":81985529216486895,\"seq\":42,\"content\":{\"type\":\"succession\",\"old\":\"BMnz2CXfYkwNGcm7fYd6cXv8GLkE2WZbdjwtvCnPhv3U\",\"new\":\"wMhKkEJCJWwrSEcEKWT8wGGienoARedtr6zvpfnBZwT\",\"created_at_ms\":1700000002000,\"old_signature\":\"+7rdaNFNSKnSYjb6bV5K70pjo3eobWa8NE+n9wpgimBB+68vtu0ve746XP/WPqAy2PCtTGETjQkCl8iloH9sBA==\",\"new_signature\":\"ETNpDBXIXP4IjkhNiZgyjqJ+cAZFB+xYdUh2fWeYmfe/qliaRQDOFti6N0+2w3YdoGjPNc2t7HEdM35hhrnOAg==\"}}                                    ",
+        "encoded_len": 480
+      }
+    },
+    {
+      "name": "ratchet_v2_with_init",
+      "inputs": {
+        "kind": "ratchet",
+        "v": 2,
+        "session": "NuFUNG1i4gD3iZc72kLg0Q==",
+        "init": {
+          "identity_dh": "hfONDEWnbp+RhDaf/Cgoc5Tdfc2VbuQIxDm5wepqymY=",
+          "ephemeral": "kPv2dtVp3PtprkwHehN0rft7HhdHwX6kcCs4Uo9TexE=",
+          "signed_prekey_id": 1,
+          "one_time_prekey_id": 100
+        },
+        "message": {
+          "header": {
+            "dh": "YlMA9lLbc2F0EpF+2Vq2OdrJ2B8xyayvBmUqVebTYRk=",
+            "pn": 0,
+            "n": 0
+          },
+          "ciphertext": "XDdVjh2Zb7D6Ko/T2QVhxtNYK6Yu"
+        }
+      },
+      "outputs": {
+        "encoded": "{\"v\":2,\"session\":\"NuFUNG1i4gD3iZc72kLg0Q==\",\"init\":{\"identity_dh\":\"hfONDEWnbp+RhDaf/Cgoc5Tdfc2VbuQIxDm5wepqymY=\",\"ephemeral\":\"kPv2dtVp3PtprkwHehN0rft7HhdHwX6kcCs4Uo9TexE=\",\"signed_prekey_id\":1,\"one_time_prekey_id\":100},\"message\":{\"header\":{\"dh\":\"YlMA9lLbc2F0EpF+2Vq2OdrJ2B8xyayvBmUqVebTYRk=\",\"pn\":0,\"n\":0},\"ciphertext\":\"XDdVjh2Zb7D6Ko/T2QVhxtNYK6Yu\"}}                                                                                                                                 ",
+        "encoded_len": 480
+      }
+    },
+    {
+      "name": "ratchet_v2",
+      "inputs": {
+        "kind": "ratchet",
+        "v": 2,
+        "session": "NuFUNG1i4gD3iZc72kLg0Q==",
+        "message": {
+          "header": {
+            "dh": "YlMA9lLbc2F0EpF+2Vq2OdrJ2B8xyayvBmUqVebTYRk=",
+            "pn": 0,
+            "n": 0
+          },
+          "ciphertext": "XDdVjh2Zb7D6Ko/T2QVhxtNYK6Yu"
+        }
+      },
+      "outputs": {
+        "encoded": "{\"v\":2,\"session\":\"NuFUNG1i4gD3iZc72kLg0Q==\",\"message\":{\"header\":{\"dh\":\"YlMA9lLbc2F0EpF+2Vq2OdrJ2B8xyayvBmUqVebTYRk=\",\"pn\":0,\"n\":0},\"ciphertext\":\"XDdVjh2Zb7D6Ko/T2QVhxtNYK6Yu\"}}                                                                                                                                                ",
+        "encoded_len": 320
+      }
+    }
+  ]
+}

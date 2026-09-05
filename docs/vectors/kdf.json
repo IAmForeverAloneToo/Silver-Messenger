@@ -1,0 +1,159 @@
+{
+  "description": "The key derivations of a session, one at a time, over arbitrary inputs: the session id, the handshake secret (classical and hybrid, with and without a one-time prekey), the root KDF (v2, and v4 with and without an ML-KEM secret), the chain KDF, and a message key's AEAD key and nonce.",
+  "cases": [
+    {
+      "name": "session_id",
+      "inputs": {
+        "kind": "session_id",
+        "ephemeral": "ikeDXC97w4+xQHncak7g6f4Pa8aT0d5zybdxrvLiaHo=",
+        "signed_prekey": "W/doaCT0i7X7xLkzx2Z1vK693WrhnpX8lFHoV+V3U14="
+      },
+      "outputs": {
+        "kind": "session_id",
+        "domain": "silver-messenger/v2/session-id",
+        "id": "cghXfR5oOA2X75AXE8//gw=="
+      }
+    },
+    {
+      "name": "x3dh_v2_no_one_time",
+      "inputs": {
+        "kind": "handshake_secret",
+        "dh1": "jEykIYCupNFwo8OL/Rn7S9n2bi6lVkg6IOPxKaGal68=",
+        "dh2": "9UG8pPdfabHK3TD5ZprS81zCf7akmWdEAkr5Hib3F/8=",
+        "dh3": "/jhViPqLyqT0bKIj0Nf06+BbBR26ANTrtZODlXTBkNg=",
+        "dh4": null,
+        "kem": null
+      },
+      "outputs": {
+        "kind": "handshake_secret",
+        "info": "silver-messenger/v2/x3dh",
+        "ikm": "//////////////////////////////////////////+MTKQhgK6k0XCjw4v9GftL2fZuLqVWSDog4/EpoZqXr/VBvKT3X2mxyt0w+Waa0vNcwn+2pJlnRAJK+R4m9xf//jhViPqLyqT0bKIj0Nf06+BbBR26ANTrtZODlXTBkNg=",
+        "secret": "tYFWx8K0Exgq97vLmbOMigKyR2hg7ydAzL8XaCWoC/4="
+      }
+    },
+    {
+      "name": "x3dh_v2_one_time",
+      "inputs": {
+        "kind": "handshake_secret",
+        "dh1": "jEykIYCupNFwo8OL/Rn7S9n2bi6lVkg6IOPxKaGal68=",
+        "dh2": "9UG8pPdfabHK3TD5ZprS81zCf7akmWdEAkr5Hib3F/8=",
+        "dh3": "/jhViPqLyqT0bKIj0Nf06+BbBR26ANTrtZODlXTBkNg=",
+        "dh4": "P6PMMb8M0S4lY/ATUkB3LT9+YUsLGLnZsLi+LD0+/WM=",
+        "kem": null
+      },
+      "outputs": {
+        "kind": "handshake_secret",
+        "info": "silver-messenger/v2/x3dh",
+        "ikm": "//////////////////////////////////////////+MTKQhgK6k0XCjw4v9GftL2fZuLqVWSDog4/EpoZqXr/VBvKT3X2mxyt0w+Waa0vNcwn+2pJlnRAJK+R4m9xf//jhViPqLyqT0bKIj0Nf06+BbBR26ANTrtZODlXTBkNg/o8wxvwzRLiVj8BNSQHctP35hSwsYudmwuL4sPT79Yw==",
+        "secret": "57mv8/Y2WL+JDZXAB3WwHWndUslWZr+maNYGy7RNiss="
+      }
+    },
+    {
+      "name": "pqxdh_v3_no_one_time",
+      "inputs": {
+        "kind": "handshake_secret",
+        "dh1": "jEykIYCupNFwo8OL/Rn7S9n2bi6lVkg6IOPxKaGal68=",
+        "dh2": "9UG8pPdfabHK3TD5ZprS81zCf7akmWdEAkr5Hib3F/8=",
+        "dh3": "/jhViPqLyqT0bKIj0Nf06+BbBR26ANTrtZODlXTBkNg=",
+        "dh4": null,
+        "kem": "/NxZmpIZ2Os4UCjrUIBfNqb34vR7RzOpeFIDVwN5/Jk="
+      },
+      "outputs": {
+        "kind": "handshake_secret",
+        "info": "silver-messenger/v3/pqxdh",
+        "ikm": "//////////////////////////////////////////+MTKQhgK6k0XCjw4v9GftL2fZuLqVWSDog4/EpoZqXr/VBvKT3X2mxyt0w+Waa0vNcwn+2pJlnRAJK+R4m9xf//jhViPqLyqT0bKIj0Nf06+BbBR26ANTrtZODlXTBkNj83FmakhnY6zhQKOtQgF82pvfi9HtHM6l4UgNXA3n8mQ==",
+        "secret": "aXZh7G3GvjnCTQbebJWejfhAB0y6B10K6FceBKRCKU4="
+      }
+    },
+    {
+      "name": "pqxdh_v3_one_time",
+      "inputs": {
+        "kind": "handshake_secret",
+        "dh1": "jEykIYCupNFwo8OL/Rn7S9n2bi6lVkg6IOPxKaGal68=",
+        "dh2": "9UG8pPdfabHK3TD5ZprS81zCf7akmWdEAkr5Hib3F/8=",
+        "dh3": "/jhViPqLyqT0bKIj0Nf06+BbBR26ANTrtZODlXTBkNg=",
+        "dh4": "P6PMMb8M0S4lY/ATUkB3LT9+YUsLGLnZsLi+LD0+/WM=",
+        "kem": "/NxZmpIZ2Os4UCjrUIBfNqb34vR7RzOpeFIDVwN5/Jk="
+      },
+      "outputs": {
+        "kind": "handshake_secret",
+        "info": "silver-messenger/v3/pqxdh",
+        "ikm": "//////////////////////////////////////////+MTKQhgK6k0XCjw4v9GftL2fZuLqVWSDog4/EpoZqXr/VBvKT3X2mxyt0w+Waa0vNcwn+2pJlnRAJK+R4m9xf//jhViPqLyqT0bKIj0Nf06+BbBR26ANTrtZODlXTBkNg/o8wxvwzRLiVj8BNSQHctP35hSwsYudmwuL4sPT79Y/zcWZqSGdjrOFAo61CAXzam9+L0e0czqXhSA1cDefyZ",
+        "secret": "t2TME5XBObiPpIkvjpIYcrFzI9sODkLfGikKqutk+ZI="
+      }
+    },
+    {
+      "name": "root_v2",
+      "inputs": {
+        "kind": "root",
+        "root": "Et2ocj81qgsLpDKPvMOsyPAHutYNfaRjCWh2myFbgms=",
+        "dh": "rJp9BKWErVrg1e61VyFFH47mKTH9lQPkQsGr2RPqpmI=",
+        "kem": null,
+        "pq_ratchet": false
+      },
+      "outputs": {
+        "kind": "root",
+        "info": "silver-messenger/v2/ratchet-root",
+        "root": "Csoncp2h10j7GtKf1FVOMjkvqL68d2I+mTYBuR1fbQs=",
+        "chain": "Am7UlEXLW2UmP5ym23OtO4GUoMiRaUkT+8xq0IcM2cU="
+      }
+    },
+    {
+      "name": "root_v4_dh_only",
+      "inputs": {
+        "kind": "root",
+        "root": "Et2ocj81qgsLpDKPvMOsyPAHutYNfaRjCWh2myFbgms=",
+        "dh": "rJp9BKWErVrg1e61VyFFH47mKTH9lQPkQsGr2RPqpmI=",
+        "kem": null,
+        "pq_ratchet": true
+      },
+      "outputs": {
+        "kind": "root",
+        "info": "silver-messenger/v4/ratchet-root",
+        "root": "F4i0HM99A8xBXJhUrWtmyeNfIEmygGtDdBXxSZD1Hao=",
+        "chain": "6wjdymlh1yGaPph1GZ6Jp0zWoHCIMZi2S1fRzuEjP54="
+      }
+    },
+    {
+      "name": "root_v4_with_kem",
+      "inputs": {
+        "kind": "root",
+        "root": "Et2ocj81qgsLpDKPvMOsyPAHutYNfaRjCWh2myFbgms=",
+        "dh": "rJp9BKWErVrg1e61VyFFH47mKTH9lQPkQsGr2RPqpmI=",
+        "kem": "5Q7bF1OvYzmUUsrJXpxp6LOT2DsEM7e1EHzx56QiJAQ=",
+        "pq_ratchet": true
+      },
+      "outputs": {
+        "kind": "root",
+        "info": "silver-messenger/v4/ratchet-root",
+        "root": "sNVhXasPjUwfaUy1oAUk7WqEfo9Pby0gIHxL/o/3WkU=",
+        "chain": "GDpvg1PbFwyz0AiYZOgPqtXWzbnDt35rdMnBvv0Mhrk="
+      }
+    },
+    {
+      "name": "chain",
+      "inputs": {
+        "kind": "chain",
+        "chain": "dk9BKEp3pNTJ8DUtt2fjYYX7IQqBriCIVx9Y0XhobPU="
+      },
+      "outputs": {
+        "kind": "chain",
+        "next": "yJO3sJVdVZsSMvmWOzWGFf/ULAP+kkHLpiAP9atbQiQ=",
+        "message_key": "JzFLegNeSE+O0dXzygeXE4ol+moziHXkPVycisyEBXE="
+      }
+    },
+    {
+      "name": "message_key",
+      "inputs": {
+        "kind": "message_key",
+        "message_key": "2K67adoyfhjQ8npuE+ncN+50lUXh4kYU3aEk+8PIwKE="
+      },
+      "outputs": {
+        "kind": "message_key",
+        "info": "silver-messenger/v2/ratchet-message",
+        "key": "SCZRBruvnws8emhcqX+RCRBkd/izv1MtILMmg8SrI1A=",
+        "nonce": "FZ/CGtChkNybn18ZYRVQfxY9G/dPH59a"
+      }
+    }
+  ]
+}

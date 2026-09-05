@@ -74,6 +74,11 @@ subtle = "2"
 directories = "6"
 uuid = { version = "1", features = ["v4"] }
 
+# tests
+# Property tests over the protocol crate; no regex or fork features, the
+# generators are hand-written.
+proptest = { version = "1", default-features = false, features = ["std"] }
+
 # tui
 ratatui = "0.30"
 unicode-width = "0.2"
