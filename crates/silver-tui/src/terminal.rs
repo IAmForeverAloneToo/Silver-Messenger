@@ -100,27 +100,31 @@ pub fn leave() {
         return;
     }
     let mut out = stdout();
-    let _ = leaving(mode, &mut out);
+    leaving(mode, &mut out);
     let _ = out.flush();
     let _ = disable_raw_mode();
 }
 
 /// What leaving `mode` writes, in the order that undoes entering it: the
-/// mouse, the reports, the title, the alternate screen.
-fn leaving(mode: Mode, out: &mut impl Write) -> std::io::Result<()> {
+/// mouse, the reports, the title, the alternate screen. Every step is
+/// tried whatever the one before did: this runs from a panic hook, where
+/// half a restoration is better than none (on Windows without a console,
+/// crossterm's commands fail rather than write).
+fn leaving(mode: Mode, out: &mut impl Write) {
     match mode {
         Mode::Plain => {}
         Mode::Full | Mode::FullNoMouse => {
             if mode == Mode::Full {
-                queue!(out, DisableMouseCapture)?;
+                let _ = queue!(out, DisableMouseCapture);
             }
-            queue!(out, DisableFocusChange, DisableBracketedPaste)?;
-            out.write_all(POP_TITLE.as_bytes())?;
-            queue!(out, LeaveAlternateScreen)?;
+            let _ = queue!(out, DisableFocusChange, DisableBracketedPaste);
+            let _ = out.write_all(POP_TITLE.as_bytes());
+            let _ = queue!(out, LeaveAlternateScreen);
         }
-        Mode::Reader => queue!(out, DisableFocusChange, DisableBracketedPaste)?,
+        Mode::Reader => {
+            let _ = queue!(out, DisableFocusChange, DisableBracketedPaste);
+        }
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -129,10 +133,14 @@ mod tests {
 
     fn written(mode: Mode) -> String {
         let mut out = Vec::new();
-        leaving(mode, &mut out).unwrap();
+        leaving(mode, &mut out);
         String::from_utf8(out).unwrap()
     }
 
+    // On Windows without a console (CI), crossterm's commands go through
+    // the console API and write nothing, so the bytes cannot be checked
+    // there; the pty test checks the terminal itself on Linux.
+    #[cfg(not(windows))]
     #[test]
     fn leaving_undoes_what_each_mode_set_up() {
         let full = written(Mode::Full);
