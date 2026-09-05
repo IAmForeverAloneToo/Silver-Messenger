@@ -112,19 +112,6 @@ impl Notifier {
         };
         write_raw(&format!("\x1b]2;{title}\x1b\\"));
     }
-
-    /// Save the terminal's title so it can be put back on exit.
-    pub fn push_title(&self) {
-        if !self.quiet_titles {
-            write_raw("\x1b[22;2t");
-        }
-    }
-
-    pub fn pop_title(&self) {
-        if !self.quiet_titles {
-            write_raw("\x1b[23;2t");
-        }
-    }
 }
 
 /// Keep a notification to printable text without the OSC separator.

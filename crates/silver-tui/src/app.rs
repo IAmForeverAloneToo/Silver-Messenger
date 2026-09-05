@@ -575,6 +575,10 @@ pub struct App {
     /// In reader mode, the selected message as an index into the open
     /// chat's lines (the screen's selection has no rows to refer to).
     reader_cursor: Option<usize>,
+    /// Debug builds only: when to panic on request, for the terminal test
+    /// of the panic hook.
+    #[cfg(debug_assertions)]
+    debug_panic_at: Option<Instant>,
 }
 
 /// What the app draws on: the terminal as a screen, or a line at a time
@@ -753,6 +757,8 @@ impl App {
             reader: false,
             journal: Vec::new(),
             reader_cursor: None,
+            #[cfg(debug_assertions)]
+            debug_panic_at: None,
         };
         app.refresh_group_list();
         app.system(Level::Info, "Welcome to Silver Messenger.");
@@ -823,6 +829,13 @@ impl App {
         Ok(app)
     }
 
+    /// Debug builds only: panic on the first tick after `delay`, so the
+    /// terminal test can see what the panic hook leaves behind.
+    #[cfg(debug_assertions)]
+    pub fn debug_panic_after(&mut self, delay: Duration) {
+        self.debug_panic_at = Some(Instant::now() + delay);
+    }
+
     pub async fn run(
         mut self,
         mut surface: Surface,
@@ -831,7 +844,6 @@ impl App {
         let mut keys = spawn_input_thread();
         let mut internal_rx = self.internal_rx.take().expect("run is called once");
         let mut tick = tokio::time::interval(Duration::from_millis(250));
-        self.notifier.push_title();
 
         let exit = loop {
             match &mut surface {
@@ -852,6 +864,10 @@ impl App {
                 Some(ev) = events.recv() => self.handle_client_event(ev),
                 Some(ev) = internal_rx.recv() => self.handle_internal(ev),
                 _ = tick.tick() => {
+                    #[cfg(debug_assertions)]
+                    if self.debug_panic_at.is_some_and(|at| Instant::now() >= at) {
+                        panic!("a panic asked for by SILVER_DEBUG_PANIC_AFTER_MS, for the terminal test");
+                    }
                     self.expire_toast();
                     self.flush_receipts();
                     self.flush_cover();
@@ -876,7 +892,6 @@ impl App {
                 break Exit::Quit;
             }
         };
-        self.notifier.pop_title();
         self.remove_open_copies();
         if let Surface::Reader(reader) = &mut surface {
             reader.finish(&mut self, matches!(exit, Exit::Quit))?;

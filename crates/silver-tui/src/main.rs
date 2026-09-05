@@ -9,6 +9,7 @@ mod link;
 mod notify;
 mod qr;
 mod reader;
+mod terminal;
 mod theme;
 mod ui;
 
@@ -19,11 +20,6 @@ use std::io::IsTerminal;
 
 use anyhow::{Context, bail};
 use clap::Parser;
-use ratatui::crossterm::event::{
-    DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-    EnableFocusChange, EnableMouseCapture,
-};
-use ratatui::crossterm::execute;
 use silver_client::{
     Client, ConnectOptions, DEFAULT_RELAY_URL, InviteLink, Pin, Protection, Proxy, SessionStore,
     Store, VaultError, keystore,
@@ -492,15 +488,8 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
 
     // Reader mode for this run, or from the config for good.
     let reader = args.reader || config.reader;
-    if reader {
-        // The full mode's panic hook (ratatui's) restores the screen; here
-        // raw mode is all there is to undo before the message prints.
-        let hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            let _ = ratatui::crossterm::terminal::disable_raw_mode();
-            hook(info);
-        }));
-    }
+    // A panic leaves the terminal as it was, then prints.
+    terminal::install_panic_hook();
 
     // The client runs until it quits or locks; a lock drops everything that
     // holds keys and starts over from the passphrase.
@@ -518,36 +507,24 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
             at_rest.clone(),
         )?;
 
-        let mut stdout = std::io::stdout();
+        // Debug builds only: a panic on request, for the terminal test.
+        #[cfg(debug_assertions)]
+        if let Some(ms) = std::env::var("SILVER_DEBUG_PANIC_AFTER_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            app.debug_panic_after(std::time::Duration::from_millis(ms));
+        }
+
         let surface = if reader {
-            // Raw mode for the keys and nothing else: the screen is the
-            // terminal's own scrollback.
             app.enable_reader();
-            ratatui::crossterm::terminal::enable_raw_mode()?;
-            let _ = execute!(stdout, EnableBracketedPaste, EnableFocusChange);
+            terminal::enter_reader()?;
             app::Surface::Reader(reader::Reader::new())
         } else {
-            let terminal = ratatui::init();
-            // Best effort: a terminal that lacks one of these just ignores it.
-            let _ = execute!(stdout, EnableBracketedPaste, EnableFocusChange);
-            if !args.no_mouse {
-                let _ = execute!(stdout, EnableMouseCapture);
-            }
-            app::Surface::Screen(terminal)
+            app::Surface::Screen(terminal::enter_full(!args.no_mouse)?)
         };
         let result = app.run(surface, events).await;
-        if reader {
-            let _ = execute!(stdout, DisableFocusChange, DisableBracketedPaste);
-            let _ = ratatui::crossterm::terminal::disable_raw_mode();
-        } else {
-            let _ = execute!(
-                stdout,
-                DisableMouseCapture,
-                DisableFocusChange,
-                DisableBracketedPaste
-            );
-            ratatui::restore();
-        }
+        terminal::leave();
         match result? {
             Exit::Quit => return Ok(()),
             Exit::Wiped(word) => {
