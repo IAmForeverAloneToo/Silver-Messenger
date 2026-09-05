@@ -300,15 +300,31 @@ pub fn assemble(info: &FileInfo, chunks: &[Vec<u8>]) -> anyhow::Result<Vec<u8>> 
 /// gets ` (2)`, ` (3)` and so on before its extension. With a `quota`, the
 /// directory's files plus this one must stay under it.
 pub fn save(dir: &Path, name: &str, bytes: &[u8], quota: Option<u64>) -> anyhow::Result<PathBuf> {
+    save_as(dir, name, bytes.len() as u64, quota, |_| bytes.to_vec())
+}
+
+/// Like [`save`], with the bytes made once the name is settled: `make`
+/// gets the name the file will have (` (2)` and so on included when the
+/// plain one is taken), which an encryption binds. `size` is what the
+/// quota is checked against before the name is claimed.
+pub fn save_as(
+    dir: &Path,
+    name: &str,
+    size: u64,
+    quota: Option<u64>,
+    make: impl FnOnce(&str) -> Vec<u8>,
+) -> anyhow::Result<PathBuf> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    check_quota(dir, bytes.len() as u64, quota)?;
+    check_quota(dir, size, quota)?;
     let name = sanitize_name(name);
     let (stem, ext) = split_extension(&name);
     let (stem, ext) = (stem.to_owned(), ext.to_owned());
     // The name is claimed by creating the file exclusively, so two fetches
     // finishing at the same moment cannot pick the same one.
     let mut candidate = dir.join(&name);
+    let mut final_name = name.clone();
     let mut n = 2;
+    let mut make = Some(make);
     loop {
         match std::fs::OpenOptions::new()
             .write(true)
@@ -316,7 +332,8 @@ pub fn save(dir: &Path, name: &str, bytes: &[u8], quota: Option<u64>) -> anyhow:
             .open(&candidate)
         {
             Ok(mut file) => {
-                if let Err(e) = std::io::Write::write_all(&mut file, bytes) {
+                let bytes = make.take().expect("made once")(&final_name);
+                if let Err(e) = std::io::Write::write_all(&mut file, &bytes) {
                     drop(file);
                     let _ = std::fs::remove_file(&candidate);
                     return Err(e).with_context(|| format!("writing {}", candidate.display()));
@@ -326,7 +343,8 @@ pub fn save(dir: &Path, name: &str, bytes: &[u8], quota: Option<u64>) -> anyhow:
                 return Ok(candidate);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                candidate = dir.join(format!("{stem} ({n}){ext}"));
+                final_name = format!("{stem} ({n}){ext}");
+                candidate = dir.join(&final_name);
                 n += 1;
             }
             Err(e) => return Err(e).with_context(|| format!("creating {}", candidate.display())),
@@ -680,6 +698,22 @@ mod tests {
         assert_eq!(info.label(), "refdp.exe (10 B)");
         assert_eq!(printable(" bob\u{202e}\x1b]2;x\x07 ", 40), "bob]2;x");
         assert_eq!(printable(&"x".repeat(100), 8), "xxxxxxxx");
+    }
+
+    #[test]
+    fn a_file_made_for_its_final_name_gets_the_name_the_disk_gave_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = save_as(dir.path(), "a.txt", 1, None, |name| {
+            name.as_bytes().to_vec()
+        })
+        .unwrap();
+        let second = save_as(dir.path(), "a.txt", 1, None, |name| {
+            name.as_bytes().to_vec()
+        })
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "a.txt");
+        assert!(second.ends_with("a (2).txt"), "{}", second.display());
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), "a (2).txt");
     }
 
     #[test]

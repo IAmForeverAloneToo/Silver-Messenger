@@ -26,6 +26,7 @@ use crate::submitter::{SubmitEvent, Submitter};
 use crate::tail::{Answer, Step, Tail};
 use crate::tls::{ConnectOptions, Connectors, Observed, connectors, observing_connector};
 use crate::transparency::SharedLog;
+use crate::vault::FileCipher;
 use silver_protocol::{
     Body, Content, DeviceCertificate, DeviceRevocation, Envelope, Identity, KeyBundle, Message,
     ProtocolError, Revocation, Sequence, Succession, UserId, now_ms, open_bytes, seal_bytes,
@@ -49,6 +50,9 @@ const RATE_LIMIT_RETRY: Duration = Duration::from_secs(5);
 const UPGRADE_CHECK: Duration = Duration::from_secs(3600);
 /// Publishes per connection in answer to a low prekey deposit.
 const MAX_REPUBLISH: u32 = 2;
+/// What encrypting a downloaded file adds to its size (the magic, the
+/// nonce and the tag), for the quota check before the name is claimed.
+const FILE_CIPHER_OVERHEAD: u64 = 64;
 
 /// Things the connection task reports to the front end.
 #[derive(Debug)]
@@ -1665,13 +1669,16 @@ impl Client {
     /// under its own name (never overwriting). Returns where it went. What
     /// the sender claimed is checked before any chunk is asked for, and a
     /// `quota` on `dir` is honoured before fetching and again before
-    /// saving.
+    /// saving. With `encrypt`, the file is written under the data key,
+    /// bound to its final name, so it is ciphertext on disk like the rest
+    /// of the data directory ([`crate::FileCipher::decrypt`] reads it).
     pub async fn download_file(
         &self,
         info: &FileInfo,
         dir: &Path,
         quota: Option<u64>,
         progress: Option<mpsc::Sender<Progress>>,
+        encrypt: Option<Arc<FileCipher>>,
     ) -> Result<PathBuf, ClientError> {
         info.check().map_err(|e| ClientError::File(e.to_string()))?;
         {
@@ -1700,7 +1707,16 @@ impl Client {
         let dir = dir.to_path_buf();
         tokio::task::spawn_blocking(move || {
             let bytes = files::assemble(&info, &chunks)?;
-            files::save(&dir, &info.name, &bytes, quota)
+            match encrypt {
+                Some(cipher) => files::save_as(
+                    &dir,
+                    &info.name,
+                    bytes.len() as u64 + FILE_CIPHER_OVERHEAD,
+                    quota,
+                    |name| cipher.encrypt(name, &bytes),
+                ),
+                None => files::save(&dir, &info.name, &bytes, quota),
+            }
         })
         .await
         .map_err(|e| ClientError::File(e.to_string()))?

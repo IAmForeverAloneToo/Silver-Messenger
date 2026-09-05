@@ -13,6 +13,7 @@ pub mod connection;
 pub mod cover;
 pub mod devices;
 pub mod everyday;
+pub mod export;
 pub mod files;
 pub mod groups;
 pub mod invite;

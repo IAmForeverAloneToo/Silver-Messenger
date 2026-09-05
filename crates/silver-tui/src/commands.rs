@@ -180,8 +180,8 @@ pub const COMMANDS: &[CommandInfo] = &[
     cmd(
         "files",
         &[],
-        "auto|ask",
-        "fetch this contact's files as they arrive, or wait for /get (the default)",
+        "auto|ask|encrypt on|off|decrypt",
+        "fetch this contact's files as they arrive, or wait for /get (the default); encrypt on keeps received files as ciphertext (/open reads them), decrypt writes a plain copy of the last one",
     ),
     cmd(
         "open",

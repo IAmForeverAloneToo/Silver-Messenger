@@ -168,14 +168,24 @@ impl ChatLine {
     }
 }
 
+/// What a file line says after the path of a file written under the data
+/// key.
+const ENCRYPTED_MARK: &str = " (encrypted)";
+/// Where `/open` puts the private plain copy of an encrypted file, under
+/// `downloads/`; emptied at start and at exit.
+const OPEN_DIR: &str = ".open";
+
 /// The saved location a file line names, if it does: `[file] name (size)
-/// → /path` (or `->` in ASCII).
+/// → /path` (or `->` in ASCII), `(encrypted)` after the path or not.
 fn saved_file_path(text: &str) -> Option<PathBuf> {
     let rest = text.strip_prefix("[file] ")?;
     let path = rest
         .rsplit_once(" → ")
         .or_else(|| rest.rsplit_once(" -> "))
         .map(|(_, path)| path.trim())?;
+    let path = path
+        .strip_suffix(ENCRYPTED_MARK.trim_start())
+        .map_or(path, str::trim_end);
     (!path.is_empty()).then(|| PathBuf::from(path))
 }
 
@@ -340,6 +350,8 @@ enum Internal {
         id: String,
         info: FileInfo,
         result: Result<PathBuf, String>,
+        /// The file was written under the data key.
+        encrypted: bool,
     },
     /// The relay's sequencer answered about a group.
     GroupSequenced {
@@ -387,6 +399,7 @@ enum Internal {
         id: String,
         info: FileInfo,
         result: Result<PathBuf, String>,
+        encrypted: bool,
     },
     /// A device was linked (or not).
     DeviceLinked {
@@ -498,6 +511,8 @@ pub struct App {
     pub sidebar_width: u16,
     /// Most `downloads/` may hold, from `downloads_quota_mib` in the config.
     downloads_quota: Option<u64>,
+    /// Received files are written under the data key (`/files encrypt`).
+    encrypted_downloads: bool,
     /// The left button is down on the divider.
     resizing: bool,
     /// The left button is down on the scrollbar.
@@ -690,6 +705,7 @@ impl App {
             last_click: None,
             sidebar_width: config.sidebar_width.clamp(12, 60),
             downloads_quota: config.downloads_quota(),
+            encrypted_downloads: config.encrypted_downloads,
             resizing: false,
             dragging_scrollbar: false,
             help_open: false,
@@ -784,6 +800,8 @@ impl App {
                 format!("{n} contact request(s) waiting in the Requests pane."),
             );
         }
+        // Plain copies a previous run left behind (a crash, a kill).
+        app.remove_open_copies();
         Ok(app)
     }
 
@@ -836,6 +854,7 @@ impl App {
             }
         };
         self.notifier.pop_title();
+        self.remove_open_copies();
         self.client.shutdown().await;
         Ok(exit)
     }
@@ -2936,16 +2955,23 @@ impl App {
                 id,
                 info,
                 result,
-            } => self.on_group_downloaded(group, id, info, result),
+                encrypted,
+            } => self.on_group_downloaded(group, id, info, result, encrypted),
             Internal::Downloaded {
                 peer,
                 id,
                 info,
                 result,
+                encrypted,
             } => {
                 let label = info.label();
                 let text = match &result {
-                    Ok(path) => format!("[file] {label} {} {}", self.glyphs.arrow, path.display()),
+                    Ok(path) => format!(
+                        "[file] {label} {} {}{}",
+                        self.glyphs.arrow,
+                        path.display(),
+                        if encrypted { ENCRYPTED_MARK } else { "" }
+                    ),
                     Err(e) => format!(
                         "[file] {label} {} {e} · /get tries again",
                         self.glyphs.failed
@@ -3519,13 +3545,15 @@ impl App {
         let tx = self.internal_tx.clone();
         let dir = self.store.downloads_dir();
         let quota = self.downloads_quota;
+        let encrypt = self.download_cipher();
+        let encrypted = encrypt.is_some();
         let (ptx, prx) = mpsc::channel::<Progress>(16);
         tokio::spawn(async move {
             let result = with_progress(
                 &tx,
                 prx,
                 &format!("Receiving {label}"),
-                client.download_file(&info, &dir, quota, Some(ptx)),
+                client.download_file(&info, &dir, quota, Some(ptx), encrypt),
             )
             .await
             .map_err(|e| e.to_string());
@@ -3535,9 +3563,144 @@ impl App {
                     id,
                     info,
                     result,
+                    encrypted,
                 })
                 .await;
         });
+    }
+
+    /// The key received files are written under, when `/files encrypt`
+    /// is on and the directory is protected.
+    pub(super) fn download_cipher(&self) -> Option<std::sync::Arc<silver_client::FileCipher>> {
+        if self.encrypted_downloads {
+            self.store.cipher()
+        } else {
+            None
+        }
+    }
+
+    /// `path` itself for a plain file; for one written under the data
+    /// key, a private plain copy under `downloads/.open/`, which is
+    /// removed at exit and at the next start.
+    fn plain_copy_for_opening(&self, path: &std::path::Path) -> anyhow::Result<PathBuf> {
+        use anyhow::Context;
+        let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        if !silver_client::FileCipher::is_encrypted(&bytes) {
+            return Ok(path.to_path_buf());
+        }
+        let cipher = self
+            .store
+            .cipher()
+            .context("the data directory is not unlocked")?;
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .context("no file name")?;
+        let plain = cipher.decrypt(&name, &bytes)?;
+        let dir = self.store.downloads_dir().join(OPEN_DIR);
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        let copy = dir.join(&name);
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&copy)
+            .with_context(|| format!("creating {}", copy.display()))?;
+        std::io::Write::write_all(&mut file, &plain)?;
+        Ok(copy)
+    }
+
+    /// Remove the plain copies `/open` made; nothing else lives there.
+    fn remove_open_copies(&self) {
+        let dir = self.store.downloads_dir().join(OPEN_DIR);
+        if dir.exists()
+            && let Err(e) = std::fs::remove_dir_all(&dir)
+        {
+            tracing::warn!("could not remove {}: {e}", dir.display());
+        }
+    }
+
+    /// `/files encrypt [on|off]`: whether received files are written
+    /// under the data key from now on.
+    fn cmd_files_encrypt(&mut self, arg: Option<&str>) {
+        let protected = self.store.cipher().is_some();
+        match arg.map(str::to_ascii_lowercase).as_deref() {
+            None => self.toast(if self.encrypted_downloads {
+                "Received files are written encrypted; /open reads them, /files decrypt writes a plain copy."
+            } else {
+                "Received files are written as plain files; /files encrypt on keeps them encrypted."
+            }),
+            Some("on") if !protected => self.toast(
+                "Not possible: the data directory itself is stored unencrypted, so the files would be no safer. Set a passphrase (silver --set-passphrase) or a key store first.",
+            ),
+            Some("on") => {
+                self.set_encrypted_downloads(true);
+                self.toast(
+                    "Received files are written encrypted from now on; /open decrypts a private copy, /files decrypt writes a plain one.",
+                );
+            }
+            Some("off") => {
+                self.set_encrypted_downloads(false);
+                self.toast(
+                    "Received files are written as plain files from now on; the encrypted ones stay so, and /open still reads them.",
+                );
+            }
+            Some(_) => self.toast("Usage: /files encrypt on|off"),
+        }
+    }
+
+    fn set_encrypted_downloads(&mut self, on: bool) {
+        self.encrypted_downloads = on;
+        let mut config = self.store.load_config().unwrap_or_default();
+        config.encrypted_downloads = on;
+        if let Err(e) = self.store.save_config(&config) {
+            self.toast(format!("Could not save config: {e}"));
+        }
+    }
+
+    /// `/files decrypt`: a plain copy, beside it, of the last received
+    /// file in this chat that was written under the data key.
+    fn cmd_files_decrypt(&mut self) {
+        let Some(conversation) = self.selected_conversation() else {
+            self.toast("Open a chat first.");
+            return;
+        };
+        let Some(path) = self
+            .lines_of(&conversation)
+            .iter()
+            .rev()
+            .find_map(|l| l.file.clone())
+        else {
+            self.toast("No saved file in this chat yet.");
+            return;
+        };
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let result = (|| -> anyhow::Result<PathBuf> {
+            use anyhow::Context;
+            let bytes = std::fs::read(&path)?;
+            if !silver_client::FileCipher::is_encrypted(&bytes) {
+                anyhow::bail!("{name} is a plain file already");
+            }
+            let cipher = self
+                .store
+                .cipher()
+                .context("the data directory is not unlocked")?;
+            let plain = cipher.decrypt(&name, &bytes)?;
+            let dir = self.store.downloads_dir();
+            silver_client::files::save(&dir, &name, &plain, self.downloads_quota)
+        })();
+        match result {
+            Ok(copy) => self.toast(format!("Plain copy written: {}", copy.display())),
+            Err(e) => self.toast(format!("Not decrypted: {e}")),
+        }
     }
 
     fn line_mut(&mut self, peer: &UserId, id: &str) -> Option<&mut ChatLine> {
@@ -3563,9 +3726,18 @@ impl App {
             self.toast(format!("Not opening {name}: {why}."));
             return;
         }
-        match open::that_detached(path) {
-            Ok(()) => self.toast(format!("Opening {}", path.display())),
-            Err(e) => self.toast(format!("Could not open {}: {e}", path.display())),
+        // A file kept as ciphertext is handed to the opener as a private
+        // plain copy, which goes at exit.
+        let to_open = match self.plain_copy_for_opening(path) {
+            Ok(copy) => copy,
+            Err(e) => {
+                self.toast(format!("Could not open {name}: {e}"));
+                return;
+            }
+        };
+        match open::that_detached(&to_open) {
+            Ok(()) => self.toast(format!("Opening {}", to_open.display())),
+            Err(e) => self.toast(format!("Could not open {}: {e}", to_open.display())),
         }
     }
 
@@ -3657,6 +3829,11 @@ impl App {
     /// `/files auto|ask`: whether the selected contact's files are fetched
     /// as they arrive or wait for `/get`.
     fn cmd_files(&mut self, args: &[&str]) {
+        match args.first().map(|s| s.to_ascii_lowercase()).as_deref() {
+            Some("encrypt") => return self.cmd_files_encrypt(args.get(1).copied()),
+            Some("decrypt") => return self.cmd_files_decrypt(),
+            _ => {}
+        }
         let Some(index) = self.selected_contact_index() else {
             self.toast("Select a contact first.");
             return;
@@ -3669,8 +3846,13 @@ impl App {
                 } else {
                     "wait for /get"
                 };
+                let kept = if self.encrypted_downloads {
+                    " Saved encrypted."
+                } else {
+                    ""
+                };
                 self.toast(format!(
-                    "Files from {name} {state}. /files auto fetches them at once, /files ask waits."
+                    "Files from {name} {state}. /files auto fetches them at once, /files ask waits.{kept}"
                 ));
             }
             Some("auto") | Some("on") => {
@@ -3693,7 +3875,7 @@ impl App {
                 });
                 self.toast(format!("Files from {name} wait for /get."));
             }
-            Some(_) => self.toast("Usage: /files auto|ask"),
+            Some(_) => self.toast("Usage: /files auto|ask, /files encrypt on|off, /files decrypt"),
         }
     }
 

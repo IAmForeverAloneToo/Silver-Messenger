@@ -268,6 +268,16 @@ pub(crate) struct GroupsFile {
     expected: BTreeMap<GroupId, ExpectedGroup>,
 }
 
+impl GroupsFile {
+    /// Each group's name as shown, by id.
+    pub(crate) fn names(&self) -> BTreeMap<GroupId, String> {
+        self.groups
+            .iter()
+            .map(|(id, r)| (*id, r.display_name().to_owned()))
+            .collect()
+    }
+}
+
 /// A group named at link time, before its Welcome came.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExpectedGroup {

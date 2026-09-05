@@ -112,6 +112,17 @@ struct Args {
     #[arg(long)]
     force: bool,
 
+    /// Write every conversation into this directory (outside the data
+    /// directory), one file per contact or group, then exit. Deleted and
+    /// expired messages are not there. Nothing is overwritten.
+    #[arg(long, value_name = "DIR")]
+    export_history: Option<PathBuf>,
+
+    /// With --export-history: text (one line per message) or json (one
+    /// JSON object per message, every field of it).
+    #[arg(long, value_name = "FORMAT", default_value = "text")]
+    format: String,
+
     /// Make this data directory a device of an identity you already have
     /// on another computer: register with the relay, print a link and a
     /// QR code for that computer to take in with /devices link, wait for
@@ -254,6 +265,22 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
         let user_id = silver_protocol::Identity::from_secrets(&payload.identity).user_id();
         silver_client::import_backup(&store, payload, args.force)?;
         println!("Restored identity {user_id} into {}.", data_dir.display());
+        return Ok(());
+    }
+
+    if let Some(dir) = args.export_history {
+        let format = silver_client::export::Format::parse(&args.format)
+            .with_context(|| format!("--format {} is neither text nor json", args.format))?;
+        let written =
+            silver_client::export::export_history(&store, &dir, format, silver_protocol::now_ms())?;
+        println!(
+            "Wrote {} conversation(s) to {}.",
+            written.len(),
+            dir.display()
+        );
+        for path in &written {
+            println!("  {}", path.display());
+        }
         return Ok(());
     }
 

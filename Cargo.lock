@@ -4671,6 +4671,7 @@ dependencies = [
  "axum-server",
  "bs58",
  "chacha20poly1305",
+ "chrono",
  "directories",
  "futures-util",
  "keyring",

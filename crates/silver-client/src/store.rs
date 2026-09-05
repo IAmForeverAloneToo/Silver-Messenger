@@ -118,6 +118,11 @@ pub struct Config {
     /// this many minutes without a keystroke; 0 never. Needs a passphrase.
     #[serde(default)]
     pub lock_after_minutes: u64,
+    /// Write received files under the data key, so `downloads/` holds
+    /// ciphertext like the rest of the directory; `/open` decrypts a
+    /// private temporary copy. Only where the directory is protected.
+    #[serde(default)]
+    pub encrypted_downloads: bool,
 }
 
 fn default_downloads_quota_mib() -> u64 {
@@ -196,6 +201,7 @@ impl Default for Config {
             downloads_quota_mib: default_downloads_quota_mib(),
             os_keystore: true,
             lock_after_minutes: 0,
+            encrypted_downloads: false,
         }
     }
 }

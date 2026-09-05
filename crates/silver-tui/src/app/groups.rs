@@ -1144,13 +1144,15 @@ impl App {
         let tx = self.internal_tx.clone();
         let dir = self.store.downloads_dir();
         let quota = self.downloads_quota;
+        let encrypt = self.download_cipher();
+        let encrypted = encrypt.is_some();
         let (ptx, prx) = mpsc::channel::<Progress>(16);
         tokio::spawn(async move {
             let result = with_progress(
                 &tx,
                 prx,
                 &format!("Receiving {label}"),
-                client.download_file(&info, &dir, quota, Some(ptx)),
+                client.download_file(&info, &dir, quota, Some(ptx), encrypt),
             )
             .await
             .map_err(|e| e.to_string());
@@ -1160,6 +1162,7 @@ impl App {
                     id,
                     info,
                     result,
+                    encrypted,
                 })
                 .await;
         });
@@ -1171,10 +1174,16 @@ impl App {
         id: String,
         info: FileInfo,
         result: Result<PathBuf, String>,
+        encrypted: bool,
     ) {
         let label = info.label();
         let text = match &result {
-            Ok(path) => format!("[file] {label} {} {}", self.glyphs.arrow, path.display()),
+            Ok(path) => format!(
+                "[file] {label} {} {}{}",
+                self.glyphs.arrow,
+                path.display(),
+                if encrypted { ENCRYPTED_MARK } else { "" }
+            ),
             Err(e) => format!(
                 "[file] {label} {} {e} · /get tries again",
                 self.glyphs.failed
