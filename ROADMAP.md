@@ -428,13 +428,16 @@ those who want to pay for it (46).
 
 ## Phase 10: a finished terminal client
 
-50. [ ] **Everyday privacy features** (M). Disappearing messages with a
+50. [x] **Everyday privacy features** (M). Disappearing messages with a
         per-conversation timer enforced by both sides; delete for me and
         a best-effort delete for everyone that says exactly what it can
         and cannot promise; edits as new messages that reference the old
         one; replies and reactions; all as encrypted content types behind
         capabilities, so older clients see something sensible. Encrypted
-        `downloads/` as an option, and history export.
+        `downloads/` as an option, and history export. Done in 0.10.0:
+        `/reply`, `/react`, `/edit`, `/delete [me]`, `/timer`, `/files
+        encrypt`, `--export-history`; protocol sections 4.7, 13.3 and
+        14.5; the design note `docs/design/everyday.md`.
 51. [ ] **Accessibility in the terminal** (M). A screen-reader mode with
         linear output and no box drawing, high-contrast palettes, and
         every action reachable without the mouse checked against a

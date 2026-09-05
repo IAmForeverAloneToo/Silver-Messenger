@@ -4,6 +4,71 @@ Notable changes to Silver Messenger. Versions follow [semantic
 versioning](https://semver.org); while the major version is 0, a minor bump
 means behaviour or the wire protocol changed in a way worth reading about.
 
+## Unreleased
+
+Phase 10 of the roadmap begins with the everyday features: what people
+expect of a messenger in daily use, without a single new thing for the
+relay to see.
+
+### Added
+
+- **Replies, reactions, edits and deletions.** `/reply <text>` answers
+  a message, quoted on every reader's screen from that reader's own
+  copy, so a reply cannot misquote; `/react <emoji>` puts a reaction
+  under a message and `/react none` takes it back; `/edit <text>`
+  replaces the text of one of your messages within a day of sending,
+  marked as edited, the history keeping every version; `/delete`
+  removes one of your messages for everyone within a day, leaving a
+  placeholder on every screen, and `/delete me` removes any message
+  from your devices only. Each acts on the message selected with
+  Shift-Up (or a triple click), else on the last one it makes sense
+  for, and the status line names the selected message. Only the
+  author's edits and deletions apply, checked against the sealed sender
+  (the MLS sender in a group), and one that arrives before its message
+  waits a day for it. All of it is content inside the encrypted body
+  (protocol section 4.7), padded like any other, so the relay cannot
+  tell a reaction from a receipt or a deletion from a short message; a
+  contact whose client is older is never sent a kind it would not read,
+  and the client says what they will not see. In groups the kinds go
+  only when every member's leaf declares the new capability (13.1,
+  13.3); otherwise the client names the members whose clients are older
+  and sends nothing.
+- **Disappearing messages.** `/timer 1d` (30s to 1w, or off) makes
+  messages in a conversation go that long after you send them, or after
+  the other side reads them, on every device on its own clock; a note
+  says who set it, lines carry an hourglass while they have a timer,
+  and the status line says how long a selected message has left. In a
+  group the timer is an admin's word, told to a newcomer as they join.
+  What ran out is rewritten out of the history, not marked. Towards a
+  contact whose client is older the timer is set on this side alone,
+  and the client says so. The threat model says exactly what a timer
+  and a deletion promise: the other side's software keeps them, not
+  cryptography.
+- **Encrypted downloads.** `/files encrypt on`, where the data directory
+  is protected, writes received files under the data key, so
+  `downloads/` holds ciphertext like the rest; `/open` decrypts a
+  private copy for the opener, removed at exit and at the next start,
+  and `/files decrypt` writes a plain copy beside the file. Off by
+  default.
+- **History export.** `silver --export-history <dir>` writes every
+  conversation to a file of its own, as text or, with `--format json`,
+  as JSON lines with every field the history keeps; deleted and expired
+  messages are not there, and nothing is overwritten.
+- **Sync between devices** gains the moment a message was read, so a
+  timer starts from the same instant on every device, and a `remove`
+  kind by which a device tells its siblings what it deleted for itself
+  (protocol 14.5).
+
+### Changed
+
+- The history file gains update lines (`read`, `edit`, `react`, `gone`)
+  after the entries and is rewritten, atomically, when a message is
+  removed for good; a client on 0.9.0 skips the lines it does not know
+  and shows the rest. Every body from 0.10.0 advertises the `edits`,
+  `reactions` and `timers` capabilities; every key package and leaf
+  declares the private-use leaf capability `0xF003`, and a leaf that
+  does not is refreshed at once.
+
 ## 0.9.0 - 2026-09-05
 
 Phase 9 of the roadmap: more than two people, more than one device.

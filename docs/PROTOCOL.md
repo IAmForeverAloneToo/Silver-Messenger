@@ -260,6 +260,9 @@ the relay does not learn which clients have which features.
 | `lifecycle` | Understands `revocation` and `succession` content: identity-lifecycle statements pushed inside a message (section 10). |
 | `cover` | Understands `cover` content and wants it: the client's user has cover traffic on (4.6). Advertised only while that is so. |
 | `devices` | Seals every message to every device of the recipient's it knows of (section 14), so the recipient's primary need not pass it on to its other devices; understands `device_revocation` content; and reads `sync` content from its own devices. Advertised always from 0.9.0. |
+| `edits` | Understands `edit` and `delete` content (4.7). Advertised always from 0.10.0. |
+| `reactions` | Understands `reaction` content (4.7). Advertised always from 0.10.0. |
+| `timers` | Understands `timer` content (4.7). Advertised always from 0.10.0. |
 
 ### 4.4 Receipts
 
@@ -348,6 +351,93 @@ the outbox. Two running clients therefore keep each other covered until
 one of them stops, and the other falls silent within ten minutes, so at
 most a handful of cover messages ever wait in an offline contact's
 mailbox. `THREAT_MODEL.md` says what this hides and what it does not.
+
+### 4.7 Replies, edits, deletions, reactions and timers
+
+All inside the encrypted body, padded like any other, so the relay sees
+a reaction as it sees a receipt and cannot tell a deletion from a short
+message.
+
+```json
+{ "type": "text", "body": "yes, tomorrow", "reply_to": "<message id>" }
+{ "type": "file", "name": "...", "...": "...", "reply_to": "<message id>" }
+{ "type": "edit", "id": "<message id>", "body": "yes, on Tuesday" }
+{ "type": "delete", "ids": [ "<message id>", "..." ] }
+{ "type": "reaction", "id": "<message id>", "emoji": "👍" }
+{ "type": "reaction", "id": "<message id>", "emoji": "" }
+{ "type": "timer", "seconds": 86400 }
+```
+
+A message is named by the id it goes by: one-to-one, the id of the
+envelope to the contact's primary (14.4); in a group, the application
+message id (13.3). Every id named must be a valid message id (section
+3); a body naming one that is not is refused when it is encoded and when
+it is decoded.
+
+* `reply_to`, optional on `text` and `file`, names the message answered,
+  one in the same conversation. The reader shows a quote drawn from its
+  own copy of that message and never from anything the sender wrote
+  about it, so a reply cannot misquote; a reader that does not have the
+  message says so. A client from before 0.10.0 ignores the field and
+  shows the text alone, which is why replies need no capability.
+* `edit`: the message `id` says `body` from now on. Only its author may
+  edit it: a reader applies an edit only when the sealed sender (the MLS
+  sender in a group) wrote the message named, and refuses one for a
+  message it holds from anyone else. An edit for a message the reader
+  does not hold yet (a group's fan-out can cross, a mailbox can deliver
+  out of order) is kept for a day and applied when the message arrives,
+  under the same check. A file message cannot be edited. The reader
+  keeps the earlier text in its history and shows the line as edited.
+  `body` is bounded as a text is. This implementation offers an edit
+  within 24 hours of sending; a reader does not enforce the window,
+  since the sender's clock is the sender's own.
+* `delete`: the author asks every reader to remove the messages `ids`,
+  one to 64 of them, whatever their age. A reader applies a deletion
+  only to messages the sender wrote: the text, the file reference and
+  the reactions go, a placeholder saying a message was deleted stays,
+  and a file already saved stays. A deletion for a message not held yet
+  is kept as a tombstone for a day, and the message, should it arrive
+  from that sender, is dropped on arrival. This implementation offers
+  the command within 24 hours of sending.
+* `reaction`: one short string per sender per message, `emoji` being 1
+  to 32 bytes of UTF-8 without control, blank or invisible characters
+  (the zero-width joiner of emoji sequences excepted), or empty to take
+  the sender's reaction back; a later one replaces the earlier. Any
+  party to a conversation may react to any message in it, its own
+  included; a reaction to a message not held yet waits for it.
+* `timer`: the conversation's disappearing-message setting from now on,
+  in seconds: 0 turns it off, otherwise 1 to 31 536 000 (a year). Each
+  message sent or received while a timer is set carries that timer for
+  good; a later change leaves earlier messages alone. A sent message's
+  clock runs from its `sent_at_ms`; a received message's from the moment
+  the reader showed it, so a message never read never goes. When the
+  clock runs out each device removes the message from its history and
+  its screen on its own; nothing is sent, and nothing is asked of the
+  other side beyond running this software. One-to-one either side sets
+  the timer; in a group only an admin, and members refuse one from
+  anyone else (13.3). A timer is not itself subject to the timer.
+* None of these kinds gets a receipt, a notification or an unread mark.
+  Each is an ordinary body: numbered with `seq`, carried in a session,
+  padded, sent to every device of the recipient's and copied to the
+  sender's own devices as a text is (14.4, 14.5). This implementation
+  sends a reaction one-to-one through the receipt queue with a `read`
+  receipt's wait (4.4), so its moment says no more than a receipt's.
+
+What a deletion or a timer promises is stated in `THREAT_MODEL.md`: the
+other side's copy goes when the other side's client is this software,
+unmodified, on 0.10.0 or later, and running or later started with the
+deletion in its mailbox; nothing removes a screenshot, a copy a modified
+client kept, an export or a backup taken before, a file already saved,
+or what a person remembers. The relay held only ciphertext and does
+nothing for either.
+
+**Older clients.** A client that lacks a capability is never sent the
+kind: `edits` gates `edit` and `delete`, `reactions` gates `reaction`,
+`timers` gates `timer` (4.3), and a sender that would use one towards a
+contact whose last message did not advertise it says so to its user
+instead. A timer is then set on the sender's side alone, where it still
+removes that side's copies on time. In groups the gate is a leaf
+capability (13.1).
 
 ## 5. Session establishment (X3DH, and PQXDH from v3)
 
@@ -1176,12 +1266,23 @@ of this section is ever sent to a client that does not advertise it.
 
   Trailing bytes, an unknown version, an unsorted list or an empty one
   make the extension malformed and the group unusable.
+* **Leaf capability `0xF003`** (`silver_everyday`, private use): declared
+  in the capabilities of every key package and leaf from 0.10.0 and never
+  carried as an extension. A leaf that declares it reads the kinds of 4.7
+  as application messages (13.3); a client sends one of those to a group
+  only when every leaf in the tree declares it, and otherwise names the
+  members whose clients are older and sends nothing, since a member
+  without it would report an unreadable message. A leaf refresh declares
+  what the client reads at that moment rather than what it read when it
+  joined, and a client whose own leaf does not declare the type refreshes
+  it at once.
 * **Required capabilities**: every group's context carries a
   `RequiredCapabilities` extension listing extension types `0xF000` and
   `0xF001`, and every key package and leaf declares capabilities for the
   one ciphersuite, those two extension types and, from 0.9.0, `0xF002`
   (default protocol versions, credential types and proposal types), so a
-  leaf that cannot carry them cannot be added.
+  leaf that cannot carry them cannot be added. `0xF003` is declared but
+  not required, so a member on 0.9.0 stays a member.
 * **Configuration**: the pure-ciphertext wire format policy (handshake
   messages travel as `PrivateMessage`, never `PublicMessage`); the
   ratchet tree travels inside the Welcome (`ratchet_tree` extension), so
@@ -1239,9 +1340,17 @@ The plaintext of a `message` is JSON:
 { "id": "<random, 1 to 64 bytes>", "sent_at_ms": n, "content": { ... }, "head": { ... } }
 ```
 
-`content` is a `text` or a `file` of section 4; any other kind is
-ignored by members (receipts, lifecycle statements and cover traffic are
-not sent in groups). `head` is the sender's last verified transparency
+`content` is a `text` or a `file` of section 4 or, from 0.10.0, an
+`edit`, a `delete`, a `reaction` or a `timer` of 4.7, with the same
+rules read from the MLS sender: an edit or a deletion applies to the
+sender's own messages only, a reaction to any message, and a `timer` is
+the group's setting, applied when the sender is an admin (13.7) and
+refused, the sender named, otherwise; a repeat of the standing value,
+which a newcomer is sent right after its Welcome, is applied without a
+word. A member sends one of those kinds only when every leaf declares
+`0xF003` (13.1). Any other kind is ignored by members (receipts,
+lifecycle statements and cover traffic are not sent in groups). `head`
+is the sender's last verified transparency
 log head (section 11), so members compare heads across a group the way
 contacts do one-to-one. `id` de-duplicates: a member remembers the last
 256 ids per group and shows an id once. MLS numbers messages itself, so
@@ -1755,15 +1864,19 @@ ordinary bodies, as the `sync` content kind:
 ```json
 { "type": "sync", "kind": "sent", "peer": "<user id>", "id": "<message id>", "sent_at_ms": n, "content": { ... } }
 { "type": "sync", "kind": "received", "from": "<user id>", "id": "<message id>", "sent_at_ms": n, "content": { ... } }
-{ "type": "sync", "kind": "read", "peer": "<user id>", "ids": [ "<message id>", ... ] }
+{ "type": "sync", "kind": "read", "peer": "<user id>", "ids": [ "<message id>", ... ], "at_ms": n }
+{ "type": "sync", "kind": "remove", "peer": "<user id>", "ids": [ "<message id>", ... ] }
+{ "type": "sync", "kind": "remove", "group": "<group id>", "ids": [ "<message id>", ... ] }
 { "type": "sync", "kind": "contact", "action": "add", "user": "<user id>", "alias": "...", "bundle": { ... } }
 { "type": "sync", "kind": "devices", "devices": [ <certificate>, ... ], "revoked": [ <revocation>, ... ] }
 { "type": "sync", "kind": "leave" }
 ```
 
-* `sent`: a copy of a `text` or `file` this device sent to `peer`, under
-  the message's id; the others show it as their own line in that
-  conversation and mark it as the receipts name it.
+* `sent`: a copy of a `text`, a `file` or, from 0.10.0, an `edit`, a
+  `delete`, a `reaction` or a `timer` (4.7) this device sent to `peer`,
+  under the message's id; the others show a text or a file as their own
+  line in that conversation and mark it as the receipts name it, and
+  apply the other kinds as if made on them.
 * `received`: a `text` or `file` from `from` that the sender did not
   address to the account's other devices, which is a body that did not
   advertise `devices` (a client before 0.9.0, which seals to the account
@@ -1771,7 +1884,14 @@ ordinary bodies, as the `sync` content kind:
   a sender that advertised the capability reached every device by
   itself. Receipts for it leave from the primary alone.
 * `read`: messages from `peer` this device showed, so the others need
-  not send `read` receipts for them and no longer count them unread.
+  not send `read` receipts for them and no longer count them unread;
+  `at_ms`, from 0.10.0, is when, from which a received message's timer
+  runs on every device alike (4.7). Absent from a device before 0.10.0,
+  which the others take as now.
+* `remove`: messages this device removed from its own history and
+  screen ("delete for me"), from the conversation with `peer` or from
+  the `group` (exactly one of the two); the others remove them too, and
+  nothing goes to the other side.
 * `contact`: a change to the contact list, with `action` one of `add`
   (`user`, `alias`?, `bundle`?), `remove` (`user`), `alias` (`user`,
   `alias`?), `verify` (`user`, `verified`), `block` (`user`), `unblock`

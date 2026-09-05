@@ -166,6 +166,13 @@ refused. Received files are saved under their own name in
 | `/get [all]`                    | Fetch the newest file waiting in this chat, or `all` of them (double-click its line also fetches) |
 | `/files auto\|ask`              | Fetch this contact's files as they arrive, or wait for `/get` (the default) |
 | `/open`                         | Open the last file received in this chat (or double-click its line) |
+| `/reply <text>`                 | Answer the selected message (or the last one received), quoted on every screen from that reader's own copy |
+| `/react <emoji>` / `/react none` | React to the selected message (or the last one received); `none` takes yours back |
+| `/edit <text>`                  | Replace the text of the selected message of yours (or your last one) within a day of sending; it shows as edited |
+| `/delete`                       | Delete the selected message of yours (or your last one) for everyone, within a day of sending; a placeholder stays |
+| `/delete me`                    | Remove any message from your devices only; the other side keeps its copy |
+| `/timer <30s\|5m\|1h\|8h\|1d\|1w\|off>` | Messages in this chat disappear that long after you send them or they read them, on every device; in a group, admins only; `/timer` alone shows the setting |
+| `/files encrypt on\|off`, `/files decrypt` | Keep received files as ciphertext (needs a protected data directory; `/open` still reads them), or write a plain copy of the last one |
 | `/search <text>`                | Find messages in the selected chat, or in all chats from System |
 | `/receipts on\|off`             | Tell contacts when you have read their messages (default on) |
 | `/notify all\|bell\|off`        | Bell and desktop notification, bell only, or nothing         |
@@ -202,7 +209,8 @@ click a received file's line to open it.
 Keys: `Tab` / `Shift-Tab` or `Alt-Up` / `Alt-Down` switch chats, `Up` /
 `Down` recall earlier lines, `Alt-Enter` starts a new line in a message,
 `PgUp` / `PgDn` scroll and `Ctrl-Home` / `Ctrl-End` jump, `Shift-Up` /
-`Shift-Down` select messages. `Ctrl-C` copies the selection (with nothing
+`Shift-Down` select messages, which `/reply`, `/react`, `/edit` and
+`/delete` then act on. `Ctrl-C` copies the selection (with nothing
 selected, pressing it twice quits), `Ctrl-V`, `Shift-Insert` or a right
 click paste from the system clipboard, `Esc` clears the selection and then
 the input line, `Ctrl-Q` quits. Copies go to the system clipboard, or to
@@ -239,6 +247,7 @@ SILVER_PASSPHRASE=…        supplies the passphrase non-interactively (scripts,
 silver --export-backup <F> write an encrypted backup of identity and contacts to F (asks for a passphrase for it)
 silver --import-backup <F> restore identity and contacts from F; add --force to replace an existing identity
 SILVER_BACKUP_PASSPHRASE=… supplies the backup passphrase non-interactively
+silver --export-history <D> write every conversation to D (outside the data directory), a text file each, or JSON lines with --format json; deleted and expired messages are not there, nothing is overwritten
 silver --submit-authenticated  send on the authenticated connection instead of the relay's anonymous one (env SILVER_SUBMIT_AUTHENTICATED)
 SILVER_LOG=debug silver    write logs to <data-dir>/silver.log
 
@@ -267,7 +276,9 @@ on macOS, the Secret Service on Linux desktops), so a copied directory is
 useless elsewhere. Where there is no key store (a server, a container) the
 files are plain and the System pane says so at start. Received files go to
 `downloads/` inside it; they are ordinary files, not encrypted at rest, so
-other programs can open them. The client keeps its keys out of core dumps
+other programs can open them, unless `/files encrypt on` keeps them
+encrypted too, in which case `/open` decrypts a private copy for the
+program that opens the file. The client keeps its keys out of core dumps
 and, on Linux, away from debuggers of the same user.
 
 ## Deploying a relay
@@ -634,9 +645,19 @@ it does not, is in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
   relay serves, logs and enforces and contacts act on. In groups each
   device is a leaf of its own.
 
-What it does **not** do yet: disappearing messages, edits, replies and
-reactions, or a client for a phone. The ordered plan is in
-[ROADMAP.md](ROADMAP.md).
+* **Everyday features** (0.10.0): replies quoted from the reader's own
+  copy, reactions, edits within a day, delete for everyone within a day
+  (a placeholder stays; the threat model says exactly what the other
+  side's software does and does not do about it) and delete for me, and
+  a per-conversation timer after which messages disappear on every
+  device, from sending for the sender and from reading for the reader.
+  All of it travels inside the encrypted body as content the relay
+  cannot tell from a short message; a contact on an older client is
+  never sent what it would not read, and the client says so. Received
+  files can be kept encrypted, and the history exported.
+
+What it does **not** do yet: a screen-reader mode, or a client for a
+phone. The ordered plan is in [ROADMAP.md](ROADMAP.md).
 
 ## Development
 

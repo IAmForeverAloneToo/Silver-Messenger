@@ -111,6 +111,29 @@ routine step.
 
 ## Version notes
 
+### 0.10.0
+
+* **Nothing for the relay.** The schema stays at 3 and the backup format
+  at 2; a 0.10.0 relay is a 0.9.0 relay with the same tables, and the
+  everyday features (`PROTOCOL.md` section 4.7) are content inside the
+  encrypted body the relay never sees. A 0.9.0 relay serves 0.10.0
+  clients in full.
+* **Clients.** The history files gain update lines (`read`, `edit`,
+  `react`, `gone`) after the entries, and a file is rewritten in place
+  (atomically, under the same encryption) when a message is removed for
+  good by a deletion or a timer. `contacts.json` and `groups.json` gain
+  each conversation's timer and `config.json` the encrypted-downloads
+  option, all with defaults. Rolling a client back to 0.9.0 is safe: it
+  skips the history lines it does not know, keeps them as they are, and
+  shows the rest, with edits, reactions and timers unseen until 0.10.0
+  runs again; a file received under `/files encrypt on` is ciphertext a
+  0.9.0 client cannot open, so turn the option off and `/files decrypt`
+  what you need before rolling back. Every 0.10.0 body advertises the
+  `edits`, `reactions` and `timers` capabilities and every key package
+  and leaf declares the `0xF003` leaf capability; a client refreshes a
+  leaf that lacks it at once, so the first start after the upgrade makes
+  one commit per active group.
+
 ### 0.9.0
 
 * **The schema version moves to 3: key packages, the group sequencer

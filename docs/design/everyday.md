@@ -434,3 +434,58 @@ Each step is one commit on `main` with its tests:
 
 Compatibility through the steps: nothing sends a new kind until step 3,
 and until then a 0.10.0 tree is a 0.9.0 client with more code.
+
+## 11. Where the code differs from this note
+
+Written after the six steps landed; PROTOCOL.md sections 4.7, 13.1,
+13.3 and 14.5 are the normative text.
+
+* **Authorship on the disk.** An `edit` line and a `gone` tombstone
+  record who made them (`from`, absent for oneself), and the loader
+  applies an edit, or drops a late entry for a tombstone, only when that
+  person wrote the entry (`author_of`: the sender a group entry names;
+  the contact for what was received one-to-one). Section 6.1 had no
+  `from` on those lines, which would have let a member who saw a message
+  before another edit or suppress it on the author's behalf through a
+  crossed fan-out.
+* **Names in the `everyday` module.** One window (`may_revise`) serves
+  edits and deletions for everyone; the emoji and timer bounds are the
+  protocol's (`Content::check`), not separate helpers; the history
+  application lives in the store (`append_edit`, `append_reaction`,
+  `append_read`, `mark_deleted`, `remove_messages`) rather than as
+  `apply_*` functions; `needs_capability` and `missing_capability` say
+  what a kind needs and what a contact lacks.
+* **The sweeper** runs when something is due, not every minute: the
+  client keeps the earliest expiry among the lines on screen and reads
+  nothing from disk before that moment; a message vanishes at its time,
+  not up to a minute later. It also runs once at start, before anything
+  is shown, and before an export.
+* **Reactions in groups** go out at once rather than through the receipt
+  queue: groups have no receipts whose timing a reaction could hide
+  among. One-to-one they take the read receipts' wait as planned.
+* **A deletion for everyone** is applied on the sender's own screen at
+  the command, as on a sibling's, and the placeholder reads "you
+  deleted a message" or "alice deleted a message" with the clock alone,
+  without a name prefix.
+* **Updates for messages not held** (section 4) are kept for a day in
+  memory as well as on disk: the store has the lines and applies them at
+  the next load; the screen applies them when the message arrives.
+* **`/timer` towards an older client** sets the timer here and sends
+  nothing, as section 5.1 says, and the note in the conversation says
+  it is one-sided.
+* **`/files decrypt`** (6.4) writes the plain copy beside the file under
+  the next free name, as a download does, rather than over anything.
+  The `.open/` directory is created with mode 0700 and its copies 0600,
+  and it is removed whole at exit and at the next start.
+* **The export** (6.5) quotes a reply above the message with `> `, puts
+  the reactions after the text in brackets, keeps a note about a group
+  (a line without a writer) as it stands, names a group file
+  `group-<name>` after the group's alias or name, and refuses a directory
+  inside the data directory by comparing canonical paths.
+* **The snapshot** a linked device is given (6.1) carries the placeholder
+  of a message deleted for everyone as it stands on the primary, so the
+  new device shows the same placeholder; only lines whose timer ran out,
+  swept or not, stay behind.
+* **A newcomer's timer** (5.1) is sent by the client that added them
+  after any add, join by link or rejoin; when the newcomer's client is
+  older the engine refuses to send it and the admin's client says so.

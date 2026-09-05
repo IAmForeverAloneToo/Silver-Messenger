@@ -11,7 +11,7 @@ optional sequences.
 
 | Feature | How | If the terminal lacks it |
 | --- | --- | --- |
-| Marks `✓ ✓✓ ⋯ ✗`, dots `● ◌ ○` | Unicode glyphs from the font | Boxes. The client draws ASCII marks (`v vv .. x`) where it expects that (the classic Windows console, `TERM=linux`, a non-UTF-8 locale); `--ascii` or `/marks ascii` forces it |
+| Marks `✓ ✓✓ ⋯ ✗`, dots `● ◌ ○`, the reply quote `↳` and the timer `⧖` | Unicode glyphs from the font | Boxes. The client draws ASCII marks (`v vv .. x`, `>` and `~`) where it expects that (the classic Windows console, `TERM=linux`, a non-UTF-8 locale); `--ascii` or `/marks ascii` forces it |
 | Box drawing, half blocks (QR code), `…`, `·`, `→` | Every monospace font that ships with an OS has them | Nothing to do |
 | Mouse: wheel, clicks, drags | SGR mouse reporting, requested at start | Keyboard does everything; `--no-mouse` leaves the mouse to the terminal on purpose |
 | Bracketed paste | Requested at start | Pasted text arrives as keystrokes (one message per line) |

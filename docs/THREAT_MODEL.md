@@ -264,6 +264,26 @@ devices is dropped without a word. What they learn of your devices is
 what a stranger learns from your bundle, plus which device each message
 of yours came from, which the certificate in it says.
 
+From 0.10.0 they can edit and delete their own messages, which changes
+what your screen shows of *them* and nothing of what you wrote: the
+author check is on the sealed sender (the MLS sender in a group), which
+cannot be forged, so they cannot edit, delete or react as anyone else,
+and your history keeps every version of what they sent, which the
+export shows. A member who saw a message before you did cannot edit or
+suppress it on the author's behalf either: an edit or a tombstone kept
+for a message that has not arrived applies only to that person's own.
+A timer they set removes, from your side on your client's own clock,
+the messages sent or received from then on, and the note in the
+conversation says they set it; what you read before stays, and an
+export or a backup taken before keeps its copy. A reaction is a short
+string of their choosing, bounded and cleaned like a name. What a
+deletion or a timer of *yours* does on their side is a promise their
+software keeps or does not: an unmodified client on 0.10.0 or later
+removes the message when the deletion reaches it or the timer runs
+out; a modified client, a screenshot, an export or a backup taken
+before, a file they already saved, and what they remember are beyond
+it, and the client never claims otherwise.
+
 In a group, a contact who is a member sees everything said in it, as in
 any group, and learns the member list, which is what a group is. A
 contact who invites you to a group makes your client join it in MLS
@@ -295,9 +315,15 @@ encrypted under a key that only the passphrase unlocks (Argon2id, 64 MiB
 and 3 passes, then XChaCha20-Poly1305), and the thief is left guessing
 the passphrase offline; a weak passphrase is the remaining risk. Where
 there is neither (no key store and no passphrase), the files are plain and
-the client says so at start. Received files in `downloads/` are the
-exception in every case: they are saved as ordinary files so other
-programs can open them.
+the client says so at start. Received files in `downloads/` are saved
+as ordinary files so other programs can open them, unless `/files
+encrypt on` was chosen (0.10.0), which writes them under the data key
+like the rest; `/open` then hands the opener a private plain copy under
+`downloads/.open/`, removed when the client exits and at its next start,
+and `/files decrypt` writes a plain copy on request. Messages that ran
+out (a timer) or were deleted are rewritten out of the history files
+rather than marked, so the directory does not hold them; the placeholder
+of a message its author deleted for everyone stays, without the text.
 
 With the keys (a thief who also has the key store, the passphrase, or the
 memory of a running, unlocked client), they get the keys the directory
@@ -647,8 +673,9 @@ maintainer's account plus signing key both being taken.
 | Identity revocation | Closed (0.8.0, roadmap item 43): a pre-signed revocation certificate kept in the data directory and the backup, and a cross-signed succession for a planned rotation, served by the relay and verified by contacts (`PROTOCOL.md` section 10). A revocation is final. What remains is the race on a succession an attacker holding a compromised key issued before its owner revoked it. |
 | A relay that serves one person a stale key, hides a revocation or handover from them, or tells two people two different stories | Closed (0.8.0, roadmap item 44): the relay keeps a hash-chained log of every key change and statement, clients replay it, refuse what it does not bear out, and compare log heads inside every message, so a fork is reported by the next message between two people it treated differently (`PROTOCOL.md` section 11). Substitution of an identity was never possible, the id being the key. What remains: two contacts who never message each other never compare heads, and a relay that forks for one client and everyone that client talks to is caught only through someone on the other side. |
 | Certificate revocation checking | Not planned; key pins are the mitigation. |
-| Received files stored unencrypted in `downloads/` | By design, so other programs can open them; a "keep encrypted" option could follow if asked for. |
-| History kept until the user removes it | By design; an expiry setting could follow if asked for. |
+| Received files stored unencrypted in `downloads/` | Closed as an option (0.10.0, roadmap item 50): `/files encrypt on`, where the directory is protected, keeps received files as ciphertext under the data key, `/open` decrypting a private copy that goes at exit. Off by default, so other programs can open the files. |
+| History kept until the user removes it | Closed (0.10.0, roadmap item 50): a per-conversation timer removes messages on each device's own clock, from sending for the sender and from reading for the reader; `/delete me` removes any message from one's own devices; both rewrite the history file rather than mark it. |
+| Delete for everyone and disappearing messages: what they promise | By design (0.10.0): enforced by the other side's software, never by cryptography. An unmodified client on 0.10.0 or later removes the message when the deletion reaches it or the timer runs out, and the client says exactly that; a screenshot, a modified client, an export or a backup taken before, a file already saved and a person's memory are beyond it. The relay holds only ciphertext and does nothing for either; it cannot tell a deletion from a short message. |
 | A panic in the terminal client can leave the terminal in raw mode | Small; next client pass. |
 | Groups: what the relay learns, and what a member can do | Groups exist from 0.9.0 (roadmap item 47) and this document says what they protect. What remains, by design: the relay sees a group's size and membership by inference from delivery bursts and sees each group's epoch move; group messages are not deniable; a rogue member can wedge a group (every honest client stops rather than accept a rule-breaking commit) and an admin has to make it anew; a leaver stays in the tree until an admin's client commits the leave, and a declined invitation leaves a dead leaf until an admin removes it; a member absent past its mailbox's quota rejoins and loses the messages between. Cover traffic does not cover groups. |
 | Multiple devices: what a second device adds to the attack surface | Done (0.9.0, roadmap item 48), and this document says what devices protect: the identity key stays on the primary, a linked device is certified and revocable, contacts verify the identity and never a device, the relay cannot add or keep a device unseen (`PROTOCOL.md` section 14). What remains, by design: the relay learns how many devices a person has and which ids, and infers it again from delivery bursts; a linked device holds every conversation from the day it was linked plus the snapshot it was given, so its theft exposes what the person read anywhere; a revoked device is told so but erases itself only on its owner's word; the primary's loss is still the identity's, restored from the backup; a succession moves no devices. |
