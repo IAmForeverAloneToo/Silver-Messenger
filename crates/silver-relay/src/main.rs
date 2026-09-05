@@ -119,6 +119,11 @@ struct Args {
     /// beyond that get the bundle without one.
     #[arg(long, env = "SILVER_RELAY_ONE_TIME_PREKEYS_PER_USER_PER_HOUR", default_value_t = Policy::default().one_time_prekeys_per_user_per_hour)]
     one_time_prekeys_per_user_per_hour: u32,
+    /// Group sequencer entries kept at most; 0 for no cap. A group's
+    /// entry is one counter and one hash, and goes when no commit has
+    /// moved it for 180 days.
+    #[arg(long, env = "SILVER_RELAY_MAX_GROUPS", default_value_t = Policy::default().max_groups)]
+    max_groups: u64,
 
     /// Serve TLS on --listen with this certificate chain (PEM); the files
     /// are re-read when they change, so a renewal needs no restart.
@@ -490,11 +495,12 @@ async fn run_admin(socket: PathBuf, action: AdminAction) -> anyhow::Result<()> {
         AdminAction::Evict { .. } => {
             let e: Evicted = serde_json::from_value(body)?;
             println!(
-                "evicted {}: {} messages ({}), {} prekeys, bundle {}",
+                "evicted {}: {} messages ({}), {} prekeys, {} key packages, bundle {}",
                 e.who,
                 e.removed.messages,
                 bytes_text(e.removed.bytes),
                 e.removed.prekeys,
+                e.removed.key_packages,
                 if e.removed.had_bundle {
                     "removed"
                 } else {
@@ -642,6 +648,7 @@ async fn main() -> anyhow::Result<()> {
         log_ids: args.log_ids,
         require_bound_auth: args.require_bound_auth,
         one_time_prekeys_per_user_per_hour: args.one_time_prekeys_per_user_per_hour,
+        max_groups: args.max_groups,
         ..Policy::default()
     };
     if policy.require_bound_auth {

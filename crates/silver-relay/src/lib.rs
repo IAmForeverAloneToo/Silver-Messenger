@@ -58,7 +58,7 @@ use tracing::{debug, error, info, warn};
 
 pub use store::{
     Ban, BlobLimits, BlobMeta, BlobPut, Enqueue, Limits, Removed, SCHEMA_VERSION, SchemaTooNew,
-    Stats, Store,
+    Sequenced, Stats, Store,
 };
 
 /// The admin setting that holds an invite token changed at runtime; an
@@ -163,6 +163,14 @@ pub const MAX_ONE_TIME_PREKEYS: usize = 200;
 /// One-time ML-KEM keys a client may have on deposit at once; fewer, as
 /// each is 1.2 KB and a publish has to fit in one frame.
 pub const MAX_PQ_ONE_TIME_PREKEYS: usize = 50;
+/// A group's sequencer entry that no commit has moved for this long is
+/// dropped; a live group refreshes its entry with every commit, and a
+/// member of a dropped one re-creates it (`docs/PROTOCOL.md` section 13).
+pub const GROUP_IDLE_TTL: Duration = Duration::from_secs(180 * 24 * 60 * 60);
+/// Key package deposits one connection may make per minute: one, since a
+/// deposit replaces the whole list and a client has no reason to repeat
+/// it.
+const KEY_PACKAGE_DEPOSITS_PER_MINUTE: u32 = 1;
 
 /// Abuse controls applied per connection, plus the registration policy.
 #[derive(Clone, Debug)]
@@ -213,8 +221,11 @@ pub struct Policy {
     pub require_bound_auth: bool,
     /// One-time prekeys handed out for one user per hour, at most; lookups
     /// beyond that get the bundle without one, so nobody can drain a
-    /// deposit by looking someone up in a loop.
+    /// deposit by looking someone up in a loop. Key packages share the
+    /// budget: past it, the last-resort one is handed out.
     pub one_time_prekeys_per_user_per_hour: u32,
+    /// Group sequencer entries the relay keeps at most; 0 for no cap.
+    pub max_groups: u64,
 }
 
 impl Default for Policy {
@@ -237,6 +248,7 @@ impl Default for Policy {
             log_ids: false,
             require_bound_auth: false,
             one_time_prekeys_per_user_per_hour: 30,
+            max_groups: 100_000,
         }
     }
 }
@@ -307,6 +319,9 @@ struct Conn {
     /// The client published prekeys, so it speaks protocol v2: it gets
     /// prekey status reports and one-time prekeys with its lookups.
     prekeys: bool,
+    /// The client deposited key packages, so it may ask for others'.
+    key_packages: bool,
+    deposits: Bucket,
 }
 
 impl Conn {
@@ -317,6 +332,8 @@ impl Conn {
             lookups: Bucket::per_minute(policy.lookups_per_minute),
             blobs: Bucket::per_minute(policy.blob_chunks_per_minute),
             prekeys: false,
+            key_packages: false,
+            deposits: Bucket::per_minute(KEY_PACKAGE_DEPOSITS_PER_MINUTE),
         }
     }
 }
@@ -350,6 +367,8 @@ struct Counters {
     refused_registrations: AtomicU64,
     refused_uploads: AtomicU64,
     idle_closed: AtomicU64,
+    group_commits: AtomicU64,
+    group_rejections: AtomicU64,
 }
 
 /// A copy of the counters plus what is open right now.
@@ -361,6 +380,20 @@ pub struct CounterSnapshot {
     pub refused_registrations: u64,
     pub refused_uploads: u64,
     pub idle_closed: u64,
+    /// Commits the group sequencer accepted, and ones it refused.
+    #[serde(default)]
+    pub group_commits: u64,
+    #[serde(default)]
+    pub group_rejections: u64,
+}
+
+/// What one sweep of the expiry loop deleted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Expired {
+    pub messages: usize,
+    pub blobs: usize,
+    pub key_packages: usize,
+    pub groups: usize,
 }
 
 /// Holds one connection's place in the counts; dropping it gives the
@@ -633,6 +666,8 @@ impl RelayState {
             refused_registrations: self.counters.refused_registrations.load(Ordering::Relaxed),
             refused_uploads: self.counters.refused_uploads.load(Ordering::Relaxed),
             idle_closed: self.counters.idle_closed.load(Ordering::Relaxed),
+            group_commits: self.counters.group_commits.load(Ordering::Relaxed),
+            group_rejections: self.counters.group_rejections.load(Ordering::Relaxed),
         }
     }
 
@@ -863,7 +898,202 @@ impl RelayState {
         if self.policy.max_blob_mib > 0 {
             features.push(feature::BLOBS.to_owned());
         }
+        features.push(feature::GROUPS.to_owned());
         features
+    }
+
+    /// A group id for the log: hashed with the run's salt, as identities
+    /// are, so the log does not list groups.
+    fn group_label(&self, group: &silver_protocol::GroupId) -> String {
+        use sha2::Digest;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(self.log_salt);
+        hasher.update(group.as_bytes());
+        let digest = hasher.finalize();
+        digest[..6].iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// Store `me`'s key package deposit (`docs/PROTOCOL.md` section 13);
+    /// the reply.
+    fn deposit_key_packages(
+        &self,
+        me: &UserId,
+        packages: Vec<silver_protocol::wire::KeyPackageDeposit>,
+        last_resort: Option<silver_protocol::wire::KeyPackageDeposit>,
+        conn: &mut Conn,
+    ) -> ServerFrame {
+        use silver_protocol::group::{MAX_KEY_PACKAGE_BYTES, MAX_KEY_PACKAGES};
+        if !conn.deposits.try_take() {
+            return ServerFrame::error(
+                ErrorCode::RateLimited,
+                "key packages were deposited a moment ago; wait a minute",
+            );
+        }
+        if packages.len() > MAX_KEY_PACKAGES {
+            return ServerFrame::error(ErrorCode::TooLarge, "too many key packages");
+        }
+        let now = now_ms();
+        for package in packages.iter().chain(last_resort.iter()) {
+            if package.data.is_empty() || package.data.len() > MAX_KEY_PACKAGE_BYTES {
+                return ServerFrame::error(ErrorCode::TooLarge, "a key package is too large");
+            }
+            if package.expires_at_ms <= now {
+                return ServerFrame::error(
+                    ErrorCode::Malformed,
+                    "a key package has expired already",
+                );
+            }
+        }
+        if self.bundle(me).is_none() {
+            return ServerFrame::error(ErrorCode::Forbidden, "publish a bundle first");
+        }
+        let stored = self
+            .store
+            .set_key_packages(me, &packages, last_resort.as_ref())
+            .and_then(|()| self.store.key_package_status(me));
+        match stored {
+            Ok((remaining, consumed)) => {
+                conn.key_packages = true;
+                ServerFrame::KeyPackageStatus {
+                    remaining,
+                    consumed: consumed
+                        .into_iter()
+                        .map(silver_protocol::wire::KeyPackageRef)
+                        .collect(),
+                }
+            }
+            Err(e) => {
+                error!("storing key packages: {e:#}");
+                ServerFrame::error(ErrorCode::Internal, "storage error")
+            }
+        }
+    }
+
+    /// One of `user`'s key packages for a client that deposited its own:
+    /// from the deposit while the handout budget lasts, the last-resort
+    /// one after; `null` when the identity has none.
+    fn key_package_for(&self, user: UserId, conn: &mut Conn) -> ServerFrame {
+        if !conn.key_packages {
+            return ServerFrame::error(
+                ErrorCode::Forbidden,
+                "deposit your own key packages before asking for others'",
+            );
+        }
+        if !conn.lookups.try_take() {
+            return ServerFrame::error(ErrorCode::RateLimited, "too many lookups; slow down");
+        }
+        let now = now_ms();
+        let handed = if self.handout_allowed(&user) {
+            self.store.take_key_package(&user, now)
+        } else {
+            debug!(
+                "key packages for one user are being asked for quickly; serving the last resort"
+            );
+            self.store
+                .last_resort_key_package(&user, now)
+                .map(|p| p.map(|p| (p, true)))
+        };
+        match handed {
+            Ok(Some((package, last_resort))) => ServerFrame::KeyPackageResult {
+                user_id: user,
+                package: Some(package),
+                last_resort,
+            },
+            Ok(None) => ServerFrame::KeyPackageResult {
+                user_id: user,
+                package: None,
+                last_resort: false,
+            },
+            Err(e) => {
+                error!("taking a key package: {e:#}");
+                ServerFrame::error(ErrorCode::Internal, "storage error")
+            }
+        }
+    }
+
+    /// Create a group's sequencer entry; on any kind of connection, against
+    /// its `send` budget and the address's registration budget.
+    fn group_create(
+        &self,
+        group: silver_protocol::GroupId,
+        epoch: u64,
+        next: [u8; 32],
+        sends: &mut Bucket,
+        addr: IpAddr,
+    ) -> ServerFrame {
+        let refuse =
+            |code: ErrorCode, epoch: Option<u64>| ServerFrame::GroupRejected { group, code, epoch };
+        if !sends.try_take() || !self.registration_allowed(addr) {
+            return refuse(ErrorCode::RateLimited, None);
+        }
+        // The cap is on new entries; an existing one is still answered, so
+        // a member re-creating a group after a restore gets its answer.
+        let exists = self.store.group_epoch(&group).unwrap_or(None).is_some();
+        if !exists
+            && self.policy.max_groups > 0
+            && self.store.group_count().unwrap_or(0) >= self.policy.max_groups
+        {
+            return refuse(ErrorCode::Forbidden, None);
+        }
+        match self.store.group_create(&group, epoch, next, now_ms()) {
+            Ok(Sequenced::Stands(epoch)) => {
+                debug!(group = %self.group_label(&group), epoch, "group sequencer entry created");
+                ServerFrame::GroupState { group, epoch }
+            }
+            Ok(Sequenced::Exists(epoch)) => refuse(ErrorCode::Exists, Some(epoch)),
+            Ok(other) => {
+                error!("group create answered {other:?}");
+                refuse(ErrorCode::Internal, None)
+            }
+            Err(e) => {
+                error!("creating a group entry: {e:#}");
+                refuse(ErrorCode::Internal, None)
+            }
+        }
+    }
+
+    /// Move a group's sequencer entry on; on any kind of connection,
+    /// against its `send` budget.
+    fn group_commit(
+        &self,
+        group: silver_protocol::GroupId,
+        epoch: u64,
+        token: [u8; 32],
+        next: [u8; 32],
+        sends: &mut Bucket,
+    ) -> ServerFrame {
+        let refuse =
+            |code: ErrorCode, epoch: Option<u64>| ServerFrame::GroupRejected { group, code, epoch };
+        if !sends.try_take() {
+            return refuse(ErrorCode::RateLimited, None);
+        }
+        let outcome = self
+            .store
+            .group_commit(&group, epoch, &token, next, now_ms());
+        match outcome {
+            Ok(Sequenced::Stands(epoch)) => {
+                self.counters.group_commits.fetch_add(1, Ordering::Relaxed);
+                debug!(group = %self.group_label(&group), epoch, "group moved on");
+                ServerFrame::GroupState { group, epoch }
+            }
+            Ok(rejected) => {
+                self.counters
+                    .group_rejections
+                    .fetch_add(1, Ordering::Relaxed);
+                debug!(group = %self.group_label(&group), ?rejected, "group commit refused");
+                match rejected {
+                    Sequenced::Stale(epoch) => refuse(ErrorCode::Stale, Some(epoch)),
+                    Sequenced::NotFound => refuse(ErrorCode::NotFound, None),
+                    Sequenced::Forbidden => refuse(ErrorCode::Forbidden, None),
+                    Sequenced::Exists(epoch) => refuse(ErrorCode::Exists, Some(epoch)),
+                    Sequenced::Stands(_) => unreachable!("handled above"),
+                }
+            }
+            Err(e) => {
+                error!("moving a group entry: {e:#}");
+                refuse(ErrorCode::Internal, None)
+            }
+        }
     }
 
     /// Store a self-signed revocation for its identity: the identity is
@@ -985,10 +1215,12 @@ impl RelayState {
         (revocation, succession)
     }
 
-    /// Delete unacknowledged envelopes and file blobs older than `ttl`.
-    /// Returns how many of each.
-    pub fn expire(&self, ttl: Duration) -> (usize, usize) {
-        let cutoff = now_ms().saturating_sub(ttl.as_millis() as u64);
+    /// Delete unacknowledged envelopes and file blobs older than `ttl`,
+    /// key packages past their lifetime, and group sequencer entries idle
+    /// for [`GROUP_IDLE_TTL`]. Returns how many of each.
+    pub fn expire(&self, ttl: Duration) -> Expired {
+        let now = now_ms();
+        let cutoff = now.saturating_sub(ttl.as_millis() as u64);
         let messages = self.store.expire(cutoff).unwrap_or_else(|e| {
             error!("expiring messages: {e:#}");
             0
@@ -997,7 +1229,21 @@ impl RelayState {
             error!("expiring blobs: {e:#}");
             0
         });
-        (messages, blobs)
+        let key_packages = self.store.expire_key_packages(now).unwrap_or_else(|e| {
+            error!("expiring key packages: {e:#}");
+            0
+        });
+        let group_cutoff = now.saturating_sub(GROUP_IDLE_TTL.as_millis() as u64);
+        let groups = self.store.expire_groups(group_cutoff).unwrap_or_else(|e| {
+            error!("expiring group entries: {e:#}");
+            0
+        });
+        Expired {
+            messages,
+            blobs,
+            key_packages,
+            groups,
+        }
     }
 
     /// Store one chunk of an encrypted file; the reply for the uploader.
@@ -1372,10 +1618,11 @@ fn blob_rejected(blob: &str, code: ErrorCode, message: &str) -> ServerFrame {
 /// say how the limits have been doing.
 pub async fn expire_periodically(state: Arc<RelayState>, ttl: Duration, every: Duration) {
     loop {
-        let (messages, blobs) = state.expire(ttl);
-        if messages > 0 || blobs > 0 {
+        let expired = state.expire(ttl);
+        if expired != Expired::default() {
             info!(
-                "expired {messages} unacknowledged envelopes and {blobs} files older than {ttl:?}"
+                "expired {} unacknowledged envelopes and {} files older than {ttl:?}, {} key packages past their lifetime and {} group entries idle for {GROUP_IDLE_TTL:?}",
+                expired.messages, expired.blobs, expired.key_packages, expired.groups
             );
         }
         state.sweep_addresses();
@@ -1542,7 +1789,9 @@ async fn handle_socket(
         Ok(Some(Ok(
             frame @ (ClientFrame::Send { .. }
             | ClientFrame::BlobPut { .. }
-            | ClientFrame::BlobGet { .. }),
+            | ClientFrame::BlobGet { .. }
+            | ClientFrame::GroupCreate { .. }
+            | ClientFrame::GroupCommit { .. }),
         ))) if state.policy.anonymous_sends_per_minute > 0 => {
             anonymous_session(sink, stream, &state, frame, addr).await;
             return;
@@ -1674,10 +1923,19 @@ async fn anonymous_session(
                 data,
             } => vec![state.put_blob(blob, index, total, &data, &mut blobs, addr)],
             ClientFrame::BlobGet { blob } => state.get_blob(&blob, &mut blobs),
+            ClientFrame::GroupCreate { group, epoch, next } => {
+                vec![state.group_create(group, epoch, next, &mut bucket, addr)]
+            }
+            ClientFrame::GroupCommit {
+                group,
+                epoch,
+                token,
+                next,
+            } => vec![state.group_commit(group, epoch, token, next, &mut bucket)],
             ClientFrame::Ping => vec![ServerFrame::Pong],
             _ => vec![ServerFrame::error(
                 ErrorCode::Unauthenticated,
-                "this connection only accepts send, file chunks and ping",
+                "this connection only accepts send, file chunks, group sequencing and ping",
             )],
         };
         for reply in replies {
@@ -1776,13 +2034,20 @@ fn handle_frame(
             data,
         } => vec![state.put_blob(blob, index, total, &data, &mut conn.blobs, conn.addr)],
         ClientFrame::BlobGet { blob } => state.get_blob(&blob, &mut conn.blobs),
-        ClientFrame::KeyPackages { .. }
-        | ClientFrame::KeyPackage { .. }
-        | ClientFrame::GroupCreate { .. }
-        | ClientFrame::GroupCommit { .. } => vec![ServerFrame::error(
-            ErrorCode::Malformed,
-            "this relay does not serve groups",
-        )],
+        ClientFrame::KeyPackages {
+            packages,
+            last_resort,
+        } => vec![state.deposit_key_packages(me, packages, last_resort, conn)],
+        ClientFrame::KeyPackage { user_id } => vec![state.key_package_for(user_id, conn)],
+        ClientFrame::GroupCreate { group, epoch, next } => {
+            vec![state.group_create(group, epoch, next, &mut conn.sends, conn.addr)]
+        }
+        ClientFrame::GroupCommit {
+            group,
+            epoch,
+            token,
+            next,
+        } => vec![state.group_commit(group, epoch, token, next, &mut conn.sends)],
         ClientFrame::Ping => vec![ServerFrame::Pong],
     }
 }

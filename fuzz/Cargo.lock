@@ -1654,7 +1654,7 @@ dependencies = [
 
 [[package]]
 name = "silver-client"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1693,7 +1693,7 @@ dependencies = [
 
 [[package]]
 name = "silver-protocol"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "base64",
  "bs58",

@@ -256,6 +256,31 @@ pub fn render(state: &RelayState, tls: Option<&CertStore>) -> String {
         "Bytes of encrypted file chunks the relay keeps at most.",
         u64::from(policy.blob_storage_mib) * 1024 * 1024,
     );
+    t.gauge(
+        "silver_relay_key_packages",
+        "MLS key packages on deposit, last-resort ones not counted.",
+        s.key_packages,
+    );
+    t.gauge(
+        "silver_relay_groups",
+        "Groups with an epoch sequencer entry.",
+        s.groups,
+    );
+    t.gauge(
+        "silver_relay_groups_limit",
+        "Group sequencer entries kept at most (0 for no limit).",
+        policy.max_groups,
+    );
+    t.counter(
+        "silver_relay_group_commits_total",
+        "Group commits the epoch sequencer accepted.",
+        c.group_commits,
+    );
+    t.counter(
+        "silver_relay_group_rejections_total",
+        "Group commits the epoch sequencer refused (stale, unknown or wrong token).",
+        c.group_rejections,
+    );
     if let Some(store) = tls {
         let expiry = store
             .current()

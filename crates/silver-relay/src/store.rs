@@ -10,11 +10,15 @@ use std::path::Path;
 
 use anyhow::Context;
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
+use silver_protocol::encoding::b64_array;
+use silver_protocol::group::{GroupId, token_hash};
 use silver_protocol::prekey::OneTimePrekey;
 use silver_protocol::transparency::{EntryKind, Hash, LogEntry, LogHead, LogPosition, subject};
+use silver_protocol::wire::KeyPackageDeposit;
 use silver_protocol::{
     DhPublic, Envelope, KeyBundle, Revocation, SignedPqPrekey, Succession, UserId, now_ms,
 };
+use subtle::ConstantTimeEq;
 
 /// A deposit of one-time keys: `(owner, key id) -> encoded public key` for
 /// keys not yet handed out.
@@ -72,13 +76,31 @@ pub(crate) const BLOB_CHUNKS: TableDefinition<(&str, u32), &[u8]> =
     TableDefinition::new("blob_chunks");
 /// Bytes of chunks stored in total, for the storage cap.
 const BLOB_BYTES: &str = "blob_bytes";
+/// `(owner, deposit sequence) -> KeyPackageDeposit JSON`: key packages not
+/// yet handed out, in the order they were deposited (`docs/PROTOCOL.md`
+/// section 13). The relay never parses them.
+pub(crate) const KEY_PACKAGES: TableDefinition<(&[u8], u64), &[u8]> =
+    TableDefinition::new("key_packages");
+/// `(owner, key package ref)` for packages handed out that the owner may
+/// still list on its next deposit; forgotten once it stops listing them.
+pub(crate) const KEY_PACKAGES_USED: TableDefinition<(&[u8], &[u8]), ()> =
+    TableDefinition::new("key_packages_used");
+/// `owner -> KeyPackageDeposit JSON`: the last-resort package, handed out
+/// again and again once the deposit is empty.
+pub(crate) const KEY_PACKAGE_LAST_RESORT: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("key_package_last_resort");
+/// `group id -> GroupEntry JSON`: the epoch sequencer, one counter and one
+/// token hash per group the relay knows nothing else about.
+pub(crate) const GROUPS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("groups");
+/// The next deposit sequence number for key packages.
+const NEXT_KEY_PACKAGE: &str = "next_key_package";
 
 /// The layout of the tables, stamped into the database. It moves when a
 /// change needs more than opening a table that was not there before, with
 /// a step in [`migrate`] to bring older databases along; a database
 /// stamped with a higher version was written by a newer relay and is
 /// refused rather than misread.
-pub const SCHEMA_VERSION: u64 = 2;
+pub const SCHEMA_VERSION: u64 = 3;
 pub(crate) const SCHEMA: &str = "schema";
 
 /// The database was written by a newer relay than this one.
@@ -116,6 +138,11 @@ pub(crate) fn migrate(txn: &redb::WriteTransaction, from: u64) -> anyhow::Result
         // version moves so that an older relay, which would serve changes
         // without logging them, refuses this database instead.
         1 => seed_log(txn),
+        // 3 added the key package deposit and the group sequencer tables,
+        // which opening creates. The version moves so that an older relay,
+        // which would leave deposits to go stale and every group without a
+        // sequencer, refuses this database instead of half-serving it.
+        2 => Ok(()),
         other => anyhow::bail!("no migration from schema version {other}"),
     }
 }
@@ -275,6 +302,9 @@ pub struct Removed {
     pub messages: u64,
     pub bytes: u64,
     pub prekeys: u64,
+    /// Key packages on deposit, the last-resort one included.
+    #[serde(default)]
+    pub key_packages: u64,
 }
 
 /// Aggregate numbers for logs and health output.
@@ -286,6 +316,38 @@ pub struct Stats {
     pub bytes: u64,
     pub blobs: u64,
     pub blob_bytes: u64,
+    /// Key packages on deposit, last-resort ones not counted.
+    #[serde(default)]
+    pub key_packages: u64,
+    /// Groups with a sequencer entry.
+    #[serde(default)]
+    pub groups: u64,
+}
+
+/// What the epoch sequencer says to a create or a commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sequenced {
+    /// Accepted; the entry now stands at this epoch.
+    Stands(u64),
+    /// A commit named an epoch the entry is not at; it stands here.
+    Stale(u64),
+    /// A create for an entry that exists with other values; it stands here.
+    Exists(u64),
+    /// A commit for a group with no entry.
+    NotFound,
+    /// The token does not hash to what the entry holds.
+    Forbidden,
+}
+
+/// One group's sequencer entry.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct GroupEntry {
+    epoch: u64,
+    /// The hash of the token that moves the group on.
+    #[serde(with = "b64_array")]
+    next: [u8; 32],
+    created_at_ms: u64,
+    updated_at_ms: u64,
 }
 
 /// Caps on encrypted file storage.
@@ -430,6 +492,10 @@ impl Store {
         txn.open_table(SUCCESSIONS)?;
         txn.open_table(LOG)?;
         txn.open_table(LOG_LATEST)?;
+        txn.open_table(KEY_PACKAGES)?;
+        txn.open_table(KEY_PACKAGES_USED)?;
+        txn.open_table(KEY_PACKAGE_LAST_RESORT)?;
+        txn.open_table(GROUPS)?;
         Ok(())
     }
 
@@ -534,6 +600,30 @@ impl Store {
                 for id in ids {
                     table.remove((key, id))?;
                 }
+            }
+            let mut packages = txn.open_table(KEY_PACKAGES)?;
+            let seqs = packages
+                .range((key, 0u64)..=(key, u64::MAX))?
+                .map(|item| item.map(|(k, _)| k.value().1))
+                .collect::<Result<Vec<u64>, _>>()?;
+            for seq in seqs {
+                packages.remove((key, seq))?;
+                removed.key_packages += 1;
+            }
+            let mut used = txn.open_table(KEY_PACKAGES_USED)?;
+            let refs = used
+                .range((key, REF_LOW)..=(key, REF_HIGH))?
+                .map(|item| item.map(|(k, _)| k.value().1.to_vec()))
+                .collect::<Result<Vec<Vec<u8>>, _>>()?;
+            for r in refs {
+                used.remove((key, r.as_slice()))?;
+            }
+            if txn
+                .open_table(KEY_PACKAGE_LAST_RESORT)?
+                .remove(key)?
+                .is_some()
+            {
+                removed.key_packages += 1;
             }
         }
         txn.commit()?;
@@ -994,6 +1084,325 @@ impl Store {
         Ok((remaining, used))
     }
 
+    // --- key packages ---------------------------------------------------------
+
+    /// Replace `user`'s key package deposit with `packages`, the full list
+    /// the client still holds, and its last-resort package (`None` drops
+    /// it). Packages already on deposit keep their place in the queue; ones
+    /// handed out are not stored again even if listed; ones no longer
+    /// listed are forgotten.
+    pub fn set_key_packages(
+        &self,
+        user: &UserId,
+        packages: &[KeyPackageDeposit],
+        last_resort: Option<&KeyPackageDeposit>,
+    ) -> anyhow::Result<()> {
+        let user = user.as_bytes().as_slice();
+        let listed: HashSet<[u8; 32]> = packages.iter().map(|p| p.r#ref).collect();
+        let txn = self.db.begin_write()?;
+        {
+            let mut table = txn.open_table(KEY_PACKAGES)?;
+            let mut used = txn.open_table(KEY_PACKAGES_USED)?;
+            let mut present = HashSet::new();
+            let mut stale = Vec::new();
+            for item in table.range((user, 0u64)..=(user, u64::MAX))? {
+                let (key, value) = item?;
+                let deposit: KeyPackageDeposit = serde_json::from_slice(value.value())
+                    .context("stored key package is unreadable")?;
+                if listed.contains(&deposit.r#ref) {
+                    present.insert(deposit.r#ref);
+                } else {
+                    stale.push(key.value().1);
+                }
+            }
+            for seq in stale {
+                table.remove((user, seq))?;
+            }
+            let mut stale_used = Vec::new();
+            for item in used.range((user, REF_LOW)..=(user, REF_HIGH))? {
+                let (key, _) = item?;
+                let r = key.value().1.to_vec();
+                let known = <[u8; 32]>::try_from(r.as_slice()).is_ok_and(|r| listed.contains(&r));
+                if !known {
+                    stale_used.push(r);
+                }
+            }
+            for r in stale_used {
+                used.remove((user, r.as_slice()))?;
+            }
+            let mut meta = txn.open_table(META)?;
+            for package in packages {
+                if present.contains(&package.r#ref)
+                    || used.get((user, package.r#ref.as_slice()))?.is_some()
+                {
+                    continue;
+                }
+                let seq = meta.get(NEXT_KEY_PACKAGE)?.map(|g| g.value()).unwrap_or(0);
+                meta.insert(NEXT_KEY_PACKAGE, seq + 1)?;
+                table.insert((user, seq), serde_json::to_vec(package)?.as_slice())?;
+                present.insert(package.r#ref);
+            }
+            let mut last = txn.open_table(KEY_PACKAGE_LAST_RESORT)?;
+            match last_resort {
+                Some(package) => {
+                    last.insert(user, serde_json::to_vec(package)?.as_slice())?;
+                }
+                None => {
+                    last.remove(user)?;
+                }
+            }
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// Hand out one of `user`'s key packages: the oldest on deposit that
+    /// has not expired, removed as it goes and remembered as handed out;
+    /// failing that, the last-resort one, which stays (`true` says so).
+    /// `None` when the identity has nothing on deposit. Expired packages
+    /// met on the way are dropped.
+    pub fn take_key_package(
+        &self,
+        user: &UserId,
+        now_ms: u64,
+    ) -> anyhow::Result<Option<(KeyPackageDeposit, bool)>> {
+        let user = user.as_bytes().as_slice();
+        let txn = self.db.begin_write()?;
+        let taken = {
+            let mut table = txn.open_table(KEY_PACKAGES)?;
+            let mut expired = Vec::new();
+            let mut found = None;
+            for item in table.range((user, 0u64)..=(user, u64::MAX))? {
+                let (key, value) = item?;
+                let deposit: KeyPackageDeposit = serde_json::from_slice(value.value())
+                    .context("stored key package is unreadable")?;
+                if deposit.expires_at_ms <= now_ms {
+                    expired.push(key.value().1);
+                    continue;
+                }
+                found = Some((key.value().1, deposit));
+                break;
+            }
+            for seq in expired {
+                table.remove((user, seq))?;
+            }
+            match found {
+                Some((seq, deposit)) => {
+                    table.remove((user, seq))?;
+                    txn.open_table(KEY_PACKAGES_USED)?
+                        .insert((user, deposit.r#ref.as_slice()), ())?;
+                    Some((deposit, false))
+                }
+                None => last_resort_in(&txn, user, now_ms)?.map(|d| (d, true)),
+            }
+        };
+        txn.commit()?;
+        Ok(taken)
+    }
+
+    /// The last-resort package alone, for handouts past the rate limit.
+    pub fn last_resort_key_package(
+        &self,
+        user: &UserId,
+        now_ms: u64,
+    ) -> anyhow::Result<Option<KeyPackageDeposit>> {
+        let txn = self.db.begin_write()?;
+        let package = last_resort_in(&txn, user.as_bytes(), now_ms)?;
+        txn.commit()?;
+        Ok(package)
+    }
+
+    /// How many key packages `user` has on deposit (the last-resort one
+    /// not counted), and the refs handed out that the user has not dropped
+    /// from its list yet.
+    pub fn key_package_status(&self, user: &UserId) -> anyhow::Result<(u32, Vec<[u8; 32]>)> {
+        let user = user.as_bytes().as_slice();
+        let txn = self.db.begin_read()?;
+        let mut remaining = 0u32;
+        for item in txn
+            .open_table(KEY_PACKAGES)?
+            .range((user, 0u64)..=(user, u64::MAX))?
+        {
+            item?;
+            remaining += 1;
+        }
+        let mut used = Vec::new();
+        for item in txn
+            .open_table(KEY_PACKAGES_USED)?
+            .range((user, REF_LOW)..=(user, REF_HIGH))?
+        {
+            let (key, _) = item?;
+            if let Ok(r) = <[u8; 32]>::try_from(key.value().1) {
+                used.push(r);
+            }
+        }
+        Ok((remaining, used))
+    }
+
+    /// Drop every key package whose lifetime ended. Returns how many.
+    pub fn expire_key_packages(&self, now_ms: u64) -> anyhow::Result<usize> {
+        let txn = self.db.begin_write()?;
+        let mut dropped = 0;
+        {
+            let mut table = txn.open_table(KEY_PACKAGES)?;
+            let mut victims = Vec::new();
+            for item in table.iter()? {
+                let (key, value) = item?;
+                let deposit: KeyPackageDeposit = serde_json::from_slice(value.value())
+                    .context("stored key package is unreadable")?;
+                if deposit.expires_at_ms <= now_ms {
+                    let (user, seq) = key.value();
+                    victims.push((user.to_vec(), seq));
+                }
+            }
+            for (user, seq) in &victims {
+                table.remove((user.as_slice(), *seq))?;
+            }
+            dropped += victims.len();
+            let mut last = txn.open_table(KEY_PACKAGE_LAST_RESORT)?;
+            let mut victims = Vec::new();
+            for item in last.iter()? {
+                let (key, value) = item?;
+                let deposit: KeyPackageDeposit = serde_json::from_slice(value.value())
+                    .context("stored key package is unreadable")?;
+                if deposit.expires_at_ms <= now_ms {
+                    victims.push(key.value().to_vec());
+                }
+            }
+            for user in &victims {
+                last.remove(user.as_slice())?;
+            }
+            dropped += victims.len();
+        }
+        txn.commit()?;
+        Ok(dropped)
+    }
+
+    // --- the group epoch sequencer ---------------------------------------------
+
+    /// Create the sequencer entry for `group` at `epoch`, `next` being the
+    /// hash of the token that moves it on. Idempotent for the same values.
+    pub fn group_create(
+        &self,
+        group: &GroupId,
+        epoch: u64,
+        next: [u8; 32],
+        now_ms: u64,
+    ) -> anyhow::Result<Sequenced> {
+        let key = group.as_bytes().as_slice();
+        let txn = self.db.begin_write()?;
+        let outcome = {
+            let mut table = txn.open_table(GROUPS)?;
+            let existing = table.get(key)?.map(|g| g.value().to_vec());
+            match existing {
+                Some(json) => {
+                    let entry: GroupEntry = serde_json::from_slice(&json)
+                        .context("stored group entry is unreadable")?;
+                    if entry.epoch == epoch && entry.next == next {
+                        Sequenced::Stands(epoch)
+                    } else {
+                        Sequenced::Exists(entry.epoch)
+                    }
+                }
+                None => {
+                    let entry = GroupEntry {
+                        epoch,
+                        next,
+                        created_at_ms: now_ms,
+                        updated_at_ms: now_ms,
+                    };
+                    table.insert(key, serde_json::to_vec(&entry)?.as_slice())?;
+                    Sequenced::Stands(epoch)
+                }
+            }
+        };
+        txn.commit()?;
+        Ok(outcome)
+    }
+
+    /// Move `group` from `epoch` to `epoch + 1` if it stands at `epoch` and
+    /// `token` hashes to what the entry holds; `next` is the hash of the
+    /// token for the epoch after.
+    pub fn group_commit(
+        &self,
+        group: &GroupId,
+        epoch: u64,
+        token: &[u8; 32],
+        next: [u8; 32],
+        now_ms: u64,
+    ) -> anyhow::Result<Sequenced> {
+        let key = group.as_bytes().as_slice();
+        let txn = self.db.begin_write()?;
+        let outcome = {
+            let mut table = txn.open_table(GROUPS)?;
+            let existing = table.get(key)?.map(|g| g.value().to_vec());
+            match existing {
+                None => Sequenced::NotFound,
+                Some(json) => {
+                    let mut entry: GroupEntry = serde_json::from_slice(&json)
+                        .context("stored group entry is unreadable")?;
+                    if entry.epoch != epoch {
+                        Sequenced::Stale(entry.epoch)
+                    } else if !bool::from(token_hash(token).ct_eq(&entry.next)) {
+                        Sequenced::Forbidden
+                    } else {
+                        entry.epoch += 1;
+                        entry.next = next;
+                        entry.updated_at_ms = now_ms;
+                        table.insert(key, serde_json::to_vec(&entry)?.as_slice())?;
+                        Sequenced::Stands(entry.epoch)
+                    }
+                }
+            }
+        };
+        txn.commit()?;
+        Ok(outcome)
+    }
+
+    /// Where `group`'s sequencer entry stands, if it has one.
+    pub fn group_epoch(&self, group: &GroupId) -> anyhow::Result<Option<u64>> {
+        let txn = self.db.begin_read()?;
+        txn.open_table(GROUPS)?
+            .get(group.as_bytes().as_slice())?
+            .map(|g| {
+                let entry: GroupEntry = serde_json::from_slice(g.value())
+                    .context("stored group entry is unreadable")?;
+                Ok(entry.epoch)
+            })
+            .transpose()
+    }
+
+    /// How many groups have a sequencer entry.
+    pub fn group_count(&self) -> anyhow::Result<u64> {
+        Ok(self.db.begin_read()?.open_table(GROUPS)?.len()?)
+    }
+
+    /// Drop sequencer entries not moved since `cutoff_ms`. Returns how many.
+    pub fn expire_groups(&self, cutoff_ms: u64) -> anyhow::Result<usize> {
+        let txn = self.db.begin_write()?;
+        let victims = {
+            let table = txn.open_table(GROUPS)?;
+            let mut victims = Vec::new();
+            for item in table.iter()? {
+                let (key, value) = item?;
+                let entry: GroupEntry = serde_json::from_slice(value.value())
+                    .context("stored group entry is unreadable")?;
+                if entry.updated_at_ms < cutoff_ms {
+                    victims.push(key.value().to_vec());
+                }
+            }
+            victims
+        };
+        {
+            let mut table = txn.open_table(GROUPS)?;
+            for group in &victims {
+                table.remove(group.as_slice())?;
+            }
+        }
+        txn.commit()?;
+        Ok(victims.len())
+    }
+
     /// Queue an envelope for its recipient.
     pub fn enqueue(
         &self,
@@ -1126,10 +1535,14 @@ impl Store {
             .map(|g| g.value())
             .unwrap_or(0);
         let usage = txn.open_table(USAGE)?;
+        let key_packages = txn.open_table(KEY_PACKAGES)?.len()?;
+        let groups = txn.open_table(GROUPS)?.len()?;
         let mut stats = Stats {
             bundles,
             blobs,
             blob_bytes,
+            key_packages,
+            groups,
             ..Stats::default()
         };
         for item in usage.iter()? {
@@ -1141,6 +1554,29 @@ impl Store {
         }
         Ok(stats)
     }
+}
+
+/// The range of key package refs under one owner: every ref is 32 bytes.
+const REF_LOW: &[u8] = &[];
+const REF_HIGH: &[u8] = &[0xff; 33];
+
+/// `user`'s last-resort key package, dropped if its lifetime ended.
+fn last_resort_in(
+    txn: &redb::WriteTransaction,
+    user: &[u8],
+    now_ms: u64,
+) -> anyhow::Result<Option<KeyPackageDeposit>> {
+    let mut last = txn.open_table(KEY_PACKAGE_LAST_RESORT)?;
+    let Some(json) = last.get(user)?.map(|g| g.value().to_vec()) else {
+        return Ok(None);
+    };
+    let deposit: KeyPackageDeposit =
+        serde_json::from_slice(&json).context("stored key package is unreadable")?;
+    if deposit.expires_at_ms <= now_ms {
+        last.remove(user)?;
+        return Ok(None);
+    }
+    Ok(Some(deposit))
 }
 
 fn adjust_usage(
@@ -1173,6 +1609,225 @@ fn decode_entry(bytes: &[u8]) -> anyhow::Result<(u64, Envelope)> {
 mod tests {
     use super::*;
     use silver_protocol::{Content, Identity, PqPrekeySecret, seal};
+
+    fn package(n: u8, expires_at_ms: u64) -> KeyPackageDeposit {
+        KeyPackageDeposit {
+            r#ref: [n; 32],
+            expires_at_ms,
+            data: vec![n; 10],
+        }
+    }
+
+    #[test]
+    fn key_packages_are_deposited_handed_out_oldest_first_and_reported() {
+        let store = Store::in_memory().unwrap();
+        let bob = Identity::generate().user_id();
+        assert_eq!(store.take_key_package(&bob, 0).unwrap(), None);
+        store
+            .set_key_packages(
+                &bob,
+                &[package(1, 100), package(2, 100), package(3, 5)],
+                Some(&package(9, 100)),
+            )
+            .unwrap();
+        assert_eq!(store.key_package_status(&bob).unwrap(), (3, vec![]));
+        assert_eq!(store.stats().unwrap().key_packages, 3);
+        // Oldest first, remembered as handed out.
+        let (taken, last_resort) = store.take_key_package(&bob, 10).unwrap().unwrap();
+        assert_eq!((taken.r#ref, last_resort), ([1; 32], false));
+        assert_eq!(store.key_package_status(&bob).unwrap(), (2, vec![[1; 32]]));
+        assert_eq!(
+            store.take_key_package(&bob, 10).unwrap().unwrap().0.r#ref,
+            [2; 32]
+        );
+        // The expired one is dropped when met; the last resort follows and
+        // stays.
+        let (taken, last_resort) = store.take_key_package(&bob, 10).unwrap().unwrap();
+        assert_eq!((taken.r#ref, last_resort), ([9; 32], true));
+        assert_eq!(
+            store.key_package_status(&bob).unwrap(),
+            (0, vec![[1; 32], [2; 32]])
+        );
+        assert_eq!(
+            store.take_key_package(&bob, 10).unwrap().unwrap().0.r#ref,
+            [9; 32]
+        );
+        // A re-deposit: a handed-out package listed again is not stored
+        // again, an unlisted handed-out one is forgotten, new ones queue.
+        store
+            .set_key_packages(
+                &bob,
+                &[package(2, 100), package(4, 100)],
+                Some(&package(9, 100)),
+            )
+            .unwrap();
+        assert_eq!(store.key_package_status(&bob).unwrap(), (1, vec![[2; 32]]));
+        // Packages keep their place across re-deposits.
+        store
+            .set_key_packages(
+                &bob,
+                &[package(6, 100), package(4, 100), package(5, 100)],
+                Some(&package(9, 100)),
+            )
+            .unwrap();
+        let mut order = Vec::new();
+        for _ in 0..3 {
+            order.push(store.take_key_package(&bob, 10).unwrap().unwrap().0.r#ref[0]);
+        }
+        assert_eq!(order, vec![4, 6, 5]);
+        // Dropping everything, including the last resort.
+        store.set_key_packages(&bob, &[], None).unwrap();
+        assert_eq!(store.take_key_package(&bob, 10).unwrap(), None);
+        assert_eq!(store.key_package_status(&bob).unwrap(), (0, vec![]));
+        // An expired last resort is dropped when asked for.
+        store
+            .set_key_packages(&bob, &[], Some(&package(8, 5)))
+            .unwrap();
+        assert_eq!(store.last_resort_key_package(&bob, 10).unwrap(), None);
+        assert_eq!(store.stats().unwrap().key_packages, 0);
+    }
+
+    #[test]
+    fn key_packages_expire_and_go_with_their_owner() {
+        let store = Store::in_memory().unwrap();
+        let bob = Identity::generate();
+        store.put_bundle(&bob.key_bundle()).unwrap();
+        store
+            .set_key_packages(
+                &bob.user_id(),
+                &[package(1, 50), package(2, 100)],
+                Some(&package(9, 50)),
+            )
+            .unwrap();
+        assert_eq!(store.expire_key_packages(60).unwrap(), 2);
+        assert_eq!(
+            store.key_package_status(&bob.user_id()).unwrap(),
+            (1, vec![])
+        );
+        assert_eq!(
+            store.last_resort_key_package(&bob.user_id(), 60).unwrap(),
+            None
+        );
+        store
+            .set_key_packages(
+                &bob.user_id(),
+                &[package(2, 100), package(3, 100)],
+                Some(&package(9, 100)),
+            )
+            .unwrap();
+        store.take_key_package(&bob.user_id(), 60).unwrap();
+        let removed = store.remove_user(&bob.user_id()).unwrap();
+        assert!(removed.had_bundle);
+        assert_eq!(
+            removed.key_packages, 2,
+            "one on deposit and the last resort"
+        );
+        assert_eq!(
+            store.key_package_status(&bob.user_id()).unwrap(),
+            (0, vec![])
+        );
+        assert_eq!(store.stats().unwrap().key_packages, 0);
+    }
+
+    #[test]
+    fn the_sequencer_orders_commits_and_refuses_the_rest() {
+        let store = Store::in_memory().unwrap();
+        let group = GroupId([1; 32]);
+        let (t0, t1, t2) = ([10u8; 32], [11u8; 32], [12u8; 32]);
+        assert_eq!(
+            store
+                .group_commit(&group, 0, &t0, token_hash(&t1), 1)
+                .unwrap(),
+            Sequenced::NotFound
+        );
+        assert_eq!(
+            store.group_create(&group, 0, token_hash(&t0), 1).unwrap(),
+            Sequenced::Stands(0)
+        );
+        // Idempotent for the same values, refused for others.
+        assert_eq!(
+            store.group_create(&group, 0, token_hash(&t0), 2).unwrap(),
+            Sequenced::Stands(0)
+        );
+        assert_eq!(
+            store.group_create(&group, 1, token_hash(&t0), 2).unwrap(),
+            Sequenced::Exists(0)
+        );
+        assert_eq!(
+            store
+                .group_commit(&group, 1, &t0, token_hash(&t1), 3)
+                .unwrap(),
+            Sequenced::Stale(0)
+        );
+        assert_eq!(
+            store
+                .group_commit(&group, 0, &t1, token_hash(&t1), 3)
+                .unwrap(),
+            Sequenced::Forbidden
+        );
+        assert_eq!(
+            store
+                .group_commit(&group, 0, &t0, token_hash(&t1), 3)
+                .unwrap(),
+            Sequenced::Stands(1)
+        );
+        assert_eq!(store.group_epoch(&group).unwrap(), Some(1));
+        // The second committer built on epoch 0 loses.
+        assert_eq!(
+            store
+                .group_commit(&group, 0, &t0, token_hash(&t2), 4)
+                .unwrap(),
+            Sequenced::Stale(1)
+        );
+        assert_eq!(
+            store
+                .group_commit(&group, 1, &t1, token_hash(&t2), 4)
+                .unwrap(),
+            Sequenced::Stands(2)
+        );
+        assert_eq!(store.group_count().unwrap(), 1);
+        assert_eq!(store.stats().unwrap().groups, 1);
+        // Entries expire by their last move; a member re-creates one.
+        assert_eq!(store.expire_groups(4).unwrap(), 0);
+        assert_eq!(store.expire_groups(5).unwrap(), 1);
+        assert_eq!(store.group_epoch(&group).unwrap(), None);
+        assert_eq!(
+            store.group_commit(&group, 2, &t2, [0; 32], 6).unwrap(),
+            Sequenced::NotFound
+        );
+        assert_eq!(
+            store.group_create(&group, 2, token_hash(&t2), 6).unwrap(),
+            Sequenced::Stands(2)
+        );
+    }
+
+    #[test]
+    fn a_version_two_database_gains_the_group_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("relay.redb");
+        let alice = Identity::generate();
+        {
+            let store = Store::open(&path).unwrap();
+            store.put_bundle(&alice.key_bundle()).unwrap();
+            // As 0.8.0 left it: no group tables, schema 2.
+            let txn = store.db.begin_write().unwrap();
+            txn.delete_table(KEY_PACKAGES).unwrap();
+            txn.delete_table(KEY_PACKAGES_USED).unwrap();
+            txn.delete_table(KEY_PACKAGE_LAST_RESORT).unwrap();
+            txn.delete_table(GROUPS).unwrap();
+            txn.commit().unwrap();
+            store.stamp_schema(Some(2)).unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+        assert!(store.bundle(&alice.user_id()).unwrap().is_some());
+        assert_eq!(
+            store.key_package_status(&alice.user_id()).unwrap(),
+            (0, vec![])
+        );
+        assert_eq!(store.group_count().unwrap(), 0);
+        assert_eq!(store.log_head().unwrap().index, 1, "the log is untouched");
+    }
 
     #[test]
     fn a_user_is_removed_from_every_table_and_nobody_else_is() {

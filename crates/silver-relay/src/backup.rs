@@ -29,7 +29,7 @@ use sha2::{Digest, Sha256};
 use crate::store::{self, SCHEMA, SCHEMA_VERSION, Store};
 
 /// The backup format this relay writes and reads.
-pub const FORMAT: u32 = 1;
+pub const FORMAT: u32 = 2;
 const MAGIC: &[u8] = b"silver-relay-backup\n";
 /// The longest field a record may carry. A blob chunk is 64 KiB and a
 /// mailbox entry well under a megabyte, so this bounds what a corrupt
@@ -148,6 +148,24 @@ enum Record {
         subject: Vec<u8>,
         json: Vec<u8>,
     },
+    /// Format 2: key packages on deposit and the group sequencer.
+    KeyPackage {
+        user: Vec<u8>,
+        seq: u64,
+        json: Vec<u8>,
+    },
+    KeyPackageUsed {
+        user: Vec<u8>,
+        r#ref: Vec<u8>,
+    },
+    KeyPackageLastResort {
+        user: Vec<u8>,
+        json: Vec<u8>,
+    },
+    Group {
+        id: Vec<u8>,
+        json: Vec<u8>,
+    },
 }
 
 impl Record {
@@ -170,6 +188,10 @@ impl Record {
             Self::Succession { .. } => 15,
             Self::LogEntry { .. } => 16,
             Self::LogLatest { .. } => 17,
+            Self::KeyPackage { .. } => 18,
+            Self::KeyPackageUsed { .. } => 19,
+            Self::KeyPackageLastResort { .. } => 20,
+            Self::Group { .. } => 21,
         }
     }
 
@@ -239,6 +261,23 @@ impl Record {
             }
             Self::LogLatest { subject, json } => {
                 put_bytes(w, subject)?;
+                put_bytes(w, json)
+            }
+            Self::KeyPackage { user, seq, json } => {
+                put_bytes(w, user)?;
+                put_u64(w, *seq)?;
+                put_bytes(w, json)
+            }
+            Self::KeyPackageUsed { user, r#ref } => {
+                put_bytes(w, user)?;
+                put_bytes(w, r#ref)
+            }
+            Self::KeyPackageLastResort { user, json } => {
+                put_bytes(w, user)?;
+                put_bytes(w, json)
+            }
+            Self::Group { id, json } => {
+                put_bytes(w, id)?;
                 put_bytes(w, json)
             }
         }
@@ -319,6 +358,23 @@ impl Record {
             },
             17 => Self::LogLatest {
                 subject: get_bytes(r)?,
+                json: get_bytes(r)?,
+            },
+            18 => Self::KeyPackage {
+                user: get_bytes(r)?,
+                seq: get_u64(r)?,
+                json: get_bytes(r)?,
+            },
+            19 => Self::KeyPackageUsed {
+                user: get_bytes(r)?,
+                r#ref: get_bytes(r)?,
+            },
+            20 => Self::KeyPackageLastResort {
+                user: get_bytes(r)?,
+                json: get_bytes(r)?,
+            },
+            21 => Self::Group {
+                id: get_bytes(r)?,
                 json: get_bytes(r)?,
             },
             other => bail!("record type {other} is not in backup format {FORMAT}"),
@@ -464,6 +520,37 @@ fn each_record(
             json: v.value().to_vec(),
         })?;
     }
+    for item in txn.open_table(store::KEY_PACKAGES)?.iter()? {
+        let (k, v) = item?;
+        let (user, seq) = k.value();
+        emit(Record::KeyPackage {
+            user: user.to_vec(),
+            seq,
+            json: v.value().to_vec(),
+        })?;
+    }
+    for item in txn.open_table(store::KEY_PACKAGES_USED)?.iter()? {
+        let (k, _) = item?;
+        let (user, r) = k.value();
+        emit(Record::KeyPackageUsed {
+            user: user.to_vec(),
+            r#ref: r.to_vec(),
+        })?;
+    }
+    for item in txn.open_table(store::KEY_PACKAGE_LAST_RESORT)?.iter()? {
+        let (k, v) = item?;
+        emit(Record::KeyPackageLastResort {
+            user: k.value().to_vec(),
+            json: v.value().to_vec(),
+        })?;
+    }
+    for item in txn.open_table(store::GROUPS)?.iter()? {
+        let (k, v) = item?;
+        emit(Record::Group {
+            id: k.value().to_vec(),
+            json: v.value().to_vec(),
+        })?;
+    }
     Ok(())
 }
 
@@ -486,6 +573,10 @@ struct Tables<'t> {
     successions: Table<'t, &'static [u8], &'static [u8]>,
     log: Table<'t, u64, &'static [u8]>,
     log_latest: Table<'t, &'static [u8], &'static [u8]>,
+    key_packages: Table<'t, (&'static [u8], u64), &'static [u8]>,
+    key_packages_used: Table<'t, (&'static [u8], &'static [u8]), ()>,
+    key_package_last_resort: Table<'t, &'static [u8], &'static [u8]>,
+    groups: Table<'t, &'static [u8], &'static [u8]>,
 }
 
 impl<'t> Tables<'t> {
@@ -508,6 +599,10 @@ impl<'t> Tables<'t> {
         txn.delete_table(store::SUCCESSIONS)?;
         txn.delete_table(store::LOG)?;
         txn.delete_table(store::LOG_LATEST)?;
+        txn.delete_table(store::KEY_PACKAGES)?;
+        txn.delete_table(store::KEY_PACKAGES_USED)?;
+        txn.delete_table(store::KEY_PACKAGE_LAST_RESORT)?;
+        txn.delete_table(store::GROUPS)?;
         Ok(Self {
             bundles: txn.open_table(store::BUNDLES)?,
             one_time: txn.open_table(store::ONE_TIME)?,
@@ -526,6 +621,10 @@ impl<'t> Tables<'t> {
             successions: txn.open_table(store::SUCCESSIONS)?,
             log: txn.open_table(store::LOG)?,
             log_latest: txn.open_table(store::LOG_LATEST)?,
+            key_packages: txn.open_table(store::KEY_PACKAGES)?,
+            key_packages_used: txn.open_table(store::KEY_PACKAGES_USED)?,
+            key_package_last_resort: txn.open_table(store::KEY_PACKAGE_LAST_RESORT)?,
+            groups: txn.open_table(store::GROUPS)?,
         })
     }
 
@@ -590,6 +689,21 @@ impl<'t> Tables<'t> {
             Record::LogLatest { subject, json } => {
                 self.log_latest
                     .insert(subject.as_slice(), json.as_slice())?;
+            }
+            Record::KeyPackage { user, seq, json } => {
+                self.key_packages
+                    .insert((user.as_slice(), *seq), json.as_slice())?;
+            }
+            Record::KeyPackageUsed { user, r#ref } => {
+                self.key_packages_used
+                    .insert((user.as_slice(), r#ref.as_slice()), ())?;
+            }
+            Record::KeyPackageLastResort { user, json } => {
+                self.key_package_last_resort
+                    .insert(user.as_slice(), json.as_slice())?;
+            }
+            Record::Group { id, json } => {
+                self.groups.insert(id.as_slice(), json.as_slice())?;
             }
         }
         Ok(())
@@ -709,9 +823,11 @@ fn get_header<R: Read>(r: &mut R) -> anyhow::Result<Header> {
     }
     let header: Header =
         serde_json::from_slice(&line).context("the backup's header is unreadable")?;
+    // Format 1 (0.7.0 and 0.8.0) is format 2 without the records 0.9.0
+    // added, so it still loads; a later format is refused.
     ensure!(
-        header.format == FORMAT,
-        "the backup is in format {}; this silver-relay {} reads format {FORMAT}",
+        header.format <= FORMAT,
+        "the backup is in format {}; this silver-relay {} reads formats up to {FORMAT}",
         header.format,
         env!("CARGO_PKG_VERSION")
     );
@@ -1039,6 +1155,20 @@ mod tests {
                 )
                 .unwrap();
         }
+        // Key packages: two on deposit and a last resort for bob, one handed
+        // out so the "used" table has an entry; and one group's sequencer.
+        let package = |n: u8| silver_protocol::wire::KeyPackageDeposit {
+            r#ref: [n; 32],
+            expires_at_ms: u64::MAX,
+            data: vec![n; 40],
+        };
+        store
+            .set_key_packages(&bob.user_id(), &[package(1), package(2)], Some(&package(9)))
+            .unwrap();
+        store.take_key_package(&bob.user_id(), 0).unwrap();
+        store
+            .group_create(&silver_protocol::GroupId([5; 32]), 3, [6; 32], 60)
+            .unwrap();
         store
             .set_ban(
                 "address:203.0.113.9",
@@ -1101,6 +1231,23 @@ mod tests {
         assert_eq!(
             restored.pq_one_time_status(&bob.user_id()).unwrap(),
             (1, vec![4])
+        );
+        assert_eq!(
+            restored.key_package_status(&bob.user_id()).unwrap(),
+            (1, vec![[1; 32]])
+        );
+        assert_eq!(
+            restored
+                .last_resort_key_package(&bob.user_id(), 0)
+                .unwrap()
+                .map(|p| p.r#ref),
+            Some([9; 32])
+        );
+        assert_eq!(
+            restored
+                .group_epoch(&silver_protocol::GroupId([5; 32]))
+                .unwrap(),
+            Some(3)
         );
         assert_eq!(
             restored.blob_chunk("a-blob", 1).unwrap(),
@@ -1193,6 +1340,11 @@ mod tests {
         header.format = FORMAT + 1;
         let err = verify(with_header(&header).as_slice()).unwrap_err();
         assert!(err.to_string().contains("format"), "{err}");
+        // The format before this one passes the gate (it is a subset of
+        // this one); the doctored file then fails its checksum, as it must.
+        header.format = FORMAT - 1;
+        let err = verify(with_header(&header).as_slice()).unwrap_err();
+        assert!(!err.to_string().contains("format"), "{err}");
         header.format = FORMAT;
         header.schema = SCHEMA_VERSION + 1;
         let err = verify(with_header(&header).as_slice()).unwrap_err();

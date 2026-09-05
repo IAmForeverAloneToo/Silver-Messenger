@@ -111,6 +111,34 @@ routine step.
 
 ## Version notes
 
+### 0.9.0
+
+* **The schema version moves to 3: key packages and the group
+  sequencer.** The relay keeps two more kinds of thing for groups
+  (`PROTOCOL.md` section 13): each identity's MLS key packages on
+  deposit, handed out like one-time prekeys, and one epoch counter with
+  one hash per group, which orders the group's commits and says nothing
+  else about it. Both live in new tables; the migration creates them and
+  touches nothing else. **Rolling back to 0.8.0 needs a restore**: 0.8.0
+  refuses a version-3 database, as it would leave deposits to go stale and
+  every group without its sequencer. Take the backup before the upgrade.
+* **The backup format moves to 2.** A backup taken by 0.9.0 carries the
+  new tables; 0.9.0 reads backups in format 1 (0.7.0 and 0.8.0) and 2,
+  but 0.8.0 refuses a format-2 backup. So a rollback restores a backup
+  taken *before* the upgrade; one taken after it is for 0.9.0 alone.
+  Groups whose sequencer moved on since that backup are re-created by
+  their members from where they stand (`PROTOCOL.md` section 13), and
+  key packages deposited since are deposited again at the next login, so
+  a restore costs nothing beyond what it always cost.
+* **Groups are served by default.** Every relay on 0.9.0 advertises the
+  `groups` feature; there is no switch, since a group is one small row and
+  a key package deposit is a few tens of kilobytes per identity.
+  `--max-groups` (default 100 000) caps the sequencer entries, idle ones
+  go after 180 days, and the metrics `silver_relay_groups`,
+  `silver_relay_key_packages`, `silver_relay_group_commits_total` and
+  `silver_relay_group_rejections_total` say how it is going. Clients on
+  0.8.0 see none of this and keep working.
+
 ### 0.8.0
 
 * **The schema version moves to 2: the key transparency log.** The relay

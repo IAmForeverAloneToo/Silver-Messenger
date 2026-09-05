@@ -43,6 +43,9 @@ async fn the_endpoint_serves_the_text_format_and_follows_the_relay() {
     );
     assert!(body.contains("silver_relay_auth_failures_total 0\n"));
     assert!(body.contains("silver_relay_identities 0\n"));
+    assert!(body.contains("silver_relay_groups 0\n"));
+    assert!(body.contains("silver_relay_key_packages 0\n"));
+    assert!(body.contains("silver_relay_group_commits_total 0\n"));
 
     // A refused login shows up on the next scrape, without its address.
     state.note_auth_failure("203.0.113.7".parse().unwrap());
