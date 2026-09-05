@@ -52,6 +52,7 @@ pub mod encoding;
 pub mod envelope;
 mod error;
 pub mod identity;
+pub mod lifecycle;
 pub mod pq;
 pub mod prekey;
 pub mod session;
@@ -66,6 +67,7 @@ pub use envelope::{
 };
 pub use error::ProtocolError;
 pub use identity::{DhPublic, Identity, IdentitySecrets, UserId};
+pub use lifecycle::{Revocation, Succession};
 pub use pq::{KemPublic, KemRatchetKey, PqPrekeySecret, SignedPqPrekey};
 pub use prekey::{OneTimePrekey, PrekeySecret, Prekeys, SignedPrekey};
 pub use session::{InitHeader, RatchetHeader, RatchetMessage, Session, SessionId};

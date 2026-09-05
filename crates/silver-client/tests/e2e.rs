@@ -1316,3 +1316,108 @@ async fn a_relay_without_file_storage_says_so() {
     let err = alice_c.upload_file(&path, false, None).await.unwrap_err();
     assert!(err.to_string().contains("does not store files"), "{err}");
 }
+
+/// Look `who` up on `client` repeatedly until `rx` yields a matching lifecycle
+/// event, so the test does not race the relay storing the statement.
+async fn poll_for<T>(
+    client: &Client,
+    rx: &mut mpsc::Receiver<ClientEvent>,
+    who: silver_protocol::UserId,
+    what: &str,
+    mut pick: impl FnMut(&ClientEvent) -> Option<T>,
+) -> T {
+    for _ in 0..40 {
+        let _ = client.lookup(who).await;
+        while let Ok(Some(ev)) = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
+            if let Some(found) = pick(&ev) {
+                return found;
+            }
+        }
+    }
+    panic!("timed out waiting for {what}");
+}
+
+#[tokio::test]
+async fn a_revocation_reaches_a_contact_and_ends_the_identity() {
+    let (url, _state) = start_relay().await;
+    let alice = Arc::new(Identity::generate());
+    let bob = Arc::new(Identity::generate());
+    let (alice_c, mut alice_ev) =
+        Client::spawn(url.clone(), alice.clone(), with_sessions(&alice)).unwrap();
+    let (bob_c, mut bob_ev) = Client::spawn(url.clone(), bob.clone(), with_sessions(&bob)).unwrap();
+    connected(&mut alice_ev, "alice").await;
+    connected(&mut bob_ev, "bob").await;
+
+    // Alice retires her identity with the pre-signed certificate.
+    let revocation = alice.revocation(silver_protocol::now_ms());
+    alice_c.revoke(revocation).await.unwrap();
+
+    // Bob, looking Alice up, is told she is revoked.
+    let seen = poll_for(
+        &bob_c,
+        &mut bob_ev,
+        alice.user_id(),
+        "bob learns of the revocation",
+        |e| match e {
+            ClientEvent::PeerRevoked { revocation } => Some(revocation.clone()),
+            _ => None,
+        },
+    )
+    .await;
+    assert_eq!(seen.identity, alice.user_id());
+    assert!(seen.verify().is_ok());
+
+    // The dead identity can never publish again: Alice's client reconnects,
+    // tries to republish, and the relay refuses it.
+    let refusal = wait_for(
+        &mut alice_ev,
+        "alice refused as revoked",
+        |e| matches!(e, ClientEvent::Disconnected { reason, .. } if reason.contains("revoked")),
+    )
+    .await;
+    let ClientEvent::Disconnected { reason, .. } = refusal else {
+        unreachable!()
+    };
+    assert!(reason.contains("revoked"), "{reason}");
+
+    alice_c.shutdown().await;
+    bob_c.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_succession_reaches_a_contact_through_the_relay() {
+    let (url, _state) = start_relay().await;
+    let alice = Arc::new(Identity::generate());
+    let alice_next = Identity::generate();
+    let bob = Arc::new(Identity::generate());
+    let (alice_c, mut alice_ev) =
+        Client::spawn(url.clone(), alice.clone(), with_sessions(&alice)).unwrap();
+    let (bob_c, mut bob_ev) = Client::spawn(url.clone(), bob.clone(), with_sessions(&bob)).unwrap();
+    connected(&mut alice_ev, "alice").await;
+    connected(&mut bob_ev, "bob").await;
+
+    // Alice hands over to her new identity, cross-signed by both keys.
+    let succession = alice.succeed_to(&alice_next, silver_protocol::now_ms());
+    alice_c.succeed(succession).await.unwrap();
+    // A round-trip on Alice's own connection guarantees the relay has applied
+    // the succession (frames are processed in order) before Bob looks up.
+    let _ = alice_c.lookup(alice.user_id()).await;
+
+    let seen = poll_for(
+        &bob_c,
+        &mut bob_ev,
+        alice.user_id(),
+        "bob learns of the succession",
+        |e| match e {
+            ClientEvent::PeerSucceeded { succession } => Some(succession.clone()),
+            _ => None,
+        },
+    )
+    .await;
+    assert_eq!(seen.old, alice.user_id());
+    assert_eq!(seen.new, alice_next.user_id());
+    assert!(seen.verify().is_ok());
+
+    alice_c.shutdown().await;
+    bob_c.shutdown().await;
+}

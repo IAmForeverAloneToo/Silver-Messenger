@@ -47,7 +47,9 @@ use silver_protocol::wire::{
     ClientFrame, ErrorCode, MAX_FRAME_BYTES, ServerFrame, feature, normalize_host, verify_auth,
     verify_auth_bound,
 };
-use silver_protocol::{Envelope, KeyBundle, MAX_CIPHERTEXT_BYTES, UserId, now_ms};
+use silver_protocol::{
+    Envelope, KeyBundle, MAX_CIPHERTEXT_BYTES, Revocation, Succession, UserId, now_ms,
+};
 use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -845,7 +847,11 @@ impl RelayState {
 
     /// What this relay can do beyond protocol v1.
     pub fn features(&self) -> Vec<String> {
-        let mut features = vec![feature::PREKEYS.to_owned(), feature::PQ_PREKEYS.to_owned()];
+        let mut features = vec![
+            feature::PREKEYS.to_owned(),
+            feature::PQ_PREKEYS.to_owned(),
+            feature::LIFECYCLE.to_owned(),
+        ];
         if self.policy.anonymous_sends_per_minute > 0 {
             features.push(feature::ANONYMOUS_SEND.to_owned());
         }
@@ -853,6 +859,48 @@ impl RelayState {
             features.push(feature::BLOBS.to_owned());
         }
         features
+    }
+
+    /// Store a self-signed revocation for its identity: the identity is
+    /// dead. Verified by its own signature, so no connection auth is needed
+    /// (the key may be lost). A revoked identity that is online is
+    /// disconnected and cannot publish again.
+    pub fn apply_revocation(&self, revocation: Revocation) -> Result<(), Rejection> {
+        if revocation.verify().is_err() {
+            return Err((ErrorCode::BadSignature, "revocation signature is invalid"));
+        }
+        self.store.set_revocation(&revocation).map_err(|e| {
+            error!("storing revocation: {e:#}");
+            (ErrorCode::Internal, "storage error")
+        })?;
+        self.disconnect(&revocation.identity, "revoked by its owner");
+        Ok(())
+    }
+
+    /// Store a cross-signed succession, keyed by the old identity.
+    pub fn apply_succession(&self, succession: Succession) -> Result<(), Rejection> {
+        if succession.verify().is_err() {
+            return Err((ErrorCode::BadSignature, "succession signature is invalid"));
+        }
+        self.store.set_succession(&succession).map_err(|e| {
+            error!("storing succession: {e:#}");
+            (ErrorCode::Internal, "storage error")
+        })?;
+        Ok(())
+    }
+
+    /// The lifecycle statements the relay holds for `user`, to attach to a
+    /// lookup result.
+    pub fn lifecycle(&self, user: &UserId) -> (Option<Revocation>, Option<Succession>) {
+        let revocation = self.store.revocation(user).unwrap_or_else(|e| {
+            error!("reading revocation: {e:#}");
+            None
+        });
+        let succession = self.store.succession(user).unwrap_or_else(|e| {
+            error!("reading succession: {e:#}");
+            None
+        });
+        (revocation, succession)
     }
 
     /// Delete unacknowledged envelopes and file blobs older than `ttl`.
@@ -1059,6 +1107,10 @@ impl RelayState {
         }
         if bundle.verify().is_err() {
             return Err((ErrorCode::BadSignature, "bundle signature is invalid"));
+        }
+        // A revoked identity is dead: it cannot be published again.
+        if self.store.is_revoked(me).unwrap_or(false) {
+            return Err((ErrorCode::Forbidden, "this identity has been revoked"));
         }
         // A new identity: the invite token, the registration rate for the
         // address, and the room left all have a say.
@@ -1386,6 +1438,25 @@ async fn handle_socket(
             }
             user_id
         }
+        // A revocation or a succession authenticates itself, so the relay
+        // takes it without a login: a revoked key may be lost and unable to
+        // log in. It is a one-shot; the connection then closes.
+        Ok(Some(Ok(ClientFrame::Revoke { revocation }))) => {
+            let reply = match state.apply_revocation(revocation) {
+                Ok(()) => ServerFrame::Published,
+                Err((code, message)) => ServerFrame::error(code, message),
+            };
+            let _ = send(&mut sink, &reply).await;
+            return;
+        }
+        Ok(Some(Ok(ClientFrame::Succeed { succession }))) => {
+            let reply = match state.apply_succession(succession) {
+                Ok(()) => ServerFrame::Published,
+                Err((code, message)) => ServerFrame::error(code, message),
+            };
+            let _ = send(&mut sink, &reply).await;
+            return;
+        }
         Ok(Some(Ok(
             frame @ (ClientFrame::Send { .. }
             | ClientFrame::BlobPut { .. }
@@ -1578,8 +1649,22 @@ fn handle_frame(
             } else {
                 state.bundle(&user_id)
             };
-            vec![ServerFrame::LookupResult { user_id, bundle }]
+            let (revocation, succession) = state.lifecycle(&user_id);
+            vec![ServerFrame::LookupResult {
+                user_id,
+                bundle,
+                revocation,
+                succession,
+            }]
         }
+        ClientFrame::Revoke { revocation } => match state.apply_revocation(revocation) {
+            Ok(()) => vec![ServerFrame::Published],
+            Err((code, message)) => vec![ServerFrame::error(code, message)],
+        },
+        ClientFrame::Succeed { succession } => match state.apply_succession(succession) {
+            Ok(()) => vec![ServerFrame::Published],
+            Err((code, message)) => vec![ServerFrame::error(code, message)],
+        },
         ClientFrame::Send { envelope } => vec![state.submit(envelope, &mut conn.sends, Some(me))],
         ClientFrame::Ack { id } => {
             state.ack(me, &id);

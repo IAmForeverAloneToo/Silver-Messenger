@@ -10,6 +10,7 @@ use crate::bundle::KeyBundle;
 use crate::encoding::{b64, b64_array};
 use crate::envelope::Envelope;
 use crate::identity::{Identity, UserId};
+use crate::lifecycle::{Revocation, Succession};
 
 /// Domain of the v1 relay login: a signature over the challenge nonce
 /// alone, which a hostile relay could collect and present elsewhere.
@@ -40,6 +41,11 @@ pub mod feature {
     /// (protocol v3) and hands out one-time ones. A relay without this
     /// drops them from bundles, and sessions through it stay classical.
     pub const PQ_PREKEYS: &str = "pq_prekeys";
+    /// The relay accepts and serves identity revocations and successions
+    /// (`Revoke`/`Succeed`), so a lost or rotated key reaches contacts on
+    /// their next lookup. A relay without this drops them; contacts still
+    /// learn from statements pushed inside messages.
+    pub const LIFECYCLE: &str = "lifecycle";
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +75,19 @@ pub enum ClientFrame {
     /// Ask for someone's key bundle.
     Lookup {
         user_id: UserId,
+    },
+    /// Declare an identity dead. The revocation is self-signed, so the
+    /// relay accepts it without the connection authenticating as that
+    /// identity — the key may be lost. The relay stores it, serves it on
+    /// lookups, and refuses to let the identity publish again.
+    Revoke {
+        revocation: Revocation,
+    },
+    /// Announce that an identity has moved to a new one. Cross-signed by
+    /// both keys, so the relay accepts it without authentication and serves
+    /// it on lookups of the old identity.
+    Succeed {
+        succession: Succession,
     },
     /// Hand an encrypted envelope to the relay for delivery. Accepted on an
     /// authenticated connection, or (on relays advertising
@@ -154,6 +173,12 @@ pub enum ServerFrame {
     LookupResult {
         user_id: UserId,
         bundle: Option<KeyBundle>,
+        /// A revocation the relay holds for this identity (it is dead).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revocation: Option<Revocation>,
+        /// A succession the relay holds for this identity (it moved).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        succession: Option<Succession>,
     },
     /// The relay accepted the envelope with this id for delivery.
     Sent {

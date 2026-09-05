@@ -132,6 +132,14 @@ enum Record {
         key: String,
         value: String,
     },
+    Revocation {
+        user: Vec<u8>,
+        json: Vec<u8>,
+    },
+    Succession {
+        user: Vec<u8>,
+        json: Vec<u8>,
+    },
 }
 
 impl Record {
@@ -150,6 +158,8 @@ impl Record {
             Self::BlobChunk { .. } => 11,
             Self::Ban { .. } => 12,
             Self::Admin { .. } => 13,
+            Self::Revocation { .. } => 14,
+            Self::Succession { .. } => 15,
         }
     }
 
@@ -208,6 +218,10 @@ impl Record {
             Self::Admin { key, value } => {
                 put_bytes(w, key.as_bytes())?;
                 put_bytes(w, value.as_bytes())
+            }
+            Self::Revocation { user, json } | Self::Succession { user, json } => {
+                put_bytes(w, user)?;
+                put_bytes(w, json)
             }
         }
     }
@@ -272,6 +286,14 @@ impl Record {
             13 => Self::Admin {
                 key: get_string(r)?,
                 value: get_string(r)?,
+            },
+            14 => Self::Revocation {
+                user: get_bytes(r)?,
+                json: get_bytes(r)?,
+            },
+            15 => Self::Succession {
+                user: get_bytes(r)?,
+                json: get_bytes(r)?,
             },
             other => bail!("record type {other} is not in backup format {FORMAT}"),
         })
@@ -388,6 +410,20 @@ fn each_record(
             value: v.value().to_owned(),
         })?;
     }
+    for item in txn.open_table(store::REVOCATIONS)?.iter()? {
+        let (k, v) = item?;
+        emit(Record::Revocation {
+            user: k.value().to_vec(),
+            json: v.value().to_vec(),
+        })?;
+    }
+    for item in txn.open_table(store::SUCCESSIONS)?.iter()? {
+        let (k, v) = item?;
+        emit(Record::Succession {
+            user: k.value().to_vec(),
+            json: v.value().to_vec(),
+        })?;
+    }
     Ok(())
 }
 
@@ -406,6 +442,8 @@ struct Tables<'t> {
     blob_chunks: Table<'t, (&'static str, u32), &'static [u8]>,
     bans: Table<'t, &'static str, &'static [u8]>,
     admin: Table<'t, &'static str, &'static str>,
+    revocations: Table<'t, &'static [u8], &'static [u8]>,
+    successions: Table<'t, &'static [u8], &'static [u8]>,
 }
 
 impl<'t> Tables<'t> {
@@ -424,6 +462,8 @@ impl<'t> Tables<'t> {
         txn.delete_table(store::BLOB_CHUNKS)?;
         txn.delete_table(store::BANS)?;
         txn.delete_table(store::ADMIN)?;
+        txn.delete_table(store::REVOCATIONS)?;
+        txn.delete_table(store::SUCCESSIONS)?;
         Ok(Self {
             bundles: txn.open_table(store::BUNDLES)?,
             one_time: txn.open_table(store::ONE_TIME)?,
@@ -438,6 +478,8 @@ impl<'t> Tables<'t> {
             blob_chunks: txn.open_table(store::BLOB_CHUNKS)?,
             bans: txn.open_table(store::BANS)?,
             admin: txn.open_table(store::ADMIN)?,
+            revocations: txn.open_table(store::REVOCATIONS)?,
+            successions: txn.open_table(store::SUCCESSIONS)?,
         })
     }
 
@@ -489,6 +531,12 @@ impl<'t> Tables<'t> {
             }
             Record::Admin { key, value } => {
                 self.admin.insert(key.as_str(), value.as_str())?;
+            }
+            Record::Revocation { user, json } => {
+                self.revocations.insert(user.as_slice(), json.as_slice())?;
+            }
+            Record::Succession { user, json } => {
+                self.successions.insert(user.as_slice(), json.as_slice())?;
             }
         }
         Ok(())
@@ -950,6 +998,10 @@ mod tests {
         store
             .set_admin_setting("invite_token", Some("kept"))
             .unwrap();
+        // Lifecycle statements: bob revoked, carol handed over to a successor.
+        store.set_revocation(&bob.revocation(40)).unwrap();
+        let dave = Identity::generate();
+        store.set_succession(&carol.succeed_to(&dave, 50)).unwrap();
         (store, bob, carol)
     }
 
@@ -1006,6 +1058,16 @@ mod tests {
             restored.admin_setting("invite_token").unwrap().as_deref(),
             Some("kept")
         );
+        assert!(restored.is_revoked(&bob.user_id()).unwrap());
+        assert_eq!(
+            restored.revocation(&bob.user_id()).unwrap(),
+            store.revocation(&bob.user_id()).unwrap()
+        );
+        assert_eq!(
+            restored.succession(&carol.user_id()).unwrap(),
+            store.succession(&carol.user_id()).unwrap()
+        );
+        assert!(restored.succession(&carol.user_id()).unwrap().is_some());
         assert_eq!(restored.schema_version().unwrap(), SCHEMA_VERSION);
         // An acknowledgement finds the restored index.
         let first = restored.queued(&bob.user_id()).unwrap().remove(0);

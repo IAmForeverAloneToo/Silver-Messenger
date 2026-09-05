@@ -232,6 +232,7 @@ the relay does not learn which clients have which features.
 | `receipts` | Understands `receipt` content and wants to be sent it. |
 | `files` | Understands `file` content and can fetch blobs (section 7.5). |
 | `padded_files` | Cuts a fetched file to its announced `size`, so the sender may pad the last chunk (4.5). |
+| `lifecycle` | Understands `revocation` and `succession` content: identity-lifecycle statements pushed inside a message (section 10). |
 
 ### 4.4 Receipts
 
@@ -459,6 +460,8 @@ first.
 | `ack` | `id` | The envelope with this id was received and stored; the relay may drop it. |
 | `blob_put` | `blob`, `index`, `total`, `data` (b64) | Store chunk `index` of `total` of blob `blob` (section 7.5). |
 | `blob_get` | `blob` | Ask for every chunk of a blob. |
+| `revoke` | `revocation` | A self-signed revocation (section 10). Accepted without `auth`, since the key may be lost; a one-shot, the connection then closes. |
+| `succeed` | `succession` | A cross-signed succession (section 10). Accepted without `auth`; a one-shot. |
 | `ping` | | |
 
 ### Relay → client
@@ -469,7 +472,7 @@ first.
 | `auth_ok` | `user_id`, `features`? | `features` lists strings from section 7.3; absent on older relays. |
 | `published` | | |
 | `prekey_status` | `one_time_remaining`, `consumed`? | After `published`, only to clients whose bundle carried prekeys: how many one-time keys are on deposit and which ids were handed out since they were published. |
-| `lookup_result` | `user_id`, `bundle` (or `null`) | |
+| `lookup_result` | `user_id`, `bundle` (or `null`), `revocation`?, `succession`? | `revocation` and `succession` carry the lifecycle statements the relay holds for `user_id` (section 10), if any; older relays omit both fields. |
 | `sent` | `id` | The envelope is queued for delivery. |
 | `rejected` | `id`, `code`, `message` | The envelope was not queued. `rate_limited` means try again later; any other code is final. |
 | `deliver` | `envelope` | Delivered in mailbox order; acknowledge with `ack`. |
@@ -535,6 +538,7 @@ be linked through a resumed session.
 | `anonymous_send` | Section 7.2. |
 | `blobs` | Section 7.5: the relay stores encrypted file chunks. Absent when the operator set the largest blob to 0. |
 | `pq_prekeys` | The relay keeps `pq_signed` and `pq_one_time` (section 2), hands out one-time ML-KEM keys on lookup and reports them in `prekey_status` (`pq_one_time_remaining`, `pq_consumed`). |
+| `lifecycle` | The relay accepts `revoke` and `succeed`, keeps the statements, refuses to publish a revoked identity, and attaches the statements to `lookup_result` (section 10). Absent on relays before 0.8.0; contacts then learn only from the copy pushed inside a message. |
 
 A relay without the field is a v1 relay: it stores bundles as v1 (dropping
 `prekeys`, since it re-serialises what it parsed), so clients behind it
@@ -691,3 +695,79 @@ network observer still sees when messages and blobs travel and roughly
 how big they are, including that a blob is fetched some time after a
 message is delivered. Receipts are delayed at random rather than hidden.
 Group messaging is not defined yet.
+
+## 10. Identity lifecycle
+
+An identity key can be retired or replaced without word of mouth, by two
+short signed statements. Each carries its own signatures, so it is trusted
+however it arrived: served on a `lookup_result`, or pushed inside a message
+(the `revocation` and `succession` content types, sent only to peers that
+advertised the `lifecycle` capability). A contact acts on a statement only
+after checking it against the key it has pinned for that identity.
+
+### 10.1 Revocation
+
+A **revocation** declares an identity dead.
+
+```json
+{ "identity": "<user id>", "created_at_ms": 1699999999999,
+  "signature": "<b64 64 bytes>" }
+```
+
+It is self-signed by the identity it retires:
+`signature = sign("silver-messenger/v4/revocation", identity || created_at_ms)`,
+with `identity` the 32 raw key bytes and `created_at_ms` eight big-endian
+bytes. `verify()` checks that signature. Only the key holder could have
+produced a valid one, so anyone may store and relay it.
+
+A client mints its revocation the first time it runs, while the key is
+present, and keeps it aside (in the data directory and, encrypted, in the
+export backup) for the day the key must be declared dead — the way an
+OpenPGP revocation certificate is kept for later. It can therefore be
+published even after the private key is lost, which is why the relay takes
+a `revoke` frame without a login (7, pre-auth one-shot).
+
+A relay that keeps lifecycle statements stores the revocation, disconnects
+the identity if it is online, refuses any later `publish` for it
+(`forbidden`, "this identity has been revoked"), and attaches it to every
+`lookup_result` for it. The refusal is permanent: removing the user does
+not lift it, so a revoked key can never be re-registered. A contact that
+sees a valid revocation for a pinned key retires that contact, drops its
+sessions, and stops sending to it.
+
+### 10.2 Succession
+
+A **succession** names a successor identity for a planned rotation, while
+the old key still works.
+
+```json
+{ "old": "<user id>", "new": "<user id>", "created_at_ms": 1699999999999,
+  "old_signature": "<b64 64 bytes>", "new_signature": "<b64 64 bytes>" }
+```
+
+It is *cross-signed*, the way Matrix cross-signing binds a new device key:
+the old key authorises the handover and the new key accepts it, over the
+same bytes `old || new || created_at_ms` (raw key bytes and eight
+big-endian bytes):
+
+* `old_signature = sign("silver-messenger/v4/succession", message)`
+* `new_signature = sign("silver-messenger/v4/succession-accept", message)`
+
+`verify()` checks both and that `old` and `new` differ, so nobody can name
+someone else's key as their successor, and a rotation needs both keys'
+consent. A relay keeps it under the old identity and attaches it to a
+`lookup_result` for the old identity. A contact that sees a valid
+succession for its pinned (old) key re-pins the contact to `new`: it moves
+the conversation across, clears the pinned bundle and the verified mark,
+starts message numbering afresh, and looks the new key up. The safety
+number changes, so the two should compare it again, but no out-of-band step
+is required to keep talking.
+
+### 10.3 What it does not do
+
+A revocation is permanent; a key retired by mistake is recovered by making
+a new identity, as before. Neither statement is carried in a transparency
+log yet, so a relay may withhold one it holds (a contact still learns from
+the copy pushed inside a message, and withholding cannot forge a statement,
+only delay it); a hash-chained bundle log is future work. Lifecycle applies
+to one-to-one identities; group membership is separate.

@@ -318,10 +318,11 @@ container story. Operations come before reach.
 ## Phase 8: finish the protocol
 
 Each item here is a line in the threat model's table of gaps. The
-handshake is post-quantum; the ratchet after it is not. Messages are not
-deniable. An identity cannot be rotated or revoked. A relay that shows one
-person a substitute key is caught only when two people compare safety
-numbers by hand. Nothing has been formally modelled.
+handshake was post-quantum; the ratchet after it was not, and now is (41).
+Messages were not deniable, and now are (42). An identity could not be
+rotated or revoked, and now can (43). A relay that shows one person a
+substitute key is still caught only when two people compare safety numbers
+by hand (44). Nothing has been formally modelled yet (45).
 
 41. [x] **Post-quantum ratchet** (L). An ML-KEM ratchet next to the
         Diffie–Hellman one, so healing after a compromise is post-quantum
@@ -340,14 +341,15 @@ numbers by hand. Nothing has been formally modelled.
         signature is over a public key, not the transcript. The v1 fallback
         is put on a retirement schedule: 0.8.0 and 0.9.0 still send v1 to
         peers without prekeys and warn, 0.10.0 refuses.
-43. [ ] **Identity lifecycle** (M). A revocation statement pre-signed when
+43. [x] **Identity lifecycle** (M). A revocation statement pre-signed when
         an identity is created and kept in the backup, so a key that is
         lost can still be declared dead; a signed successor statement for
-        a planned rotation; both published in the bundle and pushed to
+        a planned rotation; both served by the relay on lookup and pushed to
         contacts, who verify them against the old key and re-pin. A lost
-        or rotated key then no longer needs word of mouth. OpenPGP
-        revocation certificates and Matrix cross-signing are the
-        references.
+        or rotated key then no longer needs word of mouth. `/revoke` and
+        `/rotate` drive them; the relay refuses to publish a revoked
+        identity ever again. OpenPGP revocation certificates and Matrix
+        cross-signing are the references.
 44. [ ] **Key transparency, small edition** (L). The relay keeps a
         hash-chained, append-only log of every bundle it serves, and
         clients carry the log head inside their encrypted messages and

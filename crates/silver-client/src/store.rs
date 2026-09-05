@@ -29,7 +29,7 @@ use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 use silver_protocol::envelope::ReceiptKind;
 use silver_protocol::wire::url_host;
-use silver_protocol::{Identity, IdentitySecrets, KeyBundle, Sequence, UserId};
+use silver_protocol::{Identity, IdentitySecrets, KeyBundle, Revocation, Sequence, UserId};
 
 use crate::files::FileInfo;
 use crate::sessions::{PrekeyFile, SessionsFile};
@@ -37,6 +37,7 @@ use crate::vault::{FileCipher, Kdf, LINE_PREFIX, VaultError, VaultFile};
 
 const VAULT_FILE: &str = "vault.json";
 const IDENTITY_FILE: &str = "identity.json";
+const REVOCATION_FILE: &str = "revocation.json";
 const PREKEYS_FILE: &str = "prekeys.json";
 const SESSIONS_FILE: &str = "sessions.json";
 const CONFIG_FILE: &str = "config.json";
@@ -211,6 +212,11 @@ pub struct Contact {
     /// the user to ask for each one.
     #[serde(default)]
     pub auto_files: bool,
+    /// The contact published a revocation for this identity: it is dead and
+    /// must not be messaged. Set when a valid revocation for their pinned key
+    /// arrives; cleared only by removing and re-adding them.
+    #[serde(default)]
+    pub revoked: bool,
 }
 
 impl Contact {
@@ -224,6 +230,7 @@ impl Contact {
             verified: false,
             caps: Vec::new(),
             auto_files: false,
+            revoked: false,
         }
     }
 
@@ -685,6 +692,43 @@ impl Store {
         self.write_file(IDENTITY_FILE, text.as_bytes(), true)
     }
 
+    /// Load the pre-signed revocation certificate, minting and saving one for
+    /// `identity` on first call. It is signed once, while the key is still
+    /// present, and kept aside so the identity can be declared dead even after
+    /// the private key is lost. `created_at_ms` stamps a freshly minted one.
+    pub fn load_or_create_revocation(
+        &self,
+        identity: &Identity,
+        created_at_ms: u64,
+    ) -> anyhow::Result<Revocation> {
+        if let Some(existing) = self.revocation()? {
+            if existing.identity == identity.user_id() {
+                return Ok(existing);
+            }
+            // The stored certificate is for a different key (a restored or
+            // rotated identity): mint a fresh one below.
+        }
+        let revocation = identity.revocation(created_at_ms);
+        self.save_revocation(&revocation)?;
+        Ok(revocation)
+    }
+
+    /// The stored revocation certificate, if one has been minted.
+    pub fn revocation(&self) -> anyhow::Result<Option<Revocation>> {
+        match self.read_file(REVOCATION_FILE)? {
+            None => Ok(None),
+            Some(bytes) => Ok(Some(
+                serde_json::from_slice(&bytes).context("parsing revocation.json")?,
+            )),
+        }
+    }
+
+    /// Store a revocation certificate, e.g. when restoring a backup.
+    pub fn save_revocation(&self, revocation: &Revocation) -> anyhow::Result<()> {
+        let text = serde_json::to_string_pretty(revocation)?;
+        self.write_file(REVOCATION_FILE, text.as_bytes(), true)
+    }
+
     // --- prekeys and sessions ------------------------------------------------
 
     pub(crate) fn load_prekeys(&self) -> anyhow::Result<PrekeyFile> {
@@ -825,6 +869,44 @@ impl Store {
         let mut line = encode_line(self.cipher.as_deref(), &name, json);
         line.push('\n');
         file.write_all(line.as_bytes())?;
+        Ok(())
+    }
+
+    /// Move the conversation log from `old` to `new`, for example when a
+    /// contact rotates to a successor identity. Each line is decoded under the
+    /// old file's name and re-encoded under the new one, because the file name
+    /// is bound into the at-rest encryption. Any log already at `new` is kept
+    /// and the migrated lines appended after it.
+    pub fn migrate_history(&self, old: &UserId, new: &UserId) -> anyhow::Result<()> {
+        self.ensure_unlocked()?;
+        if old == new {
+            return Ok(());
+        }
+        let old_name = history_name(old);
+        let old_path = self.root.join(&old_name);
+        if !old_path.exists() {
+            return Ok(());
+        }
+        let text = fs::read_to_string(&old_path)
+            .with_context(|| format!("reading {}", old_path.display()))?;
+        let new_name = history_name(new);
+        let new_path = self.root.join(&new_name);
+        let mut out = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&new_path)
+            .with_context(|| format!("opening {}", new_path.display()))?;
+        for line in text.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let plain = decode_line(self.cipher.as_deref(), &old_name, line)?;
+            let mut encoded = encode_line(self.cipher.as_deref(), &new_name, &plain);
+            encoded.push('\n');
+            out.write_all(encoded.as_bytes())?;
+        }
+        out.flush()?;
+        fs::remove_file(&old_path).with_context(|| format!("removing {}", old_path.display()))?;
         Ok(())
     }
 
@@ -1101,6 +1183,69 @@ mod tests {
         let (second, created) = store.load_or_create_identity().unwrap();
         assert!(!created);
         assert_eq!(first.user_id(), second.user_id());
+    }
+
+    #[test]
+    fn a_revocation_certificate_is_minted_once_and_matches_the_identity() {
+        let (store, _dir) = temp_store();
+        let (identity, _) = store.load_or_create_identity().unwrap();
+        assert!(store.revocation().unwrap().is_none());
+
+        let first = store.load_or_create_revocation(&identity, 1000).unwrap();
+        assert_eq!(first.identity, identity.user_id());
+        assert!(first.verify().is_ok());
+        // Minting again returns the same certificate, not a fresh signature.
+        let again = store.load_or_create_revocation(&identity, 2000).unwrap();
+        assert_eq!(again, first);
+        assert_eq!(store.revocation().unwrap(), Some(first.clone()));
+
+        // A certificate stored for a different key is replaced.
+        let other = Identity::generate();
+        let fresh = store.load_or_create_revocation(&other, 3000).unwrap();
+        assert_eq!(fresh.identity, other.user_id());
+        assert_ne!(fresh, first);
+    }
+
+    #[test]
+    fn history_migrates_to_a_successor_identity() {
+        let (store, _dir) = temp_store();
+        let old = Identity::generate().user_id();
+        let new = Identity::generate().user_id();
+        for i in 0..3 {
+            store.append_history(&old, &entry(i)).unwrap();
+        }
+        store
+            .append_receipt(&old, ReceiptKind::Read, &["0".into()], 5)
+            .unwrap();
+
+        store.migrate_history(&old, &new).unwrap();
+        // The old log is gone and the new one carries the conversation with
+        // its receipts still applied.
+        assert!(store.load_history(&old).unwrap().is_empty());
+        let moved = store.load_history(&new).unwrap();
+        assert_eq!(moved.len(), 3);
+        assert_eq!(moved[0].receipt, Some(ReceiptKind::Read));
+        // Migrating a peer with no log is a no-op, not an error.
+        let empty = Identity::generate().user_id();
+        store.migrate_history(&empty, &new).unwrap();
+        assert_eq!(store.load_history(&new).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn history_migration_survives_at_rest_encryption() {
+        crate::keystore::use_mock_store();
+        let (mut store, _dir) = temp_store();
+        let _ = store.load_or_create_identity().unwrap();
+        store.protect_with_keystore().unwrap();
+        let old = Identity::generate().user_id();
+        let new = Identity::generate().user_id();
+        for i in 0..2 {
+            store.append_history(&old, &entry(i)).unwrap();
+        }
+        // Re-encoding under the new file name must still decrypt back.
+        store.migrate_history(&old, &new).unwrap();
+        assert_eq!(store.load_history(&new).unwrap().len(), 2);
+        assert!(store.load_history(&old).unwrap().is_empty());
     }
 
     #[test]

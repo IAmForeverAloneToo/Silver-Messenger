@@ -208,10 +208,15 @@ you. What they cannot do, thanks to the ratchet, is read messages that
 were already received and ratcheted past if those were recorded in
 transit: the message keys are gone. `/lock` and the idle lock drop the
 keys from memory; core dumps are off, and on Linux the process is not
-dumpable or traceable by other processes of the same user. There is no
-way to revoke an identity; the only remedy is to tell your contacts out of
-band and start a new one. A backup file (`--export-backup`) is encrypted
-under its own passphrase and holds the identity keys and contacts (not
+dumpable or traceable by other processes of the same user. To retire the
+identity itself there is a pre-signed revocation certificate (`/revoke`,
+protocol section 10), minted on first run and kept aside so the key can be
+declared dead even after it is lost; contacts that see it stop trusting the
+key. The same certificate in a thief's hands is a denial of service — they
+can publish it and kill your identity — which you recover from by starting
+a new one, so it is no worse than the loss of the keys it sits beside. A
+backup file (`--export-backup`) is encrypted under its own passphrase and
+holds the identity keys, the revocation certificate and contacts (not
 sessions or prekeys), so it deserves the same care as the data directory.
 
 ### Holder of a compromised long-term Diffie–Hellman key
@@ -232,7 +237,13 @@ The attacker can publish a new Diffie–Hellman key and prekeys for the
 victim and read new messages sent to them, and can sign messages as them.
 Contacts see the published key change (loudly) and their sessions with the
 victim are dropped, but cannot tell a compromise from a legitimate reinstall
-without comparing safety numbers out of band.
+without comparing safety numbers out of band. The victim recovers by
+retiring the key: `/revoke` declares it dead so contacts stop trusting it,
+and `/rotate` hands over to a fresh identity with a cross-signed succession
+so contacts re-pin to the new key on their own (protocol section 10). This
+races the attacker — whoever's statement a contact sees first wins until the
+next lookup — and does not undo what was already read, but it ends the
+attacker's ability to be taken for the victim going forward.
 
 ### Future quantum adversary with a recording
 

@@ -18,8 +18,8 @@ use crate::sessions::{SessionError, SessionInfo, SharedSessions};
 use crate::submitter::{SubmitEvent, Submitter};
 use crate::tls::{ConnectOptions, Connectors, Observed, connectors, observing_connector};
 use silver_protocol::{
-    Body, Content, Envelope, Identity, KeyBundle, Message, ProtocolError, Sequence, UserId, now_ms,
-    open_bytes, seal_bytes, seal_bytes_unsigned,
+    Body, Content, Envelope, Identity, KeyBundle, Message, ProtocolError, Revocation, Sequence,
+    Succession, UserId, now_ms, open_bytes, seal_bytes, seal_bytes_unsigned,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -58,6 +58,18 @@ pub enum ClientEvent {
         from: UserId,
         id: String,
         reason: String,
+    },
+    /// A peer's identity was revoked: a valid revocation statement arrived
+    /// (from a lookup, or pushed inside a message). The front end checks it
+    /// against the key it has pinned and, if it matches, retires the contact.
+    PeerRevoked {
+        revocation: silver_protocol::Revocation,
+    },
+    /// A peer moved to a new identity: a valid, cross-signed succession
+    /// arrived. The front end checks it against the pinned old key and, if
+    /// it matches, re-pins the contact to the new identity.
+    PeerSucceeded {
+        succession: silver_protocol::Succession,
     },
     /// The relay accepted the envelope with this id.
     Sent { id: String },
@@ -119,6 +131,15 @@ enum Command {
         total: u32,
         progress: Option<mpsc::Sender<Progress>>,
         reply: oneshot::Sender<Result<Vec<Vec<u8>>, ClientError>>,
+    },
+    /// Tell the relay this identity is dead, or has moved. Fire and forget:
+    /// the statement authenticates itself, and contacts also learn from the
+    /// statement pushed into their mailbox and from their next lookup.
+    Revoke {
+        revocation: silver_protocol::Revocation,
+    },
+    Succeed {
+        succession: silver_protocol::Succession,
     },
     Shutdown,
 }
@@ -334,6 +355,24 @@ impl Client {
                 warn!("could not drop sessions with {peer}: {e:#}");
             }
         }
+    }
+
+    /// Tell the relay this identity is revoked (dead). The statement
+    /// authenticates itself, so the relay takes it and serves it on
+    /// lookups; contacts also learn from a copy pushed into their mailbox.
+    pub async fn revoke(&self, revocation: Revocation) -> Result<(), ClientError> {
+        self.cmd_tx
+            .send(Command::Revoke { revocation })
+            .await
+            .map_err(|_| ClientError::Stopped)
+    }
+
+    /// Tell the relay this identity has moved to a new one.
+    pub async fn succeed(&self, succession: Succession) -> Result<(), ClientError> {
+        self.cmd_tx
+            .send(Command::Succeed { succession })
+            .await
+            .map_err(|_| ClientError::Stopped)
     }
 
     /// Fetch and verify someone's key bundle from the relay.
@@ -715,6 +754,9 @@ async fn run(
                     Some(Command::Download { blob, total, progress, reply }) => {
                         transfers.queue_download(blob, total, progress, reply);
                     }
+                    // While disconnected these are dropped; the front end
+                    // resends them once reconnected.
+                    Some(Command::Revoke { .. }) | Some(Command::Succeed { .. }) => {}
                 },
             }
         }
@@ -851,6 +893,16 @@ async fn session(
                     }
                     lookups.entry(user_id).or_default().push(reply);
                 }
+                Some(Command::Revoke { revocation }) => {
+                    if sink.send(text(&ClientFrame::Revoke { revocation })).await.is_err() {
+                        return Ok(Exit::Disconnected("revoke failed".into()));
+                    }
+                }
+                Some(Command::Succeed { succession }) => {
+                    if sink.send(text(&ClientFrame::Succeed { succession })).await.is_err() {
+                        return Ok(Exit::Disconnected("succeed failed".into()));
+                    }
+                }
                 // Transfers asked for before `Published` (the relay replays
                 // the mailbox first, and a delivered file is fetched at
                 // once) wait for it; `Published` resumes them.
@@ -938,9 +990,27 @@ async fn session(
                     ServerFrame::Rejected { id, code, message } => {
                         refused(id, code, message, outbox, pending, ev_tx, &mut retry_at).await;
                     }
-                    ServerFrame::LookupResult { user_id, bundle } => {
+                    ServerFrame::LookupResult {
+                        user_id,
+                        bundle,
+                        revocation,
+                        succession,
+                    } => {
                         for reply in lookups.remove(&user_id).unwrap_or_default() {
                             let _ = reply.send(Ok(bundle.clone()));
+                        }
+                        // A lifecycle statement the relay holds for this
+                        // identity: forward it if it is validly signed, for
+                        // the front end to match against a pinned contact.
+                        if let Some(revocation) = revocation
+                            && revocation.verify().is_ok()
+                        {
+                            let _ = ev_tx.send(ClientEvent::PeerRevoked { revocation }).await;
+                        }
+                        if let Some(succession) = succession
+                            && succession.verify().is_ok()
+                        {
+                            let _ = ev_tx.send(ClientEvent::PeerSucceeded { succession }).await;
                         }
                     }
                     frame @ (ServerFrame::BlobAck { .. }
@@ -1308,6 +1378,26 @@ async fn refused(
         .await;
 }
 
+/// If `content` is an identity-lifecycle statement, the event to raise for
+/// it; otherwise `None`. The statement's own signatures are checked here,
+/// so the front end sees only valid ones (it still confirms the statement
+/// is about a contact it has pinned before acting).
+fn lifecycle_event(content: &Content) -> Option<ClientEvent> {
+    match content {
+        Content::Revocation(revocation) if revocation.verify().is_ok() => {
+            Some(ClientEvent::PeerRevoked {
+                revocation: revocation.clone(),
+            })
+        }
+        Content::Succession(succession) if succession.verify().is_ok() => {
+            Some(ClientEvent::PeerSucceeded {
+                succession: succession.clone(),
+            })
+        }
+        _ => None,
+    }
+}
+
 /// Open an incoming envelope and report what it held.
 async fn deliver(setup: &Setup, envelope: Envelope, ev_tx: &mpsc::Sender<ClientEvent>) {
     let id = envelope.id.clone();
@@ -1331,6 +1421,10 @@ async fn deliver(setup: &Setup, envelope: Envelope, ev_tx: &mpsc::Sender<ClientE
             content,
             caps,
         }) => {
+            if let Some(event) = lifecycle_event(&content) {
+                let _ = ev_tx.send(event).await;
+                return;
+            }
             let _ = ev_tx
                 .send(ClientEvent::Message(Box::new(Message {
                     id,
@@ -1407,6 +1501,10 @@ async fn deliver(setup: &Setup, envelope: Envelope, ev_tx: &mpsc::Sender<ClientE
             content,
             caps,
         }) => {
+            if let Some(event) = lifecycle_event(&content) {
+                let _ = ev_tx.send(event).await;
+                return;
+            }
             let _ = ev_tx
                 .send(ClientEvent::Message(Box::new(Message {
                     id,

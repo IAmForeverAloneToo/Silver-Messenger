@@ -143,7 +143,9 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
             .get(&contact.user_id)
             .map(|ids| ids.len())
             .filter(|n| *n > 0);
-        let label = if contact.verified {
+        let label = if contact.revoked {
+            format!("{} (revoked)", contact.display_name())
+        } else if contact.verified {
             format!("{} {}", app.glyphs.verified, contact.display_name())
         } else {
             contact.display_name()
@@ -180,14 +182,15 @@ fn draw_messages(frame: &mut Frame, app: &mut App, area: Rect) {
         None => (" System ".to_owned(), system_rows(app, width), Pane::System),
         Some(contact) => (
             format!(
-                " {}{} · {}{} ",
-                if contact.verified {
+                " {}{} · {}{}{} ",
+                if contact.verified && !contact.revoked {
                     format!("{} ", app.glyphs.verified)
                 } else {
                     String::new()
                 },
                 contact.display_name(),
                 contact.user_id,
+                if contact.revoked { " · revoked" } else { "" },
                 app.encryption_label(contact)
                     .map(|l| format!(" · {l}"))
                     .unwrap_or_default()

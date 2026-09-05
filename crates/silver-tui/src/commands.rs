@@ -149,6 +149,18 @@ pub const COMMANDS: &[CommandInfo] = &[
         "<ws-url>",
         "change the relay (takes effect on next start)",
     ),
+    cmd(
+        "revoke",
+        &[],
+        "confirm",
+        "retire your identity for good; contacts are told it is dead (needs /revoke confirm)",
+    ),
+    cmd(
+        "rotate",
+        &[],
+        "confirm",
+        "move to a new identity; contacts re-pin automatically, then restart (needs /rotate confirm)",
+    ),
     cmd("help", &["h", "?"], "", "show this help"),
     cmd(
         "lock",

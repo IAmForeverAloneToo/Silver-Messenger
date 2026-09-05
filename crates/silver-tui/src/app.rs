@@ -1427,6 +1427,8 @@ impl App {
             "files" => self.cmd_files(&rest),
             "open" => self.cmd_open(),
             "relay" => self.cmd_relay(&rest),
+            "revoke" => self.cmd_revoke(&rest),
+            "rotate" => self.cmd_rotate(&rest),
             "lock" => self.cmd_lock(),
             "quit" | "q" | "exit" => self.should_quit = true,
             other => match commands::closest(other) {
@@ -2034,6 +2036,128 @@ impl App {
         }
     }
 
+    /// Retire this identity for good. Publishes the pre-signed revocation to
+    /// the relay and, best-effort, to every contact that understands lifecycle
+    /// statements. Needs `/revoke confirm`, because it cannot be undone.
+    fn cmd_revoke(&mut self, args: &[&str]) {
+        let confirmed = matches!(
+            args.first().map(|a| a.to_ascii_lowercase()).as_deref(),
+            Some("confirm") | Some("yes")
+        );
+        if !confirmed {
+            self.system(
+                Level::Warn,
+                "This retires your identity for good: contacts will be told it is dead and stop trusting it, and the relay will refuse to publish your key again. It cannot be undone; to keep talking you would start a new identity. Run /revoke confirm to go ahead.",
+            );
+            self.toast("Type /revoke confirm to retire this identity.");
+            return;
+        }
+        let (identity, _) = match self.store.load_or_create_identity() {
+            Ok(pair) => pair,
+            Err(e) => {
+                self.toast(format!("Could not load your identity: {e}"));
+                return;
+            }
+        };
+        let revocation = match self.store.load_or_create_revocation(&identity, now_ms()) {
+            Ok(revocation) => revocation,
+            Err(e) => {
+                self.toast(format!("Could not read your revocation certificate: {e}"));
+                return;
+            }
+        };
+        // Tell contacts that can hear it now; the relay serves it to the rest.
+        let peers: Vec<UserId> = self
+            .contacts
+            .iter()
+            .filter(|c| !c.revoked && c.supports(capability::LIFECYCLE))
+            .map(|c| c.user_id)
+            .collect();
+        for peer in peers {
+            self.send_content_to(peer, Content::Revocation(revocation.clone()));
+        }
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            let _ = client.revoke(revocation).await;
+        });
+        self.system(
+            Level::Warn,
+            "Your identity is revoked. The relay and your contacts have been told it is dead. Start a fresh installation to make a new identity; if you kept a backup, its contacts come with it.",
+        );
+        self.toast("Identity revoked. See System.");
+    }
+
+    /// Move to a fresh identity with a cross-signed succession, so contacts
+    /// re-pin to the new key on their own. Needs `/rotate confirm`.
+    fn cmd_rotate(&mut self, args: &[&str]) {
+        let confirmed = matches!(
+            args.first().map(|a| a.to_ascii_lowercase()).as_deref(),
+            Some("confirm") | Some("yes")
+        );
+        if !confirmed {
+            self.system(
+                Level::Warn,
+                "This makes a new identity and hands over to it: the move is signed by both your old and new keys, so contacts re-pin to the new one without having to compare safety numbers again from scratch (though it is worth doing). Restart afterwards to run as the new identity. Run /rotate confirm to go ahead.",
+            );
+            self.toast("Type /rotate confirm to rotate your identity.");
+            return;
+        }
+        let (old, _) = match self.store.load_or_create_identity() {
+            Ok(pair) => pair,
+            Err(e) => {
+                self.toast(format!("Could not load your identity: {e}"));
+                return;
+            }
+        };
+        let new = silver_protocol::Identity::generate();
+        let now = now_ms();
+        let succession = old.succeed_to(&new, now);
+        let new_id = new.user_id();
+        // Announce to contacts that understand it, over the still-live old
+        // sessions, then to the relay.
+        let peers: Vec<UserId> = self
+            .contacts
+            .iter()
+            .filter(|c| !c.revoked && c.supports(capability::LIFECYCLE))
+            .map(|c| c.user_id)
+            .collect();
+        for peer in peers {
+            self.send_content_to(peer, Content::Succession(succession.clone()));
+        }
+        let client = self.client.clone();
+        let announced = succession.clone();
+        tokio::spawn(async move {
+            let _ = client.succeed(announced).await;
+        });
+        // Persist the new identity so the next start runs as it: its keys, a
+        // fresh revocation certificate for it, and no carried-over sessions.
+        if let Err(e) = self.store.save_identity(&new) {
+            self.toast(format!("Could not save the new identity: {e}"));
+            return;
+        }
+        if let Err(e) = self.store.load_or_create_revocation(&new, now) {
+            self.system(
+                Level::Warn,
+                format!(
+                    "New identity saved, but its revocation certificate could not be written: {e}"
+                ),
+            );
+        }
+        if let Err(e) = self.store.clear_sessions() {
+            self.system(
+                Level::Warn,
+                format!("New identity saved, but old sessions could not be cleared: {e}"),
+            );
+        }
+        self.system(
+            Level::Info,
+            format!(
+                "Handed over to a new identity ({new_id}). Contacts have been told and will re-pin to it. Restart Silver to run as the new identity; until you do, this session still uses the old one."
+            ),
+        );
+        self.toast("Rotation announced. Restart to use the new identity.");
+    }
+
     fn persist_contacts(&mut self) {
         if let Err(e) = self.store.save_contacts(&self.contacts) {
             self.toast(format!("Could not save contacts: {e}"));
@@ -2051,6 +2175,17 @@ impl App {
             self.toast("Select a contact first, or /add <user-id>.");
             return;
         };
+        if self.contacts[index].revoked {
+            let name = self.contacts[index].display_name();
+            self.system(
+                Level::Warn,
+                format!(
+                    "{name} revoked their identity, so nothing can be sent to it. If they gave you a new identity, /add it and message that instead."
+                ),
+            );
+            self.toast(format!("{name}'s identity is revoked; not sent."));
+            return;
+        }
         let peer = self.contacts[index].user_id;
         self.new_marker = None; // answered: nothing is "new" any more
         self.send_content_to(peer, Content::Text { body: text });
@@ -2163,7 +2298,11 @@ impl App {
                         Content::Text { body } => Some(body.clone()),
                         Content::File { .. } => FileInfo::from_content(&content)
                             .map(|i| format!("[file] {}", i.label())),
-                        Content::Receipt { .. } => None,
+                        // Receipts and lifecycle statements are not shown in
+                        // the conversation as messages of their own.
+                        Content::Receipt { .. }
+                        | Content::Revocation(_)
+                        | Content::Succession(_) => None,
                     };
                     if let Some(text) = text {
                         // The relay may have answered before this event was
@@ -2350,6 +2489,14 @@ impl App {
                         self.apply_receipt(from, kind, &ids);
                         return;
                     }
+                    // Lifecycle statements are handled from PeerRevoked /
+                    // PeerSucceeded events, which the client raises after
+                    // verifying the signatures; they never reach here as a
+                    // plain message.
+                    Content::Revocation(_) | Content::Succession(_) => {
+                        self.known_ids.insert(message.id);
+                        return;
+                    }
                 };
                 // A file is fetched now only for a contact on /files auto;
                 // otherwise it waits for /get. What the sender claims about
@@ -2430,11 +2577,89 @@ impl App {
                 );
                 self.toast(format!("Unreadable message from {name}; see System."));
             }
+            ClientEvent::PeerRevoked { revocation } => self.handle_peer_revoked(revocation),
+            ClientEvent::PeerSucceeded { succession } => self.handle_peer_succeeded(succession),
             ClientEvent::Error(text) => {
                 self.system(Level::Warn, text.clone());
                 self.toast(text);
             }
         }
+    }
+
+    // --- identity lifecycle ----------------------------------------------------
+
+    /// A validly-signed revocation reached us (from a lookup or pushed inside
+    /// a message; the client checked the signature first). If it names a
+    /// contact we have pinned, retire that contact: mark it revoked, drop the
+    /// sessions and warn. A revocation for someone we do not know is ignored.
+    fn handle_peer_revoked(&mut self, revocation: silver_protocol::Revocation) {
+        let Some(index) = self.contact_index(&revocation.identity) else {
+            return; // not a contact of ours
+        };
+        if self.contacts[index].revoked {
+            return; // already known dead
+        }
+        let name = self.contact_name(&revocation.identity);
+        let peer = revocation.identity;
+        self.contacts[index].revoked = true;
+        self.contacts[index].verified = false;
+        self.persist_contacts();
+        self.client.forget_sessions(&peer);
+        self.system(
+            Level::Warn,
+            format!(
+                "{name} revoked their identity. It is dead: do not trust it and you can no longer message it. If they move to a new identity you will be told, or they can send you a new one to /add."
+            ),
+        );
+        self.toast(format!("{name} revoked their identity. See System."));
+    }
+
+    /// A validly-signed, cross-signed succession reached us. If its old key is
+    /// a contact we have pinned, re-pin that contact to the successor key:
+    /// migrate the conversation, clear the pinned bundle and the verified mark,
+    /// start numbering afresh, and look the new key up. A succession whose old
+    /// key we have not pinned is ignored.
+    fn handle_peer_succeeded(&mut self, succession: silver_protocol::Succession) {
+        let Some(index) = self.contact_index(&succession.old) else {
+            return; // the old key is not one of ours
+        };
+        // Nothing to do if we already moved to (or past) this successor.
+        if self.contact_index(&succession.new).is_some() {
+            return;
+        }
+        let name = self.contact_name(&succession.old);
+        let (old, new) = (succession.old, succession.new);
+        // Migrate the on-disk conversation, then the in-memory view.
+        if let Err(e) = self.store.migrate_history(&old, &new) {
+            self.system(
+                Level::Warn,
+                format!("Could not move the conversation with {name} to their new key: {e}"),
+            );
+        }
+        if let Some(thread) = self.threads.remove(&old) {
+            self.threads.insert(new, thread);
+        }
+        if let Some(unread) = self.unread.remove(&old) {
+            self.unread.entry(new).or_default().extend(unread);
+        }
+        let contact = &mut self.contacts[index];
+        contact.user_id = new;
+        contact.bundle = None; // re-pin on lookup below
+        contact.verified = false;
+        contact.revoked = false;
+        contact.sent_seq = 0;
+        contact.received = None;
+        self.persist_contacts();
+        self.client.forget_sessions(&old);
+        self.system(
+            Level::Warn,
+            format!(
+                "{name} moved to a new identity ({new}). It is signed by both their old and new keys, so it is genuine, and I have re-pinned them. The safety number has changed: run /verify and compare it again before you trust it."
+            ),
+        );
+        self.toast(format!("{name} rotated their identity. See System."));
+        // Fetch and pin the successor's key so messages can flow again.
+        self.lookup_contact(new, None);
     }
 
     // --- contact requests ------------------------------------------------------
@@ -2715,7 +2940,7 @@ impl App {
                     Err(e) => format!("[file] {} · refused: {e}", info.label()),
                 }
             }
-            Content::Receipt { .. } => return,
+            Content::Receipt { .. } | Content::Revocation(_) | Content::Succession(_) => return,
         };
         // Strangers get bounded room: so many senders, so much per sender.
         let mut text: String = text.chars().take(MAX_HELD_CHARS).collect();

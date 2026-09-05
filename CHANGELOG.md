@@ -25,6 +25,19 @@ means behaviour or the wire protocol changed in a way worth reading about.
   only to peers with no prekeys) and v2 sessions stay signed; v1 is now
   scheduled for retirement: 0.8.0 and 0.9.0 still send it and warn, 0.10.0
   will refuse to.
+- **Identity lifecycle: revoke and rotate.** `/revoke` retires an identity
+  for good with a pre-signed revocation certificate, minted on first run
+  and kept in the data directory and the encrypted backup so the key can be
+  declared dead even after it is lost. `/rotate` moves to a fresh identity
+  with a succession cross-signed by both the old and the new key, so
+  contacts re-pin to the new key on their own without comparing safety
+  numbers from scratch. Contacts learn from a copy pushed inside a message
+  and from the relay, which serves the statements on lookup and refuses to
+  publish a revoked identity ever again. A revoked contact is marked as such
+  and cannot be messaged; a succeeded contact is re-pinned and its
+  conversation carried across. Needs a relay on 0.8.0 (the `lifecycle`
+  feature); older relays still carry the pushed copies. See protocol
+  section 10.
 
 ## 0.7.0 - 2026-09-04
 

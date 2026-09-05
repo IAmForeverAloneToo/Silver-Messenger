@@ -505,11 +505,12 @@ it does not, is in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
   bound to its own name and history is encrypted line by line. A new
   identity offers to set a passphrase on first start; `--set-passphrase`
   and `--remove-passphrase` change it later.
-* **Backups**: `--export-backup` writes the identity keys and contact list
-  to one file encrypted under a passphrase of its own (Argon2id and
-  XChaCha20-Poly1305). `--import-backup` restores it onto a fresh
-  installation: same id, same contacts, and a new message-numbering epoch so
-  contacts see a reinstall rather than replays. History is not included.
+* **Backups**: `--export-backup` writes the identity keys, the revocation
+  certificate and the contact list to one file encrypted under a passphrase
+  of its own (Argon2id and XChaCha20-Poly1305). `--import-backup` restores
+  it onto a fresh installation: same id, same contacts, and a new
+  message-numbering epoch so contacts see a reinstall rather than replays.
+  History is not included.
 * **Safety numbers**: `/verify` shows twelve groups of five digits derived
   from both identity keys, identical on both sides. Two people who read them
   to each other confirm that nobody sits between them; `/verify ok` records
@@ -517,6 +518,16 @@ it does not, is in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
   their identity key; when it does, the client warns loudly and clears the
   verified mark, because it means either a deliberate rotation or a stolen
   identity key.
+* **Retire or replace an identity**: `/revoke` declares your identity dead
+  with a certificate pre-signed on first run and kept in the data directory
+  and the backup, so a key that is lost can still be retired; contacts that
+  see it stop trusting the key, and the relay refuses to publish it ever
+  again. `/rotate` moves to a fresh identity with a handover signed by both
+  the old and the new key, so contacts re-pin to the new key on their own.
+  A revoked contact is marked and cannot be messaged; a rotated one is
+  re-pinned and its conversation carried across, with a nudge to compare
+  safety numbers again. Needs a relay on 0.8.0; older relays still pass on
+  the copy pushed inside a message.
 * **Sequence numbers**: every message carries, inside the encrypted body, a
   per-conversation counter plus a random per-installation epoch. The
   recipient drops replays, points out gaps, and notices when a contact has
@@ -534,10 +545,10 @@ it does not, is in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
   connection; it shows a pending mark (`⋯`) until the relay accepts it, and a
   failure mark (`✗`) if the relay refuses it for good.
 
-What it does **not** do: deniability (messages are signed; the decision is
-recorded in [docs/PROTOCOL.md](docs/PROTOCOL.md) section 9), cover
-traffic, post-quantum ratchet steps after the handshake. The ordered plan
-is in [ROADMAP.md](ROADMAP.md).
+What it does **not** do yet: cover traffic; key transparency, so a relay
+that shows one person a substitute key is still caught only when two people
+compare safety numbers by hand; a formal model of the handshake and
+ratchet. The ordered plan is in [ROADMAP.md](ROADMAP.md).
 
 ## Development
 

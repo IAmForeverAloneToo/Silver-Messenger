@@ -11,7 +11,9 @@ use std::path::Path;
 use anyhow::Context;
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use silver_protocol::prekey::OneTimePrekey;
-use silver_protocol::{DhPublic, Envelope, KeyBundle, SignedPqPrekey, UserId};
+use silver_protocol::{
+    DhPublic, Envelope, KeyBundle, Revocation, SignedPqPrekey, Succession, UserId,
+};
 
 /// A deposit of one-time keys: `(owner, key id) -> encoded public key` for
 /// keys not yet handed out.
@@ -47,6 +49,12 @@ pub(crate) const BANS: TableDefinition<&str, &[u8]> = TableDefinition::new("bans
 /// Settings the administrator changed while the relay ran, which win over
 /// the command line at the next start: the invite token, for one.
 pub(crate) const ADMIN: TableDefinition<&str, &str> = TableDefinition::new("admin");
+/// `identity -> Revocation JSON`: a self-signed statement that the identity
+/// is dead, served on lookups so contacts learn of it.
+pub(crate) const REVOCATIONS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("revocations");
+/// `old identity -> Succession JSON`: a cross-signed statement that the
+/// identity moved to a new one, served on lookups of the old identity.
+pub(crate) const SUCCESSIONS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("successions");
 /// `blob id -> BlobMeta JSON` for encrypted file chunks on deposit.
 pub(crate) const BLOBS: TableDefinition<&str, &[u8]> = TableDefinition::new("blobs");
 /// `(blob id, chunk index) -> ciphertext`.
@@ -287,6 +295,8 @@ impl Store {
         txn.open_table(BLOB_CHUNKS)?;
         txn.open_table(BANS)?;
         txn.open_table(ADMIN)?;
+        txn.open_table(REVOCATIONS)?;
+        txn.open_table(SUCCESSIONS)?;
         Ok(())
     }
 
@@ -425,6 +435,59 @@ impl Store {
             ));
         }
         Ok(bans)
+    }
+
+    // --- identity lifecycle ----------------------------------------------------
+
+    /// Record a self-signed revocation for its identity.
+    pub fn set_revocation(&self, revocation: &Revocation) -> anyhow::Result<()> {
+        let bytes = serde_json::to_vec(revocation)?;
+        let txn = self.db.begin_write()?;
+        txn.open_table(REVOCATIONS)?
+            .insert(revocation.identity.as_bytes().as_slice(), bytes.as_slice())?;
+        txn.commit()?;
+        Ok(())
+    }
+
+    pub fn revocation(&self, user: &UserId) -> anyhow::Result<Option<Revocation>> {
+        let txn = self.db.begin_read()?;
+        match txn
+            .open_table(REVOCATIONS)?
+            .get(user.as_bytes().as_slice())?
+        {
+            Some(guard) => Ok(Some(serde_json::from_slice(guard.value())?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Whether the identity has been revoked.
+    pub fn is_revoked(&self, user: &UserId) -> anyhow::Result<bool> {
+        let txn = self.db.begin_read()?;
+        Ok(txn
+            .open_table(REVOCATIONS)?
+            .get(user.as_bytes().as_slice())?
+            .is_some())
+    }
+
+    /// Record a cross-signed succession, keyed by the old identity.
+    pub fn set_succession(&self, succession: &Succession) -> anyhow::Result<()> {
+        let bytes = serde_json::to_vec(succession)?;
+        let txn = self.db.begin_write()?;
+        txn.open_table(SUCCESSIONS)?
+            .insert(succession.old.as_bytes().as_slice(), bytes.as_slice())?;
+        txn.commit()?;
+        Ok(())
+    }
+
+    pub fn succession(&self, user: &UserId) -> anyhow::Result<Option<Succession>> {
+        let txn = self.db.begin_read()?;
+        match txn
+            .open_table(SUCCESSIONS)?
+            .get(user.as_bytes().as_slice())?
+        {
+            Some(guard) => Ok(Some(serde_json::from_slice(guard.value())?)),
+            None => Ok(None),
+        }
     }
 
     pub fn admin_setting(&self, key: &str) -> anyhow::Result<Option<String>> {
@@ -974,6 +1037,35 @@ mod tests {
             store.remove_user(&bob.user_id()).unwrap(),
             Removed::default()
         );
+    }
+
+    #[test]
+    fn lifecycle_statements_round_trip_and_outlive_the_user() {
+        let store = Store::in_memory().unwrap();
+        let old = Identity::generate();
+        let new = Identity::generate();
+        assert!(!store.is_revoked(&old.user_id()).unwrap());
+        assert!(store.revocation(&old.user_id()).unwrap().is_none());
+
+        let revocation = old.revocation(1000);
+        store.set_revocation(&revocation).unwrap();
+        assert!(store.is_revoked(&old.user_id()).unwrap());
+        assert_eq!(store.revocation(&old.user_id()).unwrap(), Some(revocation));
+
+        let succession = old.succeed_to(&new, 2000);
+        store.set_succession(&succession).unwrap();
+        assert_eq!(
+            store.succession(&old.user_id()).unwrap(),
+            Some(succession.clone())
+        );
+        // Keyed by the old identity; the successor is not "the one who moved".
+        assert!(store.succession(&new.user_id()).unwrap().is_none());
+
+        // A revocation is permanent: removing the user does not lift it, so a
+        // revoked key can never be re-registered.
+        store.remove_user(&old.user_id()).unwrap();
+        assert!(store.is_revoked(&old.user_id()).unwrap());
+        assert_eq!(store.succession(&old.user_id()).unwrap(), Some(succession));
     }
 
     #[test]

@@ -74,6 +74,14 @@ pub enum Content {
         #[serde(with = "b64_array")]
         sha256: [u8; 32],
     },
+    /// A signed statement that the sender's identity is revoked (dead).
+    /// Verified by its own signature, so it is trusted however it arrived.
+    /// Only sent to peers that advertised `lifecycle`.
+    Revocation(crate::lifecycle::Revocation),
+    /// A signed statement that the sender has moved to a new identity.
+    /// Cross-signed by both keys. Only sent to peers that advertised
+    /// `lifecycle`.
+    Succession(crate::lifecycle::Succession),
 }
 
 /// How far a message got on the recipient's side. Ordered: read implies
@@ -97,6 +105,10 @@ pub mod capability {
     /// (it cuts them to `size`), so the relay sees file sizes in 64 KiB
     /// steps only.
     pub const PADDED_FILES: &str = "padded_files";
+    /// The client understands `Content::Revocation` and
+    /// `Content::Succession`: identity-lifecycle statements pushed inside a
+    /// message so a peer learns of a revoked or rotated key promptly.
+    pub const LIFECYCLE: &str = "lifecycle";
 }
 
 /// Bodies are padded to a multiple of this many bytes, so a relay sees

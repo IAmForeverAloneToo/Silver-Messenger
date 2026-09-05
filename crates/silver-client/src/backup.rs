@@ -13,7 +13,7 @@ use std::path::Path;
 use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 use silver_protocol::encoding::b64;
-use silver_protocol::{Identity, IdentitySecrets, now_ms};
+use silver_protocol::{Identity, IdentitySecrets, Revocation, now_ms};
 use zeroize::Zeroizing;
 
 use crate::store::{Contact, Store};
@@ -38,6 +38,11 @@ pub struct BackupPayload {
     pub created_at_ms: u64,
     pub identity: IdentitySecrets,
     pub contacts: Vec<Contact>,
+    /// The pre-signed revocation certificate, kept alongside the key so the
+    /// identity can be declared dead after a loss. Optional for backups
+    /// written before lifecycle statements existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revocation: Option<Revocation>,
 }
 
 /// Write the store's identity and contacts to `path`, encrypted under
@@ -57,10 +62,12 @@ pub fn export_backup_with(
         bail!("there is no identity to back up yet");
     }
     let (identity, _) = store.load_or_create_identity()?;
+    let now = now_ms();
     let payload = BackupPayload {
-        created_at_ms: now_ms(),
+        created_at_ms: now,
         identity: identity.to_secrets(),
         contacts: store.load_contacts()?,
+        revocation: Some(store.load_or_create_revocation(&identity, now)?),
     };
     let plaintext = Zeroizing::new(serde_json::to_vec(&payload)?);
     let ciphertext = encrypt_with_passphrase(passphrase, &kdf, BACKUP_AAD, &plaintext)?;
@@ -101,6 +108,17 @@ pub fn import_backup(store: &Store, payload: BackupPayload, force: bool) -> anyh
     }
     let identity = Identity::from_secrets(&payload.identity);
     store.save_identity(&identity)?;
+    // Restore the pre-signed revocation so a key lost after this restore can
+    // still be declared dead. A backup that predates lifecycle statements
+    // carries none; mint a fresh one from the restored key instead.
+    match payload.revocation {
+        Some(revocation) if revocation.identity == identity.user_id() => {
+            store.save_revocation(&revocation)?;
+        }
+        _ => {
+            store.load_or_create_revocation(&identity, payload.created_at_ms)?;
+        }
+    }
     // Sessions and prekeys belong to the installation, not the identity:
     // peers will be told to start over.
     store.clear_sessions()?;
@@ -147,6 +165,10 @@ mod tests {
         ));
         let payload = read_backup(&file, "backup pass").unwrap();
         assert_eq!(payload.contacts.len(), 1);
+        // The pre-signed revocation travels with the identity.
+        let backed_up = payload.revocation.clone().expect("revocation in backup");
+        assert_eq!(backed_up.identity, identity.user_id());
+        assert!(backed_up.verify().is_ok());
 
         let target_dir = tempfile::tempdir().unwrap();
         let target = Store::open(target_dir.path()).unwrap();
@@ -154,6 +176,10 @@ mod tests {
         let (restored, created) = target.load_or_create_identity().unwrap();
         assert!(!created);
         assert_eq!(restored.user_id(), identity.user_id());
+        // The restored store carries the same certificate, so a key lost
+        // after this restore can still be revoked.
+        let restored_rev = target.revocation().unwrap().expect("restored revocation");
+        assert_eq!(restored_rev, backed_up);
         let contacts = target.load_contacts().unwrap();
         assert_eq!(contacts[0].alias.as_deref(), Some("peer"));
         assert_eq!(contacts[0].sent_seq, 0);

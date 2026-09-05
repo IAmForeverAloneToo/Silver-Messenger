@@ -47,7 +47,7 @@ all. The gaps that matter are listed at the end with what closes them.
 | 1.5.4 Output encoding near the interpreter | Met | Text is sanitised for the terminal at the rendering layer, with a test that drives the real backend and asserts no escape reaches it. |
 | 1.6.1 Key management policy | Met | PROTOCOL.md sections 1, 2, 5 and 8: what each key is, who signs it, how long it lives, when it rotates. |
 | 1.6.2 Key consumers protected from key exposure | Partly | Secrets are `Zeroize`d on drop and kept out of `Debug` output; the running process holds them in memory (threat model: device thief with memory). |
-| 1.6.3 Key replacement | Met | Prekeys rotate on a schedule; identity keys cannot be revoked, only replaced out of band (documented gap). |
+| 1.6.3 Key replacement | Met | Prekeys rotate on a schedule; an identity key is revoked with a pre-signed certificate (`/revoke`) or replaced with a cross-signed succession (`/rotate`), served by the relay and verified by contacts (PROTOCOL.md section 10). |
 | 1.6.4 Client-side secrets | Met | The data key is wrapped by the OS key store or a passphrase; nothing is embedded in the binary. |
 | 1.7.1 Common logging format | Met | `tracing` in both binaries. |
 | 1.7.2 Logs transmitted securely | N/A | Logs stay on the host (journal, or `silver.log` with 0600). |
