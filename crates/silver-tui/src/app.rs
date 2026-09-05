@@ -264,11 +264,12 @@ enum Internal {
         body: Box<silver_protocol::group::GroupBody>,
         chunks: Result<Vec<Vec<u8>>, String>,
     },
-    /// The relay answered a key package request.
-    KeyPackageFor {
+    /// The relay answered the key package requests for `user` and each of
+    /// their devices, in that order.
+    KeyPackagesFor {
         group: silver_protocol::group::GroupId,
         user: UserId,
-        result: Result<Option<(silver_protocol::wire::KeyPackageDeposit, bool)>, String>,
+        packages: Vec<(UserId, KeyPackageAnswer)>,
     },
     /// The relay answered a key package deposit.
     KeyPackages {
@@ -290,6 +291,11 @@ enum Internal {
         result: Result<PathBuf, String>,
     },
 }
+
+/// What the relay answered to a key package request: the package and
+/// whether it was the last-resort one, none on deposit, or an error.
+pub(crate) type KeyPackageAnswer =
+    Result<Option<(silver_protocol::wire::KeyPackageDeposit, bool)>, String>;
 
 pub struct App {
     store: Store,
@@ -2652,11 +2658,11 @@ impl App {
             Internal::GroupParked { from, body, chunks } => {
                 self.on_group_parked(from, body, chunks)
             }
-            Internal::KeyPackageFor {
+            Internal::KeyPackagesFor {
                 group,
                 user,
-                result,
-            } => self.on_key_package_for(group, user, result),
+                packages,
+            } => self.on_key_packages_for(group, user, packages),
             Internal::KeyPackages { result } => self.on_key_packages(result),
             Internal::GroupJoinLookup { link, result } => self.on_group_join_lookup(link, result),
             Internal::GroupUploaded { group, result } => self.on_group_uploaded(group, result),

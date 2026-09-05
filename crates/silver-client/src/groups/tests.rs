@@ -50,6 +50,21 @@ impl Party {
         }
     }
 
+    /// A linked device of `account`'s: its own keys, certified by the
+    /// account, and an engine that acts for the account.
+    fn device_of(account: &Party, name: &str) -> Self {
+        let identity = Arc::new(Identity::generate());
+        let certificate = account
+            .identity
+            .certify_device(&identity.user_id(), name, now_ms())
+            .unwrap();
+        Self {
+            identity: identity.clone(),
+            groups: Groups::ephemeral_device(identity, certificate),
+            inbox: Vec::new(),
+        }
+    }
+
     fn id(&self) -> UserId {
         self.identity.user_id()
     }
@@ -855,6 +870,360 @@ fn state_survives_a_reload_from_disk() {
     let staged = groups.stage_self_update(&group).unwrap();
     assert_eq!(staged.epoch, 1);
     assert_eq!(groups.sequencer_entry(&group).unwrap().epoch, 1);
+}
+
+/// Alice makes a group and adds bob with both his devices, and carol, in
+/// one commit; everyone says yes.
+fn with_devices(
+    seq: &mut Sequencer,
+    blobs: &mut HashMap<String, Vec<Vec<u8>>>,
+) -> (Party, Party, Party, Party, GroupId) {
+    let mut alice = Party::new();
+    let mut bob = Party::new();
+    let mut laptop = Party::device_of(&bob, "laptop");
+    let mut carol = Party::new();
+    let created = alice.groups.create("devices", now_ms()).unwrap();
+    seq.create(created);
+    let group = created.group;
+    let bob_kp = bob.key_package();
+    let laptop_kp = laptop.key_package();
+    let carol_kp = carol.key_package();
+    // The laptop's package names bob and is signed by a key bob certified.
+    assert!(
+        alice
+            .groups
+            .verify_key_package(&carol.id(), &laptop_kp, now_ms())
+            .is_err(),
+        "another identity's"
+    );
+    let packages = vec![
+        alice
+            .groups
+            .verify_key_package(&bob.id(), &bob_kp, now_ms())
+            .unwrap(),
+        alice
+            .groups
+            .verify_key_package(&bob.id(), &laptop_kp, now_ms())
+            .unwrap(),
+        alice
+            .groups
+            .verify_key_package(&carol.id(), &carol_kp, now_ms())
+            .unwrap(),
+    ];
+    let staged = alice.groups.stage_add(&group, &packages).unwrap();
+    seq.commit(staged).unwrap();
+    let out = alice.groups.commit_staged(&group, now_ms()).unwrap();
+    assert_eq!(out.envelopes.len(), 3, "a Welcome per leaf");
+    deliver(out, &mut [&mut bob, &mut laptop, &mut carol], blobs);
+    for party in [&mut bob, &mut laptop, &mut carol] {
+        let events = party.drain(blobs);
+        let [GroupEvent::Invited { held }] = events.as_slice() else {
+            panic!("{events:?}");
+        };
+        assert_eq!(held.members.len(), 3, "members are identities");
+        party.groups.accept_welcome(&group).unwrap();
+    }
+    (alice, bob, laptop, carol, group)
+}
+
+#[test]
+fn devices_are_leaves_of_their_identity() {
+    let mut seq = Sequencer::default();
+    let mut blobs = HashMap::new();
+    let (mut alice, mut bob, mut laptop, mut carol, group) = with_devices(&mut seq, &mut blobs);
+    let record = alice.groups.get(&group).unwrap();
+    assert_eq!(record.members.len(), 4, "a leaf per device");
+    assert_eq!(record.identities(), vec![alice.id(), bob.id(), carol.id()]);
+    assert_eq!(record.devices_of(&bob.id()), vec![bob.id(), laptop.id()]);
+    assert!(record.is_admin(&alice.id()) && !record.is_admin(&bob.id()));
+    for party in [&laptop, &carol] {
+        assert_eq!(party.groups.get(&group).unwrap().members.len(), 4);
+    }
+
+    // Alice writes: bob reads it on both devices. The laptop writes:
+    // everyone, bob's primary included, reads it as bob's.
+    let out = alice
+        .groups
+        .send(&group, text("hello"), None, now_ms())
+        .unwrap();
+    assert_eq!(out.envelopes.len(), 3);
+    deliver(out, &mut [&mut bob, &mut laptop, &mut carol], &mut blobs);
+    for party in [&mut bob, &mut laptop, &mut carol] {
+        assert!(matches!(
+            party.drain(&blobs).as_slice(),
+            [GroupEvent::Message { from, .. }] if *from == alice.id()
+        ));
+    }
+    let out = laptop
+        .groups
+        .send(&group, text("from the laptop"), None, now_ms())
+        .unwrap();
+    assert_eq!(out.envelopes.len(), 3, "to alice, carol and bob's primary");
+    deliver(out, &mut [&mut alice, &mut bob, &mut carol], &mut blobs);
+    let bob_id = bob.id();
+    for party in [&mut alice, &mut bob, &mut carol] {
+        assert!(matches!(
+            party.drain(&blobs).as_slice(),
+            [GroupEvent::Message { from, content, .. }]
+                if *from == bob_id && *content == text("from the laptop")
+        ));
+    }
+
+    // Bob, no admin, adds a device of his own: allowed, and no change to
+    // the members as identities. Carol may not add bob's device.
+    let mut phone = Party::device_of(&bob, "phone");
+    let phone_kp = phone.key_package();
+    let verified = bob
+        .groups
+        .verify_key_package(&bob.id(), &phone_kp, now_ms())
+        .unwrap();
+    assert!(matches!(
+        carol
+            .groups
+            .stage_add(&group, std::slice::from_ref(&verified)),
+        Err(GroupError::NotAdmin)
+    ));
+    let staged = bob.groups.stage_add(&group, &[verified]).unwrap();
+    seq.commit(staged).unwrap();
+    let out = bob.groups.commit_staged(&group, now_ms()).unwrap();
+    assert_eq!(
+        out.envelopes.len(),
+        4,
+        "the commit to three leaves, the Welcome to one"
+    );
+    // The phone was told of the group when it was linked: the Welcome
+    // from its own identity is taken without asking, alias and all.
+    phone
+        .groups
+        .expect_groups([(
+            group,
+            ExpectedGroup {
+                name: "devices".into(),
+                alias: Some("work".into()),
+            },
+        )])
+        .unwrap();
+    deliver(
+        out,
+        &mut [&mut alice, &mut laptop, &mut carol, &mut phone],
+        &mut blobs,
+    );
+    for party in [&mut alice, &mut laptop, &mut carol] {
+        assert_eq!(
+            party.drain(&blobs),
+            vec![GroupEvent::Changed {
+                group,
+                by: bob.id(),
+                change: Change::Updated,
+            }]
+        );
+        assert_eq!(party.groups.get(&group).unwrap().members.len(), 5);
+        assert_eq!(party.groups.get(&group).unwrap().identities().len(), 3);
+    }
+    assert_eq!(phone.drain(&blobs), vec![GroupEvent::Joined { group }]);
+    let record = phone.groups.get(&group).unwrap();
+    assert_eq!(record.state, GroupState::Active);
+    assert_eq!(record.alias.as_deref(), Some("work"));
+    assert_eq!(record.devices_of(&bob.id()).len(), 3);
+    assert!(phone.groups.expected(&group).is_none());
+    let out = phone
+        .groups
+        .send(&group, text("phone here"), None, now_ms())
+        .unwrap();
+    assert_eq!(out.envelopes.len(), 4);
+    deliver(
+        out,
+        &mut [&mut alice, &mut bob, &mut laptop, &mut carol],
+        &mut blobs,
+    );
+    assert!(matches!(
+        alice.drain(&blobs).as_slice(),
+        [GroupEvent::Message { from, .. }] if *from == bob_id
+    ));
+    bob.drain(&blobs);
+    laptop.drain(&blobs);
+    carol.drain(&blobs);
+
+    // A forged device leaf, its certificate not bob's word, is refused.
+    let mallory = Party::new();
+    let forged = {
+        let identity = Arc::new(Identity::generate());
+        let mut certificate = mallory
+            .identity
+            .certify_device(&identity.user_id(), "x", now_ms())
+            .unwrap();
+        certificate.account = bob.id();
+        let mut party = Party {
+            identity: identity.clone(),
+            groups: Groups::ephemeral_device(identity, certificate),
+            inbox: Vec::new(),
+        };
+        party.key_package()
+    };
+    assert!(
+        alice
+            .groups
+            .verify_key_package(&bob.id(), &forged, now_ms())
+            .is_err()
+    );
+
+    // Bob takes the phone out again (unlinked, say): the identity stays.
+    // Carol may not touch bob's devices; alice removes bob whole.
+    assert!(matches!(
+        carol.groups.stage_remove_device(&group, &laptop.id()),
+        Err(GroupError::NotAdmin)
+    ));
+    assert!(bob.groups.stage_remove_device(&group, &bob.id()).is_err());
+    let staged = bob.groups.stage_remove_device(&group, &phone.id()).unwrap();
+    seq.commit(staged).unwrap();
+    let out = bob.groups.commit_staged(&group, now_ms()).unwrap();
+    deliver(
+        out,
+        &mut [&mut alice, &mut laptop, &mut carol, &mut phone],
+        &mut blobs,
+    );
+    assert_eq!(
+        alice.drain(&blobs),
+        vec![GroupEvent::Changed {
+            group,
+            by: bob.id(),
+            change: Change::Updated,
+        }]
+    );
+    laptop.drain(&blobs);
+    carol.drain(&blobs);
+    assert_eq!(
+        phone.drain(&blobs),
+        vec![GroupEvent::Removed {
+            group,
+            by: bob.id()
+        }]
+    );
+    assert_eq!(alice.groups.get(&group).unwrap().identities().len(), 3);
+    let staged = alice.groups.stage_remove(&group, &[bob.id()]).unwrap();
+    seq.commit(staged).unwrap();
+    let out = alice.groups.commit_staged(&group, now_ms()).unwrap();
+    assert_eq!(out.envelopes.len(), 3);
+    deliver(out, &mut [&mut bob, &mut laptop, &mut carol], &mut blobs);
+    for party in [&mut bob, &mut laptop] {
+        assert_eq!(
+            party.drain(&blobs),
+            vec![GroupEvent::Removed {
+                group,
+                by: alice.id()
+            }]
+        );
+    }
+    assert_eq!(
+        carol.drain(&blobs),
+        vec![GroupEvent::Changed {
+            group,
+            by: alice.id(),
+            change: Change::Removed(vec![bob.id()]),
+        }]
+    );
+    assert_eq!(
+        carol.groups.get(&group).unwrap().identities(),
+        vec![alice.id(), carol.id()]
+    );
+}
+
+#[test]
+fn a_device_out_of_sync_is_re_added_by_its_identitys_other_device() {
+    let mut seq = Sequencer::default();
+    let mut blobs = HashMap::new();
+    let (mut alice, mut bob, mut laptop, mut carol, group) = with_devices(&mut seq, &mut blobs);
+    // The laptop misses many commits.
+    for i in 0..(HOLD_LIMIT + 1) {
+        let staged = alice.groups.stage_rename(&group, &format!("n{i}")).unwrap();
+        seq.commit(staged).unwrap();
+        let out = alice.groups.commit_staged(&group, now_ms()).unwrap();
+        deliver(
+            Outgoing {
+                id: None,
+                envelopes: out
+                    .envelopes
+                    .into_iter()
+                    .filter(|e| e.to != laptop.id())
+                    .collect(),
+                uploads: Vec::new(),
+            },
+            &mut [&mut bob, &mut carol],
+            &mut blobs,
+        );
+        bob.drain(&blobs);
+        carol.drain(&blobs);
+    }
+    let staged = alice.groups.stage_rename(&group, "far").unwrap();
+    seq.commit(staged).unwrap();
+    let out = alice.groups.commit_staged(&group, now_ms()).unwrap();
+    deliver(out, &mut [&mut bob, &mut laptop, &mut carol], &mut blobs);
+    bob.drain(&blobs);
+    carol.drain(&blobs);
+    assert_eq!(laptop.drain(&blobs), vec![GroupEvent::OutOfSync { group }]);
+    // The request goes to the admin and to bob's primary; bob, no admin,
+    // answers for his own device.
+    let out = laptop.groups.rejoin_request(&group, now_ms()).unwrap();
+    assert_eq!(out.envelopes.len(), 2);
+    deliver(out, &mut [&mut alice, &mut bob], &mut blobs);
+    assert!(matches!(
+        alice.drain(&blobs).as_slice(),
+        [GroupEvent::RejoinRequest { member, .. }] if *member == bob.id()
+    ));
+    let events = bob.drain(&blobs);
+    let [
+        GroupEvent::RejoinRequest {
+            member,
+            key_package,
+            ..
+        },
+    ] = events.as_slice()
+    else {
+        panic!("{events:?}");
+    };
+    assert_eq!(*member, bob.id());
+    assert!(matches!(
+        carol.groups.stage_rejoin(&group, bob.id(), key_package),
+        Err(GroupError::NotAdmin)
+    ));
+    let staged = bob
+        .groups
+        .stage_rejoin(&group, bob.id(), key_package)
+        .unwrap();
+    seq.commit(staged).unwrap();
+    let out = bob.groups.commit_staged(&group, now_ms()).unwrap();
+    deliver(out, &mut [&mut alice, &mut laptop, &mut carol], &mut blobs);
+    assert_eq!(
+        alice.drain(&blobs),
+        vec![GroupEvent::Changed {
+            group,
+            by: bob.id(),
+            change: Change::Updated,
+        }]
+    );
+    carol.drain(&blobs);
+    let events = laptop.drain(&blobs);
+    assert!(
+        events.contains(&GroupEvent::Joined { group }),
+        "a Welcome from its own identity, taken without asking: {events:?}"
+    );
+    let record = laptop.groups.get(&group).unwrap();
+    assert_eq!(record.state, GroupState::Active);
+    assert_eq!(record.name, "far");
+    assert_eq!(record.identities().len(), 3);
+    let out = laptop
+        .groups
+        .send(&group, text("back"), None, now_ms())
+        .unwrap();
+    assert_eq!(out.envelopes.len(), 3);
+    deliver(out, &mut [&mut alice, &mut bob, &mut carol], &mut blobs);
+    let bob_id = bob.id();
+    for party in [&mut alice, &mut bob, &mut carol] {
+        assert!(matches!(
+            party.drain(&blobs).as_slice(),
+            [GroupEvent::Message { from, .. }] if *from == bob_id
+        ));
+    }
 }
 
 #[test]

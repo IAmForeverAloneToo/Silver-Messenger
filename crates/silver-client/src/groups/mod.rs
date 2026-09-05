@@ -29,6 +29,7 @@ use std::sync::Arc;
 
 use openmls::group::GroupId as MlsGroupId;
 use openmls::prelude::*;
+use openmls::treesync::RatchetTree;
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_traits::OpenMlsProvider;
 use openmls_traits::storage::StorageProvider as _;
@@ -37,12 +38,14 @@ use sha2::{Digest, Sha256};
 use silver_protocol::blob::{self, BlobKey, CHUNK_BYTES, MAX_FILE_BYTES, new_blob_id};
 use silver_protocol::encoding::b64_array;
 use silver_protocol::group::{
-    self, BlobRef, EXTENSION_GROUP, EXTENSION_SEAL, GroupBody, GroupId, GroupKind, GroupPlaintext,
-    MAX_MEMBERS, SEQUENCER_LABEL, SilverGroup, decode_seal_key, encode_seal_key,
+    self, BlobRef, EXTENSION_DEVICE, EXTENSION_GROUP, EXTENSION_SEAL, GroupBody, GroupId,
+    GroupKind, GroupPlaintext, MAX_MEMBERS, SEQUENCER_LABEL, SilverGroup, decode_seal_key,
+    encode_seal_key,
 };
 use silver_protocol::wire::KeyPackageDeposit;
 use silver_protocol::{
-    Body, Content, DhPublic, Envelope, Identity, LogHead, UserId, seal_bytes_unsigned_to,
+    Body, Content, DeviceCertificate, DhPublic, Envelope, Identity, LogHead, UserId,
+    seal_bytes_unsigned_to,
 };
 use tls_codec::{Deserialize as _, Serialize as _};
 
@@ -78,12 +81,28 @@ const MLS_FILE: &str = "groups.mls";
 
 // --- what is stored ---------------------------------------------------------
 
-/// A member as the tree lists them: identity and sealing key.
+/// A leaf of the tree: the identity it belongs to, the device whose key
+/// signed it (the identity's own on a primary; `docs/PROTOCOL.md` section
+/// 14), and its sealing key. An identity with several devices has a leaf
+/// per device; the members as shown are identities.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemberInfo {
     pub user: UserId,
+    pub device: UserId,
     pub seal: DhPublic,
     pub admin: bool,
+}
+
+/// The distinct identities among `members`, in the order they first
+/// appear.
+pub fn identities(members: &[MemberInfo]) -> Vec<UserId> {
+    let mut out: Vec<UserId> = Vec::new();
+    for member in members {
+        if !out.contains(&member.user) {
+            out.push(member.user);
+        }
+    }
+    out
 }
 
 /// Where a group stands for this client.
@@ -160,10 +179,27 @@ impl GroupRecord {
     }
 
     pub fn admins(&self) -> Vec<UserId> {
+        identities(&self.members)
+            .into_iter()
+            .filter(|u| self.is_admin(u))
+            .collect()
+    }
+
+    /// The members as identities, each once whatever its devices.
+    pub fn identities(&self) -> Vec<UserId> {
+        identities(&self.members)
+    }
+
+    pub fn is_member(&self, user: &UserId) -> bool {
+        self.members.iter().any(|m| m.user == *user)
+    }
+
+    /// The devices `user` is in the group with.
+    pub fn devices_of(&self, user: &UserId) -> Vec<UserId> {
         self.members
             .iter()
-            .filter(|m| m.admin)
-            .map(|m| m.user)
+            .filter(|m| m.user == *user)
+            .map(|m| m.device)
             .collect()
     }
 }
@@ -387,7 +423,12 @@ fn mls_err<E: std::fmt::Display>(e: E) -> GroupError {
 
 pub struct Groups {
     store: Option<Store>,
+    /// This device's keys: the identity's own on a primary.
     identity: Arc<Identity>,
+    /// On a linked device, the account's certificate for these keys; the
+    /// leaves this engine makes carry it, and their credential names the
+    /// account.
+    certificate: Option<DeviceCertificate>,
     provider: Provider,
     signer: SignatureKeyPair,
     file: GroupsFile,
@@ -396,26 +437,52 @@ pub struct Groups {
 }
 
 impl Groups {
-    /// Load from the data directory; missing files mean no groups yet.
+    /// Load from the data directory; missing files mean no groups yet. On
+    /// a linked device (`linked` in `identity.json`) the engine acts for
+    /// the account.
     pub fn load(store: &Store, identity: Arc<Identity>) -> anyhow::Result<Self> {
         let file = store.load_groups()?;
         let provider = match store.load_mls()? {
             Some(bytes) => Provider::from_export(&bytes)?,
             None => Provider::new(),
         };
-        let mut groups = Self::with(Some(store.clone()), identity, provider, file);
+        let certificate = match store.load_linked()? {
+            Some(linked) => {
+                linked.certificate.verify()?;
+                if linked.certificate.device != identity.user_id() {
+                    anyhow::bail!("the link in identity.json is for another key");
+                }
+                Some(linked.certificate)
+            }
+            None => None,
+        };
+        let mut groups = Self::with(Some(store.clone()), identity, certificate, provider, file);
         groups.clear_all_pending()?;
         Ok(groups)
     }
 
-    /// An engine that lives in memory only.
+    /// An engine that lives in memory only, for a primary.
     pub fn ephemeral(identity: Arc<Identity>) -> Self {
-        Self::with(None, identity, Provider::new(), GroupsFile::default())
+        Self::with(None, identity, None, Provider::new(), GroupsFile::default())
+    }
+
+    /// An engine in memory only for a linked device, `certificate` being
+    /// the account's word for `identity`'s key.
+    pub fn ephemeral_device(identity: Arc<Identity>, certificate: DeviceCertificate) -> Self {
+        assert_eq!(certificate.device, identity.user_id());
+        Self::with(
+            None,
+            identity,
+            Some(certificate),
+            Provider::new(),
+            GroupsFile::default(),
+        )
     }
 
     fn with(
         store: Option<Store>,
         identity: Arc<Identity>,
+        certificate: Option<DeviceCertificate>,
         provider: Provider,
         file: GroupsFile,
     ) -> Self {
@@ -428,12 +495,27 @@ impl Groups {
         Self {
             store,
             identity,
+            certificate,
             provider,
             signer,
             file,
             handles: HashMap::new(),
             staged: HashMap::new(),
         }
+    }
+
+    /// The identity this engine acts for: this key's own on a primary,
+    /// the account's on a linked device. Membership and admin rights go
+    /// by it.
+    pub fn account(&self) -> UserId {
+        self.certificate
+            .as_ref()
+            .map_or_else(|| self.identity.user_id(), |c| c.account)
+    }
+
+    /// This device's own id, which its leaves are signed with.
+    fn device(&self) -> UserId {
+        self.identity.user_id()
     }
 
     /// Commits staged before a restart are gone with the process.
@@ -459,6 +541,7 @@ impl Groups {
         Ok(())
     }
 
+    /// This device's id; [`Groups::account`] is who it acts for.
     pub fn user_id(&self) -> UserId {
         self.identity.user_id()
     }
@@ -482,7 +565,7 @@ impl Groups {
                     group: *id,
                     from,
                     name: r.name.clone(),
-                    members: r.members.iter().map(|m| m.user).collect(),
+                    members: r.identities(),
                     received_at_ms: r.created_at_ms,
                 }),
                 _ => None,
@@ -582,9 +665,12 @@ impl Groups {
 
     // --- key packages -----------------------------------------------------------
 
+    /// The credential names the account; the signature key is this
+    /// device's, which on a linked device differs and is vouched for by
+    /// the `silver_device` leaf extension.
     fn credential(&self) -> CredentialWithKey {
         CredentialWithKey {
-            credential: BasicCredential::new(self.identity.user_id().as_bytes().to_vec()).into(),
+            credential: BasicCredential::new(self.account().as_bytes().to_vec()).into(),
             signature_key: self.signer.public().into(),
         }
     }
@@ -596,18 +682,26 @@ impl Groups {
             Some(&[
                 ExtensionType::Unknown(EXTENSION_GROUP),
                 ExtensionType::Unknown(EXTENSION_SEAL),
+                ExtensionType::Unknown(EXTENSION_DEVICE),
             ]),
             None,
             None,
         )
     }
 
+    /// The sealing key, and on a linked device the certificate.
     fn leaf_extensions(&self) -> Extensions<LeafNode> {
-        Extensions::single(Extension::Unknown(
+        let mut extensions = vec![Extension::Unknown(
             EXTENSION_SEAL,
             UnknownExtension(encode_seal_key(&self.identity.dh_public())),
-        ))
-        .expect("one private-use extension")
+        )];
+        if let Some(certificate) = &self.certificate {
+            extensions.push(Extension::Unknown(
+                EXTENSION_DEVICE,
+                UnknownExtension(certificate.encode()),
+            ));
+        }
+        Extensions::from_vec(extensions).expect("distinct private-use extensions")
     }
 
     fn new_key_package(&self, last_resort: bool, now_ms: u64) -> Result<KeyPackageRecord> {
@@ -725,9 +819,10 @@ impl Groups {
         }
     }
 
-    /// Parse and check a key package the relay handed out for `user`:
-    /// signed by that identity, our ciphersuite, alive, with the
-    /// extensions a leaf needs.
+    /// Parse and check a key package the relay handed out for a device of
+    /// `user`'s (or `user`'s own): its leaf names that identity and is
+    /// signed by it or by a device it certified, our ciphersuite, alive,
+    /// with the extensions a leaf needs.
     pub fn verify_key_package(&self, user: &UserId, data: &[u8], now_ms: u64) -> Result<Vec<u8>> {
         let kp = parse_key_package(data, self.provider.crypto())?;
         verify_leaf(kp.leaf_node(), Some(user))?;
@@ -779,7 +874,7 @@ impl Groups {
     /// Make a group with ourselves as the only member and admin. The caller
     /// registers the returned entry with the relay's sequencer.
     pub fn create(&mut self, name: &str, now_ms: u64) -> Result<Created> {
-        let me = self.identity.user_id();
+        let me = self.account();
         let extension = SilverGroup::new(name, me, now_ms)?;
         let id = GroupId::generate();
         let config = self.group_config(&extension)?;
@@ -800,6 +895,7 @@ impl Groups {
                 alias: None,
                 members: vec![MemberInfo {
                     user: me,
+                    device: self.device(),
                     seal: self.identity.dh_public(),
                     admin: true,
                 }],
@@ -860,38 +956,57 @@ impl Groups {
         Ok(steps)
     }
 
-    /// Stage a commit adding members from verified key packages
-    /// ([`Groups::verify_key_package`]).
+    /// Stage a commit adding leaves from verified key packages
+    /// ([`Groups::verify_key_package`]): an admin adds anyone (every
+    /// device of an identity in one commit, as a rule), and any member
+    /// adds devices of its own identity.
     pub fn stage_add(&mut self, group: &GroupId, packages: &[Vec<u8>]) -> Result<Staged> {
-        let me = self.identity.user_id();
+        let me = self.account();
         let record = self.active(group)?.clone();
-        if !record.is_admin(&me) {
-            return Err(GroupError::NotAdmin);
-        }
         if self.staged.contains_key(group) {
             return Err(GroupError::AlreadyStaged);
         }
         let mut parsed = Vec::with_capacity(packages.len());
-        let mut added = Vec::with_capacity(packages.len());
+        let mut added: Vec<MemberInfo> = Vec::with_capacity(packages.len());
         for data in packages {
             let kp = parse_key_package(data, self.provider.crypto())?;
-            let (user, seal) = verify_leaf(kp.leaf_node(), None)?;
-            if record.members.iter().any(|m| m.user == user)
-                || added.iter().any(|m: &MemberInfo| m.user == user)
+            let leaf = verify_leaf(kp.leaf_node(), None)?;
+            if record.members.iter().any(|m| m.device == leaf.device)
+                || added.iter().any(|m| m.device == leaf.device)
             {
-                return Err(GroupError::AlreadyAMember(user));
+                return Err(GroupError::AlreadyAMember(leaf.account));
             }
             added.push(MemberInfo {
-                user,
-                seal,
-                admin: false,
+                user: leaf.account,
+                device: leaf.device,
+                seal: leaf.seal,
+                admin: record.is_admin(&leaf.account),
             });
             parsed.push(kp);
         }
-        if record.members.len() + added.len() > MAX_MEMBERS {
+        if !record.is_admin(&me) && added.iter().any(|m| m.user != me) {
+            return Err(GroupError::NotAdmin);
+        }
+        let mut after = record.identities();
+        for member in &added {
+            if !after.contains(&member.user) {
+                after.push(member.user);
+            }
+        }
+        if after.len() > MAX_MEMBERS {
             return Err(GroupError::Full);
         }
-        let change = Change::Added(added.iter().map(|m| m.user).collect());
+        // What the commit does to the membership as identities; devices
+        // of identities already in are no change in that sense.
+        let new_identities: Vec<UserId> = identities(&added)
+            .into_iter()
+            .filter(|u| !record.is_member(u))
+            .collect();
+        let change = if new_identities.is_empty() {
+            Change::Updated
+        } else {
+            Change::Added(new_identities)
+        };
         self.stage(
             group,
             |builder| Ok(builder.propose_adds(parsed)),
@@ -900,9 +1015,9 @@ impl Groups {
         )
     }
 
-    /// Stage a commit removing members.
+    /// Stage a commit removing identities, every device of each.
     pub fn stage_remove(&mut self, group: &GroupId, users: &[UserId]) -> Result<Staged> {
-        let me = self.identity.user_id();
+        let me = self.account();
         let record = self.active(group)?.clone();
         if !record.is_admin(&me) {
             return Err(GroupError::NotAdmin);
@@ -911,9 +1026,9 @@ impl Groups {
             return Err(GroupError::Mls("leave with /group leave".into()));
         }
         let remaining_admins = record
-            .members
+            .admins()
             .iter()
-            .filter(|m| m.admin && !users.contains(&m.user))
+            .filter(|a| !users.contains(a))
             .count();
         if remaining_admins == 0 {
             return Err(GroupError::LastAdmin);
@@ -921,9 +1036,17 @@ impl Groups {
         let mut indices = Vec::new();
         {
             let handle = load_handle(&mut self.handles, &self.provider, group)?;
+            let leaves = leaves_of(handle)?;
             for user in users {
-                let index = member_index(handle, user).ok_or(GroupError::NotAMember(*user))?;
-                indices.push(index);
+                let theirs: Vec<LeafNodeIndex> = leaves
+                    .iter()
+                    .filter(|(_, leaf)| leaf.account == *user)
+                    .map(|(index, _)| *index)
+                    .collect();
+                if theirs.is_empty() {
+                    return Err(GroupError::NotAMember(*user));
+                }
+                indices.extend(theirs);
             }
         }
         // Admins removed from the group leave the admin list with it.
@@ -946,6 +1069,69 @@ impl Groups {
         )
     }
 
+    /// Stage a commit removing one device's leaf, the identity staying a
+    /// member by its other devices: for an admin, or for any member of the
+    /// device's own identity (a primary taking an unlinked device out of
+    /// its groups). This device's own leaf goes with [`Groups::leave`].
+    pub fn stage_remove_device(&mut self, group: &GroupId, device: &UserId) -> Result<Staged> {
+        let me = self.account();
+        let record = self.active(group)?.clone();
+        if *device == self.device() {
+            return Err(GroupError::Mls("leave with /group leave".into()));
+        }
+        let Some(leaf) = record.members.iter().find(|m| m.device == *device) else {
+            return Err(GroupError::NotAMember(*device));
+        };
+        if !record.is_admin(&me) && leaf.user != me {
+            return Err(GroupError::NotAdmin);
+        }
+        let account = leaf.user;
+        let last = record.devices_of(&account).len() == 1;
+        if last && account == me {
+            return Err(GroupError::Mls("leave with /group leave".into()));
+        }
+        if last && record.is_admin(&account) && record.admins().len() == 1 {
+            return Err(GroupError::LastAdmin);
+        }
+        let index = {
+            let handle = load_handle(&mut self.handles, &self.provider, group)?;
+            leaves_of(handle)?
+                .into_iter()
+                .find(|(_, l)| l.device == *device)
+                .map(|(index, _)| index)
+                .ok_or(GroupError::NotAMember(*device))?
+        };
+        let change = if last {
+            Change::Removed(vec![account])
+        } else {
+            Change::Updated
+        };
+        if last {
+            // Its identity goes with its last device; an admin leaves the
+            // admin list too.
+            let extension = self.extension(group)?.without_admin(&account);
+            let context = context_extensions(&extension)?;
+            self.stage(
+                group,
+                move |builder| {
+                    builder
+                        .propose_removals([index])
+                        .propose_group_context_extensions(context)
+                        .map_err(mls_err)
+                },
+                Vec::new(),
+                change,
+            )
+        } else {
+            self.stage(
+                group,
+                move |builder| Ok(builder.propose_removals([index])),
+                Vec::new(),
+                change,
+            )
+        }
+    }
+
     /// Stage a commit that changes the group's name.
     pub fn stage_rename(&mut self, group: &GroupId, name: &str) -> Result<Staged> {
         self.stage_extension_change(
@@ -963,7 +1149,7 @@ impl Groups {
     /// Stage a commit that makes `user` an admin, or stops them being one.
     pub fn stage_admin(&mut self, group: &GroupId, user: UserId, admin: bool) -> Result<Staged> {
         let record = self.active(group)?.clone();
-        if !record.members.iter().any(|m| m.user == user) {
+        if !record.is_member(&user) {
             return Err(GroupError::NotAMember(user));
         }
         self.stage_extension_change(
@@ -998,7 +1184,7 @@ impl Groups {
         change: impl FnOnce(SilverGroup) -> Result<SilverGroup>,
         what: Change,
     ) -> Result<Staged> {
-        let me = self.identity.user_id();
+        let me = self.account();
         let record = self.active(group)?.clone();
         if !record.is_admin(&me) {
             return Err(GroupError::NotAdmin);
@@ -1054,13 +1240,7 @@ impl Groups {
         if self.staged.contains_key(group) {
             return Err(GroupError::AlreadyStaged);
         }
-        let recipients: Vec<MemberInfo> = self
-            .record(group)?
-            .members
-            .iter()
-            .filter(|m| m.user != self.identity.user_id())
-            .cloned()
-            .collect();
+        let recipients = self.others(group)?;
         let leaf = LeafNodeParameters::builder()
             .with_extensions(self.leaf_extensions())
             .build();
@@ -1165,25 +1345,19 @@ impl Groups {
 
     // --- leaving -----------------------------------------------------------------
 
-    /// Propose our own removal to the group and forget its state; an
-    /// admin's next commit takes us out. Returns the proposal envelopes.
+    /// Propose this device's own removal to the group and forget its
+    /// state; an admin's next commit takes the leaf out. Returns the
+    /// proposal envelopes. The identity's other devices stay members
+    /// until they leave too.
     pub fn leave(&mut self, group: &GroupId) -> Result<Outgoing> {
-        let me = self.identity.user_id();
+        let me = self.account();
         let record = self.active(group)?.clone();
-        let other_admins = record
-            .members
-            .iter()
-            .filter(|m| m.admin && m.user != me)
-            .count();
-        if record.is_admin(&me) && other_admins == 0 && record.members.len() > 1 {
+        let other_admins = record.admins().iter().filter(|a| **a != me).count();
+        let last_leaf = record.devices_of(&me).len() == 1;
+        if record.is_admin(&me) && other_admins == 0 && last_leaf && record.identities().len() > 1 {
             return Err(GroupError::LastAdmin);
         }
-        let recipients: Vec<MemberInfo> = record
-            .members
-            .iter()
-            .filter(|m| m.user != me)
-            .cloned()
-            .collect();
+        let recipients = self.others(group)?;
         let mut outgoing = Outgoing::default();
         if !recipients.is_empty() {
             let handle = load_handle(&mut self.handles, &self.provider, group)?;
@@ -1212,7 +1386,7 @@ impl Groups {
         head: Option<LogHead>,
         now_ms: u64,
     ) -> Result<Outgoing> {
-        let record = self.active(group)?.clone();
+        self.active(group)?;
         let id = uuid::Uuid::new_v4().to_string();
         let plaintext = GroupPlaintext {
             id: id.clone(),
@@ -1227,12 +1401,7 @@ impl Groups {
             .map_err(mls_err)?
             .tls_serialize_detached()
             .map_err(mls_err)?;
-        let recipients: Vec<MemberInfo> = record
-            .members
-            .iter()
-            .filter(|m| m.user != self.identity.user_id())
-            .cloned()
-            .collect();
+        let recipients = self.others(group)?;
         let (body, upload) = self.frame(group, GroupKind::Message, message)?;
         let envelopes = self.seal_to(&recipients, &body)?;
         self.persist()?;
@@ -1241,6 +1410,19 @@ impl Groups {
             envelopes,
             uploads: upload.into_iter().collect(),
         })
+    }
+
+    /// Every leaf but this device's own: the identity's other devices
+    /// get their copies like anyone else.
+    fn others(&self, group: &GroupId) -> Result<Vec<MemberInfo>> {
+        let me = self.device();
+        Ok(self
+            .record(group)?
+            .members
+            .iter()
+            .filter(|m| m.device != me)
+            .cloned()
+            .collect())
     }
 
     /// A join request for the admin an invite link names, from a fresh key
@@ -1255,7 +1437,7 @@ impl Groups {
         // Kept like a deposited one, so the Welcome made from it can be read.
         self.file.key_packages.push(package.clone());
         self.file.joins.insert(link.group, link.via);
-        let proof = group::join_proof(&link.key, &link.group, &self.identity.user_id());
+        let proof = group::join_proof(&link.key, &link.group, &self.account());
         let body =
             GroupBody::inline(link.group, GroupKind::Join, package.data).with_join_proof(proof);
         let envelope = seal_bytes_unsigned_to(
@@ -1272,14 +1454,16 @@ impl Groups {
         })
     }
 
-    /// A rejoin request to every admin we know of, from a fresh key
-    /// package.
+    /// A rejoin request from a fresh key package to every admin we know
+    /// of, and to this identity's other devices, which may answer it too.
     pub fn rejoin_request(&mut self, group: &GroupId, now_ms: u64) -> Result<Outgoing> {
         let record = self.record(group)?.clone();
+        let me = self.account();
+        let device = self.device();
         let admins: Vec<MemberInfo> = record
             .members
             .iter()
-            .filter(|m| m.admin && m.user != self.identity.user_id())
+            .filter(|m| m.device != device && (m.admin || m.user == me))
             .cloned()
             .collect();
         let package = self.new_key_package(false, now_ms)?;
@@ -1295,16 +1479,16 @@ impl Groups {
         })
     }
 
-    /// The invite link for `group`, naming ourselves as the admin to ask.
+    /// The invite link for `group`, naming this device as the one to ask:
+    /// the request comes here, whichever of the admin's devices this is.
     pub fn invite_link(&mut self, group: &GroupId, relay: Option<String>) -> Result<GroupLink> {
-        let me = self.identity.user_id();
-        if !self.active(group)?.is_admin(&me) {
+        if !self.active(group)?.is_admin(&self.account()) {
             return Err(GroupError::NotAdmin);
         }
         let extension = self.extension(group)?;
         Ok(GroupLink {
             group: *group,
-            via: me,
+            via: self.device(),
             key: group::link_key(&extension.invite_key, group),
             relay,
         })
@@ -1374,6 +1558,7 @@ impl Groups {
         Ok(message)
     }
 
+    /// Seal `body` to each leaf: to its device, under its sealing key.
     fn seal_to(&self, members: &[MemberInfo], body: &GroupBody) -> Result<Vec<Envelope>> {
         let bytes = Body::Group(body.clone()).encode()?;
         members
@@ -1381,7 +1566,7 @@ impl Groups {
             .map(|m| {
                 Ok(seal_bytes_unsigned_to(
                     &self.identity,
-                    m.user,
+                    m.device,
                     &m.seal,
                     &bytes,
                 )?)
@@ -1441,7 +1626,7 @@ impl Groups {
             StagedWelcome::new_from_welcome(&self.provider, &Self::join_config(), welcome, None)
                 .map_err(mls_err)?;
         let sender = staged.welcome_sender().map_err(mls_err)?;
-        let (inviter, _) = verify_leaf(sender, None)?;
+        let inviter = verify_leaf(sender, None)?;
         let context = staged.group_context();
         if context.ciphersuite() != CIPHERSUITE {
             return Err(GroupError::KeyPackage("wrong ciphersuite".into()));
@@ -1450,19 +1635,29 @@ impl Groups {
             return Err(GroupError::Mls("the Welcome names another group".into()));
         }
         let extension = extension_of(context.extensions())?;
-        let mut member_ids = Vec::new();
-        for member in staged.members() {
-            member_ids.push(user_of(&member.credential, &member.signature_key)?);
-        }
-        if !member_ids.contains(&inviter) || !extension.is_admin(&inviter) {
+        let me = self.account();
+        // An admin adds anyone; one's own identity's device adds one's own.
+        let inviter_in = staged
+            .members()
+            .any(|m| m.signature_key.as_slice() == inviter.device.as_bytes());
+        if !inviter_in || !(extension.is_admin(&inviter.account) || inviter.account == me) {
             return Err(GroupError::Mls(
                 "the Welcome does not come from an admin".into(),
             ));
         }
         let _ = from;
-        // The answer to a join request we sent this admin needs no second
-        // yes from the user.
-        let asked = self.file.joins.get(&group) == Some(&inviter);
+        // No second yes from the user for the answer to a join request we
+        // sent this admin (by either id the link named), for a group the
+        // primary named when this device was linked, or for one's own
+        // identity's other device adding this one.
+        let asked = self
+            .file
+            .joins
+            .get(&group)
+            .is_some_and(|via| *via == inviter.account || *via == inviter.device);
+        let expected = self.file.expected.remove(&group);
+        let ours = inviter.account == me;
+        let taken = asked || expected.is_some() || ours;
         // Join now, so the group stays in sync while the user decides; the
         // key package that let us in is spent by this.
         let handle = staged.into_group(&self.provider).map_err(mls_err)?;
@@ -1473,12 +1668,17 @@ impl Groups {
         self.handles.insert(group, handle);
         let record = GroupRecord {
             name: extension.name.clone(),
-            alias: previous.as_ref().and_then(|r| r.alias.clone()),
+            alias: previous
+                .as_ref()
+                .and_then(|r| r.alias.clone())
+                .or(expected.and_then(|e| e.alias)),
             members: members.clone(),
-            state: if asked {
+            state: if taken {
                 GroupState::Active
             } else {
-                GroupState::Invited { from: inviter }
+                GroupState::Invited {
+                    from: inviter.account,
+                }
             },
             tokens: vec![EpochToken { epoch, token }],
             held: Vec::new(),
@@ -1488,7 +1688,7 @@ impl Groups {
             seen: previous.map(|r| r.seen).unwrap_or_default(),
         };
         self.file.groups.insert(group, record);
-        if asked {
+        if taken {
             self.file.joins.remove(&group);
             self.persist()?;
             return Ok(vec![GroupEvent::Joined { group }]);
@@ -1496,9 +1696,9 @@ impl Groups {
         Ok(vec![GroupEvent::Invited {
             held: HeldWelcome {
                 group,
-                from: inviter,
+                from: inviter.account,
                 name: extension.name,
-                members: members.into_iter().map(|m| m.user).collect(),
+                members: identities(&members),
                 received_at_ms: now_ms,
             },
         }])
@@ -1638,8 +1838,8 @@ impl Groups {
             Sender::Member(index) => Some(*index),
             _ => None,
         };
-        let sender = match sender_index.and_then(|i| handle.member_at(i)) {
-            Some(member) => user_of(&member.credential, &member.signature_key)?,
+        let sender = match sender_index.map(|i| leaf_at(handle, i)) {
+            Some(leaf) => leaf?.account,
             None => {
                 return Ok(vec![GroupEvent::Refused {
                     group,
@@ -1676,16 +1876,10 @@ impl Groups {
                 Ok(events)
             }
             ProcessedMessageContent::ProposalMessage(proposal) => {
-                // Only a member's own leave is proposed by reference; admins
+                // Only a leaf's own leave is proposed by reference; admins
                 // commit it next.
                 let ours = match proposal.proposal() {
-                    Proposal::Remove(remove) => {
-                        handle
-                            .member_at(remove.removed())
-                            .map(|m| user_of(&m.credential, &m.signature_key))
-                            .transpose()?
-                            == Some(sender)
-                    }
+                    Proposal::Remove(remove) => Some(remove.removed()) == sender_index,
                     _ => false,
                 };
                 if !ours {
@@ -1766,14 +1960,14 @@ impl Groups {
                             .groups
                             .get_mut(&group)
                             .ok_or(GroupError::NoSuchGroup)?;
-                        let before: Vec<UserId> = record.members.iter().map(|m| m.user).collect();
+                        let before = record.identities();
                         record.members = members;
                         record.name = extension_after.name.clone();
                         if matches!(record.state, GroupState::OutOfSync { .. }) {
                             record.state = GroupState::Active;
                         }
                         push_token(record, epoch, token);
-                        let after: Vec<UserId> = record.members.iter().map(|m| m.user).collect();
+                        let after = record.identities();
                         for change in describe(
                             change,
                             &before,
@@ -1812,11 +2006,12 @@ impl Groups {
             Some(record) if record.state == GroupState::Active => record.clone(),
             _ => return Ok(Vec::new()),
         };
-        if !record.is_admin(&self.identity.user_id()) {
+        if !record.is_admin(&self.account()) {
             return Ok(Vec::new());
         }
         let kp = parse_key_package(mls, self.provider.crypto())?;
-        let (joiner, _) = verify_leaf(kp.leaf_node(), None)?;
+        let leaf = verify_leaf(kp.leaf_node(), None)?;
+        let joiner = leaf.account;
         let extension = self.extension(&group)?;
         if !group::verify_join_proof(&extension.invite_key, &group, &joiner, &proof.proof) {
             return Ok(vec![GroupEvent::Refused {
@@ -1824,7 +2019,9 @@ impl Groups {
                 reason: format!("{} presented a link that is not valid", joiner.short()),
             }]);
         }
-        if record.members.iter().any(|m| m.user == joiner) {
+        // A device already in asks for nothing; an identity's further
+        // device may join by the link like anyone.
+        if record.members.iter().any(|m| m.device == leaf.device) {
             return Ok(Vec::new());
         }
         let _ = now_ms;
@@ -1845,47 +2042,59 @@ impl Groups {
             Some(record) if record.state == GroupState::Active => record.clone(),
             _ => return Ok(Vec::new()),
         };
-        if !record.is_admin(&self.identity.user_id()) {
+        let me = self.account();
+        let kp = parse_key_package(mls, self.provider.crypto())?;
+        let leaf = verify_leaf(kp.leaf_node(), None)?;
+        // An admin answers anyone's; one's own identity's other device
+        // answers one's own.
+        if !record.is_admin(&me) && leaf.account != me {
             return Ok(Vec::new());
         }
-        let kp = parse_key_package(mls, self.provider.crypto())?;
-        let (member, _) = verify_leaf(kp.leaf_node(), None)?;
-        if !record.members.iter().any(|m| m.user == member) {
+        if !record.members.iter().any(|m| m.device == leaf.device) {
             return Ok(vec![GroupEvent::Refused {
                 group,
-                reason: format!("{} asked to rejoin a group they are not in", member.short()),
+                reason: format!(
+                    "{} asked to rejoin a group they are not in",
+                    leaf.account.short()
+                ),
             }]);
         }
         Ok(vec![GroupEvent::RejoinRequest {
             group,
-            member,
+            member: leaf.account,
             key_package: mls.to_vec(),
         }])
     }
 
-    /// Stage a commit that removes `member` and adds them back from a fresh
-    /// key package, for a rejoin request.
+    /// Stage a commit that removes the leaf a rejoin request came from
+    /// and adds it back from the fresh key package; `member` is the
+    /// identity the request named.
     pub fn stage_rejoin(
         &mut self,
         group: &GroupId,
         member: UserId,
         key_package: &[u8],
     ) -> Result<Staged> {
-        let me = self.identity.user_id();
+        let me = self.account();
         let record = self.active(group)?.clone();
-        if !record.is_admin(&me) {
+        if !record.is_admin(&me) && member != me {
             return Err(GroupError::NotAdmin);
         }
         let kp = parse_key_package(key_package, self.provider.crypto())?;
-        let (user, seal) = verify_leaf(kp.leaf_node(), Some(&member))?;
+        let leaf = verify_leaf(kp.leaf_node(), Some(&member))?;
         let index = {
             let handle = load_handle(&mut self.handles, &self.provider, group)?;
-            member_index(handle, &member).ok_or(GroupError::NotAMember(member))?
+            leaves_of(handle)?
+                .into_iter()
+                .find(|(_, l)| l.device == leaf.device)
+                .map(|(index, _)| index)
+                .ok_or(GroupError::NotAMember(member))?
         };
         let was_admin = record.is_admin(&member);
         let added = vec![MemberInfo {
-            user,
-            seal,
+            user: leaf.account,
+            device: leaf.device,
+            seal: leaf.seal,
             admin: was_admin,
         }];
         self.stage(
@@ -1973,25 +2182,55 @@ fn parse_welcome(data: &[u8]) -> Result<Welcome> {
 
 /// The identity a credential and signature key stand for: the credential's
 /// identity must be the signature key, and a valid user id.
-fn user_of(credential: &Credential, signature_key: &[u8]) -> Result<UserId> {
-    let bytes: [u8; 32] = credential
+/// What a verified leaf says: whose it is, which device signed it, and
+/// how to seal to it.
+#[derive(Clone, Debug)]
+struct Leaf {
+    account: UserId,
+    device: UserId,
+    seal: DhPublic,
+}
+
+/// The identity a leaf belongs to (`docs/PROTOCOL.md` section 13.1 and
+/// 14): the credential names it; the signature key is that identity's
+/// own, or a device key the leaf's `silver_device` certificate binds to
+/// it, signed by the identity.
+fn identity_of(leaf: &LeafNode) -> Result<(UserId, UserId)> {
+    let bytes: [u8; 32] = leaf
+        .credential()
         .serialized_content()
         .try_into()
         .map_err(|_| GroupError::KeyPackage("credential is not a user id".into()))?;
-    if bytes.as_slice() != signature_key {
+    let account = UserId::from_bytes(bytes)
+        .map_err(|_| GroupError::KeyPackage("credential is not a valid key".into()))?;
+    let signature_key = leaf.signature_key().as_slice();
+    if signature_key == bytes.as_slice() {
+        return Ok((account, account));
+    }
+    let Some(extension) = leaf.extensions().unknown(EXTENSION_DEVICE) else {
         return Err(GroupError::KeyPackage(
-            "credential and signature key differ".into(),
+            "credential and signature key differ, and no device certificate says why".into(),
+        ));
+    };
+    let certificate = DeviceCertificate::decode(&extension.0)
+        .map_err(|e| GroupError::KeyPackage(format!("device certificate: {e}")))?;
+    if certificate.account != account || certificate.device.as_bytes() != signature_key {
+        return Err(GroupError::KeyPackage(
+            "the device certificate is not for this leaf".into(),
         ));
     }
-    UserId::from_bytes(bytes)
-        .map_err(|_| GroupError::KeyPackage("credential is not a valid key".into()))
+    certificate
+        .verify()
+        .map_err(|_| GroupError::KeyPackage("the device certificate does not verify".into()))?;
+    Ok((account, certificate.device))
 }
 
-/// Check a leaf: identity as above, and the sealing key present.
-fn verify_leaf(leaf: &LeafNode, expected: Option<&UserId>) -> Result<(UserId, DhPublic)> {
-    let user = user_of(leaf.credential(), leaf.signature_key().as_slice())?;
+/// Check a leaf: identity as above (`expected`'s, when given), and the
+/// sealing key present.
+fn verify_leaf(leaf: &LeafNode, expected: Option<&UserId>) -> Result<Leaf> {
+    let (account, device) = identity_of(leaf)?;
     if let Some(expected) = expected {
-        if user != *expected {
+        if account != *expected {
             return Err(GroupError::KeyPackage("signed by another identity".into()));
         }
     }
@@ -2000,7 +2239,38 @@ fn verify_leaf(leaf: &LeafNode, expected: Option<&UserId>) -> Result<(UserId, Dh
         .unknown(EXTENSION_SEAL)
         .ok_or_else(|| GroupError::KeyPackage("no sealing key in the leaf".into()))?;
     let seal = decode_seal_key(&seal.0)?;
-    Ok((user, seal))
+    Ok(Leaf {
+        account,
+        device,
+        seal,
+    })
+}
+
+/// The leaf at `index` in `tree`, found by the signature key OpenMLS
+/// reports for the member there (every leaf's is distinct).
+fn leaf_in(tree: &RatchetTree, member: &Member) -> Result<Leaf> {
+    let leaf = tree
+        .leaves()
+        .find(|l| l.signature_key().as_slice() == member.signature_key.as_slice())
+        .ok_or_else(|| GroupError::Mls("a member without a leaf".into()))?;
+    verify_leaf(leaf, None)
+}
+
+/// The leaf at `index`, verified.
+fn leaf_at(handle: &MlsGroup, index: LeafNodeIndex) -> Result<Leaf> {
+    let member = handle
+        .member_at(index)
+        .ok_or_else(|| GroupError::Mls("nobody at that leaf".into()))?;
+    leaf_in(&handle.export_ratchet_tree(), &member)
+}
+
+/// Every leaf of the tree with its index, verified.
+fn leaves_of(handle: &MlsGroup) -> Result<Vec<(LeafNodeIndex, Leaf)>> {
+    let tree = handle.export_ratchet_tree();
+    handle
+        .members()
+        .map(|member| Ok((member.index, leaf_in(&tree, &member)?)))
+        .collect()
 }
 
 fn extension_of(extensions: &Extensions<GroupContext>) -> Result<SilverGroup> {
@@ -2025,31 +2295,26 @@ fn context_extensions(extension: &SilverGroup) -> Result<Extensions<GroupContext
     .map_err(mls_err)
 }
 
-/// Every member of the tree with their sealing key, admins marked.
+/// Every leaf of the tree with its sealing key, admins marked.
 fn members_of(handle: &MlsGroup, extension: &SilverGroup) -> Result<Vec<MemberInfo>> {
-    let tree = handle.export_ratchet_tree();
     let mut members = Vec::new();
-    for leaf in tree.leaves() {
-        let (user, seal) = verify_leaf(leaf, None)?;
+    for (_, leaf) in leaves_of(handle)? {
         members.push(MemberInfo {
-            user,
-            seal,
-            admin: extension.is_admin(&user),
+            user: leaf.account,
+            device: leaf.device,
+            seal: leaf.seal,
+            admin: extension.is_admin(&leaf.account),
         });
     }
     Ok(members)
 }
 
-fn member_index(handle: &MlsGroup, user: &UserId) -> Option<LeafNodeIndex> {
-    handle
-        .members()
-        .find(|m| m.credential.serialized_content() == user.as_bytes())
-        .map(|m| m.index)
-}
-
-/// The membership rules of `docs/design/groups.md` 7.6, checked on a commit
-/// from `committer` against the group as it stood before. `Ok` says what
-/// the commit does.
+/// The membership rules of `docs/design/groups.md` 7.6, with devices
+/// (`docs/design/devices.md` 6.3), checked on a commit from `committer`
+/// against the group as it stood before: an admin adds and removes
+/// anyone, any member adds and removes leaves of its own identity, and
+/// only an admin changes the settings. `Ok` says what the commit does to
+/// the membership as identities.
 fn check_commit(
     handle: &MlsGroup,
     staged: &StagedCommit,
@@ -2057,39 +2322,37 @@ fn check_commit(
     before: &SilverGroup,
 ) -> std::result::Result<Change, String> {
     let admin = before.is_admin(committer);
-    let adds: Vec<UserId> = staged
+    let adds: Vec<Leaf> = staged
         .add_proposals()
-        .map(|p| verify_leaf(p.add_proposal().key_package().leaf_node(), None).map(|(u, _)| u))
+        .map(|p| verify_leaf(p.add_proposal().key_package().leaf_node(), None))
         .collect::<Result<_>>()
         .map_err(|e| format!("an added leaf is not valid: {e}"))?;
-    let mut removed = Vec::new();
-    let mut left = Vec::new();
+    let leaves = leaves_of(handle).map_err(|e| e.to_string())?;
+    // Leaves removed: whose, and whether by the leaf's own proposal.
+    let mut removed_indices = Vec::new();
+    let mut removed: Vec<(UserId, bool)> = Vec::new();
     for proposal in staged.remove_proposals() {
         let index = proposal.remove_proposal().removed();
-        let who = handle
-            .member_at(index)
-            .map(|m| user_of(&m.credential, &m.signature_key))
-            .transpose()
-            .map_err(|e| e.to_string())?
+        let who = leaves
+            .iter()
+            .find(|(i, _)| *i == index)
+            .map(|(_, leaf)| leaf.account)
             .ok_or_else(|| "a removal of nobody".to_owned())?;
         let by_self = matches!(proposal.sender(), Sender::Member(i) if *i == index);
-        if by_self {
-            left.push(who);
-        } else {
-            removed.push(who);
-        }
+        removed_indices.push(index);
+        removed.push((who, by_self));
     }
     let changes_context = staged
         .queued_proposals()
         .any(|p| matches!(p.proposal(), Proposal::GroupContextExtensions(_)));
     let context = staged.group_context();
-    if !adds.is_empty() && !admin {
+    if !admin && adds.iter().any(|leaf| leaf.account != *committer) {
         return Err(format!(
             "{} added members without being an admin",
             committer.short()
         ));
     }
-    if !removed.is_empty() && !admin {
+    if !admin && removed.iter().any(|(who, _)| who != committer) {
         return Err(format!(
             "{} removed members without being an admin",
             committer.short()
@@ -2118,29 +2381,57 @@ fn check_commit(
     if after.admins.is_empty() {
         return Err("the commit leaves the group without an admin".into());
     }
-    let members_after: Vec<UserId> = {
-        let mut current: Vec<UserId> = handle
-            .members()
-            .filter_map(|m| user_of(&m.credential, &m.signature_key).ok())
-            .collect();
-        current.retain(|u| !removed.contains(u) && !left.contains(u));
-        current.extend(adds.iter().copied());
-        current
-    };
-    if after.admins.iter().any(|a| !members_after.contains(a)) {
+    // The membership as identities, before and after.
+    let mut ids_before: Vec<UserId> = Vec::new();
+    for (_, leaf) in &leaves {
+        if !ids_before.contains(&leaf.account) {
+            ids_before.push(leaf.account);
+        }
+    }
+    let mut ids_after: Vec<UserId> = Vec::new();
+    for (index, leaf) in &leaves {
+        if !removed_indices.contains(index) && !ids_after.contains(&leaf.account) {
+            ids_after.push(leaf.account);
+        }
+    }
+    for leaf in &adds {
+        if !ids_after.contains(&leaf.account) {
+            ids_after.push(leaf.account);
+        }
+    }
+    if after.admins.iter().any(|a| !ids_after.contains(a)) {
         return Err("the commit names an admin who is not a member".into());
     }
-    if members_after.len() > MAX_MEMBERS {
+    if ids_after.len() > MAX_MEMBERS {
         return Err("the commit makes the group too large".into());
     }
-    if !adds.is_empty() {
-        Ok(Change::Added(adds))
-    } else if !removed.is_empty() {
-        Ok(Change::Removed(removed))
+    let added: Vec<UserId> = ids_after
+        .iter()
+        .filter(|u| !ids_before.contains(u))
+        .copied()
+        .collect();
+    let gone: Vec<UserId> = ids_before
+        .iter()
+        .filter(|u| !ids_after.contains(u))
+        .copied()
+        .collect();
+    // An identity whose every leaf went by its own proposals left; the
+    // rest were removed.
+    let (left, removed_ids): (Vec<UserId>, Vec<UserId>) = gone.into_iter().partition(|u| {
+        removed
+            .iter()
+            .filter(|(who, _)| who == u)
+            .all(|(_, by_self)| *by_self)
+    });
+    if !added.is_empty() {
+        Ok(Change::Added(added))
+    } else if !removed_ids.is_empty() {
+        Ok(Change::Removed(removed_ids))
     } else if !left.is_empty() {
         Ok(Change::Left(left))
     } else {
-        // A context change or a bare update; `describe` tells them apart.
+        // A device came or went, the settings changed, or a leaf was
+        // refreshed; `describe` tells the settings apart.
         Ok(Change::Updated)
     }
 }

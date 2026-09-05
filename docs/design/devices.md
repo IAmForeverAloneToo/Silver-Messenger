@@ -376,9 +376,17 @@ the target's hand-out budget one prekey per device.
   and one key package per device, and adds every device in one commit.
   A device that joins the account later is added by one of the account's
   devices (rule above), from the key package the new device deposited.
-* Fan-out and Welcomes go per leaf, which they already do.
-* Rejoin (13.8) is per leaf: a device out of sync asks the admins, and
-  the account's other devices may answer too.
+* Fan-out and Welcomes go per leaf, which they already do. A Welcome
+  from a device of one's own identity is taken without asking, as is
+  one for a group the primary named at link time (7.4), whose alias is
+  applied from the start.
+* Rejoin (13.8) is per leaf: a device out of sync asks the admins and
+  the account's other devices, and any of them may answer. Leaving
+  (13.7) is per leaf too: `/group leave` on one device takes that
+  device's leaf out, and the identity stays a member by its other
+  devices until they leave as well. An invite link names the device
+  that made it as the one to ask, so the request reaches the device
+  whose owner is watching.
 
 ### 6.4 The link
 

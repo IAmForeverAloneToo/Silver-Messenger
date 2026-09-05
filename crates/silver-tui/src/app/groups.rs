@@ -12,7 +12,7 @@ use silver_client::groups::{
 use silver_client::{ClientError, GroupError, KeyPackageStatus, SequencerAnswer};
 use silver_protocol::bundle::capability as bundle_capability;
 use silver_protocol::group::{GroupBody, GroupId};
-use silver_protocol::wire::{KeyPackageDeposit, feature};
+use silver_protocol::wire::feature;
 
 use super::*;
 
@@ -103,7 +103,7 @@ impl App {
         };
         let mut parts = vec![
             format!("# {name}"),
-            format!("{} members", record.members.len()),
+            format!("{} members", record.identities().len()),
         ];
         if record.is_admin(&self.me) {
             parts.push("you are an admin".into());
@@ -254,13 +254,12 @@ impl App {
             return by_alias;
         }
         if let Ok(id) = who.parse::<UserId>() {
-            return record.members.iter().find(|m| m.user == id).map(|m| m.user);
+            return record.is_member(&id).then_some(id);
         }
         let matches: Vec<UserId> = record
-            .members
-            .iter()
-            .filter(|m| m.user.to_string().starts_with(who))
-            .map(|m| m.user)
+            .identities()
+            .into_iter()
+            .filter(|u| u.to_string().starts_with(who))
             .collect();
         match matches.as_slice() {
             [one] => Some(*one),
@@ -310,59 +309,101 @@ impl App {
         }
         let client = self.client.clone();
         let tx = self.internal_tx.clone();
-        self.toast(format!("Asking the relay for {name}'s key package…"));
+        self.toast(format!("Asking the relay for {name}'s key packages…"));
         tokio::spawn(async move {
-            let result = client
-                .key_package_for(user)
-                .await
-                .map_err(|e| e.to_string());
+            // Every device of theirs gets a leaf of its own: the list
+            // comes with their bundle, and each device deposits its own
+            // key packages under its own id.
+            let devices: Vec<UserId> = match client.lookup_full(user).await {
+                Ok(lookup) => lookup
+                    .bundle
+                    .map(|b| b.devices.iter().map(|d| d.device).collect())
+                    .unwrap_or_default(),
+                Err(_) => Vec::new(),
+            };
+            let mut packages = Vec::new();
+            for id in std::iter::once(user).chain(devices) {
+                let result = client.key_package_for(id).await.map_err(|e| e.to_string());
+                packages.push((id, result));
+            }
             let _ = tx
-                .send(Internal::KeyPackageFor {
+                .send(Internal::KeyPackagesFor {
                     group,
                     user,
-                    result,
+                    packages,
                 })
                 .await;
         });
     }
 
-    pub(super) fn on_key_package_for(
+    /// The relay answered for `user` and each device of theirs, in that
+    /// order. Their own key package is a must; a device's may be missing,
+    /// in which case the rest are added and the device is left for one of
+    /// theirs to add.
+    pub(super) fn on_key_packages_for(
         &mut self,
         group: GroupId,
         user: UserId,
-        result: Result<Option<(KeyPackageDeposit, bool)>, String>,
+        packages: Vec<(UserId, KeyPackageAnswer)>,
     ) {
         let name = self.contact_name(&user);
-        let package = match result {
-            Ok(Some((package, _))) => package,
-            Ok(None) => {
-                self.toast(format!(
-                    "{name} has no key package on the relay; they need to connect once with a client that takes part in groups."
-                ));
-                return;
+        let mut verified = Vec::new();
+        let mut left_out = 0;
+        for (id, result) in packages {
+            let primary = id == user;
+            let package = match result {
+                Ok(Some((package, _))) => package,
+                Ok(None) if primary => {
+                    self.toast(format!(
+                        "{name} has no key package on the relay; they need to connect once with a client that takes part in groups."
+                    ));
+                    return;
+                }
+                Err(e) if primary => {
+                    self.toast(format!("Could not get {name}'s key package: {e}"));
+                    return;
+                }
+                Ok(None) | Err(_) => {
+                    left_out += 1;
+                    continue;
+                }
+            };
+            match self
+                .groups
+                .verify_key_package(&user, &package.data, now_ms())
+            {
+                Ok(bytes) => verified.push(bytes),
+                Err(e) if primary => {
+                    self.system(
+                        Level::Warn,
+                        format!(
+                            "The relay handed out a key package for {name} that does not check out ({e}); nobody was added."
+                        ),
+                    );
+                    self.toast(format!("{name}'s key package is not valid; see System."));
+                    return;
+                }
+                Err(e) => {
+                    self.system(
+                        Level::Warn,
+                        format!(
+                            "The relay handed out a key package for a device of {name}'s ({}…) that does not check out ({e}); the device was left out.",
+                            id.short()
+                        ),
+                    );
+                    left_out += 1;
+                }
             }
-            Err(e) => {
-                self.toast(format!("Could not get {name}'s key package: {e}"));
-                return;
-            }
-        };
-        let verified = match self
-            .groups
-            .verify_key_package(&user, &package.data, now_ms())
-        {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                self.system(
-                    Level::Warn,
-                    format!(
-                        "The relay handed out a key package for {name} that does not check out ({e}); nobody was added."
-                    ),
-                );
-                self.toast(format!("{name}'s key package is not valid; see System."));
-                return;
-            }
-        };
-        match self.groups.stage_add(&group, &[verified]) {
+        }
+        if left_out > 0 {
+            self.system(
+                Level::Info,
+                format!(
+                    "{left_out} device(s) of {name}'s had no usable key package on the relay and were left out; one of their devices can add them later."
+                ),
+            );
+        }
+        match self.groups.stage_add(&group, &verified) {
             Ok(staged) => self.run_staged(staged, Purpose::Add(vec![user])),
             Err(e) => self.toast(format!("Could not add {name}: {e}")),
         }
@@ -414,28 +455,30 @@ impl App {
             return;
         };
         let name = self.group_name(&group);
-        self.system(
-            Level::Info,
-            format!("{name}: {} member(s)", record.members.len()),
-        );
-        for member in &record.members {
-            let who = self.member_name(&member.user);
+        let members = record.identities();
+        self.system(Level::Info, format!("{name}: {} member(s)", members.len()));
+        for user in &members {
+            let who = self.member_name(user);
             let verified = self
-                .contact_index(&member.user)
+                .contact_index(user)
                 .is_some_and(|i| self.contacts[i].verified);
             let mut notes = Vec::new();
-            if member.admin {
-                notes.push("admin");
+            if record.is_admin(user) {
+                notes.push("admin".to_owned());
             }
             if verified {
-                notes.push("verified");
+                notes.push("verified".to_owned());
+            }
+            let devices = record.devices_of(user).len();
+            if devices > 1 {
+                notes.push(format!("{devices} devices"));
             }
             let notes = if notes.is_empty() {
                 String::new()
             } else {
                 format!(" ({})", notes.join(", "))
             };
-            self.system(Level::Info, format!("  {who}{notes}  {}", member.user));
+            self.system(Level::Info, format!("  {who}{notes}  {user}"));
         }
         self.select(0);
     }
@@ -629,7 +672,8 @@ impl App {
         self.system(
             Level::Info,
             format!(
-                "{name}: id {group}, {} member(s), admin(s) {}, {state}. Messages are encrypted with MLS on the ML-KEM-768 + X25519 hybrid suite; every member's client checks every change against the group's rules.",
+                "{name}: id {group}, {} member(s) on {} device(s), admin(s) {}, {state}. Messages are encrypted with MLS on the ML-KEM-768 + X25519 hybrid suite; every member's client checks every change against the group's rules.",
+                record.identities().len(),
                 record.members.len(),
                 admins.join(", ")
             ),
@@ -1253,7 +1297,7 @@ impl App {
                     self.refresh_group_list();
                     self.note_in_group(group, "you joined by the link");
                     let name = self.group_name(&group);
-                    let members = self.groups.get(&group).map_or(0, |r| r.members.len());
+                    let members = self.groups.get(&group).map_or(0, |r| r.identities().len());
                     self.system(Level::Info, format!("Joined {name} ({members} members)."));
                     self.notifier.announce(&format!("Joined {name}"));
                     self.group_unread
