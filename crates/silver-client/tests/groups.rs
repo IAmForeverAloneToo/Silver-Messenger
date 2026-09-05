@@ -308,8 +308,12 @@ async fn an_invite_link_is_answered_by_the_admin_it_names() {
     );
     let out = alice.groups.commit_staged(&group, now_ms()).unwrap();
     alice.send(out).await;
-    let held = bob.accept_invitation().await;
-    assert_eq!(held.members.len(), 2);
+    // Bob asked alice: her Welcome is the answer, and needs no second yes.
+    assert_eq!(
+        bob.next_group_events().await,
+        vec![GroupEvent::Joined { group }]
+    );
+    assert_eq!(bob.groups.get(&group).unwrap().members.len(), 2);
     let out = bob.groups.send(&group, text("in"), None, now_ms()).unwrap();
     bob.send(out).await;
     assert!(matches!(

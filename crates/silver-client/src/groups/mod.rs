@@ -208,6 +208,10 @@ pub(crate) struct GroupsFile {
     key_packages: Vec<KeyPackageRecord>,
     #[serde(default)]
     last_resort: Option<KeyPackageRecord>,
+    /// Groups we asked to join by link, and the admin asked: their Welcome
+    /// is taken without asking the user again.
+    #[serde(default)]
+    joins: BTreeMap<GroupId, UserId>,
 }
 
 // --- what comes out -----------------------------------------------------------
@@ -231,10 +235,11 @@ pub enum GroupEvent {
         by: UserId,
         change: Change,
     },
-    /// We were added: the group is now active.
+    /// The admin we asked by link answered with a Welcome: the group is
+    /// active, and the user's yes was the join request.
     Joined { group: GroupId },
-    /// A Welcome from someone the caller has to vouch for (a stranger);
-    /// [`Groups::accept_welcome`] or [`Groups::decline_welcome`] settle it.
+    /// A Welcome the caller has to vouch for; [`Groups::accept_welcome`]
+    /// or [`Groups::decline_welcome`] settle it.
     Invited { held: HeldWelcome },
     /// An admin removed us.
     Removed { group: GroupId, by: UserId },
@@ -1199,6 +1204,7 @@ impl Groups {
         let package = self.new_key_package(false, now_ms)?;
         // Kept like a deposited one, so the Welcome made from it can be read.
         self.file.key_packages.push(package.clone());
+        self.file.joins.insert(link.group, link.via);
         let proof = group::join_proof(&link.key, &link.group, &self.identity.user_id());
         let body =
             GroupBody::inline(link.group, GroupKind::Join, package.data).with_join_proof(proof);
@@ -1404,6 +1410,9 @@ impl Groups {
             ));
         }
         let _ = from;
+        // The answer to a join request we sent this admin needs no second
+        // yes from the user.
+        let asked = self.file.joins.get(&group) == Some(&inviter);
         // Join now, so the group stays in sync while the user decides; the
         // key package that let us in is spent by this.
         let handle = staged.into_group(&self.provider).map_err(mls_err)?;
@@ -1416,7 +1425,11 @@ impl Groups {
             name: extension.name.clone(),
             alias: previous.as_ref().and_then(|r| r.alias.clone()),
             members: members.clone(),
-            state: GroupState::Invited { from: inviter },
+            state: if asked {
+                GroupState::Active
+            } else {
+                GroupState::Invited { from: inviter }
+            },
             tokens: vec![EpochToken { epoch, token }],
             held: Vec::new(),
             leaf_updated_ms: now_ms,
@@ -1425,6 +1438,11 @@ impl Groups {
             seen: previous.map(|r| r.seen).unwrap_or_default(),
         };
         self.file.groups.insert(group, record);
+        if asked {
+            self.file.joins.remove(&group);
+            self.persist()?;
+            return Ok(vec![GroupEvent::Joined { group }]);
+        }
         Ok(vec![GroupEvent::Invited {
             held: HeldWelcome {
                 group,

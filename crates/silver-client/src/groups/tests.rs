@@ -413,13 +413,11 @@ fn a_link_lets_a_stranger_ask_and_an_admin_add_them() {
     deliver(out, &mut [&mut bob, &mut carol, &mut dave], &mut blobs);
     bob.drain(&blobs);
     carol.drain(&blobs);
-    let events = dave.drain(&blobs);
-    let [GroupEvent::Invited { held }] = events.as_slice() else {
-        panic!("{events:?}");
-    };
-    assert_eq!(held.group, group);
-    dave.groups.accept_welcome(&group).unwrap();
-    assert_eq!(dave.groups.get(&group).unwrap().members.len(), 4);
+    // Dave asked this admin: her Welcome is taken without a second yes.
+    assert_eq!(dave.drain(&blobs), vec![GroupEvent::Joined { group }]);
+    let record = dave.groups.get(&group).unwrap();
+    assert_eq!(record.state, GroupState::Active);
+    assert_eq!(record.members.len(), 4);
     // Dave reads what comes next.
     let out = bob
         .groups

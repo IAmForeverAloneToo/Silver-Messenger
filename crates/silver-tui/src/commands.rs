@@ -48,7 +48,24 @@ pub const COMMANDS: &[CommandInfo] = &[
         "[id|link]",
         "copy the last message of this chat, your id, or your invite link",
     ),
-    cmd("alias", &["rename"], "<name>", "name the selected contact"),
+    cmd(
+        "group",
+        &["g"],
+        "<new|add|remove|leave|members|invite|join|link|admin|rename|info|rejoin|forget> …",
+        "groups: /group new <name>, /group add <contact>, /group remove <member>, /group leave, /group members, /group invite [copy], /group join <link>, /group link reset, /group admin add|remove <member>, /group rename <name>, /group info, /group rejoin, /group forget",
+    ),
+    cmd(
+        "decline",
+        &[],
+        "<g1…>",
+        "turn a group invitation down (the Requests pane lists them)",
+    ),
+    cmd(
+        "alias",
+        &["rename"],
+        "<name>",
+        "name the selected contact or group",
+    ),
     cmd(
         "remove",
         &["rm"],

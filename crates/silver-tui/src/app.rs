@@ -1,5 +1,7 @@
 //! Application state, key handling and command dispatch.
 
+mod groups;
+
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::PathBuf;
@@ -65,6 +67,9 @@ pub struct ChatLine {
     pub file: Option<PathBuf>,
     /// For received files not fetched yet: how to fetch it.
     pub pending: Option<FileInfo>,
+    /// In a group: who wrote it (`None` for our own lines and for notes
+    /// about the group).
+    pub sender: Option<UserId>,
 }
 
 /// The saved location a file line names, if it does: `[file] name (size)
@@ -91,6 +96,7 @@ pub enum Pane {
     System,
     Requests,
     Thread(UserId),
+    Group(silver_protocol::group::GroupId),
 }
 
 /// One row of the message pane as laid out: its text, and which entry of
@@ -239,6 +245,50 @@ enum Internal {
         info: FileInfo,
         result: Result<PathBuf, String>,
     },
+    /// The relay's sequencer answered about a group.
+    GroupSequenced {
+        group: silver_protocol::group::GroupId,
+        purpose: groups::Purpose,
+        answer: Result<silver_client::SequencerAnswer, String>,
+    },
+    /// A group message's envelopes (and blobs) were handed to the relay.
+    GroupSent {
+        group: silver_protocol::group::GroupId,
+        id: Option<String>,
+        text: Option<String>,
+        result: Result<(), String>,
+    },
+    /// A parked group message was fetched from the blob store.
+    GroupParked {
+        from: UserId,
+        body: Box<silver_protocol::group::GroupBody>,
+        chunks: Result<Vec<Vec<u8>>, String>,
+    },
+    /// The relay answered a key package request.
+    KeyPackageFor {
+        group: silver_protocol::group::GroupId,
+        user: UserId,
+        result: Result<Option<(silver_protocol::wire::KeyPackageDeposit, bool)>, String>,
+    },
+    /// The relay answered a key package deposit.
+    KeyPackages {
+        result: Result<silver_client::KeyPackageStatus, String>,
+    },
+    /// The admin an invite link names was looked up.
+    GroupJoinLookup {
+        link: silver_client::GroupLink,
+        result: Result<Option<KeyBundle>, String>,
+    },
+    GroupUploaded {
+        group: silver_protocol::group::GroupId,
+        result: Result<FileInfo, String>,
+    },
+    GroupDownloaded {
+        group: silver_protocol::group::GroupId,
+        id: String,
+        info: FileInfo,
+        result: Result<PathBuf, String>,
+    },
 }
 
 pub struct App {
@@ -254,6 +304,22 @@ pub struct App {
     pub threads: HashMap<UserId, Vec<ChatLine>>,
     /// Ids of messages received but not yet shown, per contact.
     pub unread: HashMap<UserId, Vec<String>>,
+    /// The groups engine (`docs/design/groups.md`).
+    groups: silver_client::Groups,
+    /// Groups in the chat list, in order; invitations are not listed.
+    pub group_list: Vec<silver_protocol::group::GroupId>,
+    pub group_threads: HashMap<silver_protocol::group::GroupId, Vec<ChatLine>>,
+    pub group_unread: HashMap<silver_protocol::group::GroupId, Vec<String>>,
+    /// The first unread message of the group that was just opened.
+    pub group_new_marker: Option<(silver_protocol::group::GroupId, String)>,
+    /// Envelope id -> (group, message id), for the sent mark of a message
+    /// that goes out as one envelope per member.
+    group_envelopes: HashMap<String, (silver_protocol::group::GroupId, String)>,
+    /// Message id -> envelopes the relay has not accepted yet.
+    group_outstanding: HashMap<String, usize>,
+    /// When to put key packages on deposit again.
+    key_packages_due: Option<Instant>,
+    last_group_maintenance: Instant,
     known_ids: RecentIds,
     /// The note that the Requests pane is full has been made.
     requests_full_noted: bool,
@@ -408,10 +474,40 @@ impl App {
                         receipt: h.receipt,
                         file,
                         pending,
+                        sender: None,
                     }
                 })
                 .collect();
             threads.insert(contact.user_id, lines);
+        }
+        let groups = silver_client::Groups::load(&store, client.identity_arc())?;
+        let mut group_threads = HashMap::new();
+        for (id, _) in groups.list() {
+            let lines: Vec<ChatLine> = store
+                .load_group_history(id)?
+                .into_iter()
+                .map(|h| {
+                    known_ids.insert(h.id.clone());
+                    let file = match h.direction {
+                        Direction::Received => saved_file_path(&h.text),
+                        Direction::Sent => None,
+                    };
+                    let pending = h.file.filter(|_| file.is_none());
+                    ChatLine {
+                        id: h.id,
+                        direction: h.direction,
+                        timestamp_ms: h.timestamp_ms,
+                        text: h.text,
+                        delivered: true,
+                        failed: false,
+                        receipt: None,
+                        file,
+                        pending,
+                        sender: h.from,
+                    }
+                })
+                .collect();
+            group_threads.insert(*id, lines);
         }
         let (internal_tx, internal_rx) = mpsc::channel(64);
         let mut app = Self {
@@ -425,6 +521,15 @@ impl App {
             blocked,
             threads,
             unread: HashMap::new(),
+            groups,
+            group_list: Vec::new(),
+            group_threads,
+            group_unread: HashMap::new(),
+            group_new_marker: None,
+            group_envelopes: HashMap::new(),
+            group_outstanding: HashMap::new(),
+            key_packages_due: None,
+            last_group_maintenance: Instant::now(),
             known_ids,
             requests_full_noted: false,
             receipts: ReceiptQueue::default(),
@@ -470,6 +575,7 @@ impl App {
             lock_requested: false,
             rotated: false,
         };
+        app.refresh_group_list();
         app.system(Level::Info, "Welcome to Silver Messenger.");
         match &app.at_rest {
             AtRest::Passphrase => {}
@@ -527,8 +633,9 @@ impl App {
 
         let exit = loop {
             terminal.draw(|frame| ui::draw(frame, &mut self))?;
-            let unread: usize =
-                self.unread.values().map(Vec::len).sum::<usize>() + self.held_message_count();
+            let unread: usize = self.unread.values().map(Vec::len).sum::<usize>()
+                + self.group_unread.values().map(Vec::len).sum::<usize>()
+                + self.held_message_count();
             self.notifier.set_unread(unread);
             tokio::select! {
                 Some(ev) = keys.recv() => {
@@ -541,6 +648,7 @@ impl App {
                     self.expire_toast();
                     self.flush_receipts();
                     self.flush_cover();
+                    self.maintain_groups();
                     if let Some(after) = self.lock_after {
                         if self.can_lock() && self.last_activity.elapsed() >= after {
                             self.lock_requested = true;
@@ -594,18 +702,29 @@ impl App {
             .filter(|i| *i < self.contacts.len())
     }
 
-    /// Panes: System, one per contact, then Requests while any are pending.
+    /// Panes: System, one per contact, one per group, then Requests while
+    /// any request or invitation is pending.
     pub fn pane_count(&self) -> usize {
-        self.contacts.len() + 1 + usize::from(!self.requests.is_empty())
+        self.contacts.len() + self.group_list.len() + 1 + usize::from(self.has_requests_pane())
+    }
+
+    /// Whether the Requests pane is shown: contact requests or group
+    /// invitations wait.
+    pub fn has_requests_pane(&self) -> bool {
+        !self.requests.is_empty() || !self.invitations().is_empty()
     }
 
     pub fn requests_pane_selected(&self) -> bool {
-        !self.requests.is_empty() && self.selected == self.contacts.len() + 1
+        self.has_requests_pane() && self.selected == self.contacts.len() + self.group_list.len() + 1
     }
 
-    /// Total messages waiting in contact requests.
+    /// Total messages waiting in contact requests, plus group invitations.
     pub fn held_message_count(&self) -> usize {
-        self.requests.iter().map(|r| r.messages.len()).sum()
+        self.requests
+            .iter()
+            .map(|r| r.messages.len())
+            .sum::<usize>()
+            + self.invitations().len()
     }
 
     fn contact_name(&self, user_id: &UserId) -> String {
@@ -1003,7 +1122,9 @@ impl App {
                 }
                 skip_source = None;
                 // Date rules between messages are not text anyone wants.
-                if row.source.is_none() && matches!(self.view.pane, Pane::Thread(_)) {
+                if row.source.is_none()
+                    && matches!(self.view.pane, Pane::Thread(_) | Pane::Group(_))
+                {
                     continue;
                 }
                 if let Some(source) = row.source {
@@ -1053,6 +1174,19 @@ impl App {
                     ui::clock(line.timestamp_ms),
                     line.text
                 ))
+            }
+            Pane::Group(group) => {
+                let line = self.group_threads.get(&group)?.get(source)?;
+                let who = match (line.direction, line.sender) {
+                    (Direction::Sent, _) => "you".to_owned(),
+                    (_, Some(sender)) => self.member_name(&sender),
+                    (_, None) => String::new(),
+                };
+                Some(if who.is_empty() {
+                    format!("{} {}", ui::clock(line.timestamp_ms), line.text)
+                } else {
+                    format!("{} {who}: {}", ui::clock(line.timestamp_ms), line.text)
+                })
             }
         }
     }
@@ -1368,6 +1502,12 @@ impl App {
                 .and_then(|ids| ids.first().cloned())
                 .map(|first| (id, first))
         });
+        self.group_new_marker = self.selected_group().and_then(|id| {
+            self.group_unread
+                .get(&id)
+                .and_then(|ids| ids.iter().find(|i| !i.is_empty()).cloned())
+                .map(|first| (id, first))
+        });
         self.mark_selected_read();
     }
 
@@ -1384,6 +1524,9 @@ impl App {
                     self.receipts.read(id, message_id);
                 }
             }
+        }
+        if let Some(group) = self.selected_group() {
+            self.group_unread.remove(&group);
         }
     }
 
@@ -1430,6 +1573,8 @@ impl App {
             "session" => self.cmd_session(),
             "receipts" => self.cmd_receipts(&rest),
             "cover" => self.cmd_cover(&rest),
+            "group" | "g" => self.cmd_group(&rest),
+            "decline" => self.cmd_decline(&rest),
             "notify" => self.cmd_notify(&rest),
             "marks" | "ascii" => self.cmd_marks(&rest),
             "theme" | "colors" | "colours" => self.cmd_theme(&rest),
@@ -1563,7 +1708,16 @@ impl App {
             };
         }
         if self.requests_pane_selected() {
-            return "/accept <n> · /block <n> · F1 help".to_owned();
+            return "/accept <n> · /block <n> · /accept g<n> · /decline g<n> · F1 help".to_owned();
+        }
+        if let Some(group) = self.selected_group() {
+            return match self.group_state_label(&group) {
+                None => "Enter sends to everyone · /group members · /group add <contact> · F1 help"
+                    .to_owned(),
+                Some(state) => {
+                    format!("This group is {state} · /group forget removes it · F1 help")
+                }
+            };
         }
         if self.selected_contact().is_none() {
             return if self.contacts.is_empty() {
@@ -2031,6 +2185,15 @@ impl App {
     }
 
     fn cmd_alias(&mut self, args: &[&str]) {
+        if let Some(group) = self.selected_group() {
+            let alias = args.join(" ");
+            let alias = (!alias.trim().is_empty()).then_some(alias);
+            match self.groups.set_alias(&group, alias) {
+                Ok(()) => self.toast(format!("Now shown as {}.", self.group_name(&group))),
+                Err(e) => self.toast(format!("Could not set the alias: {e}")),
+            }
+            return;
+        }
         let Some(index) = self.selected_contact_index() else {
             self.toast("Select a contact first.");
             return;
@@ -2246,6 +2409,10 @@ impl App {
             self.toast("Accept a request first: /accept <n>.");
             return;
         }
+        if let Some(group) = self.selected_group() {
+            self.send_group_text(group, text);
+            return;
+        }
         let Some(index) = self.selected_contact_index() else {
             self.toast("Select a contact first, or /add <user-id>.");
             return;
@@ -2436,6 +2603,7 @@ impl App {
                                 receipt: None,
                                 file: None,
                                 pending: None,
+                                sender: None,
                             },
                         );
                         self.scroll = 0;
@@ -2467,6 +2635,34 @@ impl App {
                     );
                 }
             },
+            Internal::GroupSequenced {
+                group,
+                purpose,
+                answer,
+            } => self.on_group_sequenced(group, purpose, answer),
+            Internal::GroupSent {
+                group,
+                id,
+                text,
+                result,
+            } => self.on_group_sent(group, id, text, result),
+            Internal::GroupParked { from, body, chunks } => {
+                self.on_group_parked(from, body, chunks)
+            }
+            Internal::KeyPackageFor {
+                group,
+                user,
+                result,
+            } => self.on_key_package_for(group, user, result),
+            Internal::KeyPackages { result } => self.on_key_packages(result),
+            Internal::GroupJoinLookup { link, result } => self.on_group_join_lookup(link, result),
+            Internal::GroupUploaded { group, result } => self.on_group_uploaded(group, result),
+            Internal::GroupDownloaded {
+                group,
+                id,
+                info,
+                result,
+            } => self.on_group_downloaded(group, id, info, result),
             Internal::Downloaded {
                 peer,
                 id,
@@ -2519,6 +2715,7 @@ impl App {
             ClientEvent::Connected { relay_url } => {
                 self.connection = Connection::Connected;
                 self.system(Level::Info, format!("Connected to {relay_url}"));
+                self.deposit_key_packages();
                 // Reached over TLS: from now on, never without.
                 let mut config = self.store.load_config().unwrap_or_default();
                 if config.note_secure(&relay_url)
@@ -2538,9 +2735,14 @@ impl App {
                 );
             }
             ClientEvent::Sent { id } => {
-                self.mark_line(&id, |line| line.delivered = true);
+                if !self.on_group_envelope_done(&id, true) {
+                    self.mark_line(&id, |line| line.delivered = true);
+                }
             }
             ClientEvent::Rejected { id, reason } => {
+                if self.on_group_envelope_done(&id, false) {
+                    return;
+                }
                 self.mark_line(&id, |line| line.failed = true);
                 self.system(Level::Warn, format!("Relay refused a message: {reason}"));
                 self.toast(format!("Not delivered: {reason}"));
@@ -2645,6 +2847,7 @@ impl App {
                         receipt: None,
                         file: None,
                         pending,
+                        sender: None,
                     },
                 );
                 // Shown means in the selected chat of a window that has focus;
@@ -2703,9 +2906,7 @@ impl App {
             ClientEvent::PeerRevoked { revocation } => self.handle_peer_revoked(revocation),
             ClientEvent::PeerSucceeded { succession } => self.handle_peer_succeeded(succession),
             ClientEvent::Transparency(event) => self.handle_transparency(event),
-            ClientEvent::Group { id, .. } => {
-                tracing::debug!(%id, "a group message; this client does not show groups yet");
-            }
+            ClientEvent::Group { from, id, body } => self.on_group_body(from, id, body),
             ClientEvent::Error(text) => {
                 self.system(Level::Warn, text.clone());
                 self.toast(text);
@@ -3048,11 +3249,12 @@ impl App {
 
     /// The saved file behind a row of the message pane, if it shows one.
     fn file_at_row(&self, row: usize) -> Option<PathBuf> {
-        let Pane::Thread(peer) = self.view.pane else {
-            return None;
-        };
         let source = self.view.rows.get(row)?.source?;
-        self.threads.get(&peer)?.get(source)?.file.clone()
+        match self.view.pane {
+            Pane::Thread(peer) => self.threads.get(&peer)?.get(source)?.file.clone(),
+            Pane::Group(group) => self.group_threads.get(&group)?.get(source)?.file.clone(),
+            _ => None,
+        }
     }
 
     /// The file waiting to be fetched behind a row, if it shows one.
@@ -3084,11 +3286,15 @@ impl App {
     /// `/get [all]`: fetch the newest file waiting in this chat, or all of
     /// them.
     fn cmd_get(&mut self, args: &[&str]) {
+        let all = args.first().is_some_and(|a| a.eq_ignore_ascii_case("all"));
+        if let Some(group) = self.selected_group() {
+            self.group_get(group, all);
+            return;
+        }
         let Some(peer) = self.selected_contact().map(|c| c.user_id) else {
             self.toast("Select a chat first.");
             return;
         };
-        let all = args.first().is_some_and(|a| a.eq_ignore_ascii_case("all"));
         let waiting: Vec<(String, FileInfo)> = self
             .threads
             .get(&peer)
@@ -3148,6 +3354,10 @@ impl App {
     /// Send a file to the selected contact: upload it, then a message that
     /// says where it is and how to read it.
     fn cmd_send(&mut self, args: &[&str]) {
+        if let Some(group) = self.selected_group() {
+            self.send_group_file(group, args);
+            return;
+        }
         let Some(index) = self.selected_contact_index() else {
             self.toast("Select a contact first.");
             return;
@@ -3297,9 +3507,16 @@ impl App {
 
     fn cmd_accept(&mut self, args: &[&str]) {
         let Some(arg) = args.first() else {
-            self.toast("Usage: /accept <n|user-id> (see the Requests pane)");
+            self.toast("Usage: /accept <n|user-id|g<n>> (see the Requests pane)");
             return;
         };
+        if let Some(n) = arg
+            .strip_prefix(['g', 'G'])
+            .and_then(|rest| rest.parse::<usize>().ok())
+        {
+            self.accept_invitation(n);
+            return;
+        }
         let Some(index) = self.resolve_request(arg) else {
             self.toast("No such request. Numbers are shown in the Requests pane.");
             return;
@@ -3340,6 +3557,7 @@ impl App {
                     receipt: None,
                     file: None,
                     pending,
+                    sender: None,
                 },
             );
         }
@@ -3443,6 +3661,7 @@ impl App {
             text: line.text.clone(),
             receipt: None,
             file: line.pending.clone(),
+            from: None,
         };
         if let Err(e) = self.store.append_history(&peer, &entry) {
             self.toast(format!("Could not save history: {e}"));
@@ -3690,6 +3909,7 @@ mod tests {
                 receipt: None,
                 file: None,
                 pending: None,
+                sender: None,
             });
 
         app.handle_client_event(ClientEvent::PeerSucceeded {
@@ -3735,5 +3955,258 @@ mod tests {
         // one the rotation left, untouched.
         assert_eq!(app.system.len(), before + 2);
         assert!(app.store.revocation().unwrap().is_none());
+    }
+
+    // --- groups ------------------------------------------------------------------
+
+    use super::groups::Purpose;
+    use silver_client::SequencerAnswer;
+    use silver_client::groups::{Groups, Outgoing};
+    use silver_protocol::envelope::{Body, Envelope, open_bytes};
+    use silver_protocol::group::GroupId;
+
+    /// Another member's client: an engine over a fresh identity.
+    fn engine() -> (Arc<Identity>, Groups) {
+        let identity = Arc::new(Identity::generate());
+        (identity.clone(), Groups::ephemeral(identity))
+    }
+
+    /// Open an envelope another engine sealed to the app's user, as the
+    /// connection task would, and hand its group body to the app.
+    fn deliver(app: &mut App, envelope: &Envelope) {
+        let identity = app.client.identity_arc();
+        let opened = open_bytes(&identity, envelope).unwrap();
+        let Body::Group(body) = Body::decode(&opened.body).unwrap() else {
+            panic!("not a group body");
+        };
+        app.handle_client_event(ClientEvent::Group {
+            from: opened.from,
+            id: opened.id,
+            body: Box::new(body),
+        });
+    }
+
+    /// `admin` adds the app's user to `group` with the app's `n`th key
+    /// package on deposit: the Welcome to send.
+    fn add_me(app: &mut App, admin: &mut Groups, group: &GroupId, n: usize) -> Outgoing {
+        let (packages, _) = app.groups.deposit(now_ms()).unwrap();
+        let verified = admin
+            .verify_key_package(&app.me, &packages[n].data, now_ms())
+            .unwrap();
+        admin.stage_add(group, &[verified]).unwrap();
+        admin.commit_staged(group, now_ms()).unwrap()
+    }
+
+    fn text(s: &str) -> Content {
+        Content::Text { body: s.into() }
+    }
+
+    fn group_texts(app: &App, group: &GroupId) -> Vec<String> {
+        app.group_threads
+            .get(group)
+            .map(|lines| lines.iter().map(|l| l.text.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn a_group_stands_on_the_sequencers_word_and_falls_without_it() {
+        let (mut app, _dir) = app();
+        assert_eq!(app.pane_count(), 1);
+        let created = app.groups.create("team", now_ms()).unwrap();
+        let group = created.group;
+        app.refresh_group_list();
+        assert_eq!(app.group_list, vec![group]);
+        assert_eq!(app.pane_count(), 2);
+        assert_eq!(
+            app.selected_group(),
+            None,
+            "not opened before the relay agrees"
+        );
+
+        // The relay takes it: the pane opens.
+        app.on_group_sequenced(group, Purpose::Create, Ok(SequencerAnswer::Stands(0)));
+        assert_eq!(app.selected_group(), Some(group));
+        assert!(app.group_title(&group).contains("you are an admin"));
+        assert!(
+            app.system
+                .iter()
+                .any(|l| l.text.starts_with("Created team"))
+        );
+
+        // A rename the relay calls stale is discarded, and the name stays.
+        app.groups.stage_rename(&group, "crew").unwrap();
+        app.on_group_sequenced(
+            group,
+            Purpose::Rename("crew".into()),
+            Ok(SequencerAnswer::Stale(3)),
+        );
+        assert!(!app.groups.has_staged(&group));
+        assert_eq!(app.group_name(&group), "team");
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|(t, _)| t.contains("did not go through"))
+        );
+
+        // One that stands is merged and noted in the group.
+        app.groups.stage_rename(&group, "crew").unwrap();
+        app.on_group_sequenced(
+            group,
+            Purpose::Rename("crew".into()),
+            Ok(SequencerAnswer::Stands(1)),
+        );
+        assert_eq!(app.group_name(&group), "crew");
+        assert_eq!(
+            group_texts(&app, &group),
+            vec!["· you renamed the group to crew"]
+        );
+        assert_eq!(app.store.load_group_history(&group).unwrap().len(), 1);
+
+        // A second group the relay refuses is dropped again.
+        let other = app.groups.create("other", now_ms()).unwrap();
+        app.refresh_group_list();
+        assert_eq!(app.group_list.len(), 2);
+        app.on_group_sequenced(other.group, Purpose::Create, Ok(SequencerAnswer::Exists(4)));
+        assert_eq!(app.group_list, vec![group]);
+        assert!(app.groups.get(&other.group).is_none());
+        assert_eq!(app.pane_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn an_invitation_waits_for_a_stranger_and_is_taken_from_a_contact() {
+        let (mut app, _dir) = app();
+        let (alice_id, mut alice) = engine();
+        let alice_id = alice_id.user_id();
+        let created = alice.create("the papers", now_ms()).unwrap();
+        let group = created.group;
+        let out = add_me(&mut app, &mut alice, &group, 0);
+        assert_eq!(out.envelopes.len(), 1, "a Welcome to us alone");
+        deliver(&mut app, &out.envelopes[0]);
+
+        // A stranger's Welcome waits in Requests; nothing of the group shows.
+        assert!(app.group_list.is_empty());
+        assert_eq!(app.invitations().len(), 1);
+        assert!(app.has_requests_pane());
+        assert_eq!(app.held_message_count(), 1);
+        assert_eq!(app.pane_count(), 2);
+        assert!(
+            app.system
+                .iter()
+                .any(|l| l.text.contains("invites you to the group the papers"))
+        );
+        let out = alice
+            .send(&group, text("before you said yes"), None, now_ms())
+            .unwrap();
+        deliver(&mut app, &out.envelopes[0]);
+        assert!(group_texts(&app, &group).is_empty());
+
+        // /accept g1 opens it, and what comes next shows with its writer.
+        app.cmd_accept(&["g1"]);
+        assert_eq!(app.group_list, vec![group]);
+        assert!(app.invitations().is_empty());
+        assert!(!app.has_requests_pane());
+        assert_eq!(app.selected_group(), Some(group));
+        assert!(
+            group_texts(&app, &group)
+                .iter()
+                .any(|t| t.ends_with(" added you"))
+        );
+        let out = alice.send(&group, text("hello"), None, now_ms()).unwrap();
+        deliver(&mut app, &out.envelopes[0]);
+        let last = app.group_threads[&group].last().unwrap();
+        assert_eq!(last.text, "hello");
+        assert_eq!(last.direction, Direction::Received);
+        assert_eq!(last.sender, Some(alice_id));
+        assert!(
+            app.group_unread.get(&group).is_none_or(|u| u.is_empty()),
+            "read at once in the open, focused pane"
+        );
+        let history = app.store.load_group_history(&group).unwrap();
+        assert_eq!(history.last().unwrap().from, Some(alice_id));
+        // The same envelope again is not shown twice.
+        deliver(&mut app, &out.envelopes[0]);
+        assert_eq!(
+            group_texts(&app, &group)
+                .iter()
+                .filter(|t| *t == "hello")
+                .count(),
+            1
+        );
+
+        // Declined, an invitation goes without a trace.
+        let second = alice.create("another", now_ms()).unwrap();
+        let out = add_me(&mut app, &mut alice, &second.group, 1);
+        deliver(&mut app, &out.envelopes[0]);
+        assert_eq!(app.invitations().len(), 1);
+        app.cmd_decline(&["g1"]);
+        assert!(app.invitations().is_empty());
+        assert!(app.groups.get(&second.group).is_none());
+        assert_eq!(app.group_list, vec![group]);
+
+        // A contact's Welcome is taken at once, with a badge on the pane.
+        let (bob_id, mut bob) = engine();
+        app.contacts.push(Contact::new(bob_id.user_id()));
+        let third = bob.create("bob's", now_ms()).unwrap();
+        let out = add_me(&mut app, &mut bob, &third.group, 2);
+        deliver(&mut app, &out.envelopes[0]);
+        assert!(app.invitations().is_empty());
+        assert!(app.group_list.contains(&third.group));
+        assert!(
+            app.group_unread
+                .get(&third.group)
+                .is_some_and(|u| !u.is_empty())
+        );
+
+        // A blocked sender's Welcome is declined without a word.
+        let (eve_id, mut eve) = engine();
+        app.blocked.push(eve_id.user_id());
+        let fourth = eve.create("eve's", now_ms()).unwrap();
+        let out = add_me(&mut app, &mut eve, &fourth.group, 3);
+        let before = app.system.len();
+        deliver(&mut app, &out.envelopes[0]);
+        assert!(app.invitations().is_empty());
+        assert!(app.groups.get(&fourth.group).is_none());
+        assert_eq!(app.system.len(), before);
+    }
+
+    #[tokio::test]
+    async fn a_group_message_is_marked_sent_once_every_member_has_it() {
+        let (mut app, _dir) = app();
+        let created = app.groups.create("team", now_ms()).unwrap();
+        let group = created.group;
+        app.refresh_group_list();
+        app.on_group_sequenced(group, Purpose::Create, Ok(SequencerAnswer::Stands(0)));
+
+        // Two envelopes went out for one message; the relay took one so far.
+        app.group_envelopes
+            .insert("e1".into(), (group, "m1".into()));
+        app.group_envelopes
+            .insert("e2".into(), (group, "m1".into()));
+        app.group_outstanding.insert("m1".into(), 2);
+        app.on_group_sent(group, Some("m1".into()), Some("hello".into()), Ok(()));
+        let line = app.group_line_mut(&group, "m1").unwrap();
+        assert_eq!(line.direction, Direction::Sent);
+        assert!(!line.delivered);
+        assert!(app.on_group_envelope_done("e1", true));
+        assert!(!app.group_line_mut(&group, "m1").unwrap().delivered);
+        assert!(app.on_group_envelope_done("e2", true));
+        assert!(app.group_line_mut(&group, "m1").unwrap().delivered);
+        assert!(app.group_outstanding.is_empty());
+        // An envelope of a one-to-one message is not ours to count.
+        assert!(!app.on_group_envelope_done("elsewhere", true));
+
+        // A message the relay refused is not shown as sent.
+        app.on_group_sent(
+            group,
+            Some("m2".into()),
+            Some("lost".into()),
+            Err("gone".into()),
+        );
+        assert!(app.group_line_mut(&group, "m2").is_none());
+        assert!(
+            app.system
+                .last()
+                .is_some_and(|l| l.text.contains("not sent"))
+        );
     }
 }

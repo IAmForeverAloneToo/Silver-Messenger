@@ -289,6 +289,10 @@ pub struct HistoryEntry {
     /// For a received file: how to fetch it, kept until it has been.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<FileInfo>,
+    /// In a group's history: who wrote it (absent for our own lines and
+    /// for notes about the group).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<UserId>,
 }
 
 /// A later line in a history file that updates earlier entries.
@@ -855,7 +859,39 @@ impl Store {
     // --- history ---------------------------------------------------------------
 
     pub fn append_history(&self, peer: &UserId, entry: &HistoryEntry) -> anyhow::Result<()> {
-        self.append_history_line(peer, &serde_json::to_string(entry)?)
+        self.append_history_line(&history_name(peer), &serde_json::to_string(entry)?)
+    }
+
+    /// A group's conversation log, kept like a contact's under
+    /// `history/group-<id>.jsonl`.
+    pub fn append_group_history(
+        &self,
+        group: &silver_protocol::GroupId,
+        entry: &HistoryEntry,
+    ) -> anyhow::Result<()> {
+        self.append_history_line(&group_history_name(group), &serde_json::to_string(entry)?)
+    }
+
+    /// [`Store::append_text`] for a group's log.
+    pub fn append_group_text(
+        &self,
+        group: &silver_protocol::GroupId,
+        id: &str,
+        text: &str,
+    ) -> anyhow::Result<()> {
+        let line = TextLine {
+            update: id.to_owned(),
+            text: text.to_owned(),
+        };
+        self.append_history_line(&group_history_name(group), &serde_json::to_string(&line)?)
+    }
+
+    /// [`Store::load_history`] for a group's log.
+    pub fn load_group_history(
+        &self,
+        group: &silver_protocol::GroupId,
+    ) -> anyhow::Result<Vec<HistoryEntry>> {
+        self.load_history_named(&group_history_name(group))
     }
 
     /// Record that the peer returned a receipt for messages we sent.
@@ -871,7 +907,7 @@ impl Store {
             ids: ids.to_vec(),
             at_ms,
         };
-        self.append_history_line(peer, &serde_json::to_string(&line)?)
+        self.append_history_line(&history_name(peer), &serde_json::to_string(&line)?)
     }
 
     /// Replace the text of the entry `id` from now on; the original line
@@ -881,19 +917,18 @@ impl Store {
             update: id.to_owned(),
             text: text.to_owned(),
         };
-        self.append_history_line(peer, &serde_json::to_string(&line)?)
+        self.append_history_line(&history_name(peer), &serde_json::to_string(&line)?)
     }
 
-    fn append_history_line(&self, peer: &UserId, json: &str) -> anyhow::Result<()> {
+    fn append_history_line(&self, name: &str, json: &str) -> anyhow::Result<()> {
         self.ensure_unlocked()?;
-        let name = history_name(peer);
-        let path = self.root.join(&name);
+        let path = self.root.join(name);
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
             .with_context(|| format!("opening {}", path.display()))?;
-        let mut line = encode_line(self.cipher.as_deref(), &name, json);
+        let mut line = encode_line(self.cipher.as_deref(), name, json);
         line.push('\n');
         file.write_all(line.as_bytes())?;
         Ok(())
@@ -940,9 +975,12 @@ impl Store {
     /// The conversation with `peer`, receipts applied to the entries they
     /// refer to.
     pub fn load_history(&self, peer: &UserId) -> anyhow::Result<Vec<HistoryEntry>> {
+        self.load_history_named(&history_name(peer))
+    }
+
+    fn load_history_named(&self, name: &str) -> anyhow::Result<Vec<HistoryEntry>> {
         self.ensure_unlocked()?;
-        let name = history_name(peer);
-        let path = self.root.join(&name);
+        let path = self.root.join(name);
         if !path.exists() {
             return Ok(Vec::new());
         }
@@ -953,7 +991,7 @@ impl Store {
             if line.trim().is_empty() {
                 continue;
             }
-            let parsed = decode_line(self.cipher.as_deref(), &name, line)
+            let parsed = decode_line(self.cipher.as_deref(), name, line)
                 .and_then(|plain| serde_json::from_str::<HistoryLine>(&plain).map_err(Into::into));
             match parsed {
                 Ok(HistoryLine::Entry(entry)) => entries.push(entry),
@@ -995,6 +1033,10 @@ impl Store {
 
 fn history_name(peer: &UserId) -> String {
     format!("{HISTORY_DIR}/{peer}.jsonl")
+}
+
+fn group_history_name(group: &silver_protocol::GroupId) -> String {
+    format!("{HISTORY_DIR}/group-{group}.jsonl")
 }
 
 fn relative_name(root: &Path, path: &Path) -> String {
@@ -1154,6 +1196,7 @@ mod tests {
             text: format!("msg {i}"),
             receipt: None,
             file: None,
+            from: None,
         }
     }
 

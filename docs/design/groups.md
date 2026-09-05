@@ -402,7 +402,10 @@ generates a key package for the purpose, and sends a `join` body to the
 admin with `join.proof = HMAC-SHA256(key, "silver-messenger/v1/group-join" || group_id || joiner id)`.
 The admin's client verifies the proof against its current invite key,
 checks the joiner is not blocked and not already a member, and adds it as
-in 7.2; members see "X joined by link". A link names one admin; if that
+in 7.2; members see "X joined by link". The joiner's client remembers
+which admin it asked for which group, and takes that admin's Welcome
+without asking the user again: the request was the yes. A Welcome for
+the group from anyone else is an invitation as in 7.2. A link names one admin; if that
 admin is gone the link is dead and someone makes a new one. `/group link
 reset` rotates the invite key (a `GroupContextExtensions` commit) and
 prints the new link.

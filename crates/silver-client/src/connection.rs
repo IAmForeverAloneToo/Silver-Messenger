@@ -216,6 +216,12 @@ enum Command {
         user_id: UserId,
         reply: oneshot::Sender<Result<Option<(KeyPackageDeposit, bool)>, ClientError>>,
     },
+    /// A peer's transparency log head, from a message the front end
+    /// decrypted itself.
+    PeerHead {
+        peer: UserId,
+        head: silver_protocol::LogHead,
+    },
     /// A `GroupCreate` or `GroupCommit`, on the anonymous connection when
     /// it is up.
     Sequencer {
@@ -595,7 +601,7 @@ impl Client {
     /// The relay's transparency log as this client last verified it, to
     /// carry inside every message for the recipient to compare; nothing
     /// until the log has been replayed once, or when no log is kept.
-    fn gossip_head(&self) -> Option<silver_protocol::LogHead> {
+    pub fn gossip_head(&self) -> Option<silver_protocol::LogHead> {
         let log = self.log.as_ref()?;
         if !self.relay_supports(feature::TRANSPARENCY) {
             return None;
@@ -612,6 +618,25 @@ impl Client {
 
     pub fn identity(&self) -> &Identity {
         &self.identity
+    }
+
+    /// The identity, shared.
+    pub fn identity_arc(&self) -> Arc<Identity> {
+        self.identity.clone()
+    }
+
+    /// A transparency log head a peer carried inside a message the front
+    /// end decrypted itself (a group message), to compare with our own
+    /// view as heads inside one-to-one messages are.
+    pub async fn note_peer_head(
+        &self,
+        peer: UserId,
+        head: silver_protocol::LogHead,
+    ) -> Result<(), ClientError> {
+        self.cmd_tx
+            .send(Command::PeerHead { peer, head })
+            .await
+            .map_err(|_| ClientError::Stopped)
     }
 
     pub fn user_id(&self) -> UserId {
@@ -1070,6 +1095,7 @@ async fn run(
                     Some(Command::Sequencer { reply, .. }) => {
                         let _ = reply.send(Err(ClientError::NotConnected));
                     }
+                    Some(Command::PeerHead { .. }) => {}
                 },
             }
         }
@@ -1271,6 +1297,11 @@ async fn session(
                         return Ok(Exit::Disconnected("send failed".into()));
                     }
                     key_package_replies.entry(user_id).or_default().push_back(reply);
+                }
+                Some(Command::PeerHead { peer, head }) => {
+                    if !dispatch(tail.on_peer_head(peer, head), &mut sink, ev_tx).await {
+                        return Ok(Exit::Disconnected("send failed".into()));
+                    }
                 }
                 Some(Command::Sequencer { group, frame, reply }) => {
                     // On the anonymous connection when it is up, so the

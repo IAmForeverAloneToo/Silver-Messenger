@@ -12,7 +12,7 @@ use silver_protocol::UserId;
 use silver_protocol::envelope::ReceiptKind;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, Connection, Level, Pane, View, ViewRow};
+use crate::app::{App, ChatLine, Connection, Level, Pane, View, ViewRow};
 
 /// Rows the compose box may grow to before it scrolls.
 const INPUT_MAX_ROWS: u16 = 6;
@@ -152,7 +152,23 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
         };
         lines.push(row(label, unread, app.selected == i + 1));
     }
-    if !app.requests.is_empty() {
+    for (i, group) in app.group_list.iter().enumerate() {
+        let unread = app
+            .group_unread
+            .get(group)
+            .map(|ids| ids.len())
+            .filter(|n| *n > 0);
+        let label = match app.group_state_label(group) {
+            Some(state) => format!("# {} ({state})", app.group_name(group)),
+            None => format!("# {}", app.group_name(group)),
+        };
+        lines.push(row(
+            label,
+            unread,
+            app.selected == app.contacts.len() + i + 1,
+        ));
+    }
+    if app.has_requests_pane() {
         lines.push(row(
             "Requests".into(),
             Some(app.held_message_count()),
@@ -173,14 +189,19 @@ fn draw_messages(frame: &mut Frame, app: &mut App, area: Rect) {
     let width = area.width.saturating_sub(2) as usize;
     let height = area.height.saturating_sub(2) as usize;
 
-    let (title, rows, pane) = match app.selected_contact() {
-        None if app.requests_pane_selected() => (
-            " Contact requests ".to_owned(),
+    let (title, rows, pane) = match (app.selected_group(), app.selected_contact()) {
+        (Some(group), _) => (
+            app.group_title(&group),
+            group_rows(app, &group, width),
+            Pane::Group(group),
+        ),
+        (None, None) if app.requests_pane_selected() => (
+            " Requests ".to_owned(),
             request_rows(app, width),
             Pane::Requests,
         ),
-        None => (" System ".to_owned(), system_rows(app, width), Pane::System),
-        Some(contact) => (
+        (None, None) => (" System ".to_owned(), system_rows(app, width), Pane::System),
+        (None, Some(contact)) => (
             format!(
                 " {}{} · {}{}{} ",
                 if contact.verified && !contact.revoked {
@@ -340,11 +361,32 @@ fn request_rows(app: &App, width: usize) -> Vec<Row> {
     let mut rows: Vec<Row> = Vec::new();
     rows.extend(wrap_message(
         vec![],
-        "People who wrote to you but are not contacts yet. /accept <n> starts a chat with them; /block <n> drops their messages from now on.",
+        "People who wrote to you but are not contacts yet. /accept <n> starts a chat with them; /block <n> drops their messages from now on. Group invitations from strangers wait here too: /accept g<n> joins, /decline g<n> does not.",
         app.theme.dim,
         width,
     ).into_iter().map(|l| (l, None)));
     rows.push((Line::from(""), None));
+    for (i, held) in app.invitations().iter().enumerate() {
+        rows.push((
+            Line::from(vec![
+                Span::styled(
+                    format!("g{}. {}", i + 1, held.name),
+                    app.theme.accent.add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(
+                        "  a group of {}, from {}… ({})",
+                        held.members.len(),
+                        held.from.short(),
+                        held.from
+                    ),
+                    app.theme.dim,
+                ),
+            ]),
+            None,
+        ));
+        rows.push((Line::from(""), None));
+    }
     for (i, request) in app.requests.iter().enumerate() {
         rows.push((
             Line::from(vec![
@@ -392,14 +434,48 @@ fn thread_rows(app: &App, peer: &UserId, width: usize) -> Vec<Row> {
         .find(|c| c.user_id == *peer)
         .map(|c| c.display_name())
         .unwrap_or_default();
-    let mut rows: Vec<Row> = Vec::new();
-    let mut last_day: Option<NaiveDate> = None;
-    let today = Local::now().date_naive();
     let marker = app
         .new_marker
         .as_ref()
         .filter(|(p, _)| p == peer)
         .map(|(_, id)| id.as_str());
+    lines_rows(app, lines, &|_| peer_name.clone(), marker, width)
+}
+
+fn group_rows(app: &App, group: &silver_protocol::group::GroupId, width: usize) -> Vec<Row> {
+    let Some(lines) = app.group_threads.get(group) else {
+        return Vec::new();
+    };
+    let marker = app
+        .group_new_marker
+        .as_ref()
+        .filter(|(g, _)| g == group)
+        .map(|(_, id)| id.as_str());
+    lines_rows(
+        app,
+        lines,
+        &|line: &ChatLine| match line.sender {
+            Some(sender) => app.member_name(&sender),
+            None => String::new(),
+        },
+        marker,
+        width,
+    )
+}
+
+/// The rows of a conversation: date rules, the "new messages" rule, and
+/// each line with its clock, name, mark and text. `name_of` names the
+/// writer of a received line; an empty name is a note about the chat.
+fn lines_rows(
+    app: &App,
+    lines: &[ChatLine],
+    name_of: &dyn Fn(&ChatLine) -> String,
+    marker: Option<&str>,
+    width: usize,
+) -> Vec<Row> {
+    let mut rows: Vec<Row> = Vec::new();
+    let mut last_day: Option<NaiveDate> = None;
+    let today = Local::now().date_naive();
     for (i, line) in lines.iter().enumerate() {
         // A separator whenever the calendar day changes.
         let day = Local
@@ -419,9 +495,9 @@ fn thread_rows(app: &App, peer: &UserId, width: usize) -> Vec<Row> {
         if marker == Some(line.id.as_str()) {
             rows.push((separator(" new messages ", width, app.theme.accent), None));
         }
-        let (name, name_style) = match line.direction {
+        let (name, name_style): (String, Style) = match line.direction {
             Direction::Sent => ("you".to_owned(), app.theme.you),
-            Direction::Received => (peer_name.clone(), app.theme.peer),
+            Direction::Received => (name_of(line), app.theme.peer),
         };
         // ⋯ waiting for the relay, ✓ accepted by the relay, ✓✓ delivered to
         // their device, ✓✓ in colour read, ✗ refused for good (or their
@@ -442,14 +518,26 @@ fn thread_rows(app: &App, peer: &UserId, width: usize) -> Vec<Row> {
         } else {
             format!(" {mark}")
         };
-        let prefix = vec![
-            Span::styled(format!("{} ", clock(line.timestamp_ms)), app.theme.dim),
-            Span::styled(name, name_style.add_modifier(Modifier::BOLD)),
-            Span::styled(mark, mark_style),
-            Span::raw(": "),
-        ];
+        let prefix = if name.is_empty() {
+            vec![Span::styled(
+                format!("{} ", clock(line.timestamp_ms)),
+                app.theme.dim,
+            )]
+        } else {
+            vec![
+                Span::styled(format!("{} ", clock(line.timestamp_ms)), app.theme.dim),
+                Span::styled(name, name_style.add_modifier(Modifier::BOLD)),
+                Span::styled(mark, mark_style),
+                Span::raw(": "),
+            ]
+        };
+        let style = if line.text.starts_with("· ") {
+            app.theme.dim
+        } else {
+            Style::default()
+        };
         rows.extend(
-            wrap_message(prefix, &line.text, Style::default(), width)
+            wrap_message(prefix, &line.text, style, width)
                 .into_iter()
                 .map(|l| (l, Some(i))),
         );
@@ -862,6 +950,7 @@ mod tests {
                     receipt: Some(ReceiptKind::Read),
                     file: None,
                     pending: None,
+                    sender: None,
                 },
                 ChatLine {
                     id: "2".into(),
@@ -873,6 +962,7 @@ mod tests {
                     receipt: None,
                     file: None,
                     pending: None,
+                    sender: None,
                 },
                 ChatLine {
                     id: "3".into(),
@@ -884,6 +974,7 @@ mod tests {
                     receipt: None,
                     file: None,
                     pending: None,
+                    sender: None,
                 },
             ],
         );
@@ -1005,6 +1096,7 @@ mod tests {
                 receipt: None,
                 file: None,
                 pending: None,
+                sender: None,
             }],
         );
         app.requests.push(ContactRequest {
