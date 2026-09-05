@@ -104,11 +104,12 @@ this one, a provisional code point is an internal matter: PROTOCOL.md
 records it, and when the RFC assigns the final one, groups are
 re-initialised (RFC 9420 `ReInit`, or re-creation by an admin) under a
 bumped group protocol version. That is one commit per group, and the
-sequencer entry moves with it. If OpenMLS's post-quantum feature turns out
-unfit in the spike (section 15), the fallback is RFC 9420's
+sequencer entry moves with it. The spike (section 15) ran the suite end
+to end on the pinned stable toolchain; the ML-KEM-768 and X-Wing code
+comes from libcrux, Cryspen's verified implementations, through hpke-rs.
+The fallback, had it failed, would have been RFC 9420's
 `MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519` with the same
-re-initialisation path to the hybrid suite later, and the threat model
-says so in plain words. The spike decides; the note is corrected.
+re-initialisation path to the hybrid suite later; it was not needed.
 
 ### 4.2 Credentials and leaves
 
@@ -186,8 +187,11 @@ for the relay to not learn membership, reads would have to be anonymous
 and tokenised. Fan-out keeps one delivery path, one quota, one expiry
 rule, sealed sender for free, and gives the relay nothing but the same
 per-recipient rows it already stores. The price is upload bandwidth
-proportional to group size, which section 12 quantifies and which is the
-same trade Signal makes.
+proportional to group size for small messages, which section 12
+quantifies and which is the same trade Signal makes; a large message
+(a Welcome, a commit with a long update path) goes once through the blob
+store and only its reference is fanned out, so the cost of the big
+objects does not multiply.
 
 What fan-out leaves the relay: a burst of envelopes from one anonymous
 connection to a set of recipients, from which it can infer that those
@@ -590,26 +594,40 @@ line item 48 changes.
 ## 12. Sizes
 
 With X-Wing, the public keys are large: 1216 bytes per HPKE public key,
-1120 bytes per ciphertext. Estimates, to be measured in the spike and
-corrected here:
+1120 bytes per ciphertext. Measured in the spike with OpenMLS 0.9 (TLS
+serialisation, before the envelope):
 
 | Object | Size | Path |
 | --- | --- | --- |
-| Key package | about 2.8 KiB | 20 on deposit is about 56 KiB, under the 128 KiB frame |
-| Text message (padded body) | 320 to 480 bytes | envelope, the size of a one-to-one text |
-| Commit with path, 16 members | about 12 KiB | envelope |
-| Commit with path, 256 members | about 24 KiB | envelope or blob, at the edge |
-| Commit adding 10 members | about 30 KiB plus path | blob |
-| Welcome with tree, 16 members | about 40 KiB | blob |
-| Welcome with tree, 256 members | about 700 KiB | blob |
+| Key package | 2680 bytes (last resort: 2683) | 20 on deposit is 52 KiB, under the 128 KiB frame |
+| Application message, 11 bytes of plaintext | 156 bytes | envelope; the padded body is 320 bytes, the size of a one-to-one text |
+| Application message, 100 bytes | 246 bytes | envelope, 480-byte padded body |
+| Commit adding 2, and its Welcome (3 members) | 9.4 KiB, 9.6 KiB | envelope |
+| Self-update commit with path, 3 members | 6.4 KiB | envelope |
+| Commit adding 15, and its Welcome (16 members) | 46 KiB, 46 KiB | blob |
+| Self-update commit with path, 16 members | 15.8 KiB | envelope |
+| Commit adding 255, and its Welcome (256 members) | 695 KiB, 684 KiB | blob |
+| Self-update commit with path, 256 members, young tree | 161 KiB | blob |
+
+The last row is larger than log(N) would suggest because a tree built by
+one big add has every leaf unmerged on the path, so a path encrypts to
+each of them; as members update, the tree fills in and paths shrink
+towards a dozen ciphertexts. The 24 KiB inline limit therefore routes
+most commits in groups beyond about twenty members through the blob
+store, and every Welcome beyond a handful of members.
 
 Fan-out cost to the sender: a text message to a group of N costs N
-envelopes of about 480 bytes: 8 KiB for 16, 120 KiB for 256. A commit
-costs N times its size, so an admin adding to a group of 256 uploads up
-to 6 MiB; through Tor that is slow and is said in the docs. The relay's
+envelopes of 320 to 480 bytes: 8 KiB for 16, 120 KiB for 256. A commit
+that goes through the blob store is uploaded once and then costs N
+envelopes of about 500 bytes, so an admin adding to a group of 256
+uploads about 700 KiB plus 128 KiB of envelopes, not N times the commit;
+through Tor that is a minute, and the docs say so. The relay's
 per-recipient quota (1000 envelopes, 32 MiB) is unchanged; a very active
 group of 256 fills an absent member's mailbox in about a thousand
-messages, after which that member rejoins on return (7.5).
+messages, after which that member rejoins on return (7.5). Building a
+256-member group took 15 seconds of CPU in the spike, most of it 255
+X-Wing key generations, which real clients do ahead of time when they
+deposit key packages.
 
 ## 13. Tests
 
@@ -667,15 +685,27 @@ Compatibility through the steps: nothing sends a v5 body until step 4,
 and nothing deposits a key package until then, so a partially landed tree
 is a 0.8.0 client with more code.
 
-## 15. Open points, to be settled by the spike
+## 15. What the spike settled
 
-* Whether OpenMLS's post-quantum feature builds and behaves on all three
-  CI platforms with the pinned toolchain; the fallback is in 4.1.
-* The exact sizes of section 12.
-* Whether `StagedCommit::export_secret` gives the next epoch's exporter for
-  the committer's own pending commit, which the sequencer step relies on;
-  if not, the committer merges first and the sequencer step happens
-  inside a storage transaction that is rolled back on `stale`.
-* Whether the redb-backed storage provider's write amplification is
-  acceptable for a busy group, or whether a write-behind cache with
-  explicit flush points is needed.
+A throwaway program against OpenMLS 0.9.0 with the
+`draft-ietf-mls-pq-ciphersuites` feature, on stable 1.94 on Linux:
+
+* The hybrid suite creates a group, adds members, delivers a Welcome
+  with the tree, sends and reads application messages, and removes a
+  member who then cannot read the next epoch. The other CI platforms
+  are exercised by the implementation's own tests.
+* `StagedCommit::export_secret` on the committer's own pending commit
+  equals `MlsGroup::export_secret` after the merge, so the sequencer
+  step of 5.2 needs no transaction and no rollback: build the commit,
+  read the next token from the staged commit, ask the sequencer, then
+  merge or clear.
+* A losing committer clears its pending commit and merges the winner's
+  without any special handling.
+* The sizes are those of section 12.
+* Key package validation from bytes (`KeyPackageIn::validate`) gives the
+  fetcher the credential, the signature key and the leaf extensions to
+  check against the identity, which is what 6.1 needs.
+
+Still open, to be settled by the implementation: whether the redb-backed
+storage provider's write amplification is acceptable for a busy group,
+or whether a write-behind cache with explicit flush points is needed.
