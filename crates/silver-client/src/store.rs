@@ -236,6 +236,11 @@ pub struct Contact {
     /// primary's is `received`.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub device_received: HashMap<UserId, Sequence>,
+    /// The conversation's disappearing-message timer, in seconds; 0 for
+    /// none (`docs/design/everyday.md`). Set by either side, applied to
+    /// messages sent and received from then on.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub expire_after_s: u64,
 }
 
 impl Contact {
@@ -251,6 +256,7 @@ impl Contact {
             auto_files: false,
             revoked: false,
             device_received: HashMap::new(),
+            expire_after_s: 0,
         }
     }
 
@@ -306,6 +312,23 @@ pub enum Direction {
     Received,
 }
 
+/// A reaction to a message, as kept with it: whose (`None` for one's
+/// own) and what.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reaction {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<UserId>,
+    pub emoji: String,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 /// One message in a conversation log.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HistoryEntry {
@@ -324,6 +347,73 @@ pub struct HistoryEntry {
     /// for notes about the group).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<UserId>,
+    /// The message this one answers (`docs/PROTOCOL.md` section 4.7), if
+    /// it is a reply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<String>,
+    /// The conversation's disappearing-message timer when this was sent
+    /// or received, in seconds; 0 for none. The clock runs from
+    /// `timestamp_ms` for a sent message and from `read_at_ms` for a
+    /// received one ([`crate::everyday::expires_at`]).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub expire_after_s: u64,
+    /// When a received message was shown; applied from later `read`
+    /// lines, and written with the entry only where the entry carries its
+    /// state whole (a device snapshot).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_at_ms: Option<u64>,
+    /// The text was replaced by an edit; `previous` holds the earlier
+    /// texts, oldest first.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub edited: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub previous: Vec<String>,
+    /// The author deleted the message for everyone: what stays is a
+    /// placeholder with no text and no file, which later edits and
+    /// reactions leave alone.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub deleted: bool,
+    /// The reactions to it, one per person; applied from later lines.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reactions: Vec<Reaction>,
+}
+
+impl HistoryEntry {
+    /// A plain entry: no receipt, no file, no sender, nothing of section
+    /// 4.7 about it.
+    pub fn new(
+        id: impl Into<String>,
+        direction: Direction,
+        timestamp_ms: u64,
+        text: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            direction,
+            timestamp_ms,
+            text: text.into(),
+            receipt: None,
+            file: None,
+            from: None,
+            reply_to: None,
+            expire_after_s: 0,
+            read_at_ms: None,
+            edited: false,
+            previous: Vec::new(),
+            deleted: false,
+            reactions: Vec::new(),
+        }
+    }
+
+    /// When this message goes, if it has a timer and its clock runs.
+    pub fn expires_at_ms(&self) -> Option<u64> {
+        crate::everyday::expires_at(
+            self.direction,
+            self.timestamp_ms,
+            self.read_at_ms,
+            self.expire_after_s,
+        )
+    }
 }
 
 /// A later line in a history file that updates earlier entries.
@@ -342,13 +432,86 @@ struct TextLine {
     text: String,
 }
 
-/// What one line of a history file can be.
+/// Messages shown to the user, and when: a received message's timer runs
+/// from the first such line that names it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ReadLine {
+    read: Vec<String>,
+    at_ms: u64,
+}
+
+/// An edit: the message `edit` says `text` from now on; the edit's own id
+/// and time are kept for the record.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct EditLine {
+    edit: String,
+    text: String,
+    edit_id: String,
+    at_ms: u64,
+}
+
+/// A reaction to the message `react` from `from` (absent: one's own);
+/// an empty `emoji` withdraws it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ReactLine {
+    react: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    from: Option<UserId>,
+    emoji: String,
+}
+
+/// The message `gone` was removed for good: an entry for it and any line
+/// naming it, before or after this one, count for nothing.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct GoneLine {
+    gone: String,
+}
+
+/// What one line of a history file can be. Each kind has a key of its
+/// own (`id` and `direction`, `receipt`, `update`, `read`, `edit`,
+/// `react`, `gone`), which is how the untagged enum tells them apart.
 #[derive(Serialize, Deserialize)]
 #[serde(untagged)]
 enum HistoryLine {
-    Entry(HistoryEntry),
+    Entry(Box<HistoryEntry>),
     Receipt(ReceiptLine),
     Text(TextLine),
+    Read(ReadLine),
+    Edit(EditLine),
+    React(ReactLine),
+    Gone(GoneLine),
+}
+
+impl HistoryLine {
+    /// The message ids this line is about, for a rewrite that drops what
+    /// names a removed message.
+    fn names(&self, id: &str) -> bool {
+        match self {
+            Self::Entry(e) => e.id == id,
+            Self::Receipt(r) => r.ids.iter().any(|i| i == id),
+            Self::Text(t) => t.update == id,
+            Self::Read(r) => r.read.iter().any(|i| i == id),
+            Self::Edit(e) => e.edit == id,
+            Self::React(r) => r.react == id,
+            Self::Gone(g) => g.gone == id,
+        }
+    }
+}
+
+/// A conversation's log: with a contact, or in a group.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Conversation {
+    Contact(UserId),
+    Group(silver_protocol::GroupId),
+}
+
+impl Conversation {
+    fn file_name(&self) -> String {
+        match self {
+            Self::Contact(peer) => history_name(peer),
+            Self::Group(group) => group_history_name(group),
+        }
+    }
 }
 
 /// A message from someone who is not a contact yet, held until the user
@@ -1124,7 +1287,17 @@ impl Store {
         self.load_history_named(&history_name(peer))
     }
 
-    fn load_history_named(&self, name: &str) -> anyhow::Result<Vec<HistoryEntry>> {
+    /// A conversation's log, whichever kind it is.
+    pub fn load_conversation(
+        &self,
+        conversation: &Conversation,
+    ) -> anyhow::Result<Vec<HistoryEntry>> {
+        self.load_history_named(&conversation.file_name())
+    }
+
+    /// Every line of a history file, decoded; unreadable lines are kept as
+    /// they are (`Err`), so a rewrite loses nothing it does not understand.
+    fn read_history_lines(&self, name: &str) -> anyhow::Result<Vec<Result<HistoryLine, String>>> {
         self.ensure_unlocked()?;
         let path = self.root.join(name);
         if !path.exists() {
@@ -1132,7 +1305,7 @@ impl Store {
         }
         let text =
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-        let mut entries: Vec<HistoryEntry> = Vec::new();
+        let mut lines = Vec::new();
         for line in text.lines() {
             if line.trim().is_empty() {
                 continue;
@@ -1140,25 +1313,262 @@ impl Store {
             let parsed = decode_line(self.cipher.as_deref(), name, line)
                 .and_then(|plain| serde_json::from_str::<HistoryLine>(&plain).map_err(Into::into));
             match parsed {
-                Ok(HistoryLine::Entry(entry)) => entries.push(entry),
-                Ok(HistoryLine::Receipt(receipt)) => {
+                Ok(parsed) => lines.push(Ok(parsed)),
+                Err(e) => {
+                    tracing::warn!("keeping an unreadable history line in {name} as it is: {e:#}");
+                    lines.push(Err(line.to_owned()));
+                }
+            }
+        }
+        Ok(lines)
+    }
+
+    /// The entries of a history file with every update applied. The entry
+    /// lines are taken first and the update lines after, in their order,
+    /// so an update that stands before its entry in the file (a group's
+    /// crossed fan-out) applies all the same; a `gone` line removes its
+    /// entry wherever the entry stands.
+    fn load_history_named(&self, name: &str) -> anyhow::Result<Vec<HistoryEntry>> {
+        let lines = self.read_history_lines(name)?;
+        let mut entries: Vec<HistoryEntry> = Vec::new();
+        let mut updates = Vec::new();
+        for line in lines.into_iter().flatten() {
+            match line {
+                HistoryLine::Entry(entry) => entries.push(*entry),
+                update => updates.push(update),
+            }
+        }
+        for update in updates {
+            match update {
+                HistoryLine::Entry(_) => unreachable!("entries were taken first"),
+                HistoryLine::Receipt(receipt) => {
                     for entry in entries.iter_mut().filter(|e| receipt.ids.contains(&e.id)) {
                         if entry.receipt.is_none_or(|r| r < receipt.receipt) {
                             entry.receipt = Some(receipt.receipt);
                         }
                     }
                 }
-                Ok(HistoryLine::Text(update)) => {
-                    if let Some(entry) = entries.iter_mut().rev().find(|e| e.id == update.update) {
+                HistoryLine::Text(update) => {
+                    if let Some(entry) = revisable(&mut entries, &update.update) {
                         entry.text = update.text;
                     }
                 }
-                Err(e) => {
-                    tracing::warn!("skipping unreadable history line in {name}: {e:#}")
+                HistoryLine::Read(read) => {
+                    for entry in entries.iter_mut().filter(|e| read.read.contains(&e.id)) {
+                        // The first showing starts the clock; a later one
+                        // (a sibling's, say) does not restart it.
+                        if entry.read_at_ms.is_none() {
+                            entry.read_at_ms = Some(read.at_ms);
+                        }
+                    }
                 }
+                HistoryLine::Edit(edit) => {
+                    if let Some(entry) = revisable(&mut entries, &edit.edit) {
+                        let old = std::mem::replace(&mut entry.text, edit.text);
+                        entry.previous.push(old);
+                        entry.edited = true;
+                    }
+                }
+                HistoryLine::React(react) => {
+                    if let Some(entry) = revisable(&mut entries, &react.react) {
+                        entry.reactions.retain(|r| r.from != react.from);
+                        if !react.emoji.is_empty() {
+                            entry.reactions.push(Reaction {
+                                from: react.from,
+                                emoji: react.emoji,
+                            });
+                        }
+                    }
+                }
+                HistoryLine::Gone(gone) => entries.retain(|e| e.id != gone.gone),
             }
         }
         Ok(entries)
+    }
+
+    /// Write `lines` as the whole of a history file, under the same name
+    /// binding, atomically (beside, then over).
+    fn write_history_lines(
+        &self,
+        name: &str,
+        lines: &[Result<HistoryLine, String>],
+    ) -> anyhow::Result<()> {
+        self.ensure_unlocked()?;
+        let mut out = String::new();
+        for line in lines {
+            match line {
+                Ok(parsed) => {
+                    let json = serde_json::to_string(parsed)?;
+                    out.push_str(&encode_line(self.cipher.as_deref(), name, &json));
+                }
+                Err(raw) => out.push_str(raw),
+            }
+            out.push('\n');
+        }
+        write_atomic(&self.root.join(name), out.as_bytes())
+    }
+
+    // --- section 4.7: read marks, edits, reactions, deletions ------------------
+
+    /// Note that the messages `ids` were shown at `at_ms`, from when a
+    /// received message's timer runs.
+    pub fn append_read(
+        &self,
+        conversation: &Conversation,
+        ids: &[String],
+        at_ms: u64,
+    ) -> anyhow::Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let line = ReadLine {
+            read: ids.to_vec(),
+            at_ms,
+        };
+        self.append_history_line(&conversation.file_name(), &serde_json::to_string(&line)?)
+    }
+
+    /// The message `id` says `text` from now on, by the edit `edit_id`
+    /// made at `at_ms`; the earlier text stays in the file.
+    pub fn append_edit(
+        &self,
+        conversation: &Conversation,
+        id: &str,
+        text: &str,
+        edit_id: &str,
+        at_ms: u64,
+    ) -> anyhow::Result<()> {
+        let line = EditLine {
+            edit: id.to_owned(),
+            text: text.to_owned(),
+            edit_id: edit_id.to_owned(),
+            at_ms,
+        };
+        self.append_history_line(&conversation.file_name(), &serde_json::to_string(&line)?)
+    }
+
+    /// `from`'s reaction to the message `id` (`None`: one's own); an empty
+    /// `emoji` withdraws it.
+    pub fn append_reaction(
+        &self,
+        conversation: &Conversation,
+        id: &str,
+        from: Option<UserId>,
+        emoji: &str,
+    ) -> anyhow::Result<()> {
+        let line = ReactLine {
+            react: id.to_owned(),
+            from,
+            emoji: emoji.to_owned(),
+        };
+        self.append_history_line(&conversation.file_name(), &serde_json::to_string(&line)?)
+    }
+
+    /// Remove the messages `ids` from the file for good ("delete for me",
+    /// or a timer that ran out): the file is rewritten without their
+    /// entries and without the lines about them, and a `gone` line per id
+    /// is left so that a line naming one of them later counts for
+    /// nothing. Returns the entries as they stood, so the caller can say
+    /// what went. A conversation without a file is left without one: a
+    /// tombstone is not worth a history file for a conversation there
+    /// never was.
+    pub fn remove_messages(
+        &self,
+        conversation: &Conversation,
+        ids: &[String],
+    ) -> anyhow::Result<Vec<HistoryEntry>> {
+        let name = conversation.file_name();
+        if !self.root.join(&name).exists() {
+            return Ok(Vec::new());
+        }
+        let before = self.load_history_named(&name)?;
+        let removed: Vec<HistoryEntry> =
+            before.into_iter().filter(|e| ids.contains(&e.id)).collect();
+        let mut lines: Vec<Result<HistoryLine, String>> = self
+            .read_history_lines(&name)?
+            .into_iter()
+            .filter_map(|line| match line {
+                Ok(HistoryLine::Receipt(mut r)) => {
+                    r.ids.retain(|i| !ids.contains(i));
+                    (!r.ids.is_empty()).then_some(Ok(HistoryLine::Receipt(r)))
+                }
+                Ok(HistoryLine::Read(mut r)) => {
+                    r.read.retain(|i| !ids.contains(i));
+                    (!r.read.is_empty()).then_some(Ok(HistoryLine::Read(r)))
+                }
+                Ok(parsed) => (!ids.iter().any(|id| parsed.names(id))).then_some(Ok(parsed)),
+                Err(raw) => Some(Err(raw)),
+            })
+            .collect();
+        for id in ids {
+            lines.push(Ok(HistoryLine::Gone(GoneLine { gone: id.clone() })));
+        }
+        self.write_history_lines(&name, &lines)?;
+        Ok(removed)
+    }
+
+    /// The author deleted the message `id` for everyone: its entry becomes
+    /// a placeholder without text, file, earlier texts or reactions, and
+    /// the lines that edited it or reacted to it go. When the message is
+    /// not held (not arrived, or removed), a `gone` line is left so that a
+    /// late arrival's updates count for nothing. Returns whether an entry
+    /// was there.
+    pub fn mark_deleted(&self, conversation: &Conversation, id: &str) -> anyhow::Result<bool> {
+        let name = conversation.file_name();
+        let mut found = false;
+        let mut lines: Vec<Result<HistoryLine, String>> = self
+            .read_history_lines(&name)?
+            .into_iter()
+            .filter_map(|line| match line {
+                Ok(HistoryLine::Entry(mut entry)) if entry.id == id => {
+                    found = true;
+                    entry.text.clear();
+                    entry.file = None;
+                    entry.reply_to = None;
+                    entry.edited = false;
+                    entry.previous.clear();
+                    entry.reactions.clear();
+                    entry.deleted = true;
+                    Some(Ok(HistoryLine::Entry(entry)))
+                }
+                Ok(HistoryLine::Edit(e)) if e.edit == id => None,
+                Ok(HistoryLine::React(r)) if r.react == id => None,
+                Ok(HistoryLine::Text(t)) if t.update == id => None,
+                other => Some(other),
+            })
+            .collect();
+        if !found {
+            lines.push(Ok(HistoryLine::Gone(GoneLine {
+                gone: id.to_owned(),
+            })));
+        }
+        self.write_history_lines(&name, &lines)?;
+        Ok(found)
+    }
+
+    /// Every conversation that has a log, from the history directory's
+    /// file names.
+    pub fn conversations(&self) -> anyhow::Result<Vec<Conversation>> {
+        let dir = self.root.join(HISTORY_DIR);
+        let mut out = Vec::new();
+        if !dir.exists() {
+            return Ok(out);
+        }
+        for entry in fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))? {
+            let name = entry?.file_name();
+            let Some(stem) = name.to_str().and_then(|n| n.strip_suffix(".jsonl")) else {
+                continue;
+            };
+            if let Some(group) = stem.strip_prefix("group-") {
+                if let Ok(group) = group.parse() {
+                    out.push(Conversation::Group(group));
+                }
+            } else if let Ok(peer) = stem.parse() {
+                out.push(Conversation::Contact(peer));
+            }
+        }
+        out.sort_by_key(|c| c.file_name());
+        Ok(out)
     }
 
     /// Where the client keeps not-yet-accepted outgoing envelopes.
@@ -1175,6 +1585,17 @@ impl Store {
     pub fn downloads_dir(&self) -> PathBuf {
         self.root.join("downloads")
     }
+}
+
+/// The entry an edit or a reaction applies to: the latest with that id
+/// (a duplicate is the same message twice, and the last one shows), and
+/// none at all once the entry is deleted for everyone.
+fn revisable<'a>(entries: &'a mut [HistoryEntry], id: &str) -> Option<&'a mut HistoryEntry> {
+    entries
+        .iter_mut()
+        .rev()
+        .find(|e| e.id == id)
+        .filter(|e| !e.deleted)
 }
 
 fn history_name(peer: &UserId) -> String {
@@ -1331,19 +1752,164 @@ mod tests {
     }
 
     fn entry(i: u64) -> HistoryEntry {
-        HistoryEntry {
-            id: i.to_string(),
-            direction: if i % 2 == 0 {
+        HistoryEntry::new(
+            i.to_string(),
+            if i % 2 == 0 {
                 Direction::Sent
             } else {
                 Direction::Received
             },
-            timestamp_ms: i,
-            text: format!("msg {i}"),
-            receipt: None,
-            file: None,
-            from: None,
+            i,
+            format!("msg {i}"),
+        )
+    }
+
+    #[test]
+    fn edits_reactions_and_reads_apply_in_order_and_before_their_entry() {
+        let (store, _dir) = temp_store();
+        let peer = Identity::generate().user_id();
+        let conv = Conversation::Contact(peer);
+        let bob = Identity::generate().user_id();
+        // An edit and a reaction for a message that has not arrived yet.
+        store
+            .append_edit(&conv, "1", "early edit", "e0", 5)
+            .unwrap();
+        store.append_reaction(&conv, "1", Some(bob), "👍").unwrap();
+        for i in 0..3 {
+            store.append_history(&peer, &entry(i)).unwrap();
         }
+        store
+            .append_edit(&conv, "0", "msg 0, again", "e1", 6)
+            .unwrap();
+        store
+            .append_edit(&conv, "0", "msg 0, once more", "e2", 7)
+            .unwrap();
+        store.append_reaction(&conv, "0", None, "❤️").unwrap();
+        store.append_reaction(&conv, "0", Some(bob), "👍").unwrap();
+        store.append_reaction(&conv, "0", Some(bob), "😂").unwrap();
+        store.append_reaction(&conv, "0", None, "").unwrap();
+        store.append_read(&conv, &["1".into()], 100).unwrap();
+        store.append_read(&conv, &["1".into()], 200).unwrap();
+        store.append_read(&conv, &[], 300).unwrap();
+        let history = store.load_history(&peer).unwrap();
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[0].text, "msg 0, once more");
+        assert!(history[0].edited);
+        assert_eq!(history[0].previous, vec!["msg 0", "msg 0, again"]);
+        assert_eq!(
+            history[0].reactions,
+            vec![Reaction {
+                from: Some(bob),
+                emoji: "😂".into()
+            }],
+            "one per person, the last winning, an empty one withdrawing"
+        );
+        assert_eq!(history[1].text, "early edit", "applied before its entry");
+        assert_eq!(history[1].previous, vec!["msg 1"]);
+        assert_eq!(history[1].reactions.len(), 1);
+        assert_eq!(history[1].read_at_ms, Some(100), "the first showing counts");
+        assert_eq!(history[2].read_at_ms, None);
+        assert_eq!(store.load_conversation(&conv).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn removed_messages_are_rewritten_out_and_stay_gone() {
+        let (store, _dir) = temp_store();
+        let peer = Identity::generate().user_id();
+        let conv = Conversation::Contact(peer);
+        for i in 0..4 {
+            store.append_history(&peer, &entry(i)).unwrap();
+        }
+        store
+            .append_receipt(&peer, ReceiptKind::Read, &["0".into(), "2".into()], 10)
+            .unwrap();
+        store.append_edit(&conv, "2", "edited", "e", 11).unwrap();
+        store.append_reaction(&conv, "2", None, "👍").unwrap();
+        let removed = store
+            .remove_messages(&conv, &["2".into(), "9".into()])
+            .unwrap();
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].text, "edited");
+        let history = store.load_history(&peer).unwrap();
+        assert_eq!(
+            history.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            ["0", "1", "3"]
+        );
+        assert_eq!(history[0].receipt, Some(ReceiptKind::Read));
+        // Nothing about it is left on disk, and a late line naming it, or
+        // its entry again, counts for nothing.
+        let raw = fs::read_to_string(store.root.join(history_name(&peer))).unwrap();
+        assert!(!raw.contains("edited") && !raw.contains("msg 2"), "{raw}");
+        store.append_edit(&conv, "2", "back?", "e2", 12).unwrap();
+        store.append_history(&peer, &entry(2)).unwrap();
+        assert_eq!(store.load_history(&peer).unwrap().len(), 3);
+        // Removing from a conversation that has no file does nothing.
+        let nobody = Conversation::Contact(Identity::generate().user_id());
+        assert!(
+            store
+                .remove_messages(&nobody, &["x".into()])
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!store.root.join(nobody.file_name()).exists());
+    }
+
+    #[test]
+    fn a_deletion_for_everyone_leaves_a_placeholder_or_a_tombstone() {
+        let (store, _dir) = temp_store();
+        let peer = Identity::generate().user_id();
+        let conv = Conversation::Contact(peer);
+        for i in 0..2 {
+            store.append_history(&peer, &entry(i)).unwrap();
+        }
+        store.append_edit(&conv, "1", "edited", "e", 5).unwrap();
+        store.append_reaction(&conv, "1", None, "👍").unwrap();
+        assert!(store.mark_deleted(&conv, "1").unwrap());
+        let history = store.load_history(&peer).unwrap();
+        assert_eq!(history.len(), 2);
+        let gone = &history[1];
+        assert!(gone.deleted);
+        assert!(gone.text.is_empty() && gone.previous.is_empty() && gone.reactions.is_empty());
+        assert!(!gone.edited);
+        let raw = fs::read_to_string(store.root.join(history_name(&peer))).unwrap();
+        assert!(!raw.contains("edited") && !raw.contains("msg 1"), "{raw}");
+        // Later edits and reactions leave the placeholder alone.
+        store.append_edit(&conv, "1", "again", "e2", 6).unwrap();
+        store.append_reaction(&conv, "1", None, "❤️").unwrap();
+        let history = store.load_history(&peer).unwrap();
+        assert!(history[1].text.is_empty() && history[1].reactions.is_empty());
+        // A deletion for a message not held: a tombstone, so that the
+        // message arriving later shows nothing.
+        assert!(!store.mark_deleted(&conv, "7").unwrap());
+        store.append_history(&peer, &entry(7)).unwrap();
+        assert_eq!(store.load_history(&peer).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn conversations_are_listed_from_the_history_directory() {
+        let (store, _dir) = temp_store();
+        assert!(store.conversations().unwrap().is_empty());
+        let peer = Identity::generate().user_id();
+        let group = silver_protocol::GroupId::generate();
+        store.append_history(&peer, &entry(0)).unwrap();
+        store.append_group_history(&group, &entry(1)).unwrap();
+        fs::write(store.root.join(HISTORY_DIR).join("notes.txt"), "x").unwrap();
+        let mut listed = store.conversations().unwrap();
+        listed.sort_by_key(|c| matches!(c, Conversation::Group(_)));
+        assert_eq!(
+            listed,
+            vec![Conversation::Contact(peer), Conversation::Group(group)]
+        );
+        // A file's at-rest encryption survives a rewrite.
+        crate::keystore::use_mock_store();
+        let mut store = store;
+        store.protect_with_keystore().unwrap();
+        let conv = Conversation::Group(group);
+        store.append_edit(&conv, "1", "edited", "e", 2).unwrap();
+        store.remove_messages(&conv, &["nothing".into()]).unwrap();
+        let raw = fs::read_to_string(store.root.join(conv.file_name())).unwrap();
+        assert!(raw.lines().all(|l| l.starts_with(LINE_PREFIX)), "{raw}");
+        assert_eq!(store.load_group_history(&group).unwrap()[0].text, "edited");
     }
 
     #[test]

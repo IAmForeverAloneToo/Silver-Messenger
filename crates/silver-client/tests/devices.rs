@@ -555,15 +555,7 @@ fn stored(store: &Store, identity: &Identity) -> ConnectOptions {
 }
 
 fn history(id: &str, at: u64, direction: Direction, text: &str) -> HistoryEntry {
-    HistoryEntry {
-        id: id.into(),
-        direction,
-        timestamp_ms: at,
-        text: text.into(),
-        receipt: None,
-        file: None,
-        from: None,
-    }
+    HistoryEntry::new(id, direction, at, text)
 }
 
 #[tokio::test]
@@ -662,6 +654,7 @@ async fn a_device_links_by_its_link_and_takes_the_snapshot() {
         id: GroupId::generate(),
         name: "team".into(),
         alias: Some("work".into()),
+        expire_after_s: 0,
     };
     let snapshot = Snapshot::gather(&alice_store, std::slice::from_ref(&group), 30, now).unwrap();
     assert_eq!(snapshot.message_count(), 2, "the old line stays behind");

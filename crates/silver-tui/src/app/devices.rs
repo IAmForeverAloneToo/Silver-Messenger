@@ -261,6 +261,7 @@ impl App {
                 id: *id,
                 name: r.name.clone(),
                 alias: r.alias.clone(),
+                expire_after_s: r.expire_after_s,
             })
             .collect();
         let snapshot = match Snapshot::gather(&self.store, &groups, days, now_ms()) {

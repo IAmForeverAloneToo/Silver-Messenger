@@ -1479,13 +1479,14 @@ impl App {
 
     fn record_group(&mut self, group: GroupId, line: ChatLine) {
         let entry = HistoryEntry {
-            id: line.id.clone(),
-            direction: line.direction,
-            timestamp_ms: line.timestamp_ms,
-            text: line.text.clone(),
-            receipt: None,
             file: line.pending.clone(),
             from: line.sender,
+            ..HistoryEntry::new(
+                line.id.clone(),
+                line.direction,
+                line.timestamp_ms,
+                line.text.clone(),
+            )
         };
         if let Err(e) = self.store.append_group_history(&group, &entry) {
             self.toast(format!("Could not save history: {e}"));

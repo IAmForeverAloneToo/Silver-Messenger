@@ -163,6 +163,10 @@ pub struct GroupRecord {
     pub muted: bool,
     #[serde(default)]
     seen: VecDeque<String>,
+    /// The group's disappearing-message timer, in seconds; 0 for none.
+    /// Set by an admin's `timer` message (`docs/design/everyday.md`).
+    #[serde(default)]
+    pub expire_after_s: u64,
 }
 
 impl GroupRecord {
@@ -616,6 +620,13 @@ impl Groups {
         self.persist()
     }
 
+    /// The group's disappearing-message timer from now on, in seconds (0
+    /// for none), as an admin set it.
+    pub fn set_timer(&mut self, group: &GroupId, seconds: u64) -> Result<()> {
+        self.record_mut(group)?.expire_after_s = seconds;
+        self.persist()
+    }
+
     /// Forget a group that is left, removed or broken.
     pub fn forget(&mut self, group: &GroupId) -> Result<()> {
         let record = self.record(group)?;
@@ -906,6 +917,7 @@ impl Groups {
                 created_at_ms: now_ms,
                 muted: false,
                 seen: VecDeque::new(),
+                expire_after_s: 0,
             },
         );
         self.persist()?;
@@ -1685,6 +1697,10 @@ impl Groups {
             leaf_updated_ms: now_ms,
             created_at_ms: now_ms,
             muted: previous.as_ref().is_some_and(|r| r.muted),
+            // A timer set while this device was last in the group stands
+            // until an admin says otherwise; a newcomer is told the
+            // group's timer by whoever added it.
+            expire_after_s: previous.as_ref().map_or(0, |r| r.expire_after_s),
             seen: previous.map(|r| r.seen).unwrap_or_default(),
         };
         self.file.groups.insert(group, record);

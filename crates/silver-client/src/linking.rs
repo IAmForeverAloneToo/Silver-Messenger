@@ -306,6 +306,14 @@ pub struct SnapshotContact {
     pub revoked: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub caps: Vec<String>,
+    /// The conversation's disappearing-message timer, in seconds; 0 for
+    /// none.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub expire_after_s: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 impl From<&Contact> for SnapshotContact {
@@ -318,6 +326,7 @@ impl From<&Contact> for SnapshotContact {
             auto_files: contact.auto_files,
             revoked: contact.revoked,
             caps: contact.caps.clone(),
+            expire_after_s: contact.expire_after_s,
         }
     }
 }
@@ -333,6 +342,7 @@ impl SnapshotContact {
         contact.auto_files = self.auto_files;
         contact.revoked = self.revoked;
         contact.caps = self.caps;
+        contact.expire_after_s = self.expire_after_s;
         contact
     }
 }
@@ -346,6 +356,9 @@ pub struct SnapshotGroup {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alias: Option<String>,
+    /// The group's disappearing-message timer, in seconds; 0 for none.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub expire_after_s: u64,
 }
 
 /// One line of history with the furthest receipt it got, which a
@@ -396,7 +409,10 @@ pub struct Snapshot {
 impl Snapshot {
     /// Gather from `store`: every contact and blocked id, `groups` as
     /// given, and the last `days` days of history with each contact and
-    /// each of the groups (`days` 0: no history).
+    /// each of the groups (`days` 0: no history). Each line goes as it
+    /// stands (the latest text, its reactions, when it was read); a line
+    /// whose disappearing-message timer has run out stays behind, whether
+    /// or not the sweeper got to it yet.
     pub fn gather(
         store: &Store,
         groups: &[SnapshotGroup],
@@ -411,6 +427,7 @@ impl Snapshot {
             entries
                 .into_iter()
                 .filter(|e| e.timestamp_ms >= since)
+                .filter(|e| e.expires_at_ms().is_none_or(|at| at > now_ms))
                 .map(SnapshotEntry::from)
                 .collect()
         };
@@ -838,15 +855,7 @@ mod tests {
     }
 
     fn entry(id: &str, at: u64, direction: Direction, text: &str) -> HistoryEntry {
-        HistoryEntry {
-            id: id.into(),
-            direction,
-            timestamp_ms: at,
-            text: text.into(),
-            receipt: None,
-            file: None,
-            from: None,
-        }
+        HistoryEntry::new(id, direction, at, text)
     }
 
     #[test]
@@ -886,6 +895,10 @@ mod tests {
         store
             .append_history(&bob, &entry("b", now - DAY_MS, Direction::Received, "hi"))
             .unwrap();
+        // A recent line whose hour-long timer ran out, not swept yet.
+        let mut timed = entry("t", now - 2 * DAY_MS, Direction::Sent, "gone soon");
+        timed.expire_after_s = 3600;
+        store.append_history(&bob, &timed).unwrap();
         let group = GroupId::generate();
         store
             .append_group_history(
@@ -897,13 +910,18 @@ mod tests {
             id: group,
             name: "team".into(),
             alias: Some("work".into()),
+            expire_after_s: 0,
         }];
 
         let snapshot = Snapshot::gather(&store, &groups, 30, now).unwrap();
         assert_eq!(snapshot.contacts.len(), 2);
         assert_eq!(snapshot.blocked, vec![mallory]);
         assert_eq!(snapshot.groups, groups);
-        assert_eq!(snapshot.message_count(), 3, "the old line stays behind");
+        assert_eq!(
+            snapshot.message_count(),
+            3,
+            "the old line and the run-out one stay behind"
+        );
         let lines = &snapshot.history[&bob];
         assert_eq!(lines[0].entry.id, "a");
         assert_eq!(lines[0].receipt, Some(ReceiptKind::Read));

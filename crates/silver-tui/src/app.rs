@@ -3900,13 +3900,13 @@ impl App {
     /// Append a line to a thread and to the on-disk history.
     fn record(&mut self, peer: UserId, line: ChatLine) {
         let entry = HistoryEntry {
-            id: line.id.clone(),
-            direction: line.direction,
-            timestamp_ms: line.timestamp_ms,
-            text: line.text.clone(),
-            receipt: None,
             file: line.pending.clone(),
-            from: None,
+            ..HistoryEntry::new(
+                line.id.clone(),
+                line.direction,
+                line.timestamp_ms,
+                line.text.clone(),
+            )
         };
         if let Err(e) = self.store.append_history(&peer, &entry) {
             self.toast(format!("Could not save history: {e}"));
