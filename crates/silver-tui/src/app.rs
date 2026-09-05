@@ -1,5 +1,6 @@
 //! Application state, key handling and command dispatch.
 
+mod bounds;
 mod devices;
 mod everyday;
 mod groups;
@@ -568,6 +569,9 @@ pub struct App {
     expiry_dirty: bool,
     /// Edits, reactions and deletions for messages not held yet.
     late: Vec<everyday::LateUpdate>,
+    /// Conversations whose file holds lines older than the window in
+    /// memory (`bounds::HISTORY_WINDOW`).
+    has_older: HashSet<Conversation>,
     /// Reader mode: the journal is printed line by line instead of the
     /// screen being drawn (`docs/design/accessibility.md`).
     reader: bool,
@@ -654,12 +658,21 @@ impl App {
         if let Err(e) = silver_client::everyday::sweep_expired(&store, now_ms()) {
             tracing::warn!("could not remove messages whose time ran out: {e:#}");
         }
+        // Every id is known, so nothing is shown twice; the newest window
+        // of lines is kept, the file has the rest.
+        let mut has_older = HashSet::new();
         for contact in &contacts {
-            let lines: Vec<ChatLine> = store
-                .load_history(&contact.user_id)?
+            let mut entries = store.load_history(&contact.user_id)?;
+            for h in &entries {
+                known_ids.insert(h.id.clone());
+            }
+            if entries.len() > bounds::HISTORY_WINDOW {
+                entries.drain(..entries.len() - bounds::HISTORY_WINDOW);
+                has_older.insert(Conversation::Contact(contact.user_id));
+            }
+            let lines: Vec<ChatLine> = entries
                 .into_iter()
                 .map(|h| {
-                    known_ids.insert(h.id.clone());
                     let delivered = !pending.contains(&h.id);
                     ChatLine::from_history(h, delivered)
                 })
@@ -669,13 +682,17 @@ impl App {
         let groups = silver_client::Groups::load(&store, client.identity_arc())?;
         let mut group_threads = HashMap::new();
         for (id, _) in groups.list() {
-            let lines: Vec<ChatLine> = store
-                .load_group_history(id)?
+            let mut entries = store.load_group_history(id)?;
+            for h in &entries {
+                known_ids.insert(h.id.clone());
+            }
+            if entries.len() > bounds::HISTORY_WINDOW {
+                entries.drain(..entries.len() - bounds::HISTORY_WINDOW);
+                has_older.insert(Conversation::Group(*id));
+            }
+            let lines: Vec<ChatLine> = entries
                 .into_iter()
-                .map(|h| {
-                    known_ids.insert(h.id.clone());
-                    ChatLine::from_history(h, true)
-                })
+                .map(|h| ChatLine::from_history(h, true))
                 .collect();
             group_threads.insert(*id, lines);
         }
@@ -754,6 +771,7 @@ impl App {
             next_expiry: None,
             expiry_dirty: true,
             late: Vec::new(),
+            has_older,
             reader: false,
             journal: Vec::new(),
             reader_cursor: None,
@@ -1024,6 +1042,7 @@ impl App {
             level,
             text,
         });
+        self.trim_system();
     }
 
     fn toast(&mut self, text: impl Into<String>) {
@@ -2084,6 +2103,15 @@ impl App {
         if self.requests_pane_selected() {
             return "/accept <n> · /block <n> · /accept g<n> · /decline g<n> · F1 help".to_owned();
         }
+        // At the top of a chat whose older lines are in the file alone.
+        if self.max_scroll > 0
+            && self.scroll >= self.max_scroll
+            && self
+                .selected_conversation()
+                .is_some_and(|c| self.has_older_lines(&c))
+        {
+            return "Older messages are in the history file: /search finds them, --export-history writes them · F1 help".to_owned();
+        }
         if let Some(group) = self.selected_group() {
             return match self.group_state_label(&group) {
                 None => "Enter sends to everyone · /group members · /group add <contact> · F1 help"
@@ -2234,63 +2262,6 @@ impl App {
         };
         let user_id = contact.user_id;
         self.lookup_contact(user_id, None);
-    }
-
-    fn cmd_search(&mut self, args: &[&str]) {
-        let needle = args.join(" ");
-        if needle.trim().is_empty() {
-            self.toast("Usage: /search <text>");
-            return;
-        }
-        let lower = needle.to_lowercase();
-        let (scope, label) = match self.selected_contact() {
-            Some(c) => (
-                vec![c.user_id],
-                format!("in the chat with {}", c.display_name()),
-            ),
-            None => (
-                self.contacts.iter().map(|c| c.user_id).collect(),
-                "in all chats".to_owned(),
-            ),
-        };
-        let mut hits: Vec<(u64, String)> = Vec::new();
-        for peer in scope {
-            let name = self.contact_name(&peer);
-            let Some(lines) = self.threads.get(&peer) else {
-                continue;
-            };
-            for line in lines {
-                if !line.text.to_lowercase().contains(&lower) {
-                    continue;
-                }
-                let who = match line.direction {
-                    Direction::Sent => format!("you → {name}"),
-                    Direction::Received => name.clone(),
-                };
-                hits.push((
-                    line.timestamp_ms,
-                    format!("{} {who}: {}", ui::stamp(line.timestamp_ms), line.text),
-                ));
-            }
-        }
-        hits.sort_by_key(|(at, _)| *at);
-        let total = hits.len();
-        let skipped = total.saturating_sub(SEARCH_LIMIT);
-        self.system(
-            Level::Info,
-            format!(
-                "Search for \"{needle}\" {label}: {total} match(es){}",
-                if skipped > 0 {
-                    format!(", newest {SEARCH_LIMIT} shown")
-                } else {
-                    String::new()
-                }
-            ),
-        );
-        for (_, text) in hits.into_iter().skip(skipped) {
-            self.system(Level::Info, text);
-        }
-        self.select(0);
     }
 
     fn cmd_notify(&mut self, args: &[&str]) {
@@ -4381,6 +4352,7 @@ impl App {
         self.say_line(&Conversation::Contact(peer), &line);
         self.known_ids.insert(line.id.clone());
         self.threads.entry(peer).or_default().push(line);
+        self.trim_window(&Conversation::Contact(peer));
     }
 }
 

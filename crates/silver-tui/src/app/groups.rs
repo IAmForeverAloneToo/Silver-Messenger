@@ -114,6 +114,9 @@ impl App {
         if let Some(state) = self.group_state_label(group) {
             parts.push(state.into());
         }
+        if self.has_older_lines(&Conversation::Group(*group)) {
+            parts.push("older lines in the file".into());
+        }
         format!(" {} ", parts.join(" · "))
     }
 
@@ -1572,6 +1575,7 @@ impl App {
         self.say_line(&Conversation::Group(group), &line);
         self.known_ids.insert(line.id.clone());
         self.group_threads.entry(group).or_default().push(line);
+        self.trim_window(&Conversation::Group(group));
     }
 
     pub(super) fn group_line_mut(&mut self, group: &GroupId, id: &str) -> Option<&mut ChatLine> {

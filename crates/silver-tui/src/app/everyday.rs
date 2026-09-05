@@ -14,14 +14,14 @@ use super::*;
 /// An update for a message not held yet (a crossed group fan-out, a
 /// message still in the mailbox), kept for a day to apply on arrival.
 pub(super) struct LateUpdate {
-    conversation: Conversation,
-    id: String,
-    from: Option<UserId>,
-    kind: Late,
-    at_ms: u64,
+    pub(super) conversation: Conversation,
+    pub(super) id: String,
+    pub(super) from: Option<UserId>,
+    pub(super) kind: Late,
+    pub(super) at_ms: u64,
 }
 
-enum Late {
+pub(super) enum Late {
     Edit(String),
     Reaction(String),
     /// Its author deleted it for everyone before it came: it shows nothing.
@@ -70,7 +70,10 @@ impl App {
         }
     }
 
-    fn lines_of_mut(&mut self, conversation: &Conversation) -> Option<&mut Vec<ChatLine>> {
+    pub(super) fn lines_of_mut(
+        &mut self,
+        conversation: &Conversation,
+    ) -> Option<&mut Vec<ChatLine>> {
         match conversation {
             Conversation::Contact(peer) => self.threads.get_mut(peer),
             Conversation::Group(group) => self.group_threads.get_mut(group),
@@ -676,7 +679,7 @@ impl App {
                 {
                     self.toast(format!("Could not save the edit: {e}"));
                 }
-                self.late.push(LateUpdate {
+                self.push_late(LateUpdate {
                     conversation: *conversation,
                     id: id.to_owned(),
                     from,
@@ -708,7 +711,7 @@ impl App {
                     self.say_update(conversation, &who, "deleted a message");
                 }
             }
-            Ok(Deletion::Tombstoned) => self.late.push(LateUpdate {
+            Ok(Deletion::Tombstoned) => self.push_late(LateUpdate {
                 conversation: *conversation,
                 id: id.to_owned(),
                 from,
@@ -763,7 +766,7 @@ impl App {
                     self.say_update(conversation, &who, &what);
                 }
             }
-            None => self.late.push(LateUpdate {
+            None => self.push_late(LateUpdate {
                 conversation: *conversation,
                 id: id.to_owned(),
                 from,

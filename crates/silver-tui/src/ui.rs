@@ -209,7 +209,7 @@ fn draw_messages(frame: &mut Frame, app: &mut App, area: Rect) {
         (None, None) => (" System ".to_owned(), system_rows(app, width), Pane::System),
         (None, Some(contact)) => (
             format!(
-                " {}{} · {}{}{} ",
+                " {}{} · {}{}{}{} ",
                 if contact.verified && !contact.revoked {
                     format!("{} ", app.glyphs.verified)
                 } else {
@@ -220,7 +220,12 @@ fn draw_messages(frame: &mut Frame, app: &mut App, area: Rect) {
                 if contact.revoked { " · revoked" } else { "" },
                 app.encryption_label(contact)
                     .map(|l| format!(" · {l}"))
-                    .unwrap_or_default()
+                    .unwrap_or_default(),
+                if app.has_older_lines(&silver_client::Conversation::Contact(contact.user_id)) {
+                    " · older lines in the file"
+                } else {
+                    ""
+                }
             ),
             thread_rows(app, &contact.user_id, width),
             Pane::Thread(contact.user_id),
