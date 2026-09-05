@@ -3,9 +3,11 @@
 # expected.txt. Verifpal exits 0 whether or not a query is broken, so its
 # result code (one letter and one digit per query, in the order the model
 # asks them: 'c0' a confidentiality query that holds, 'a1' an
-# authentication query with an attack) is compared instead. A model that
-# does not run, a query the expectations do not list, or an outcome that
-# differs from the one expected fails the check.
+# authentication query with an attack) is compared instead. The code is
+# the one line of its output made of such pairs alone; it is not always
+# the last line, since Verifpal says so when a newer version exists. A
+# model that does not run, a query the expectations do not list, or an
+# outcome that differs from the one expected fails the check.
 #
 #   VERIFPAL=/path/to/verifpal formal/check.sh
 #
@@ -60,7 +62,7 @@ EOF
         status=1
         continue
     fi
-    got=$(printf '%s\n' "$output" | tail -1)
+    got=$(printf '%s\n' "$output" | grep -E '^([ca][01])+$' | tail -1)
     if [ "$got" = "$expected" ]; then
         printf 'ok       %-24s %s\n' "$model" "$got"
     else
