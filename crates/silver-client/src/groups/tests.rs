@@ -856,3 +856,54 @@ fn state_survives_a_reload_from_disk() {
     assert_eq!(staged.epoch, 1);
     assert_eq!(groups.sequencer_entry(&group).unwrap().epoch, 1);
 }
+
+#[test]
+fn groups_named_at_link_time_are_kept_until_their_welcome() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = crate::store::Store::open(dir.path()).unwrap();
+    let identity = Arc::new(Identity::generate());
+    let mut groups = Groups::load(&store, identity.clone()).unwrap();
+    assert!(!store.has_groups().unwrap());
+    let known = groups.create("mine", now_ms()).unwrap().group;
+    let team = GroupId::generate();
+    let other = GroupId::generate();
+    groups
+        .expect_groups([
+            (
+                team,
+                ExpectedGroup {
+                    name: "team".into(),
+                    alias: Some("work".into()),
+                },
+            ),
+            (
+                other,
+                ExpectedGroup {
+                    name: "other".into(),
+                    alias: Some("  ".into()),
+                },
+            ),
+            // A group already here keeps what it has.
+            (
+                known,
+                ExpectedGroup {
+                    name: "renamed".into(),
+                    alias: None,
+                },
+            ),
+        ])
+        .unwrap();
+    let again = Groups::load(&store, identity).unwrap();
+    assert_eq!(
+        again.expected(&team),
+        Some(&ExpectedGroup {
+            name: "team".into(),
+            alias: Some("work".into())
+        })
+    );
+    assert_eq!(again.expected(&other).unwrap().alias, None);
+    assert!(again.expected(&known).is_none());
+    assert_eq!(again.get(&known).unwrap().name, "mine");
+    assert_eq!(again.expected_groups().count(), 2);
+    assert!(store.has_groups().unwrap());
+}

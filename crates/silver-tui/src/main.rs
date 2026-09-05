@@ -5,6 +5,7 @@ mod app;
 mod clipboard;
 mod commands;
 mod glyphs;
+mod link;
 mod notify;
 mod qr;
 mod theme;
@@ -110,6 +111,18 @@ struct Args {
     /// directory.
     #[arg(long)]
     force: bool,
+
+    /// Make this data directory a device of an identity you already have
+    /// on another computer: register with the relay, print a link and a
+    /// QR code for that computer to take in with /devices link, wait for
+    /// it, and exit. Needs an empty data directory (--data-dir).
+    #[arg(long)]
+    link: bool,
+
+    /// With --link: what to call this device, for your own devices' eyes
+    /// (up to 32 characters). The primary may name it instead.
+    #[arg(long, value_name = "NAME", env = "SILVER_DEVICE_NAME")]
+    device_name: Option<String>,
 
     /// Ask the releases page once whether a newer version exists, print
     /// the answer, and exit. Never happens by itself: the request shows
@@ -403,20 +416,21 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
         std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()),
     );
 
-    // The client runs until it quits or locks; a lock drops everything that
-    // holds keys and starts over from the passphrase.
-    loop {
-        let sessions = SessionStore::load(&store, identity.user_id())
-            .context("loading sessions and prekeys")?
-            .shared();
-        let options = ConnectOptions {
+    // Everything the connection needs from the data directory and the
+    // settings; made afresh after a lock, since a lock drops it all.
+    let connect_options = |store: &Store, identity: &silver_protocol::Identity| {
+        anyhow::Ok(ConnectOptions {
             extra_ca_certs: config.ca_cert.iter().cloned().collect(),
             proxy: proxy.clone(),
             pins: pins.clone(),
             outbox_path: Some(store.outbox_path()),
             outbox_cipher: store.cipher(),
             invite_token: config.invite_token.clone(),
-            sessions: Some(sessions),
+            sessions: Some(
+                SessionStore::load(store, identity.user_id())
+                    .context("loading sessions and prekeys")?
+                    .shared(),
+            ),
             submit_authenticated: args.submit_authenticated,
             groups: true,
             transparency: Some(
@@ -425,11 +439,22 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
                     .shared(),
             ),
             devices: Some(
-                silver_client::DeviceState::load(&store, identity.user_id())
+                silver_client::DeviceState::load(store, identity.user_id())
                     .context("loading the device list")?
                     .shared(),
             ),
-        };
+        })
+    };
+
+    if args.link {
+        let options = connect_options(&store, &identity)?;
+        return link::run(store, identity, relay_url, options, args.device_name).await;
+    }
+
+    // The client runs until it quits or locks; a lock drops everything that
+    // holds keys and starts over from the passphrase.
+    loop {
+        let options = connect_options(&store, &identity)?;
         let (client, events) = Client::spawn(relay_url.clone(), Arc::new(identity), options)?;
         let app = app::App::new(
             store,

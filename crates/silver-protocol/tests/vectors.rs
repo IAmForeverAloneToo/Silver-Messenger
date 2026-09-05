@@ -3004,7 +3004,9 @@ fn device() {
                 DeviceVectorIn::Provision {
                     secret: label32("link secret")[..16].try_into().unwrap(),
                     device: seeds("alice laptop"),
-                    plaintext: "{\"account\":\"...\",\"contacts\":[]}".into(),
+                    plaintext:
+                        "{\"account\":\"...\",\"certificate\":{},\"devices\":[],\"revoked\":[]}"
+                            .into(),
                     rng_seed: label32("provision rng"),
                 },
             ),

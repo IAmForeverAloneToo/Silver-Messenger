@@ -145,36 +145,67 @@ impl DeviceState {
         *id == self.me || *id == self.account() || self.list.devices.iter().any(|d| d.device == *id)
     }
 
-    /// The primary adds a device it certified. Refused for a linked device,
-    /// a certificate that is not this account's, one for this key, a
-    /// device already listed or revoked, or a ninth device.
-    pub fn link(&mut self, certificate: DeviceCertificate) -> anyhow::Result<()> {
+    /// Whether the primary may link `device`: not on a linked device, not
+    /// this key, not a device already listed or revoked, not a ninth.
+    pub fn can_link(&self, device: &UserId) -> anyhow::Result<()> {
         if self.linked.is_some() {
             anyhow::bail!("only the primary links devices");
         }
-        certificate.verify()?;
-        if certificate.account != self.me {
-            anyhow::bail!("the certificate is for another account");
-        }
-        if certificate.device == self.me {
+        if *device == self.me {
             anyhow::bail!("an account is not its own device");
         }
-        if self.is_revoked(&certificate.device) {
+        if self.is_revoked(device) {
             anyhow::bail!("that device was revoked; a device does not come back");
         }
-        if self
-            .list
-            .devices
-            .iter()
-            .any(|d| d.device == certificate.device)
-        {
+        if self.list.devices.iter().any(|d| d.device == *device) {
             anyhow::bail!("that device is linked already");
         }
         if self.list.devices.len() >= MAX_DEVICES {
             anyhow::bail!("an account links at most {MAX_DEVICES} devices");
         }
+        Ok(())
+    }
+
+    /// The primary adds a device it certified. Refused for a linked device,
+    /// a certificate that is not this account's, one for this key, a
+    /// device already listed or revoked, or a ninth device.
+    pub fn link(&mut self, certificate: DeviceCertificate) -> anyhow::Result<()> {
+        certificate.verify()?;
+        if certificate.account != self.me {
+            anyhow::bail!("the certificate is for another account");
+        }
+        self.can_link(&certificate.device)?;
         self.list.devices.push(certificate);
         self.list.devices.sort_by_key(|d| d.device);
+        self.persist()
+    }
+
+    /// A device in waiting takes its link: from now on this key is
+    /// `linked`'s account's device, with the account's list as the
+    /// primary sent it. Refused on a device that is linked already, and
+    /// on an identity with devices of its own, which is an account and
+    /// does not become a device.
+    pub fn adopt(
+        &mut self,
+        linked: Linked,
+        devices: Vec<DeviceCertificate>,
+        revoked: Vec<DeviceRevocation>,
+    ) -> anyhow::Result<()> {
+        if self.linked.is_some() {
+            anyhow::bail!("this device is linked already");
+        }
+        if !self.list.devices.is_empty() {
+            anyhow::bail!("an identity with devices of its own does not become a device");
+        }
+        check_linked(&linked, &self.me)?;
+        let list = checked_list(&linked.account, devices, revoked)?;
+        // The link first: a list without it would read as this key's own
+        // devices on the next start.
+        if let Some(store) = &self.store {
+            store.save_linked(Some(&linked))?;
+        }
+        self.linked = Some(linked);
+        self.list = list;
         self.persist()
     }
 
@@ -202,31 +233,14 @@ impl DeviceState {
         devices: Vec<DeviceCertificate>,
         revoked: Vec<DeviceRevocation>,
     ) -> anyhow::Result<Vec<UserId>> {
-        let account = self.account();
-        if devices.len() > MAX_DEVICES {
-            anyhow::bail!("more than {MAX_DEVICES} devices");
-        }
-        for certificate in &devices {
-            certificate.verify()?;
-            if certificate.account != account {
-                anyhow::bail!("a listed device is another account's");
-            }
-        }
-        for revocation in &revoked {
-            revocation.verify()?;
-            if revocation.account != account {
-                anyhow::bail!("a revocation is another account's");
-            }
-        }
-        let new: Vec<UserId> = revoked
+        let list = checked_list(&self.account(), devices, revoked)?;
+        let new: Vec<UserId> = list
+            .revoked
             .iter()
             .map(|r| r.device)
             .filter(|d| !self.is_revoked(d))
             .collect();
-        let mut devices = devices;
-        devices.sort_by_key(|d| d.device);
-        devices.dedup_by_key(|d| d.device);
-        self.list = DevicesFile { devices, revoked };
+        self.list = list;
         self.persist()?;
         Ok(new)
     }
@@ -245,6 +259,35 @@ impl DeviceState {
             None => Ok(()),
         }
     }
+}
+
+/// A list as `account`'s primary sent it, checked: at most [`MAX_DEVICES`],
+/// every certificate and revocation verifying and the account's, the
+/// devices in ascending id order without doubles.
+fn checked_list(
+    account: &UserId,
+    devices: Vec<DeviceCertificate>,
+    revoked: Vec<DeviceRevocation>,
+) -> anyhow::Result<DevicesFile> {
+    if devices.len() > MAX_DEVICES {
+        anyhow::bail!("more than {MAX_DEVICES} devices");
+    }
+    for certificate in &devices {
+        certificate.verify()?;
+        if certificate.account != *account {
+            anyhow::bail!("a listed device is another account's");
+        }
+    }
+    for revocation in &revoked {
+        revocation.verify()?;
+        if revocation.account != *account {
+            anyhow::bail!("a revocation is another account's");
+        }
+    }
+    let mut devices = devices;
+    devices.sort_by_key(|d| d.device);
+    devices.dedup_by_key(|d| d.device);
+    Ok(DevicesFile { devices, revoked })
 }
 
 fn check_linked(linked: &Linked, me: &UserId) -> anyhow::Result<()> {
@@ -418,6 +461,68 @@ mod tests {
         );
         // The certificate must be this key's and the account's.
         assert!(DeviceState::ephemeral(phone.user_id(), Some(linked)).is_err());
+    }
+
+    #[test]
+    fn a_device_in_waiting_adopts_its_link_once() {
+        let alice = Identity::generate();
+        let laptop = Identity::generate();
+        let phone = Identity::generate();
+        let certificate = certified(&alice, &laptop, "laptop");
+        let linked = Linked {
+            account: alice.user_id(),
+            certificate: certificate.clone(),
+        };
+        let mut state = DeviceState::ephemeral(laptop.user_id(), None).unwrap();
+        assert!(state.can_link(&phone.user_id()).is_ok());
+        // Another key's certificate, or a list of another account's, is
+        // refused and leaves the device as it was.
+        let others = Linked {
+            account: alice.user_id(),
+            certificate: certified(&alice, &phone, "phone"),
+        };
+        assert!(state.adopt(others, vec![], vec![]).is_err());
+        let mallory = Identity::generate();
+        assert!(
+            state
+                .adopt(
+                    linked.clone(),
+                    vec![certified(&mallory, &phone, "phone")],
+                    vec![]
+                )
+                .is_err()
+        );
+        assert!(!state.is_linked());
+
+        state
+            .adopt(
+                linked.clone(),
+                vec![certificate.clone(), certified(&alice, &phone, "phone")],
+                vec![alice.revoke_device(&Identity::generate().user_id(), 2)],
+            )
+            .unwrap();
+        assert!(state.is_linked());
+        assert_eq!(state.account(), alice.user_id());
+        assert_eq!(state.certificate(), Some(&certificate));
+        assert_eq!(state.devices().len(), 2);
+        assert_eq!(state.revoked().len(), 1);
+        let mut siblings = state.siblings();
+        siblings.sort();
+        let mut expected = vec![alice.user_id(), phone.user_id()];
+        expected.sort();
+        assert_eq!(siblings, expected);
+        // Once: a linked device does not take another link, and a
+        // primary with devices does not become a device.
+        assert!(state.adopt(linked.clone(), vec![], vec![]).is_err());
+        assert!(state.can_link(&phone.user_id()).is_err());
+        let mut primary = DeviceState::ephemeral(alice.user_id(), None).unwrap();
+        primary.link(certificate.clone()).unwrap();
+        let bob = Identity::generate();
+        let bobs = Linked {
+            account: bob.user_id(),
+            certificate: bob.certify_device(&alice.user_id(), "x", 1).unwrap(),
+        };
+        assert!(primary.adopt(bobs, vec![], vec![]).is_err());
     }
 
     #[test]

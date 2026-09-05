@@ -1,9 +1,10 @@
 //! Identity backup and restore.
 //!
 //! A backup is one self-contained file holding the identity keys, the
-//! contact list and nothing else, encrypted under a passphrase of its own
-//! (Argon2id and XChaCha20-Poly1305, like the vault). Restoring it onto a
-//! fresh installation gives back the same user id and contacts; message
+//! contact list, the device list (or, on a linked device, its link) and
+//! nothing else, encrypted under a passphrase of its own (Argon2id and
+//! XChaCha20-Poly1305, like the vault). Restoring it onto a fresh
+//! installation gives back the same user id, contacts and devices; message
 //! numbering starts a new epoch, so contacts see a reinstall rather than
 //! replays.
 
@@ -16,6 +17,7 @@ use silver_protocol::encoding::b64;
 use silver_protocol::{Identity, IdentitySecrets, Revocation, now_ms};
 use zeroize::Zeroizing;
 
+use crate::devices::{DevicesFile, Linked};
 use crate::store::{Contact, Store};
 use crate::vault::{Kdf, VaultError, decrypt_with_passphrase, encrypt_with_passphrase};
 
@@ -43,6 +45,15 @@ pub struct BackupPayload {
     /// written before lifecycle statements existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revocation: Option<Revocation>,
+    /// On a linked device, whose it is (`docs/PROTOCOL.md` section 14).
+    /// Absent on a primary and in backups from before devices existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked: Option<Linked>,
+    /// The account's linked devices and the revocations issued, so a
+    /// restored primary publishes its list again and the devices carry
+    /// on. Absent in backups from before devices existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub devices: Option<DevicesFile>,
 }
 
 /// Write the store's identity and contacts to `path`, encrypted under
@@ -68,6 +79,8 @@ pub fn export_backup_with(
         identity: identity.to_secrets(),
         contacts: store.load_contacts()?,
         revocation: Some(store.load_or_create_revocation(&identity, now)?),
+        linked: store.load_linked()?,
+        devices: Some(store.load_devices()?),
     };
     let plaintext = Zeroizing::new(serde_json::to_vec(&payload)?);
     let ciphertext = encrypt_with_passphrase(passphrase, &kdf, BACKUP_AAD, &plaintext)?;
@@ -108,6 +121,13 @@ pub fn import_backup(store: &Store, payload: BackupPayload, force: bool) -> anyh
     }
     let identity = Identity::from_secrets(&payload.identity);
     store.save_identity(&identity)?;
+    // A linked device's link and the device list come back with the keys;
+    // a backup from before devices existed restores a primary alone.
+    let linked = payload
+        .linked
+        .filter(|l| l.certificate.device == identity.user_id() && l.certificate.verify().is_ok());
+    store.save_linked(linked.as_ref())?;
+    store.save_devices(&payload.devices.unwrap_or_default())?;
     // Restore the pre-signed revocation so a key lost after this restore can
     // still be declared dead. A backup that predates lifecycle statements
     // carries none; mint a fresh one from the restored key instead.
@@ -152,12 +172,23 @@ mod tests {
         contact.alias = Some("peer".into());
         contact.sent_seq = 9;
         source.save_contacts(&[contact]).unwrap();
+        // A linked device, and one revoked.
+        let laptop = Identity::generate();
+        let devices = DevicesFile {
+            devices: vec![
+                identity
+                    .certify_device(&laptop.user_id(), "laptop", 1)
+                    .unwrap(),
+            ],
+            revoked: vec![identity.revoke_device(&Identity::generate().user_id(), 2)],
+        };
+        source.save_devices(&devices).unwrap();
 
         let file = source_dir.path().join("backup.json");
         export_backup_with(&source, &file, "backup pass", Kdf::fast()).unwrap();
         let raw = fs::read_to_string(&file).unwrap();
         assert!(raw.contains(FORMAT));
-        assert!(!raw.contains("signing_seed") && !raw.contains("peer"));
+        assert!(!raw.contains("signing_seed") && !raw.contains("peer") && !raw.contains("laptop"));
 
         assert!(matches!(
             read_backup(&file, "wrong"),
@@ -183,11 +214,54 @@ mod tests {
         let contacts = target.load_contacts().unwrap();
         assert_eq!(contacts[0].alias.as_deref(), Some("peer"));
         assert_eq!(contacts[0].sent_seq, 0);
+        // The device list is back, so the restored primary publishes it
+        // again; nothing says this is a linked device.
+        assert_eq!(target.load_devices().unwrap(), devices);
+        assert!(target.load_linked().unwrap().is_none());
 
         // A second import needs --force.
         let payload = read_backup(&file, "backup pass").unwrap();
         assert!(import_backup(&target, payload, false).is_err());
         let payload = read_backup(&file, "backup pass").unwrap();
         import_backup(&target, payload, true).unwrap();
+    }
+
+    #[test]
+    fn a_linked_device_backs_up_and_restores_its_link() {
+        let alice = Identity::generate();
+        let source_dir = tempfile::tempdir().unwrap();
+        let source = Store::open(source_dir.path()).unwrap();
+        let (laptop, _) = source.load_or_create_identity().unwrap();
+        let linked = Linked {
+            account: alice.user_id(),
+            certificate: alice
+                .certify_device(&laptop.user_id(), "laptop", 1)
+                .unwrap(),
+        };
+        source.save_linked(Some(&linked)).unwrap();
+        let file = source_dir.path().join("backup.json");
+        export_backup_with(&source, &file, "pass", Kdf::fast()).unwrap();
+
+        let target_dir = tempfile::tempdir().unwrap();
+        let target = Store::open(target_dir.path()).unwrap();
+        let payload = read_backup(&file, "pass").unwrap();
+        assert_eq!(payload.linked, Some(linked.clone()));
+        import_backup(&target, payload, false).unwrap();
+        assert_eq!(target.load_linked().unwrap(), Some(linked));
+        assert_eq!(
+            target.load_or_create_identity().unwrap().0.user_id(),
+            laptop.user_id()
+        );
+        // A link for another key, however it got into a backup, is not
+        // restored.
+        let mut payload = read_backup(&file, "pass").unwrap();
+        payload.linked = Some(Linked {
+            account: alice.user_id(),
+            certificate: alice
+                .certify_device(&Identity::generate().user_id(), "other", 1)
+                .unwrap(),
+        });
+        import_backup(&target, payload, true).unwrap();
+        assert!(target.load_linked().unwrap().is_none());
     }
 }

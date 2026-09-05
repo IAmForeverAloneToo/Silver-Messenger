@@ -2,15 +2,22 @@
 //! section 14): a message reaching every device of an account and a copy
 //! every device of the sender's own, a linked device's messages
 //! attributed to its account, an older sender's message passed on by the
-//! primary, a revoked device dropped by everyone, and `sync` taken from
-//! one's own devices alone.
+//! primary, a revoked device dropped by everyone, `sync` taken from
+//! one's own devices alone, and a device linked by its link with the
+//! snapshot that comes along.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use silver_client::{Client, ClientEvent, ConnectOptions, DeviceState, Linked, SessionStore};
+use silver_client::linking::LINK_LIFETIME;
+use silver_client::{
+    Client, ClientEvent, ConnectOptions, Contact, DeviceLink, DeviceState, Direction, HistoryEntry,
+    Imported, Linked, Provisioning, SessionStore, Snapshot, SnapshotGroup, Store, Taken,
+    fetch_snapshot, take_link,
+};
 use silver_protocol::device::Sync;
 use silver_protocol::envelope::ReceiptKind;
+use silver_protocol::group::GroupId;
 use silver_protocol::{Content, DeviceCertificate, Identity, Sequence, UserId, now_ms};
 use silver_relay::RelayState;
 use tokio::net::TcpListener;
@@ -527,4 +534,245 @@ async fn sync_is_taken_from_ones_own_devices_only() {
     bob_c.shutdown().await;
     h.alice_c.shutdown().await;
     h.laptop_c.shutdown().await;
+}
+
+/// Options for a client with a data directory: its device state and
+/// sessions live there.
+fn stored(store: &Store, identity: &Identity) -> ConnectOptions {
+    ConnectOptions {
+        sessions: Some(SessionStore::ephemeral(identity.user_id()).shared()),
+        devices: Some(
+            DeviceState::load(store, identity.user_id())
+                .unwrap()
+                .shared(),
+        ),
+        ..Default::default()
+    }
+}
+
+fn history(id: &str, at: u64, direction: Direction, text: &str) -> HistoryEntry {
+    HistoryEntry {
+        id: id.into(),
+        direction,
+        timestamp_ms: at,
+        text: text.into(),
+        receipt: None,
+        file: None,
+        from: None,
+    }
+}
+
+#[tokio::test]
+async fn a_device_links_by_its_link_and_takes_the_snapshot() {
+    let (url, _state) = start_relay().await;
+    // Alice's primary keeps a data directory: a contact, a blocked id,
+    // and history with the contact, one line of it too old to come along.
+    let alice_dir = tempfile::tempdir().unwrap();
+    let alice_store = Store::open(alice_dir.path()).unwrap();
+    let alice = Arc::new(alice_store.load_or_create_identity().unwrap().0);
+    let bob = Arc::new(Identity::generate());
+    let mallory = Identity::generate().user_id();
+    let mut contact = Contact::new(bob.user_id());
+    contact.alias = Some("bob".into());
+    contact.verified = true;
+    contact.sent_seq = 7;
+    alice_store.save_contacts(&[contact]).unwrap();
+    alice_store.save_blocked(&[mallory]).unwrap();
+    let now = now_ms();
+    let day = 24 * 60 * 60 * 1000;
+    alice_store
+        .append_history(
+            &bob.user_id(),
+            &history("old", now - 40 * day, Direction::Received, "long ago"),
+        )
+        .unwrap();
+    alice_store
+        .append_history(
+            &bob.user_id(),
+            &history("m1", now - 1000, Direction::Sent, "hello bob"),
+        )
+        .unwrap();
+    alice_store
+        .append_receipt(&bob.user_id(), ReceiptKind::Read, &["m1".into()], now - 500)
+        .unwrap();
+    alice_store
+        .append_history(
+            &bob.user_id(),
+            &history("m2", now - 100, Direction::Received, "hello alice"),
+        )
+        .unwrap();
+    let (alice_c, mut alice_ev) =
+        Client::spawn(url.clone(), alice.clone(), stored(&alice_store, &alice)).unwrap();
+    connected(&mut alice_ev, "alice").await;
+
+    // The laptop: an empty directory, registered with the relay, printing
+    // a link.
+    let laptop_dir = tempfile::tempdir().unwrap();
+    let laptop_store = Store::open(laptop_dir.path()).unwrap();
+    let laptop = Arc::new(laptop_store.load_or_create_identity().unwrap().0);
+    assert!(laptop_store.is_unused().unwrap());
+    let (laptop_c, mut laptop_ev) =
+        Client::spawn(url.clone(), laptop.clone(), stored(&laptop_store, &laptop)).unwrap();
+    connected(&mut laptop_ev, "the laptop").await;
+    let link = DeviceLink::new(laptop.user_id(), url.clone(), Some("laptop".into()));
+    let handed: DeviceLink = link.to_string().parse().unwrap();
+    assert_eq!(handed, link);
+
+    // Carol saw the device id and sends a provisioning message of her own
+    // first, under a secret of her own: the laptop ignores it.
+    let carol = Arc::new(Identity::generate());
+    let (carol_c, mut carol_ev) =
+        Client::spawn(url.clone(), carol.clone(), options(&carol, None, vec![])).unwrap();
+    connected(&mut carol_ev, "carol").await;
+    let laptop_bundle = carol_c.lookup(laptop.user_id()).await.unwrap().unwrap();
+    assert!(laptop_bundle.account().is_none(), "nobody's yet");
+    let hers = Provisioning {
+        account: carol.user_id(),
+        certificate: carol
+            .certify_device(&laptop.user_id(), "stolen", now)
+            .unwrap(),
+        devices: vec![],
+        revoked: vec![],
+        snapshot: None,
+    }
+    .seal(&DeviceLink::new(laptop.user_id(), url.clone(), None))
+    .unwrap();
+    let envelope = carol_c
+        .send_content_sequenced(
+            &laptop_bundle,
+            Content::Provision(hers),
+            Sequence::default(),
+        )
+        .await
+        .unwrap();
+    wait_for(
+        &mut carol_ev,
+        "carol's message sent",
+        |e| matches!(e, ClientEvent::Sent { id } if *id == envelope.id),
+    )
+    .await;
+
+    // Alice gathers the snapshot, parks it on the relay and links; the
+    // laptop takes the link.
+    let group = SnapshotGroup {
+        id: GroupId::generate(),
+        name: "team".into(),
+        alias: Some("work".into()),
+    };
+    let snapshot = Snapshot::gather(&alice_store, std::slice::from_ref(&group), 30, now).unwrap();
+    assert_eq!(snapshot.message_count(), 2, "the old line stays behind");
+    let info = alice_c
+        .upload_bytes("snapshot", snapshot.to_bytes().unwrap(), true)
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + LINK_LIFETIME;
+    let (taken, certificate) = tokio::join!(
+        take_link(&laptop_c, &mut laptop_ev, &link, deadline),
+        alice_c.link_device(
+            &handed,
+            handed.name.as_deref().unwrap_or("device"),
+            Some(info.clone())
+        )
+    );
+    let certificate = certificate.unwrap();
+    let taken = taken.unwrap();
+    assert_eq!(certificate.account, alice.user_id());
+    assert_eq!(certificate.device, laptop.user_id());
+    assert_eq!(certificate.name, "laptop");
+    assert_eq!(
+        taken,
+        Taken {
+            account: alice.user_id(),
+            certificate: certificate.clone(),
+            snapshot: Some(info),
+        }
+    );
+    // On both disks the laptop is alice's now.
+    assert_eq!(
+        laptop_store.load_linked().unwrap(),
+        Some(Linked {
+            account: alice.user_id(),
+            certificate: certificate.clone(),
+        })
+    );
+    assert_eq!(
+        laptop_store.load_devices().unwrap().devices,
+        vec![certificate.clone()]
+    );
+    assert!(!laptop_store.is_unused().unwrap());
+    assert_eq!(
+        alice_store.load_devices().unwrap().devices,
+        vec![certificate.clone()]
+    );
+    // And the relay says so: the laptop's bundle names the account, and
+    // the account's lists the laptop, whose bundle comes with it.
+    let lookup = carol_c.lookup_full(laptop.user_id()).await.unwrap();
+    assert_eq!(lookup.bundle.unwrap().account(), Some(&alice.user_id()));
+    let lookup = carol_c.lookup_full(alice.user_id()).await.unwrap();
+    assert_eq!(lookup.bundle.unwrap().devices, vec![certificate.clone()]);
+    assert_eq!(lookup.device_bundles.len(), 1);
+    assert_eq!(lookup.device_bundles[0].user_id, laptop.user_id());
+
+    // The snapshot: the contact with the owner's marks and a fresh
+    // stream, the blocked id, the recent history with its receipt, and
+    // the group for the engine.
+    let fetched = fetch_snapshot(&laptop_c, taken.snapshot.as_ref().unwrap())
+        .await
+        .unwrap();
+    let imported = fetched.import(&laptop_store).unwrap();
+    assert_eq!(
+        imported,
+        Imported {
+            contacts: 1,
+            messages: 2,
+        }
+    );
+    let contacts = laptop_store.load_contacts().unwrap();
+    assert_eq!(contacts.len(), 1);
+    assert_eq!(contacts[0].user_id, bob.user_id());
+    assert_eq!(contacts[0].alias.as_deref(), Some("bob"));
+    assert!(contacts[0].verified);
+    assert_eq!(contacts[0].sent_seq, 0);
+    assert_eq!(laptop_store.load_blocked().unwrap(), vec![mallory]);
+    let lines = laptop_store.load_history(&bob.user_id()).unwrap();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0].id, "m1");
+    assert_eq!(lines[0].receipt, Some(ReceiptKind::Read));
+    assert_eq!(lines[1].id, "m2");
+    assert_eq!(fetched.groups, vec![group]);
+
+    // The link is spent: alice does not link the laptop twice, and Bob,
+    // handed the link, is told the device is someone's.
+    assert!(alice_c.link_device(&handed, "again", None).await.is_err());
+    let (bob_c, mut bob_ev) =
+        Client::spawn(url.clone(), bob.clone(), options(&bob, None, vec![])).unwrap();
+    connected(&mut bob_ev, "bob").await;
+    assert!(bob_c.link_device(&handed, "mine", None).await.is_err());
+
+    // Bob writes to Alice: the laptop, linked a moment ago, gets its copy
+    // under the message's id.
+    let delivery = bob_c
+        .send_content(alice.user_id(), None, text("hello alice"), seq(1, 1))
+        .await
+        .unwrap();
+    assert_eq!(delivery.copies.len(), 1, "one copy, for the laptop");
+    let got = wait_for(&mut laptop_ev, "the laptop's copy", |e| {
+        text_of(e).is_some()
+    })
+    .await;
+    let (from, device, id, body) = text_of(&got).unwrap();
+    assert_eq!(
+        (from, device, id.as_str(), body.as_str()),
+        (
+            bob.user_id(),
+            None,
+            delivery.envelope.id.as_str(),
+            "hello alice"
+        )
+    );
+
+    bob_c.shutdown().await;
+    carol_c.shutdown().await;
+    alice_c.shutdown().await;
+    laptop_c.shutdown().await;
 }

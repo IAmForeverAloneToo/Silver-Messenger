@@ -749,6 +749,29 @@ impl Store {
         self.root.join(IDENTITY_FILE).exists()
     }
 
+    /// Whether nothing but keys and settings is here: no contacts,
+    /// requests, blocked ids, groups or history, and no link. Such a
+    /// directory can still become a linked device of another identity.
+    pub fn is_unused(&self) -> anyhow::Result<bool> {
+        if self.load_linked()?.is_some()
+            || !self.load_contacts()?.is_empty()
+            || !self.load_requests()?.is_empty()
+            || !self.load_blocked()?.is_empty()
+            || self.has_groups()?
+        {
+            return Ok(false);
+        }
+        let history = self.root.join(HISTORY_DIR);
+        if history.exists() {
+            for entry in fs::read_dir(&history)? {
+                if entry?.path().extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+
     /// What `identity.json` says under `linked`: on a linked device, the
     /// account and this key's certificate; nothing on a primary.
     pub fn load_linked(&self) -> anyhow::Result<Option<Linked>> {

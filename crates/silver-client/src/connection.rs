@@ -18,6 +18,7 @@ use silver_protocol::wire::{
 use crate::CAPABILITIES;
 use crate::devices::{SharedDevices, Spread, spread_of};
 use crate::files::{self, FileInfo};
+use crate::linking::{DeviceLink, Provisioning};
 use crate::outbox::Outbox;
 use crate::proxy::Proxy;
 use crate::sessions::{SessionError, SessionInfo, SharedSessions};
@@ -26,8 +27,9 @@ use crate::tail::{Answer, Step, Tail};
 use crate::tls::{ConnectOptions, Connectors, Observed, connectors, observing_connector};
 use crate::transparency::SharedLog;
 use silver_protocol::{
-    Body, Content, DeviceRevocation, Envelope, Identity, KeyBundle, Message, ProtocolError,
-    Revocation, Sequence, Succession, UserId, now_ms, open_bytes, seal_bytes, seal_bytes_unsigned,
+    Body, Content, DeviceCertificate, DeviceRevocation, Envelope, Identity, KeyBundle, Message,
+    ProtocolError, Revocation, Sequence, Succession, UserId, now_ms, open_bytes, seal_bytes,
+    seal_bytes_unsigned,
 };
 use tokio::sync::mpsc::WeakSender;
 use tokio::sync::{mpsc, oneshot};
@@ -228,8 +230,11 @@ enum Command {
         revocation: DeviceRevocation,
         reply: oneshot::Sender<Result<(), ClientError>>,
     },
-    /// Publish our bundle again: the device list changed.
-    Republish,
+    /// Publish our bundle again: the device list changed, or this device
+    /// was linked. Answered, when asked, once the relay has taken it.
+    Republish {
+        reply: Option<oneshot::Sender<Result<(), ClientError>>>,
+    },
     /// Put every chunk of an encrypted file on the relay.
     Upload {
         blob: String,
@@ -623,6 +628,20 @@ impl Client {
             .await
             .map_err(|_| ClientError::Stopped)?;
         rx.await.map_err(|_| ClientError::Stopped)?
+    }
+
+    /// Publish this device's bundle again, as it now stands, and wait for
+    /// the relay to take it.
+    pub async fn republish(&self) -> Result<(), ClientError> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::Republish { reply: Some(tx) })
+            .await
+            .map_err(|_| ClientError::Stopped)?;
+        tokio::time::timeout(REQUEST_TIMEOUT, rx)
+            .await
+            .map_err(|_| ClientError::Timeout)?
+            .map_err(|_| ClientError::NotConnected)?
     }
 
     /// Put already encrypted chunks on the relay under `blob`.
@@ -1431,17 +1450,143 @@ impl Client {
         self.forget_sessions(&device);
         lock(&self.device_bundles).remove(&device);
         self.cmd_tx
-            .send(Command::Republish)
+            .send(Command::Republish { reply: None })
             .await
             .map_err(|_| ClientError::Stopped)?;
+        self.sync_device_list().await;
+        Ok(revocation)
+    }
+
+    /// Tell this account's other devices the list as it stands.
+    async fn sync_device_list(&self) {
+        let Some(devices) = &self.devices else {
+            return;
+        };
         let sync = match lock(devices).sync_content() {
             Content::Sync(sync) => sync,
             _ => unreachable!("the device list is sync content"),
         };
         if let Err(e) = self.send_sync(sync).await {
-            debug!("telling our devices about a revocation: {e}");
+            debug!("telling our devices the device list: {e}");
         }
-        Ok(revocation)
+    }
+
+    /// Link the device that printed `link` to this account (the primary
+    /// only; `docs/design/devices.md` section 7.1): certify it under
+    /// `name`, send it the provisioning message under the link's secret
+    /// (the certificate, the list with it on, the revocations, and the
+    /// reference of `snapshot`, a file already on the relay), publish the
+    /// bundle with the device listed, and tell this account's other
+    /// devices. The device must have registered with the relay (`silver
+    /// --link` does that before printing the link) and belong to no
+    /// account yet.
+    pub async fn link_device(
+        &self,
+        link: &DeviceLink,
+        name: &str,
+        snapshot: Option<FileInfo>,
+    ) -> Result<DeviceCertificate, ClientError> {
+        let devices = self
+            .devices
+            .as_ref()
+            .ok_or_else(|| ClientError::Relay("this client keeps no device state".into()))?;
+        lock(devices)
+            .can_link(&link.device)
+            .map_err(|e| ClientError::Relay(e.to_string()))?;
+        if !self.relay_supports(feature::DEVICES) {
+            return Err(ClientError::Relay("the relay does not keep devices".into()));
+        }
+        let certificate = self.identity.certify_device(&link.device, name, now_ms())?;
+        let lookup = self.lookup_full(link.device).await?;
+        let Some(bundle) = lookup.bundle else {
+            return Err(ClientError::Relay(
+                "the device has not registered with this relay yet (run silver --link on it first)"
+                    .into(),
+            ));
+        };
+        if bundle.account().is_some() {
+            return Err(ClientError::Relay(
+                "that device belongs to an account already".into(),
+            ));
+        }
+        if !bundle.supports_sessions() {
+            return Err(ClientError::Relay(
+                "the device publishes no prekeys, so nothing can be sent to it in confidence"
+                    .into(),
+            ));
+        }
+        let (listed, revoked) = {
+            let d = lock(devices);
+            let mut listed = d.devices().to_vec();
+            listed.push(certificate.clone());
+            listed.sort_by_key(|c| c.device);
+            (listed, d.revoked().to_vec())
+        };
+        let provisioning = Provisioning {
+            account: self.identity.user_id(),
+            certificate: certificate.clone(),
+            devices: listed,
+            revoked,
+            snapshot,
+        };
+        let provision = provisioning
+            .seal(link)
+            .map_err(|e| ClientError::Relay(e.to_string()))?;
+        let (envelope, under_session) = self
+            .seal_for(
+                &bundle,
+                &Content::Provision(provision),
+                Sequence::default(),
+                None,
+            )
+            .await?;
+        if !under_session {
+            return Err(ClientError::Relay(
+                "could not start a session with the device".into(),
+            ));
+        }
+        self.queue(envelope, None).await?;
+        lock(devices)
+            .link(certificate.clone())
+            .map_err(|e| ClientError::Relay(e.to_string()))?;
+        lock(&self.device_bundles).insert(link.device, bundle);
+        self.republish().await?;
+        self.sync_device_list().await;
+        Ok(certificate)
+    }
+
+    /// Encrypt `bytes` as a file called `name` and park it on the relay,
+    /// as [`Client::upload_file`] does with a file on disk.
+    pub async fn upload_bytes(
+        &self,
+        name: &str,
+        bytes: Vec<u8>,
+        pad: bool,
+    ) -> Result<FileInfo, ClientError> {
+        if !self.relay_supports(feature::BLOBS) {
+            return Err(ClientError::Blob(
+                "the relay does not store files (it needs Silver Messenger 0.4.0 or later)".into(),
+            ));
+        }
+        let name = name.to_owned();
+        let (info, chunks) =
+            tokio::task::spawn_blocking(move || files::prepare_bytes(name, bytes, pad))
+                .await
+                .map_err(|e| ClientError::File(e.to_string()))?
+                .map_err(|e| ClientError::File(e.to_string()))?;
+        self.upload_chunks(info.blob.clone(), chunks).await?;
+        Ok(info)
+    }
+
+    /// Fetch the file `info` describes and check it, without saving it.
+    pub async fn download_bytes(&self, info: &FileInfo) -> Result<Vec<u8>, ClientError> {
+        info.check().map_err(|e| ClientError::File(e.to_string()))?;
+        let chunks = self.download_chunks(info.blob.clone(), info.chunks).await?;
+        let info = info.clone();
+        tokio::task::spawn_blocking(move || files::assemble(&info, &chunks))
+            .await
+            .map_err(|e| ClientError::File(e.to_string()))?
+            .map_err(|e| ClientError::File(e.to_string()))
     }
 
     /// Encrypt the file at `path` and park it on the relay. The returned
@@ -1628,8 +1773,14 @@ async fn run(
                     Some(Command::RevokeDevice { reply, .. }) => {
                         let _ = reply.send(Err(ClientError::NotConnected));
                     }
-                    // The next connection publishes the bundle as it stands.
-                    Some(Command::Republish) => {}
+                    // The next connection publishes the bundle as it
+                    // stands; whoever waits for the relay's word is told
+                    // there is no connection to have it over.
+                    Some(Command::Republish { reply }) => {
+                        if let Some(reply) = reply {
+                            let _ = reply.send(Err(ClientError::NotConnected));
+                        }
+                    }
                     Some(Command::Upload { blob, chunks, progress, reply }) => {
                         queues.transfers.queue_upload(blob, chunks, progress, reply);
                     }
@@ -1658,12 +1809,30 @@ async fn run(
 
 type Lookups = HashMap<UserId, Vec<oneshot::Sender<Result<Lookup, ClientError>>>>;
 
-/// What the relay's next `published` answers: a publish of ours, or a
-/// device revocation, which the relay acknowledges the same way. Frames
-/// are answered in the order they were sent.
+/// What the relay's next `published` answers: a publish of ours (with
+/// whoever asked for it to be confirmed), or a device revocation, which
+/// the relay acknowledges the same way. Frames are answered in the order
+/// they were sent.
 enum Expect {
-    Publish,
+    Publish(Option<oneshot::Sender<Result<(), ClientError>>>),
     RevokeDevice(oneshot::Sender<Result<(), ClientError>>),
+}
+
+impl Expect {
+    /// Whether an error from the relay now is this frame's refusal that
+    /// someone waits to hear of.
+    fn awaited(&self) -> bool {
+        matches!(self, Self::RevokeDevice(_) | Self::Publish(Some(_)))
+    }
+
+    fn refuse(self, error: ClientError) {
+        match self {
+            Self::RevokeDevice(reply) | Self::Publish(Some(reply)) => {
+                let _ = reply.send(Err(error));
+            }
+            Self::Publish(None) => {}
+        }
+    }
 }
 type DepositReplies = VecDeque<oneshot::Sender<Result<KeyPackageStatus, ClientError>>>;
 type KeyPackageReplies = HashMap<
@@ -1786,7 +1955,7 @@ async fn session(
     sink.send(text(&publish_frame(setup)?)).await?;
     let mut published = false;
     let mut republished = 0u32;
-    let mut expecting: VecDeque<Expect> = VecDeque::from([Expect::Publish]);
+    let mut expecting: VecDeque<Expect> = VecDeque::from([Expect::Publish(None)]);
 
     // --- steady state ------------------------------------------------------
     let mut lookups: Lookups = HashMap::new();
@@ -1854,11 +2023,14 @@ async fn session(
                     }
                     expecting.push_back(Expect::RevokeDevice(reply));
                 }
-                Some(Command::Republish) => {
+                Some(Command::Republish { reply }) => {
                     if sink.send(text(&publish_frame(setup)?)).await.is_err() {
+                        if let Some(reply) = reply {
+                            let _ = reply.send(Err(ClientError::NotConnected));
+                        }
                         return Ok(Exit::Disconnected("publish failed".into()));
                     }
-                    expecting.push_back(Expect::Publish);
+                    expecting.push_back(Expect::Publish(reply));
                 }
                 Some(Command::Lookup { user_id, reply }) => {
                     if let Err(e) = sink.send(text(&ClientFrame::Lookup { user_id })).await {
@@ -2055,13 +2227,13 @@ async fn session(
                         return Ok(Exit::Disconnected(format!("{message} ({code:?})")));
                     }
                     // Answers come in order: an error while a device
-                    // revocation is the next thing to be answered is its
-                    // refusal.
+                    // revocation, or a publish someone waits on, is the
+                    // next thing to be answered is its refusal.
                     ServerFrame::Error { code, message }
-                        if matches!(expecting.front(), Some(Expect::RevokeDevice(_))) =>
+                        if expecting.front().is_some_and(Expect::awaited) =>
                     {
-                        if let Some(Expect::RevokeDevice(reply)) = expecting.pop_front() {
-                            let _ = reply.send(Err(ClientError::Relay(format!("{message} ({code:?})"))));
+                        if let Some(expected) = expecting.pop_front() {
+                            expected.refuse(ClientError::Relay(format!("{message} ({code:?})")));
                         }
                     }
                     // An error is not tied to a request; a pending key
@@ -2100,7 +2272,10 @@ async fn session(
                                 let _ = reply.send(Ok(()));
                                 continue;
                             }
-                            Some(Expect::Publish) | None => {}
+                            Some(Expect::Publish(Some(reply))) => {
+                                let _ = reply.send(Ok(()));
+                            }
+                            Some(Expect::Publish(None)) | None => {}
                         }
                         if !published {
                             published = true;
@@ -2158,7 +2333,7 @@ async fn session(
                             if sink.send(text(&publish_frame(setup)?)).await.is_err() {
                                 return Ok(Exit::Disconnected("publish failed".into()));
                             }
-                            expecting.push_back(Expect::Publish);
+                            expecting.push_back(Expect::Publish(None));
                         }
                     }
                     ServerFrame::Pong => {}

@@ -406,25 +406,34 @@ On the primary: `/devices link <link>` (or `/devices link` and paste).
 The primary makes the certificate with `created_at_ms` now and the
 name from the link or the owner's answer, looks the device up, starts a
 session with it, and sends a **provisioning** message: the certificate,
-the account's user id, the current device list and revocations, the
-contacts (aliases, verified marks, pinned bundles, blocked ids, file
-settings), the groups (ids, names, aliases) the account is in, and an
-optional history snapshot reference (7.4); the whole body is encrypted
-once more under `HKDF-SHA256(secret, "silver-messenger/v5/link")`
-before it goes into the session, so that only the device that printed
-the link reads it, whoever else was handed the device id. The primary
-then publishes its bundle with the device on the list, adds the device
-to every group it can (6.3), and syncs the new list to its other
-devices.
+the account's user id, the device list as it will be published (the new
+device on it) and the revocations issued, and the reference of a
+**snapshot** (7.4), a file on the relay's blob store with the contacts
+(aliases, verified marks, pinned bundles, file settings, the revoked
+mark), the blocked ids, the groups (ids, names, aliases) the account is
+in, and the recent history; the whole body is encrypted once more under
+`HKDF-SHA256(secret, "silver-messenger/v5/link")` before it goes into
+the session, so that only the device that printed the link reads it,
+whoever else was handed the device id. The contacts go in the snapshot
+and not in the message because a body holds 32 KiB and a pinned bundle
+is kilobytes; the message itself holds the certificates and
+revocations, at most a few hundred bytes each. The primary then
+publishes its bundle with the device on the list, adds the device to
+every group it can (6.3), and syncs the new list to its other devices.
 
 The new device decrypts the provisioning message with the secret,
-verifies the certificate against the account id it names, keeps
-everything, republishes its bundle with `device_of`, and is linked. If
-the primary sends something under the wrong secret (a stranger who saw
-the device id) the device sees a message it cannot open from an unknown
-peer and ignores it, as it ignores any such thing. If the primary never
-answers, the link expires and the device says so; `silver --link` again
-makes a new one.
+verifies the certificate against the account id it names and the
+account against the sender, keeps the certificate and the list,
+republishes its bundle with `device_of`, and is linked; then it fetches
+the snapshot and takes the contacts, the blocked ids, the groups and
+the history. If the primary sends something under the wrong secret (a
+stranger who saw the device id) the device sees a message it cannot
+open from an unknown peer and ignores it, as it ignores any such thing.
+If the primary never answers, the link expires and the device says so;
+`silver --link` again makes a new one. A snapshot that cannot be fetched
+leaves the device linked with an empty contact list, and says so: the
+primary's later `sync contact` messages fill in what changes from then
+on, and the owner adds the rest by hand.
 
 The invite token: a closed relay takes a device's registration only with
 a token; the primary's config holds it and the owner passes it to the
@@ -459,13 +468,18 @@ was, in the backup; a linked device keeps working until the certificates
 are useless because the account is dead to everyone, and the owner
 starts a new identity.
 
-### 7.4 History at link time
+### 7.4 The snapshot
 
-The primary, when linking, offers the last N days of history (default
-30, `--history-days`) as one snapshot: the history files of every contact
-and group, as a padded file of section 4.5, uploaded to the blob store,
-its reference inside the provisioning message. The new device fetches
-it, imports the lines into its own history files, and shows them. A
+The primary, when linking, gathers one snapshot: the contacts, the
+blocked ids, the groups it is in, and the last N days of history
+(default 30, `days` in `/devices link`, 0 for none) of every contact and
+group, each line with the furthest receipt it got. The snapshot is one
+JSON document (`format: silver-messenger-snapshot`, `version: 1`) sent
+as a padded file of section 4.5: encrypted under a key of its own,
+uploaded to the blob store, its reference (a `file` content) inside the
+provisioning message. The new device fetches it, takes the contacts
+with their sequence numbers reset (each device numbers its own stream),
+imports the lines into its own history files, and shows them. A
 snapshot larger than a file may be (16 MiB) is cut at the newest
 messages that fit. Nothing syncs history later; a device that was off
 for a week has the week's messages in its own mailbox (up to its quota),
@@ -494,9 +508,11 @@ one device today.
 
 ### 8.2 Engine
 
-* `devices` module: certificates, the list, revocations, the link, the
-  provisioning message, `sync` bodies; what to fan out to, given a
-  contact and one's own list.
+* `devices` module: the device state (the list, the certificate on a
+  linked device, revocations) and what to fan out to, given a contact
+  and one's own list. `linking` module: the link, the provisioning
+  message, the snapshot; `Client::link_device` on the primary and
+  `take_link` on the device.
 * `Client::send_content` becomes send-to-account: it resolves the
   account's devices (from the bundle it holds or fetches; the devices'
   bundles come with the account's lookup, or from a lookup of the device)
@@ -637,8 +653,8 @@ Each step is one commit on `main` with its tests:
    tests.
 3. Client, sessions: per-device fan-out and sync, device list refresh,
    revocations, the primary's forwarding; tests.
-4. Client, linking: `--link`, the provisioning message, `devices.json`,
-   the history snapshot.
+4. Client, linking: `--link`, the provisioning message, the snapshot,
+   devices in the backup.
 5. Groups: the `silver_device` leaf extension, the verification and
    membership rules, per-device key packages, the old-member check.
 6. Terminal client: `/devices`, the first-run prompt, `/session`.

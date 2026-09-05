@@ -16,6 +16,7 @@ pub mod files;
 pub mod groups;
 pub mod invite;
 pub mod keystore;
+pub mod linking;
 mod outbox;
 pub mod proxy;
 pub mod receipts;
@@ -38,10 +39,14 @@ pub use cover::CoverSchedule;
 pub use devices::{DeviceState, DevicesFile, Linked, SharedDevices};
 pub use files::{FileInfo, human_size};
 pub use groups::{
-    Change, GroupError, GroupEvent, GroupLink, GroupRecord, GroupState, Groups, HeldWelcome,
-    MemberInfo, Outgoing, Staged,
+    Change, ExpectedGroup, GroupError, GroupEvent, GroupLink, GroupRecord, GroupState, Groups,
+    HeldWelcome, MemberInfo, Outgoing, Staged,
 };
 pub use invite::InviteLink;
+pub use linking::{
+    DeviceLink, Imported, LinkError, Provisioning, Snapshot, SnapshotGroup, Taken, fetch_snapshot,
+    take_link,
+};
 pub use proxy::Proxy;
 pub use receipts::ReceiptQueue;
 pub use sessions::{SessionError, SessionInfo, SessionStore, SharedSessions};

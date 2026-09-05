@@ -22,7 +22,7 @@
           "signing_seed": "bd7i+fGF0hI3f8km5Br1bd0lcDebzfgO4GI62rxezO0=",
           "dh_secret": "YijXZWAS+maZOrYKjtfv8yD16suWXNxOAIlhNqhEEAI="
         },
-        "plaintext": "{\"account\":\"...\",\"contacts\":[]}",
+        "plaintext": "{\"account\":\"...\",\"certificate\":{},\"devices\":[],\"revoked\":[]}",
         "rng_seed": "AWke87SGOFatKPShR1rvYmIvOmzWI332D2wMN6ENVhQ="
       },
       "outputs": {
@@ -30,7 +30,7 @@
         "key": "jkcXIwg1UgyFPHiAafJ8C4nQ/MuiJjGt/jRVXWHHgs8=",
         "aad": "c2lsdmVyLW1lc3Nlbmdlci92NS9wcm92aXNpb27yegsH3PUVu822BstJXRirHbb4/1MuCyrtcij0muoLYw==",
         "nonce": "3/UnOopyDB07MUNcgSxmGDgJZJYO+CfE",
-        "ciphertext": "Iq6YORJj+u/3U0WCF0CKiTFvKnzSRK801ATmfV13xj+DncRebzjumyO6MsZ8cD8="
+        "ciphertext": "Iq6YORJj+u/3U0WCF0CKiTFvKnbORKcxyRSlM2MIgX0ZaGYzzzWRoPd9DL2r5Y9yj2rNnWKSeXA8WKjao19bOPSV2w4hGo8vdcsNXA=="
       }
     },
     {

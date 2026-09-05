@@ -212,6 +212,20 @@ pub(crate) struct GroupsFile {
     /// is taken without asking the user again.
     #[serde(default)]
     joins: BTreeMap<GroupId, UserId>,
+    /// Groups this account is in, as the primary named them when this
+    /// device was linked (`docs/design/devices.md` section 7.4): the
+    /// Welcome the primary sends for each is taken without asking, and
+    /// the alias is known from the start.
+    #[serde(default)]
+    expected: BTreeMap<GroupId, ExpectedGroup>,
+}
+
+/// A group named at link time, before its Welcome came.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExpectedGroup {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
 }
 
 // --- what comes out -----------------------------------------------------------
@@ -480,6 +494,38 @@ impl Groups {
         let record = self.record_mut(group)?;
         record.alias = alias.filter(|a| !a.trim().is_empty());
         self.persist()
+    }
+
+    /// Note the groups the account is in, as the primary named them at
+    /// link time; a group already known here keeps what it has.
+    pub fn expect_groups(
+        &mut self,
+        groups: impl IntoIterator<Item = (GroupId, ExpectedGroup)>,
+    ) -> Result<()> {
+        for (id, expected) in groups {
+            if self.file.groups.contains_key(&id) {
+                continue;
+            }
+            self.file.expected.insert(
+                id,
+                ExpectedGroup {
+                    alias: expected.alias.filter(|a| !a.trim().is_empty()),
+                    ..expected
+                },
+            );
+        }
+        self.persist()
+    }
+
+    /// What the primary said of `group` at link time, while its Welcome
+    /// is still to come.
+    pub fn expected(&self, group: &GroupId) -> Option<&ExpectedGroup> {
+        self.file.expected.get(group)
+    }
+
+    /// The groups named at link time whose Welcome is still to come.
+    pub fn expected_groups(&self) -> impl Iterator<Item = (&GroupId, &ExpectedGroup)> {
+        self.file.expected.iter()
     }
 
     pub fn set_muted(&mut self, group: &GroupId, muted: bool) -> Result<()> {
@@ -2132,6 +2178,12 @@ fn describe(
 impl Store {
     pub(crate) fn load_groups(&self) -> anyhow::Result<GroupsFile> {
         self.read_json_or_default(GROUPS_FILE)
+    }
+
+    /// Whether any group is known here, in whatever state.
+    pub(crate) fn has_groups(&self) -> anyhow::Result<bool> {
+        let file = self.load_groups()?;
+        Ok(!file.groups.is_empty() || !file.expected.is_empty())
     }
 
     pub(crate) fn save_groups(&self, file: &GroupsFile) -> anyhow::Result<()> {

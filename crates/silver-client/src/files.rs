@@ -223,6 +223,22 @@ pub fn prepare(path: &Path, pad: bool) -> anyhow::Result<(FileInfo, Vec<Vec<u8>>
         .file_name()
         .map(|n| sanitize_name(&n.to_string_lossy()))
         .unwrap_or_else(|| "file".to_owned());
+    prepare_bytes(name, bytes, pad)
+}
+
+/// [`prepare`] for bytes already in memory, described under `name`.
+pub fn prepare_bytes(
+    name: String,
+    bytes: Vec<u8>,
+    pad: bool,
+) -> anyhow::Result<(FileInfo, Vec<Vec<u8>>)> {
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        bail!(
+            "{name} is {}; files up to {} can be sent",
+            human_size(bytes.len() as u64),
+            human_size(MAX_FILE_BYTES)
+        );
+    }
     let key = BlobKey::generate();
     let blob = new_blob_id();
     let size = bytes.len() as u64;
