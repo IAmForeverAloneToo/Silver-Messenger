@@ -26,6 +26,9 @@ type Row = (Line<'static>, Option<usize>);
 const NARROW_WIDTH: u16 = 70;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
+    // The ground: the terminal's own colours, or the palette's when it
+    // sets them (contrast).
+    frame.render_widget(Block::new().style(app.theme.text), frame.area());
     let [main, status] =
         Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).areas(frame.area());
     app.narrow = frame.area().width < NARROW_WIDTH;
@@ -109,7 +112,10 @@ fn draw_help(frame: &mut Frame, app: &mut App) {
         .skip(app.help_scroll)
         .take(visible)
         .collect();
-    frame.render_widget(Paragraph::new(shown).block(block), rect);
+    frame.render_widget(
+        Paragraph::new(shown).block(block).style(app.theme.text),
+        rect,
+    );
 }
 
 fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {

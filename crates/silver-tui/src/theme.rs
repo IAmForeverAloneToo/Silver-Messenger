@@ -1,8 +1,10 @@
-//! Colours. Three palettes: dark (the default, for the usual dark
-//! terminal), light for a light background, and mono for terminals without
+//! Colours. Four palettes: dark (the default, for the usual dark
+//! terminal), light for a light background, mono for terminals without
 //! colour or people who set `NO_COLOR`, which leans on bold, dim and
-//! reverse video instead. The QR code is always dark on light, whatever
-//! the palette, so a phone can read it.
+//! reverse video instead, and contrast for low vision: bright bold text
+//! on black, nothing dimmed, every pair well above the 7:1 the WCAG asks
+//! of small text (`docs/design/accessibility.md`). The QR code is always
+//! dark on light, whatever the palette, so a phone can read it.
 
 use ratatui::style::{Color, Modifier, Style};
 
@@ -11,6 +13,7 @@ pub enum ThemeName {
     Dark,
     Light,
     Mono,
+    Contrast,
 }
 
 impl ThemeName {
@@ -19,6 +22,7 @@ impl ThemeName {
             "dark" | "default" => Some(Self::Dark),
             "light" => Some(Self::Light),
             "mono" | "none" | "plain" | "nocolor" | "no-color" => Some(Self::Mono),
+            "contrast" | "high-contrast" | "highcontrast" | "hc" => Some(Self::Contrast),
             _ => None,
         }
     }
@@ -28,6 +32,7 @@ impl ThemeName {
             Self::Dark => "dark",
             Self::Light => "light",
             Self::Mono => "mono",
+            Self::Contrast => "contrast",
         }
     }
 }
@@ -35,6 +40,10 @@ impl ThemeName {
 #[derive(Clone, Copy, Debug)]
 pub struct Theme {
     pub name: ThemeName,
+    /// The ground everything is drawn on: the terminal's own colours in
+    /// most palettes, white on black in `contrast`, which assumes nothing
+    /// of the terminal.
+    pub text: Style,
     /// Timestamps, hints, rules and other things that should not shout.
     pub dim: Style,
     /// The focused pane's border and other things that should stand out.
@@ -64,12 +73,14 @@ impl Theme {
             ThemeName::Dark => Self::dark(),
             ThemeName::Light => Self::light(),
             ThemeName::Mono => Self::mono(),
+            ThemeName::Contrast => Self::contrast(),
         }
     }
 
     pub fn dark() -> Self {
         Self {
             name: ThemeName::Dark,
+            text: Style::default(),
             dim: fg(Color::DarkGray),
             accent: fg(Color::Cyan),
             selected: fg(Color::Black)
@@ -90,6 +101,7 @@ impl Theme {
     pub fn light() -> Self {
         Self {
             name: ThemeName::Light,
+            text: Style::default(),
             dim: fg(Color::DarkGray),
             accent: fg(Color::Blue),
             selected: fg(Color::White)
@@ -111,6 +123,7 @@ impl Theme {
         let plain = Style::default();
         Self {
             name: ThemeName::Mono,
+            text: plain,
             dim: plain.add_modifier(Modifier::DIM),
             accent: plain.add_modifier(Modifier::BOLD),
             selected: plain.add_modifier(Modifier::REVERSED | Modifier::BOLD),
@@ -124,6 +137,51 @@ impl Theme {
             toast: plain.add_modifier(Modifier::BOLD),
             code: fg(Color::Black).bg(Color::White),
         }
+    }
+
+    /// Bright bold text on black, every pair set on both sides so the
+    /// terminal's own colours play no part, nothing dimmed. Bright yellow
+    /// and bright white on black, and black on bright yellow, are above
+    /// 10:1 in the usual palettes; white on red, the weakest pair at about
+    /// 5:1, marks errors alone, which are short and bold.
+    pub fn contrast() -> Self {
+        let base = Style::default().fg(Color::White).bg(Color::Black);
+        let bold = base.add_modifier(Modifier::BOLD);
+        Self {
+            name: ThemeName::Contrast,
+            text: base,
+            dim: base,
+            accent: bold.fg(Color::LightYellow),
+            selected: bold.fg(Color::Black).bg(Color::LightYellow),
+            badge: bold.fg(Color::Black).bg(Color::LightYellow),
+            you: bold.fg(Color::LightYellow),
+            peer: bold.fg(Color::LightYellow),
+            warn: bold.fg(Color::LightYellow),
+            error: bold.fg(Color::White).bg(Color::Red),
+            good: bold.fg(Color::LightGreen),
+            read: bold.fg(Color::LightCyan),
+            toast: bold.fg(Color::White).bg(Color::Blue),
+            code: fg(Color::Black).bg(Color::White),
+        }
+    }
+
+    /// Every style of the palette but the QR code's.
+    #[cfg(test)]
+    pub fn styles(&self) -> [Style; 12] {
+        [
+            self.text,
+            self.dim,
+            self.accent,
+            self.selected,
+            self.badge,
+            self.you,
+            self.peer,
+            self.warn,
+            self.error,
+            self.good,
+            self.read,
+            self.toast,
+        ]
     }
 }
 
@@ -159,11 +217,21 @@ mod tests {
     #[test]
     fn mono_uses_no_colour_except_for_the_code() {
         let t = Theme::mono();
-        for style in [
-            t.dim, t.accent, t.selected, t.badge, t.you, t.peer, t.warn, t.error,
-        ] {
+        for style in t.styles() {
             assert!(style.fg.is_none() && style.bg.is_none());
         }
         assert_eq!(t.code.fg, Some(Color::Black));
+    }
+
+    #[test]
+    fn contrast_sets_both_sides_of_every_pair_and_dims_nothing() {
+        let t = Theme::contrast();
+        for style in t.styles() {
+            assert!(style.fg.is_some() && style.bg.is_some(), "{style:?}");
+            assert!(!style.add_modifier.contains(Modifier::DIM));
+        }
+        assert_eq!(t.text, t.dim, "nothing is dimmed");
+        assert_eq!(ThemeName::parse("high-contrast"), Some(ThemeName::Contrast));
+        assert_eq!(Theme::named(ThemeName::Contrast).name.as_str(), "contrast");
     }
 }

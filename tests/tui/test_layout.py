@@ -48,6 +48,18 @@ def main():
     assert a.wait("Theme: light (remembered)"), "/theme"
     assert config(a_dir)["theme"] == "light"
     a.quit()
+    # High contrast: colours by flag (NO_COLOR would strip them at the
+    # terminal layer), and /theme remembers it.
+    a = Term(a_dir, relay.url, extra=["--theme", "contrast"])
+    assert a.wait(G.connected + " connected"), "contrast"
+    y, x = a.row_of("connected")
+    assert a.fg_at(x, y) != "default", "contrast colours the status"
+    a.type("/theme contrast\r")
+    assert a.wait("Theme: contrast (remembered)"), "/theme contrast"
+    assert config(a_dir)["theme"] == "contrast"
+    a.type("/theme light\r")
+    assert a.wait("Theme: light (remembered)"), "back to light"
+    a.quit()
 
     # The "new messages" rule, focus on selection, today's date rule.
     a = Term(a_dir, relay.url)

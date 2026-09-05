@@ -1677,6 +1677,79 @@ impl App {
         self.select((self.selected + 1) % n);
     }
 
+    /// `/go <name>`: open the chat whose alias, group name or id starts
+    /// with `name`, without the mouse and without cycling through the
+    /// list; `system` and `requests` name those panes.
+    fn cmd_go(&mut self, args: &[&str]) {
+        let wanted = args.join(" ").trim().to_lowercase();
+        if wanted.is_empty() {
+            self.toast("Usage: /go <contact, group, system or requests>");
+            return;
+        }
+        let mut panes: Vec<(usize, String)> = vec![(0, "system".to_owned())];
+        for (i, contact) in self.contacts.iter().enumerate() {
+            panes.push((i + 1, contact.display_name().to_lowercase()));
+            panes.push((i + 1, contact.user_id.to_string().to_lowercase()));
+        }
+        for (i, group) in self.group_list.iter().enumerate() {
+            let pane = self.contacts.len() + i + 1;
+            panes.push((pane, self.group_name(group).to_lowercase()));
+            panes.push((pane, group.to_string().to_lowercase()));
+        }
+        if self.has_requests_pane() {
+            panes.push((self.pane_count() - 1, "requests".to_owned()));
+        }
+        let exact: Vec<usize> = panes
+            .iter()
+            .filter(|(_, name)| *name == wanted)
+            .map(|(pane, _)| *pane)
+            .collect();
+        let mut found: Vec<usize> = if exact.is_empty() {
+            panes
+                .iter()
+                .filter(|(_, name)| name.starts_with(&wanted))
+                .map(|(pane, _)| *pane)
+                .collect()
+        } else {
+            exact
+        };
+        found.dedup();
+        match found.as_slice() {
+            [] => self.toast(format!("No chat called {wanted}.")),
+            [pane] => self.select(*pane),
+            _ => self.toast(format!(
+                "{} chats start with {wanted}; say more of the name.",
+                found.len()
+            )),
+        }
+    }
+
+    /// `/sidebar <columns>`: the chat list's width, kept in the config,
+    /// as dragging the divider sets it.
+    fn cmd_sidebar(&mut self, args: &[&str]) {
+        let Some(arg) = args.first() else {
+            self.toast(format!(
+                "The chat list is {} columns wide. Usage: /sidebar <12-60>",
+                self.sidebar_width
+            ));
+            return;
+        };
+        let Ok(width) = arg.parse::<u16>() else {
+            self.toast("Usage: /sidebar <12-60>");
+            return;
+        };
+        self.sidebar_width = width.clamp(12, 60);
+        let mut config = self.store.load_config().unwrap_or_default();
+        config.sidebar_width = self.sidebar_width;
+        if let Err(e) = self.store.save_config(&config) {
+            self.toast(format!("Could not save config: {e}"));
+        }
+        self.toast(format!(
+            "The chat list is {} columns wide.",
+            self.sidebar_width
+        ));
+    }
+
     fn select_prev(&mut self) {
         let n = self.pane_count();
         self.select((self.selected + n - 1) % n);
@@ -1793,6 +1866,8 @@ impl App {
             "notify" => self.cmd_notify(&rest),
             "marks" | "ascii" => self.cmd_marks(&rest),
             "theme" | "colors" | "colours" => self.cmd_theme(&rest),
+            "go" | "chat" => self.cmd_go(&rest),
+            "sidebar" | "list" => self.cmd_sidebar(&rest),
             "search" | "find" => self.cmd_search(&rest),
             "accept" => self.cmd_accept(&rest),
             "block" => self.cmd_block(&rest),
@@ -2180,7 +2255,7 @@ impl App {
         let name = match args.first() {
             None => {
                 self.toast(format!(
-                    "Theme: {}. Usage: /theme dark|light|mono",
+                    "Theme: {}. Usage: /theme dark|light|mono|contrast",
                     self.theme.name.as_str()
                 ));
                 return;
@@ -2188,7 +2263,7 @@ impl App {
             Some(arg) => match ThemeName::parse(arg) {
                 Some(name) => name,
                 None => {
-                    self.toast("Usage: /theme dark|light|mono");
+                    self.toast("Usage: /theme dark|light|mono|contrast");
                     return;
                 }
             },
@@ -4741,5 +4816,54 @@ mod tests {
                 .last()
                 .is_some_and(|l| l.text.contains("not sent"))
         );
+    }
+
+    #[tokio::test]
+    async fn chats_are_reached_by_name_and_the_list_sized_by_command() {
+        let (mut app, _dir) = app();
+        let bob = Identity::generate();
+        let bobby = Identity::generate();
+        let mut contact = Contact::new(bob.user_id());
+        contact.alias = Some("bob".into());
+        app.contacts.push(contact);
+        let mut contact = Contact::new(bobby.user_id());
+        contact.alias = Some("bobby".into());
+        app.contacts.push(contact);
+        // A prefix that fits one, an exact name among longer ones, an
+        // ambiguous one, and the panes by name.
+        app.cmd_go(&["bobb"]);
+        assert_eq!(app.selected, 2);
+        app.cmd_go(&["BOB"]);
+        assert_eq!(app.selected, 1, "an exact name wins over a longer one");
+        app.cmd_go(&["b"]);
+        assert_eq!(app.selected, 1, "an ambiguous prefix changes nothing");
+        assert!(
+            app.toast
+                .as_ref()
+                .unwrap()
+                .0
+                .contains("2 chats start with b")
+        );
+        app.cmd_go(&["sys"]);
+        assert_eq!(app.selected, 0);
+        app.cmd_go(&[&bobby.user_id().to_string()[..6]]);
+        assert_eq!(app.selected, 2, "an id works too");
+        app.cmd_go(&["nobody"]);
+        assert!(
+            app.toast
+                .as_ref()
+                .unwrap()
+                .0
+                .contains("No chat called nobody")
+        );
+
+        app.cmd_sidebar(&["40"]);
+        assert_eq!(app.sidebar_width, 40);
+        assert_eq!(app.store.load_config().unwrap().sidebar_width, 40);
+        app.cmd_sidebar(&["999"]);
+        assert_eq!(app.sidebar_width, 60, "clamped");
+        app.cmd_sidebar(&["wide"]);
+        assert!(app.toast.as_ref().unwrap().0.starts_with("Usage"));
+        assert_eq!(app.sidebar_width, 60);
     }
 }

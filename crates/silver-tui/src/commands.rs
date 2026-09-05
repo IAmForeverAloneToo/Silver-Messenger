@@ -117,8 +117,20 @@ pub const COMMANDS: &[CommandInfo] = &[
     cmd(
         "theme",
         &["colors", "colours"],
-        "dark|light|mono",
-        "colours for a dark or a light background, or none at all",
+        "dark|light|mono|contrast",
+        "colours for a dark or a light background, none at all, or high contrast (bright bold text on black)",
+    ),
+    cmd(
+        "go",
+        &["chat"],
+        "<name>",
+        "open the chat whose contact alias, group name or id starts like that; system and requests name those panes",
+    ),
+    cmd(
+        "sidebar",
+        &["list"],
+        "<12-60>",
+        "how many columns the chat list takes (dragging its edge does the same); remembered",
     ),
     cmd(
         "accept",

@@ -159,8 +159,9 @@ struct Args {
     #[arg(long, env = "SILVER_ASCII")]
     ascii: bool,
 
-    /// Colours: dark (default), light for a light background, or mono for
-    /// none at all (NO_COLOR does the same). /theme changes it for good.
+    /// Colours: dark (default), light for a light background, mono for
+    /// none at all (NO_COLOR does the same), or contrast for bright bold
+    /// text on black. /theme changes it for good.
     #[arg(long, env = "SILVER_THEME", value_name = "NAME")]
     theme: Option<String>,
 }
