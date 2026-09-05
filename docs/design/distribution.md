@@ -104,8 +104,20 @@ warning; the `--help` of each is the reference for now.
 
 ## 6. Status
 
-To be filled in as the channels go live: which release each carries,
-which signing secrets exist, and what was checked by hand.
+As of the code landing, before 0.10.0:
+
+| Channel | State |
+| --- | --- |
+| Debian package | Built by the release workflow from 0.10.0 on; none published yet. The build script was run here on the debug binaries, the package installed on this machine and in CI's Debian container, both binaries run, the package removed cleanly; lintian clean of errors. |
+| Homebrew tap | Live for 0.9.0: CI taps this repository on macOS, audits the formula, installs it from the 0.9.0 release and runs its test on every push. Not yet tried by hand on a Mac. |
+| AUR | The PKGBUILD and `.SRCINFO` for 0.9.0 are in the repository and pass `namcap` and the `.SRCINFO` check in CI's Arch container; not pushed to the AUR (the maintainer's account). Not yet built with `makepkg -si` by hand. |
+| winget | Manifests for 0.9.0 in the repository, valid against the schemas; not submitted to `winget-pkgs` (a pull request the maintainer makes). Not yet tried with `winget install --manifest`. |
+| Authenticode | No certificate in the secrets; the step stands unchecked and the Windows executables go out unsigned. |
+| Notarisation | No Apple membership in the secrets; the step stands unchecked and the macOS executables go out unsigned. |
+
+The 0.10.0 release will be the first with the Debian packages and the
+packaging archive; the packaging commit that follows it moves the tap,
+the PKGBUILD and the manifests to 0.10.0.
 
 ## 7. Implementation order
 

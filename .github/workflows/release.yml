@@ -94,6 +94,84 @@ jobs:
           export RUSTFLAGS="--remap-path-prefix=${{ github.workspace }}=/src --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
           cargo auditable build --release --locked --workspace --target "${{ matrix.target }}"
 
+      # Signing (docs/design/distribution.md, section 3): with the secrets,
+      # both executables are signed (and, on macOS, notarised); with none,
+      # a notice says so and the release goes out unsigned; with some, the
+      # step fails, since a half-configured secret is a mistake. A signature
+      # is the one thing a signed download differs from a rebuild by; the
+      # README says how to strip it and compare.
+      - name: Sign the Windows executables
+        if: contains(matrix.target, 'windows')
+        shell: bash
+        env:
+          AUTHENTICODE_PFX: ${{ secrets.AUTHENTICODE_PFX }}
+          AUTHENTICODE_PASSWORD: ${{ secrets.AUTHENTICODE_PASSWORD }}
+        run: |
+          if [ -z "$AUTHENTICODE_PFX" ] && [ -z "$AUTHENTICODE_PASSWORD" ]; then
+            echo "::notice::AUTHENTICODE_PFX and AUTHENTICODE_PASSWORD are not set; the Windows executables are published unsigned (README, \"Signing releases\")"
+            exit 0
+          fi
+          if [ -z "$AUTHENTICODE_PFX" ] || [ -z "$AUTHENTICODE_PASSWORD" ]; then
+            echo "::error::AUTHENTICODE_PFX and AUTHENTICODE_PASSWORD must both be set, or neither"
+            exit 1
+          fi
+          pfx="$RUNNER_TEMP/authenticode.pfx"
+          printf '%s' "$AUTHENTICODE_PFX" | base64 -d > "$pfx"
+          signtool="$(ls "/c/Program Files (x86)/Windows Kits/10/bin/"*/x64/signtool.exe | sort -V | tail -1)"
+          for bin in silver silver-relay; do
+            exe="target/${{ matrix.target }}/release/$bin.exe"
+            "$signtool" sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f "$pfx" /p "$AUTHENTICODE_PASSWORD" "$exe"
+            "$signtool" verify /pa "$exe"
+          done
+          rm -f "$pfx"
+
+      - name: Sign and notarise the macOS executables
+        if: contains(matrix.target, 'apple')
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          given=0
+          for name in APPLE_CERTIFICATE_P12 APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_TEAM_ID APPLE_APP_PASSWORD; do
+            if [ -n "${!name}" ]; then given=$((given + 1)); fi
+          done
+          if [ "$given" -eq 0 ]; then
+            echo "::notice::the APPLE_* secrets are not set; the macOS executables are published unsigned and not notarised (README, \"Signing releases\")"
+            exit 0
+          fi
+          if [ "$given" -ne 5 ]; then
+            echo "::error::APPLE_CERTIFICATE_P12, APPLE_CERTIFICATE_PASSWORD, APPLE_ID, APPLE_TEAM_ID and APPLE_APP_PASSWORD must all be set, or none"
+            exit 1
+          fi
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password="$(openssl rand -hex 16)"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          printf '%s' "$APPLE_CERTIFICATE_P12" | base64 -d > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" login.keychain
+          identity="$(security find-identity -v -p codesigning "$keychain" | awk -F'"' '/Developer ID Application/ { print $2; exit }')"
+          if [ -z "$identity" ]; then
+            echo "::error::the certificate holds no Developer ID Application identity"
+            exit 1
+          fi
+          dir="target/${{ matrix.target }}/release"
+          for bin in silver silver-relay; do
+            codesign --sign "$identity" --options runtime --timestamp --force "$dir/$bin"
+            codesign --verify --strict --verbose=2 "$dir/$bin"
+          done
+          # Notarisation takes an archive; a bare executable gets no stapled
+          # ticket, so Gatekeeper asks Apple about it the first time it runs.
+          zip -j "$RUNNER_TEMP/notarise.zip" "$dir/silver" "$dir/silver-relay"
+          xcrun notarytool submit "$RUNNER_TEMP/notarise.zip" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+          security delete-keychain "$keychain"
+
       - name: SBOM
         shell: bash
         run: |
