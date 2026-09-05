@@ -100,7 +100,10 @@ What a relay stores for a user and serves on lookup:
   forge the signature. A client publishes `pq_ratchet` only when it also
   publishes ML-KEM keys, since v4 needs the post-quantum handshake. A relay
   older than 0.8.0 drops the two fields when it re-serialises the bundle,
-  so the post-quantum ratchet needs a relay that keeps them.
+  so the post-quantum ratchet needs a relay that keeps them. From 0.9.0
+  the list may also carry `groups`: the client keeps MLS key packages on
+  deposit and reads group bodies (section 13); a client adds a contact to
+  a group only when the contact's bundle says so.
 
 ## 3. Envelope (the sealed-sender layer)
 
@@ -138,10 +141,12 @@ a WebSocket frame at most 131 072 bytes.
 ## 4. Body
 
 The body is JSON. Its version is the integer field `v`, absent (0) or 1 for
-a plain body, 2 for a ratchet body, and 4 for a ratchet body that runs the
-post-quantum ratchet and is deniable (no sealed-layer signature). Other
-values are rejected. (There is no v3 body: the post-quantum *handshake* of
-0.6.0 kept `v: 2`, since it changes only what goes into `init`.)
+a plain body, 2 for a ratchet body, 4 for a ratchet body that runs the
+post-quantum ratchet and is deniable (no sealed-layer signature), and 5
+for a group body, which carries one MLS message and is unsigned at the
+sealed layer as well (section 13). Other values are rejected. (There is
+no v3 body: the post-quantum *handshake* of 0.6.0 kept `v: 2`, since it
+changes only what goes into `init`.)
 
 **Padding.** An encoded body is padded with trailing ASCII spaces (0x20)
 to a multiple of 160 bytes (clients from 0.6.0). JSON ignores trailing
@@ -500,6 +505,10 @@ first.
 | `revoke` | `revocation` | A self-signed revocation (section 10). Accepted without `auth`, since the key may be lost; a one-shot, the connection then closes. |
 | `succeed` | `succession` | A cross-signed succession (section 10). Accepted without `auth`; a one-shot. |
 | `log_since` | `index` | The transparency log entries after `index` (section 11), a page at a time; the client asks again from the last index it got until it reaches the head. Rate limited with `lookup`. |
+| `key_packages` | `packages`, `last_resort`? | Replace the client's MLS key packages on deposit (section 13.4). Authenticated connections only, after `publish`. |
+| `key_package` | `user_id` | Ask for one of `user_id`'s key packages (13.4). Only from a connection that deposited its own; rate limited with `lookup`. |
+| `group_create` | `group`, `epoch`, `next` | Create the epoch sequencer entry of a group (13.5). On any connection. |
+| `group_commit` | `group`, `epoch`, `token`, `next` | Move a group's sequencer entry on by one epoch (13.5). On any connection. |
 | `ping` | | |
 
 ### Relay → client
@@ -518,12 +527,16 @@ first.
 | `blob_ack` | `blob`, `index`, `complete` | The chunk is stored (or was already); `complete` once every chunk is. |
 | `blob_rejected` | `blob`, `code`, `message` | A `blob_put` or `blob_get` for this blob failed. `rate_limited` means try again later; `not_found` on a `blob_get` means the blob is unknown, incomplete or expired. |
 | `blob_chunk` | `blob`, `index`, `total`, `data` (b64) | One chunk in answer to `blob_get`; `total` says how many to expect. |
+| `key_package_status` | `remaining`, `consumed`? | Answers `key_packages`: how many packages are on deposit and which refs were handed out since the last deposit (13.4). |
+| `key_package_result` | `user_id`, `package` (or `null`), `last_resort`? | Answers `key_package`: one package, with `last_resort: true` when it is the one handed out again and again (13.4). |
+| `group_state` | `group`, `epoch` | Answers `group_create` or `group_commit`: the entry stands at `epoch` (13.5). |
+| `group_rejected` | `group`, `code`, `epoch`? | The sequencer refused: `stale` (with the epoch it stands at), `not_found`, `exists` (with the epoch), `forbidden`, `rate_limited` (13.5). |
 | `pong` | | |
-| `error` | `code`, `message` | Answers a frame other than `send`, `blob_put` and `blob_get`, or reports a broken connection state. |
+| `error` | `code`, `message` | Answers a frame other than `send`, `blob_put`, `blob_get`, `group_create` and `group_commit`, or reports a broken connection state. |
 
 Error codes: `unauthenticated`, `bad_signature`, `malformed`, `too_large`,
 `forbidden`, `mailbox_full`, `rate_limited`, `invite_required`,
-`not_found`, `storage_full`, `internal`.
+`not_found`, `storage_full`, `stale`, `exists`, `internal`.
 
 ### 7.1 Authenticated connection
 
@@ -560,10 +573,11 @@ the owner tops the deposit up on its next connection.
 ### 7.2 Anonymous submission connection
 
 On a relay advertising `anonymous_send`, a connection may answer the
-`challenge` with a `send`, `blob_put` or `blob_get` frame instead of
-`auth`. The connection then accepts only those three and `ping`, answered
-as on an authenticated connection, under its own rate limits (30 `send`
-and 600 chunks per minute by default). It never learns who the sender is.
+`challenge` with a `send`, `blob_put`, `blob_get`, `group_create` or
+`group_commit` frame instead of `auth`. The connection then accepts only
+those five and `ping`, answered as on an authenticated connection, under
+its own rate limits (30 `send` and 600 chunks per minute by default; the
+two group frames count as `send`). It never learns who the sender is.
 A client uses one such connection for all its submissions, uploads and
 downloads, and its authenticated connection for everything else; for TLS
 the submission connection disables session resumption so the two cannot
@@ -579,6 +593,7 @@ be linked through a resumed session.
 | `pq_prekeys` | The relay keeps `pq_signed` and `pq_one_time` (section 2), hands out one-time ML-KEM keys on lookup and reports them in `prekey_status` (`pq_one_time_remaining`, `pq_consumed`). |
 | `lifecycle` | The relay accepts `revoke` and `succeed`, keeps the statements, refuses to publish a revoked identity, and attaches the statements to `lookup_result` (section 10). Absent on relays before 0.8.0; contacts then learn only from the copy pushed inside a message. |
 | `transparency` | The relay keeps the hash-chained log of section 11, tells its head in `auth_ok` and `lookup_result`, and answers `log_since`. Absent on relays before 0.8.0; clients then check nothing against a log and send no `head` in their bodies. |
+| `groups` | The relay keeps MLS key packages on deposit and hands them out (`key_packages`, `key_package`) and runs the group epoch sequencer (`group_create`, `group_commit`), section 13. Absent on relays before 0.9.0; clients then show groups as unavailable on that relay. |
 
 A relay without the field is a v1 relay: it stores bundles as v1 (dropping
 `prekeys`, since it re-serialises what it parsed), so clients behind it
@@ -601,7 +616,14 @@ socket's peer, or what a trusted TLS front says in `X-Forwarded-For`): 16
 open connections, 20 new identities an hour and 256 MiB of `blob_put`
 data an hour; 4096 connections and 100 000 identities in total; a
 connection that sends nothing for two minutes is closed (clients `ping`
-every 30 seconds). Relay operators can change all of these and can
+every 30 seconds). Groups (section 13): one `key_packages` deposit per
+connection per minute, 30 packages plus a last-resort one per identity,
+4096 bytes each; `key_package` counts against the connection's `lookup`
+budget and against the target's hand-out budget of 30 an hour, which it
+shares with one-time prekeys; `group_create` and `group_commit` count as
+`send`, and `group_create` also against the address's 20 registrations
+an hour; 100 000 sequencer entries in total, each dropped after 180 days
+without a commit. Relay operators can change all of these and can
 require an invite token for first registrations.
 
 ### 7.5 Blob storage
@@ -740,7 +762,8 @@ relay or network observer still sees when blobs travel and roughly how
 big messages and blobs are, including that a blob is fetched some time
 after a message is delivered; between contacts without cover it sees
 when messages travel too. Receipts are delayed at random rather than
-hidden. Group messaging is not defined yet.
+hidden. Group messages (section 13) are not deniable: MLS signs every one
+with the sender's leaf key, which is the identity key.
 
 ## 10. Identity lifecycle
 
@@ -991,8 +1014,10 @@ that some identity published at some time.
 document: identities and every signature, the key derivations one by one,
 a whole handshake (v2, v3 and v4), two round trips of the ratchet with
 late and out-of-order delivery, the sealed layer (signed and deniable),
-the padded body encodings, the transparency log's hashes, and file
-chunks. Each case gives its inputs, every intermediate value on the way
+the padded body encodings, the transparency log's hashes, file chunks,
+and the group extensions, link keys, join proofs and sequencer token
+hashes of section 13 (the MLS messages themselves are RFC 9420's, with
+its own vectors). Each case gives its inputs, every intermediate value on the way
 (each Diffie–Hellman output, each KDF input and output, each AEAD's
 associated data, the exact bytes under each signature) and its outputs.
 Where an operation draws randomness the vector fixes it with a seeded
@@ -1043,3 +1068,366 @@ sealed-sender anonymity and deniability (section 9), the transparency
 log (section 11), the client's replay protection (section 8), and
 anything beyond Verifpal's bound, which finds attacks within a bounded
 number of sessions and proves nothing about what lies past it.
+
+## 13. Groups (MLS)
+
+A group is an MLS group (RFC 9420) run by the members' clients, with the
+relay as a dumb delivery service: it keeps members' key packages on
+deposit and hands them out like prekeys, orders commits with one counter
+per group, and carries every group message inside the ordinary sealed
+envelope of section 3, one per member, through that member's own mailbox.
+It never parses an MLS message. One-to-one conversations stay on the
+Double Ratchet; a group is whatever `/group new` made, at any size. The
+reasoning behind each choice is in `docs/design/groups.md`; this section
+is what is on the wire. The MLS objects themselves (`KeyPackage`,
+`Welcome`, `PrivateMessage`, the tree) are RFC 9420's, TLS-serialised as
+`MLSMessage` where the RFC defines that framing.
+
+Groups need clients and a relay on 0.9.0 or later: the relay advertises
+`groups` (7.3), and a client's bundle advertises `groups` in its signed
+capability list (section 2) once it has key packages on deposit. Nothing
+of this section is ever sent to a client that does not advertise it.
+
+### 13.1 Ciphersuite, credentials and extensions
+
+* **Ciphersuite**: `MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519` of
+  draft-ietf-mls-pq-ciphersuites, on the provisional code point OpenMLS
+  assigns it, `0x004F`: X-Wing (ML-KEM-768 + X25519) as the HPKE KEM,
+  AES-128-GCM, SHA-256, Ed25519 signatures. No other suite is accepted; a
+  key package or a Welcome for another is refused. When the RFC assigns
+  the final code point, groups are re-created under it.
+* **Credential**: `basic`, whose identity is the 32-byte user id (the raw
+  Ed25519 verifying key of section 1). The leaf's signature key is that
+  same key. A leaf whose credential and signature key are not the same
+  bytes, or whose identity is not a valid key, is refused wherever a
+  leaf is seen: a key package handed out by the relay, the sender and
+  every member in a Welcome, every leaf a commit adds.
+* **Leaf node extension `0xF001`** (`silver_seal`, private use): the
+  member's sealed-layer X25519 public key (`dh_public` of its bundle), 32
+  raw bytes. Every key package and leaf carries it; a leaf without it is
+  refused. It is what lets a member seal envelopes to every other member
+  from the tree alone, without a lookup and without the relay in the
+  loop, verified by the identity that signed the leaf.
+* **Group context extension `0xF000`** (`silver_group`, private use):
+  the group's metadata, agreed by every member through the group context
+  and changed only by a `GroupContextExtensions` proposal an admin
+  commits:
+
+  ```text
+  version (1 byte, = 1) || name length (1 byte) || name (UTF-8, at most 64 bytes, no control characters)
+  || admins length in bytes (2 BE) || admins (32 bytes each, ascending, no duplicates, at least 1, at most 256)
+  || invite_key (32 bytes) || created_at_ms (8 BE)
+  ```
+
+  Trailing bytes, an unknown version, an unsorted list or an empty one
+  make the extension malformed and the group unusable.
+* **Required capabilities**: every group's context carries a
+  `RequiredCapabilities` extension listing extension types `0xF000` and
+  `0xF001`, and every key package and leaf declares capabilities for the
+  one ciphersuite and those two extension types (default protocol
+  versions, credential types and proposal types), so a leaf that cannot
+  carry them cannot be added.
+* **Configuration**: the pure-ciphertext wire format policy (handshake
+  messages travel as `PrivateMessage`, never `PublicMessage`); the
+  ratchet tree travels inside the Welcome (`ratchet_tree` extension), so
+  there is no tree service; application messages from the last three
+  epochs still decrypt after a commit; a commit carries an update path
+  when RFC 9420 requires one, and every member forces a self-update
+  commit when its leaf is seven days old, so a compromise heals within
+  the week in a quiet group.
+
+### 13.2 The group body (v5)
+
+A body with `v: 5` carries one MLS message for one group to one member:
+
+```json
+{ "v": 5, "group": "<b64 32 bytes>", "kind": "<kind>",
+  "mls": "<b64 TLS-serialised MLSMessage>",
+  "blob": { "blob": "<32 hex>", "key": "<b64 32 bytes>", "chunks": n, "size": n, "sha256": "<b64 32 bytes>" },
+  "join": { "proof": "<b64 32 bytes>" } }
+```
+
+* `group`: the group id, 32 random bytes chosen by the creator; b64 in
+  JSON, b58 in links and on screen.
+* `kind`: `welcome` (an MLS `Welcome`), `handshake` (a `PrivateMessage`
+  carrying a proposal or a commit), `message` (a `PrivateMessage`
+  carrying an application message, 13.3), `join` (a `KeyPackage` from
+  someone presenting an invite link, with `join`, 13.7), `rejoin` (a
+  `KeyPackage` from a member that fell out of sync, 13.8).
+* Exactly one of `mls` and `blob` is present. `mls` when the message is
+  at most 24 576 bytes; otherwise the message is parked in the blob
+  store (7.5) exactly as a padded file is (4.5: a fresh key, 64 KiB
+  chunks bound to the blob id, index and count, the last chunk padded to
+  a whole one), `size` is its true length, `sha256` its hash, and the
+  recipient fetches and opens it before processing. Welcomes to groups
+  beyond a handful of members and commits that add many take this path;
+  an application message never does. A message larger than a file may be
+  (16 MiB) cannot be sent.
+* `join` is present exactly when `kind` is `join`.
+* The body is padded to 160-byte steps like every other (section 4), so
+  a short group text is the size of a short one-to-one text.
+* The sealed layer (section 3) carries no signature for a v5 body, as
+  for v4: the 64 signature bytes are zero and are not checked. Every
+  kind is authenticated inside MLS (the sender's leaf signature on a
+  `PrivateMessage`, the signature over the `GroupInfo` inside a
+  `Welcome`, the key package's own signature for `join` and `rejoin`),
+  and MLS's single-use message keys rule out replay. The sender id in
+  the sealed prefix is set truthfully but is a hint: the receiving client
+  takes the sender from MLS and ignores the hint.
+* A v5 body inside a session (a ratchet body's inner body) is refused.
+
+### 13.3 Application messages
+
+The plaintext of a `message` is JSON:
+
+```json
+{ "id": "<random, 1 to 64 bytes>", "sent_at_ms": n, "content": { ... }, "head": { ... } }
+```
+
+`content` is a `text` or a `file` of section 4; any other kind is
+ignored by members (receipts, lifecycle statements and cover traffic are
+not sent in groups). `head` is the sender's last verified transparency
+log head (section 11), so members compare heads across a group the way
+contacts do one-to-one. `id` de-duplicates: a member remembers the last
+256 ids per group and shows an id once. MLS numbers messages itself, so
+there is no `seq`, and every member is a client that reads groups, so
+there are no `caps`.
+
+### 13.4 Key packages
+
+An MLS `KeyPackage` for the suite of 13.1 with the leaf extension and
+capabilities of 13.1, a 90-day lifetime, and the credential of its
+owner. A client keeps twenty on deposit and makes more when fewer than
+ten remain or one has expired; it keeps one more marked with the MLS
+`last_resort` extension, replaced every 30 days, which the relay hands
+out again and again once the others are gone. The private halves stay
+with the client; a package's is deleted when a Welcome uses it.
+
+The frames, on the authenticated connection after `publish`:
+
+| `type` | Fields | Notes |
+| --- | --- | --- |
+| `key_packages` | `packages` (list of `{ref, expires_at_ms, data}`), `last_resort`? (`{ref, expires_at_ms, data}`) | Replaces the deposit: a package on deposit that is not listed is forgotten, one listed that is already there or was handed out is not stored again, as for prekeys. `ref` is the MLS `KeyPackageRef` (b64, 32 bytes), `data` the TLS-serialised `MLSMessage` holding the `KeyPackage` (b64, at most 4096 bytes), `expires_at_ms` the end of its lifetime, after which the relay drops it. At most 30 packages plus the last-resort one; an empty list clears the deposit. One deposit per connection per minute. The relay stores the bytes opaque. |
+| `key_package` | `user_id` | One of `user_id`'s packages. Only from a connection that has deposited its own; counts against the connection's `lookup` budget. |
+
+| `type` | Fields | Notes |
+| --- | --- | --- |
+| `key_package_status` | `remaining`, `consumed` (list of `ref`, absent when empty) | Answers `key_packages`: how many packages (the last-resort one not counted) are on deposit, and which refs were handed out since they were deposited, so the client forgets them. |
+| `key_package_result` | `user_id`, `package` (`{ref, expires_at_ms, data}` or `null`), `last_resort` (absent when false) | The oldest package on deposit, removed as it is handed out, while the target's hand-out budget lasts (30 an hour, shared with one-time prekeys, 7.1); the last-resort one, never removed, when the deposit is empty or the budget is spent; `null` when the identity has neither. |
+
+The fetcher verifies what it gets before adding: it parses the message,
+checks the leaf (13.1) against the `user_id` it asked for, the
+ciphersuite, and that the lifetime has not ended, and refuses to add on
+any failure, naming the relay. A relay that hands out a stale package
+costs the new member's first epoch some forward secrecy, as a replayed
+one-time prekey does, and no more.
+
+### 13.5 The epoch sequencer
+
+MLS needs every member to apply the same commit for each epoch; two
+commits built on the same epoch would fork the group. The relay orders
+them with one entry per group it knows nothing else about:
+
+```text
+group id (32 bytes) -> { epoch (u64), next (32 bytes), created_at_ms, updated_at_ms }
+```
+
+`next` is the SHA-256 of a token that only members of the group's
+current epoch can produce:
+
+```text
+token(e) = MLS-Exporter(label = "silver-messenger/v1/group-sequencer", context = group id (32 bytes), length = 32)
+           of epoch e
+next     = SHA-256(token(e))
+```
+
+The frames, on any connection (a client uses its anonymous connection
+while it is up, so the relay does not learn which identity committed):
+
+| `type` | Fields | Notes |
+| --- | --- | --- |
+| `group_create` | `group`, `epoch`, `next` (b64, 32 bytes) | Create the entry if there is none: answered `group_state` with `epoch`. Idempotent for the same three values; an entry with other values answers `exists` with its epoch. Counts as a `send` and against the address's registrations for the hour (7.4). |
+| `group_commit` | `group`, `epoch`, `token`, `next` (b64, 32 bytes each) | If the entry stands at `epoch` and `SHA-256(token)` is what it holds: the entry moves to `epoch + 1` holding `next`, answered `group_state` with the new epoch. Otherwise `group_rejected`: `stale` with the epoch the entry stands at when it is not `epoch`; `forbidden` when the token does not hash to what it holds; `not_found` when there is no entry. Counts as a `send`. |
+
+Answers: `group_state { group, epoch }` and `group_rejected { group,
+code, epoch? }`, with `rate_limited` when a budget is spent and
+`forbidden` from `group_create` when the relay's cap on entries (100 000
+by default) is reached. An entry no commit has moved for 180 days is
+dropped; a live group refreshes its entry with every commit.
+
+How a client commits: it builds and stages the commit, reads
+`token(e)` of its current epoch and `token(e + 1)` from the staged
+commit's exporter (OpenMLS exposes the staged commit's secrets before
+the merge), sends `group_commit`, and only on `group_state` merges the
+commit and fans it out (13.6). On `stale` it discards the staged commit,
+takes the winning commit from its mailbox, and rebuilds on top; the
+losing side of a race is never sent. On `not_found` (the entry expired,
+or the relay was restored from a backup that predates the group) any
+member re-creates the entry with `group_create` for its current epoch.
+On `stale` with a *lower* epoch than its own (a restored relay), the
+client replays the tokens it kept (the last 64 epochs) from that epoch
+forward, one accepted `group_commit` per step, until the entry catches
+up. The relay verifies a hash of an exporter output: it learns nothing
+that decrypts anything, a removed member cannot move the counter (it
+lacks the new epoch's exporter), and a hostile relay can only refuse or
+scramble the counter, a denial of service it could always cause by
+dropping mail. The creator registers a new group with `group_create` at
+epoch 0 before anything else is sent.
+
+### 13.6 Delivery
+
+A group message is one MLS ciphertext. The sender seals it once per
+member other than itself, to the member's `silver_seal` key from the
+tree, into an ordinary envelope (section 3) addressed to that member,
+and submits the envelopes as it submits one-to-one messages, on the
+anonymous connection where there is one. A commit goes to every member
+of the epoch it leaves; the Welcome it makes goes to every member it
+adds, alone. Each member finds the message in its own mailbox, under its
+own quota and expiry, and acknowledges it as any other. The relay keeps
+no membership list and no group mailbox; what fan-out shows it is a
+burst of envelopes from one connection to a set of recipients, which the
+threat model records.
+
+Envelopes reach a member in its mailbox's order, which is arrival order
+at the relay, so two committers' fan-outs can cross and the commit for
+epoch `e + 2` can arrive before the one for `e + 1`. A client holds
+handshake messages from a future epoch (at most 16, for at most ten
+minutes) and retries them after each merge. A commit further ahead than
+that, or a queue that fills, means a commit was missed for good: the
+client marks the group out of sync and asks to rejoin (13.8).
+Application messages decrypt for three epochs after the one they were
+sent in; older ones are reported as unreadable, as a ratchet that moved
+on would.
+
+### 13.7 Membership: Welcome, invite links, admins
+
+**Add.** An admin fetches one key package of the person to add
+(13.4), verifies it, builds a commit with the Add, takes the sequencer
+step, merges, fans the commit out and seals the Welcome to the new
+member. The added member's client verifies the Welcome before joining:
+the sender's leaf (13.1) and that the sender is a member and an admin
+of the group's `silver_group` extension, the ciphersuite, that the
+Welcome's group id equals the body's `group`, that the extension decodes,
+and every member's leaf in the tree. It then joins at once in MLS terms
+(the key package's secret is spent by the Welcome, and a joined group
+stays in sync while the user decides) and holds the group as *invited*:
+nothing of it is shown or sent until the user says yes, and saying no
+drops the state, leaving the admin's group with a dead leaf until an
+admin notices and removes it. A client says yes on the user's behalf
+when the sender is a contact and not blocked, or when the user asked
+that admin for that group by link; a Welcome from a stranger waits for
+the user; one from a blocked sender is declined without a word. A
+Welcome for a group the client is in already is refused; one for a
+group it left, was removed from or that broke replaces what was left of
+the old membership.
+
+**Invite links.** `/group invite` prints
+
+```text
+silver://group/<group id b58>?via=<admin id b58>&key=<link key b58>[&relay=<percent-encoded url>]
+```
+
+with `key = HMAC-SHA256(invite_key, "silver-messenger/v1/group-invite" || group id)[0..16]`,
+so a link does not carry the invite key and a rotated invite key
+(`/group link reset`, a `GroupContextExtensions` commit with a fresh
+random `invite_key`) voids every link made before. Whoever presents the
+link looks the named admin up as `/add` does, makes a fresh key package
+for the purpose, and sends the admin a `join` body carrying it with
+
+```text
+join.proof = HMAC-SHA256(key, "silver-messenger/v1/group-join" || group id || joiner id)
+```
+
+The admin's client checks the proof against the group's current
+`invite_key` in constant time, that it is an admin of an active group,
+that the joiner is not blocked and not a member, and adds the joiner as
+above; members see "X joined by link". The joiner's client remembers
+which admin it asked for which group and takes that admin's Welcome as
+the answer. A link names one admin; if that admin is gone the link is
+dead and another admin makes a new one.
+
+**Admins.** The creator is the first admin; `/group admin add|remove`
+is a `GroupContextExtensions` commit changing `admins`. The last admin
+cannot be removed and cannot leave a group that still has other members
+without appointing another admin first.
+
+**Rules every member checks** before merging a commit, against the
+group context of the epoch the commit leaves:
+
+* Add proposals, Remove proposals other than a member's own (13.9), and
+  `GroupContextExtensions` proposals are accepted only in a commit whose
+  committer is an admin.
+* Every leaf added is valid (13.1).
+* The ciphersuite is unchanged, and the required capabilities still list
+  `0xF000` and `0xF001`.
+* After the commit `admins` is not empty and lists only members, and
+  the group has at most 256 members.
+* A proposal sent on its own (by reference) is accepted only when it is
+  a member's Remove of its own leaf; every other proposal, and every
+  external-join proposal, is refused and not stored.
+
+A commit that breaks a rule is not merged: the member marks the group
+*broken*, names the committer, and stops sending and reading it. Every
+honest client applies the same rules, so they all stop at the same
+epoch while the sequencer, which cannot check policy, has moved on; a
+rogue member can wedge a group but cannot get an intruder's keys
+accepted. Recovery is a new group made by an admin with the honest
+members. A message that cannot be processed at all (a replay MLS
+refuses, an unreadable message from an epoch too far back) is reported
+and dropped without changing anything.
+
+### 13.8 Out of sync and rejoin
+
+A member falls out of sync when it misses a commit for good (a full or
+expired mailbox, a lost race whose winning commit never arrived). It
+notices as in 13.6, marks the group out of sync, and sends a `rejoin`
+body (a fresh key package) to every admin it knows of. An admin's client
+checks the key package (13.1) against the member that sent it, that the
+sender is a current member, and commits a Remove of that member's old
+leaf and an Add of the new key package in one commit, sending the
+Welcome as for an add. The member keeps its history; the messages
+between are lost, and the client says so. `/group rejoin` sends the same
+request on demand.
+
+### 13.9 Leave and remove
+
+* **Leave.** The member sends a Remove proposal for its own leaf, as a
+  `handshake` body to every other member, marks the group left, stops
+  reading it and deletes its MLS state. An admin's client that receives
+  the proposal commits it at once (a self-update commit that carries the
+  pending proposal); until one does, the leaver is still in the tree. A
+  proposal is accepted by reference only from the leaf it removes. The
+  last admin of a group with other members cannot leave; the last member
+  leaving deletes the group.
+* **Remove.** An admin's commit with the Remove. The removed member
+  receives that commit, sees it was removed, keeps its history and
+  deletes its MLS state; messages sent to the group after the commit are
+  not addressed to it, and MLS keys of the new epoch are not derivable
+  from what it held.
+* Messages that reach a client for a group it left, was removed from or
+  that broke are dropped without a word.
+
+### 13.10 Sizes
+
+Measured with OpenMLS 0.9 on the suite of 13.1 (TLS serialisation,
+before the envelope). X-Wing public keys are 1216 bytes and its
+ciphertexts 1120, which is what makes commits and Welcomes large:
+
+| Object | Size | Path |
+| --- | --- | --- |
+| Key package | 2680 bytes (last resort 2683) | twenty on deposit is 52 KiB |
+| Application message, 11 bytes of text | 156 bytes | envelope; the padded body is 320 bytes, the size of a one-to-one text |
+| Application message, 100 bytes | 246 bytes | envelope, 480-byte padded body |
+| Commit adding 2, and its Welcome (3 members) | 9.4 KiB, 9.6 KiB | envelope |
+| Self-update commit with path, 3 members | 6.4 KiB | envelope |
+| Commit adding 15, and its Welcome (16 members) | 46 KiB, 46 KiB | blob |
+| Self-update commit with path, 16 members | 15.8 KiB | envelope |
+| Commit adding 255, and its Welcome (256 members) | 695 KiB, 684 KiB | blob |
+| Self-update commit with path, 256 members, young tree | 161 KiB | blob |
+
+A text to a group of N costs the sender N envelopes of 320 to 480
+bytes; a commit that goes through the blob store is uploaded once and
+then costs N envelopes of about 500 bytes. The relay's per-recipient
+quota is unchanged, so a very active group of 256 fills an absent
+member's mailbox in about a thousand messages, after which that member
+rejoins on return (13.8).

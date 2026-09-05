@@ -114,6 +114,7 @@ capitals with `SILVER_RELAY_` in front: `--max-connections` is
 | `--max-blob-mib` | 16 | Largest file; 0 turns file transfer off | Your users share bigger files, or none |
 | `--blob-storage-mib` | 1024 | Files on deposit in total | Disk |
 | `--blob-mib-per-address-per-hour` | 256 | Uploads from one address | Abuse, or a shared address |
+| `--max-groups` | 100000 | Groups with an epoch sequencer entry (one counter and one hash each; idle ones go after 180 days); 0 for no cap | A small relay, with room: a group costs the relay almost nothing, so this is a guard against a loop making entries, not a sizing knob |
 | `--trusted-proxy` | loopback | Whose `X-Forwarded-For` names the client | A TLS front on another host |
 | `--require-bound-auth` | off | Refuse the login of clients before 0.6.0 | Once everyone has updated |
 
@@ -173,6 +174,8 @@ say:
 | `silver_relay_auth_failures_total`, `silver_relay_auth_failure_addresses`, `silver_relay_auth_failures_max_per_address` | Failed logins in total, addresses that failed in the last hour, the most from one of them (the address itself is in the log, never here) |
 | `silver_relay_identities`, `silver_relay_mailboxes`, `silver_relay_messages_queued`, `silver_relay_mailbox_bytes` | What the store holds |
 | `silver_relay_blobs`, `silver_relay_blob_bytes`, `silver_relay_blob_bytes_limit` | Files on deposit against the cap |
+| `silver_relay_key_packages`, `silver_relay_groups`, `silver_relay_groups_limit` | MLS key packages on deposit (the last-resort ones not counted), groups with a sequencer entry, and the cap |
+| `silver_relay_group_commits_total`, `silver_relay_group_rejections_total` | Group commits the sequencer accepted and refused; rejections are normal when two members change a group at once, a steady stream of them is a client stuck on a stale epoch |
 | `silver_relay_certificate_expiry_seconds`, `silver_relay_acme_failures_total` | When the served certificate expires (0 while there is none), and renewals that failed |
 
 `deploy/alerts.yml` carries the rules worth waking up for: the relay

@@ -4,6 +4,52 @@ Notable changes to Silver Messenger. Versions follow [semantic
 versioning](https://semver.org); while the major version is 0, a minor bump
 means behaviour or the wire protocol changed in a way worth reading about.
 
+## Unreleased
+
+### Added
+
+- **Groups on MLS.** `/group new <name>` makes a group; `/group add
+  <contact>` adds people, `/group invite` prints a link and a QR code
+  anyone can ask to join by, and a group is a pane after the contacts
+  with each line naming its writer. Groups run on MLS (RFC 9420, through
+  OpenMLS) on the hybrid `MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519`
+  suite, so their key agreement is post-quantum like the one-to-one
+  handshake; each member's leaf is signed by their identity key and
+  carries their sealing key, and a group message is one MLS ciphertext
+  sealed separately to every member into the ordinary envelope, so the
+  relay sees envelopes to people and no group and keeps no membership
+  list. Admins add and remove members, appoint admins, rename the group
+  and reset its invite link; anyone may leave; every member's client
+  checks every change against the group's rules and marks the group
+  broken rather than accept a change that breaks them. An invitation
+  from a contact is taken at once; one from a stranger waits in the
+  Requests pane for `/accept g<n>` or `/decline g<n>`; the answer to a
+  join by link needs no second yes. Files go to groups as to contacts;
+  members refresh their keys weekly; a member that misses a change asks
+  the admins to re-add it. One-to-one conversations stay on the Double
+  Ratchet. Group messages are signed inside MLS and are not deniable,
+  which the threat model records along with what the relay can still
+  infer (a group's size and membership from delivery bursts, and when
+  its epoch moves). Needs a relay on 0.9.0; `/group` says so on an
+  older one. Protocol section 13, the threat model, and the design note
+  `docs/design/groups.md` have the details.
+- **Relay: key packages and the group epoch sequencer.** The relay keeps
+  each identity's MLS key packages on deposit and hands them out like
+  one-time prekeys (a last-resort one when the deposit runs dry), and
+  keeps one epoch counter and one token hash per group, which orders
+  the group's commits and says nothing else about it; both work on any
+  relay from 0.9.0 with no switch, `--max-groups` caps the entries, idle
+  ones go after 180 days, and four new metrics report on them. **The
+  schema moves to 3 and the backup format to 2**: 0.8.0 refuses both,
+  so take a backup before upgrading and read UPGRADING.md.
+- **Protocol: the group body (v5).** A body version for one MLS message
+  to one member, unsigned at the sealed layer like v4, with an MLS
+  message that does not fit an envelope parked in the blob store; two
+  private-use MLS extensions for the group's metadata and the members'
+  sealing keys; the `groups` relay feature and bundle capability; the
+  key package and sequencer frames. Vectors, property tests and a fuzz
+  target cover the new encodings.
+
 ## 0.8.0 - 2026-09-05
 
 Phase 8 of the roadmap: finishing the protocol. Every ratchet step is

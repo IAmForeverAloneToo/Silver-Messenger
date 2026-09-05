@@ -30,6 +30,7 @@ problem is in [SECURITY.md](../SECURITY.md).
 | Long-term Diffie–Hellman key (X25519) | `identity.json` on the client | Opens the sealed layer of every envelope ever addressed to you; with the session state, reads v2 messages |
 | Prekeys and session state | `prekeys.json`, `sessions.json` on the client | Current ratchet keys and the private halves of published prekeys (X25519 and ML-KEM): reads messages in flight and the ones not yet ratcheted past |
 | Contact list and history | `contacts.json`, `history/`, `outbox.json` on the client | Who you talk to and what was said |
+| Group state | `groups.mls`, `groups.json`, `history/group-*.jsonl` on the client | The MLS tree and epoch secrets of every group (reads its messages until the next commit you miss), the key package private halves, who is in which group, and what was said there |
 | Received files | `downloads/` on the client, as ordinary files | Attachments people sent you; not covered by the data key |
 | Files in transit | Encrypted chunks in the relay database for up to 30 days | Ciphertext only; the key is in the message |
 | Social graph and timing | Relay memory and database, network path | Who talks to whom, when, how much |
@@ -116,6 +117,25 @@ Can:
   leave after a random delay (up to two seconds for delivery, two to
   twelve for read receipts), so a receipt no longer marks the moment a
   message was read.
+- See that a group exists and when it changes: the epoch sequencer
+  (protocol section 13.5) keeps one counter and one hash per group,
+  moved by commits that arrive on anonymous connections, so the relay
+  learns that some group moved to epoch 12 at 10:04, and not who is in
+  it or who committed. It holds no membership list.
+- Infer a group's membership and size from delivery: a group message is
+  a burst of envelopes from one connection to N recipients within a
+  second, so the recipient set, repeated over time, is the group's
+  membership minus the sender, and the burst size is its size. Cover
+  traffic does not apply to groups; Tor hides the sender's address and
+  nothing else about the burst.
+- See who fetched whose key package: `key_package` goes on the
+  authenticated connection, so the relay learns that A is about to add B
+  to some group, as it learns that A looked B up before their first
+  message. It also sees that each identity keeps key packages on
+  deposit, which says the client reads groups, not that it is in any.
+- See that a Welcome or a large commit went by, as a blob of that size
+  (a group of a dozen or more members, or many added at once), the way
+  it sees a file.
 
 Cannot:
 
@@ -138,6 +158,17 @@ Cannot:
 - Replay an old envelope to its recipient undetected: envelope ids are
   deduplicated, sequence numbers are checked, and a ratchet message key is
   used once.
+- Read a group message, learn a group's name or member list, add a
+  member to a group, or forge a group message: every group message is
+  MLS ciphertext under keys only members derive, the name and the admin
+  list live inside the group context every member agrees on, a Welcome
+  needs the group's secrets, a key package it hands out is verified
+  against the identity that signed it before anyone is added on its
+  strength, and every message is signed by its sender's leaf, which is
+  the sender's identity key. It can move a group's epoch counter only
+  with a token that members of the current epoch derive (it keeps a
+  hash, not the token), and a removed member cannot either; what it can
+  do to a group is what it can do to a mailbox, refuse or delay.
 
 ### Network observer
 
@@ -199,6 +230,27 @@ read receipts off, roughly when you looked at them, which says when you
 are at the keyboard. Cannot forge messages from someone else. Cannot learn
 your other contacts. Cannot decrypt messages between you and others.
 
+In a group, a contact who is a member sees everything said in it, as in
+any group, and learns the member list, which is what a group is. A
+contact who invites you to a group makes your client join it in MLS
+terms at once (the key package is spent; nothing is shown until you say
+yes); a stranger's invitation waits in the Requests pane, a blocked
+sender's is declined unseen. A member who turns hostile can send a
+commit that breaks the group's rules (an add or a removal by a
+non-admin, a group left without admins, a changed ciphersuite); every
+honest client refuses it, marks the group broken naming the sender, and
+stops there, so the rogue member can wedge the group, which an admin
+then makes anew without them, but cannot get an intruder's keys accepted
+or read on after being removed. An admin controls membership: a
+compromised admin can add anyone and remove anyone until the other
+admins remove it, and a group with one admin is that person's to keep
+or lose. A member who leaves keeps whatever it read; a removed one reads
+nothing sent after the commit that removed it, and nothing before it
+that was not already delivered. Group messages are not deniable: MLS
+signs every one with the sender's identity key, so a member can prove
+to a third party who wrote what, which one-to-one v4 messages do not
+allow and which is why one-to-one conversations stay on the ratchet.
+
 ### Device thief
 
 With the data directory alone they get nothing readable on a system with
@@ -219,7 +271,14 @@ prekeys and session state, the full history, contacts, and any queued
 outgoing messages. They can impersonate you and read future messages to
 you. What they cannot do, thanks to the ratchet, is read messages that
 were already received and ratcheted past if those were recorded in
-transit: the message keys are gone. `/lock` and the idle lock drop the
+transit: the message keys are gone. The same holds for groups: the
+thief reads and writes in every group you are in until the next commit
+their copy cannot follow (every member's client refreshes its leaf
+within a week, and any add or removal is such a commit), and past group
+messages recorded in transit stay closed, since MLS deletes each
+message key after use and the epoch secrets of past epochs after three
+epochs; the key package private halves in the same file let them accept
+an invitation meant for you until those packages are used up or expire. `/lock` and the idle lock drop the
 keys from memory; core dumps are off, and on Linux the process is not
 dumpable or traceable by other processes of the same user. To retire the
 identity itself there is a pre-signed revocation certificate (`/revoke`,
@@ -278,7 +337,12 @@ ratchet forward from that point; a v4 session (0.8.0, both clients on it)
 refreshes an ML-KEM secret at every step, so even an adversary who obtains
 the session key heals out of it within a round trip. Signatures (Ed25519)
 would let it forge messages *from the moment it has the power*, not
-retroactively.
+retroactively. Groups are on the hybrid MLS ciphersuite (X-Wing: ML-KEM-768
+with X25519, protocol section 13.1), so a recording of a group's traffic
+stays closed the same way; the sealed layer around each group envelope is
+X25519 alone and opens to such an adversary as every sealed layer does,
+revealing the sender of each envelope and nothing of the MLS ciphertext
+inside.
 
 ### Supply-chain attacker
 
@@ -354,6 +418,19 @@ independent rebuild is the answer to that.
   minutes after each message from them, so two running clients cover
   each other while both are around. Both connections can go through a
   SOCKS5 proxy such as Tor, one circuit per connection.
+- **Groups** (0.9.0 on): MLS (RFC 9420) through OpenMLS on the
+  `MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519` suite (X-Wing HPKE,
+  AES-128-GCM, SHA-256, Ed25519), each member's leaf signed by its
+  identity key and carrying its sealing key. A group message is one MLS
+  ciphertext sealed separately to every member into the ordinary
+  envelope, so the relay sees N envelopes and no group; membership
+  changes are commits every member checks against the group's own rules
+  (admins add and remove; anyone may leave), ordered by a counter the
+  relay keeps per group and moves only for a token members of the
+  current epoch can derive. Forward secrecy and post-compromise security
+  across membership changes are MLS's; every member refreshes its leaf
+  within a week. Group messages are signed inside MLS and are not
+  deniable.
 - **At rest**: a per-installation data key, wrapped by the OS key store or
   by a passphrase through Argon2id; every file under it is
   XChaCha20-Poly1305.
@@ -361,7 +438,8 @@ independent rebuild is the answer to that.
 Deliberately off by default: cover traffic (`/cover on`, roadmap item
 46), which costs bandwidth on both sides and the relay. Deniability is
 provided for v4 sessions (above); v1 and v2 messages are still signed
-until v1 is retired and every peer is on v4.
+until v1 is retired and every peer is on v4, and group messages are
+signed by design.
 
 ## Trust decisions a user makes
 
@@ -376,6 +454,10 @@ until v1 is retired and every peer is on v4.
 4. **Whether to set a passphrase.** Without one, the data is as safe as the
    operating system's key store and login; with one, as safe as the
    passphrase.
+5. **Whether to join a group, and whom to make an admin.** A group's
+   members see everything said in it and each other's ids; an admin
+   decides who those members are. An invitation from a contact is taken
+   on your behalf; one from a stranger waits for you.
 
 ## Supply chain
 
@@ -445,9 +527,20 @@ maintainer's account plus signing key both being taken.
   tampering cases, end-to-end tests through a real relay (sessions,
   handshakes waiting in the mailbox, restarts, lost state, anonymous
   submission, files, TLS with trusted and untrusted roots, key pins,
-  proxies), pseudo-terminal tests of the client under two terminal types,
-  and a test that renders peer-controlled text through the real terminal
-  backend and asserts nothing unescaped reaches it.
+  proxies, groups forming, talking and shrinking), the groups engine
+  against a fake sequencer (every membership rule refused, a forged
+  commit breaking the group for everyone honest, a removed member unable
+  to read on, crossed commits, a lost race, out of sync and rejoin, a
+  rewound sequencer caught up), pseudo-terminal tests of the client
+  under two terminal types, and a test that renders peer-controlled text
+  through the real terminal backend and asserts nothing unescaped
+  reaches it.
+- MLS itself: its security is RFC 9420's and the literature's, not
+  modelled here; the Verifpal models cover the one-to-one handshake and
+  ratchet only. The parts around MLS that are this program's (the
+  sequencer's property that no two commits stand for one epoch and no
+  non-member moves it, the membership rules, the Welcome checks) are
+  stated in protocol section 13 and tested, not proved.
 - Fuzzing: `cargo fuzz` targets for every parser that sees peer or relay
   data, a minute each on every push, plus the same parsers under seeded
   random input in the ordinary test suite.
@@ -472,7 +565,8 @@ maintainer's account plus signing key both being taken.
 | Received files stored unencrypted in `downloads/` | By design, so other programs can open them; a "keep encrypted" option could follow if asked for. |
 | History kept until the user removes it | By design; an expiry setting could follow if asked for. |
 | A panic in the terminal client can leave the terminal in raw mode | Small; next client pass. |
-| Group chats and multiple devices are not designed yet, so nothing here says what they protect | Roadmap items 47 and 48; this document grows when they do. |
+| Groups: what the relay learns, and what a member can do | Groups exist from 0.9.0 (roadmap item 47) and this document says what they protect. What remains, by design: the relay sees a group's size and membership by inference from delivery bursts and sees each group's epoch move; group messages are not deniable; a rogue member can wedge a group (every honest client stops rather than accept a rule-breaking commit) and an admin has to make it anew; a leaver stays in the tree until an admin's client commits the leave, and a declined invitation leaves a dead leaf until an admin removes it; a member absent past its mailbox's quota rejoins and loses the messages between. Cover traffic does not cover groups. |
+| Multiple devices are not designed yet, so nothing here says what they protect | Roadmap item 48; this document grows when it does. |
 
 ## Out of scope
 

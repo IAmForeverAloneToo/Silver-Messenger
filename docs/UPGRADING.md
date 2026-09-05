@@ -138,6 +138,19 @@ routine step.
   `silver_relay_key_packages`, `silver_relay_group_commits_total` and
   `silver_relay_group_rejections_total` say how it is going. Clients on
   0.8.0 see none of this and keep working.
+* **Clients.** A 0.9.0 client puts MLS key packages on deposit as soon
+  as it connects to a relay that serves groups, and advertises `groups`
+  in its signed bundle capabilities, so contacts on 0.9.0 can add it to
+  groups; against a 0.8.0 relay it does neither and `/group` says the
+  relay is too old. Two new files appear in the data directory,
+  `groups.json` and `groups.mls`, and group conversations go to
+  `history/group-<id>.jsonl`, all encrypted like the rest when the
+  directory is protected. Nothing changes for one-to-one messages, and a
+  0.9.0 client is never sent a group message by a client that cannot
+  see the capability. Rolling a client back to 0.8.0 leaves the three
+  files where they are, untouched and unread; the groups in them are
+  out of sync by the time 0.9.0 runs again, and their members re-add
+  you.
 
 ### 0.8.0
 

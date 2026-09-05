@@ -375,7 +375,10 @@ advertises `groups` and is not revoked, fetches one key package
 takes the sequencer step, merges, fans the commit out to the existing
 members and seals the Welcome to the new one. If the sequencer says
 `stale`, it discards the pending commit, processes what arrived, and
-retries once, then reports.
+reports that the group moved on; the user's next try builds on the new
+epoch. (The note first said the client retries once by itself; the
+shipped client leaves the retry to the user, which keeps every commit a
+thing the user asked for.)
 
 The invitee's client verifies the Welcome (the sender's credential and
 that it is an admin's, every member's leaf against its identity, the
@@ -457,10 +460,12 @@ broken, names the committer, and stops sending. Because every client
 applies the same rules, the honest members all stop at the same epoch
 while the sequencer, which cannot check policy, has moved on; a rogue
 member can therefore wedge a group but cannot get an intruder's keys
-accepted. Recovery is `/group recreate` by an admin: a new group with the
-same name and the honest members, the old one abandoned. Confidentiality
-over availability, and the threat model says a malicious member is
-outside what MLS protects against anyway.
+accepted. Recovery is a new group made by an admin (`/group new` and the
+honest members added again; the broken one is forgotten with `/group
+forget`). Confidentiality over availability, and the threat model says a
+malicious member is outside what MLS protects against anyway. (A
+`/group recreate` shorthand was planned and not built: it is two
+commands, and doing it by hand makes the admin choose the members.)
 
 ### 7.7 Contacts, names, verification
 
@@ -505,13 +510,16 @@ A `groups` module in `silver-client`:
   with every publish, and reads `key_package_status` to forget consumed
   ones. Lifetime 90 days; the last-resort one is rotated every 30 days.
 * `Group`: create, add, remove, leave, appoint, send, receive, join,
-  rejoin, recreate, self-update on schedule; the hold queue; the policy
-  check; the sequencer client with token history and catch-up; the
-  oversize path through the blob store.
-* Events for the UI: `GroupMessage`, `GroupChanged` (members, admins,
-  name), `GroupInvite` (a held Welcome), `GroupJoined`, `GroupLeft`,
-  `GroupBroken`, `GroupOutOfSync`, and `Sent` and `Rejected` per envelope
-  as today, aggregated by the UI into one mark per message.
+  rejoin, self-update on schedule; the hold queue; the policy check; the
+  sequencer client with token history and catch-up; the oversize path
+  through the blob store.
+* Events for the UI (`GroupEvent` as shipped): `Message`, `Head` (a
+  member's transparency log head), `Changed` (added, removed, left,
+  renamed, admins, link reset, updated), `Joined` (a join by link
+  answered), `Invited` (a Welcome held for the user), `Removed`,
+  `Broken`, `JoinRequest`, `LeaveProposed`, `RejoinRequest`, `OutOfSync`,
+  `Refused`; and `Sent` and `Rejected` per envelope as today, aggregated
+  by the UI into one mark per message.
 * Outbox: group envelopes queue like others; a group message is "sent"
   when every envelope of its fan-out is. A fan-out interrupted by a
   disconnect resumes from the outbox.
@@ -521,11 +529,14 @@ A `groups` module in `silver-client`:
 Group panes in the sidebar after contacts, with the same unread badges;
 lines show the sender; marks are `⋯` (queued) and `✓` (every envelope
 accepted), no `✓✓`. Commands: `/group new|add|remove|leave|members|
-invite|join|link reset|admin add|admin remove|rename|recreate|info`,
-`/mute`; the file commands work in a group pane; `/copy`, `/search`,
-selection and everything in the message pane work unchanged. The help
-overlay and the status line learn the group commands from the table as
-they do today.
+invite [copy]|join|link reset|admin add|admin remove|rename|info|
+rejoin|forget`, `/accept g<n>` and `/decline g<n>` for invitations in
+the Requests pane, `/alias` for a group's local name; the file commands
+work in a group pane; `/copy`, `/search`, selection and everything in
+the message pane work unchanged. The help overlay and the status line
+learn the group commands from the table as they do today. (`/mute` and
+`/group recreate` from the first draft were not built; the record keeps
+a `muted` flag for when muting is asked for.)
 
 ## 9. Relay
 
@@ -662,10 +673,17 @@ deposit key packages.
   commit, stale, not found, expiry, limits), schema migration 2 to 3,
   backup and restore of the new tables, metrics.
 * End to end, in `crates/silver-client/tests`: three clients through an
-  in-process relay form a group, message, add a fourth by link, remove
-  one, and the removed one cannot read on; a Welcome from a stranger is
-  held; a client on a relay without `groups` reports groups unavailable.
-* Terminal: one pty test for the group commands and rendering.
+  in-process relay form a group, message, race two commits, remove one,
+  and the removed one gets nothing more; a join by link through the
+  relay.
+* Terminal: unit tests over the app (a group standing or falling on the
+  sequencer's word, invitations from a stranger, a contact and a blocked
+  sender, a message marked sent once every envelope is in) and one pty
+  test with four clients (make, add, chat, a stranger's invitation from
+  Requests, a join by link, rename, removal, leave, restart). The
+  "relay without `groups`" case is the feature check in the client,
+  covered by the unit test of the feature list, not by an end-to-end
+  test.
 * Fuzz: a `group_body` target over the v5 decoder and the two extension
   decoders.
 * Formal: none new. MLS's security proofs are RFC 9420's and the

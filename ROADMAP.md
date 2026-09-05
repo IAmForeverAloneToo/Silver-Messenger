@@ -380,7 +380,7 @@ those who want to pay for it (46).
 
 ## Phase 9: more than two people, more than one device
 
-47. [ ] **Groups on MLS** (L). RFC 9420 through OpenMLS, with the relay
+47. [x] **Groups on MLS** (L). RFC 9420 through OpenMLS, with the relay
         as the delivery service: key packages published and handed out
         like prekeys, welcome messages and ordered commits through group
         mailboxes, membership changes as signed proposals by group
@@ -389,7 +389,13 @@ those who want to pay for it (46).
         whether one-to-one conversations stay on the Double Ratchet or
         become two-member groups, and picks the ciphersuite, with a
         post-quantum hybrid as soon as one is standardised. The design
-        note is docs/design/groups.md.
+        note is docs/design/groups.md. Done in 0.9.0: one-to-one stays
+        on the ratchet; the suite is the hybrid
+        `MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519` on its
+        provisional code point; delivery is client fan-out through the
+        members' own mailboxes rather than group mailboxes, with a
+        relay-side epoch sequencer ordering commits; PROTOCOL.md
+        section 13.
 48. [ ] **Multiple devices** (L). Each device has its own keys under the
         identity, listed in the bundle and signed by the identity key;
         linking by a QR code and a short-lived secret; every device is a

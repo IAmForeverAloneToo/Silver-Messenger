@@ -123,6 +123,14 @@ pane rather than in a chat; `/accept <n>` turns it into a contact (and moves
 the held messages into the chat), `/block <n>` drops everything from that id
 from then on. `/alias <name>` gives a contact a friendly name.
 
+`/group new <name>` makes a group; `/group add <contact>` adds people who
+are contacts (their client takes you in at once if you are theirs, and
+otherwise shows the invitation in their Requests pane), and `/group
+invite` prints a link and a QR code anyone can join by. A group is a pane
+after the contacts, with each line showing who wrote it. Groups run on
+MLS (RFC 9420) with a post-quantum hybrid suite and need a relay on
+0.9.0; the relay never learns who is in a group.
+
 Sent messages carry a mark: `⋯` waiting for the relay, `✓` accepted by the
 relay, `✓✓` delivered to the contact's device, `✓✓` in colour read, `✗`
 refused. Received files are saved under their own name in
@@ -135,13 +143,13 @@ refused. Received files are saved under their own name in
 | `/add <user-id or link> [alias]` | Add a contact by id or invite link                           |
 | `/invite [copy]`                | Show your invite link and a QR code of it; `copy` puts it on the clipboard |
 | `/copy [id\|link]`              | Copy the last message of this chat, your id, or your invite link |
-| `/alias <name>`                 | Name the selected contact                                    |
+| `/alias <name>`                 | Name the selected contact or group                           |
 | `/remove`                       | Forget the selected contact (history file stays on disk)     |
 | `/verify`                       | Show the safety number to compare with the selected contact  |
 | `/verify ok` / `/verify no`     | Mark the selected contact as verified, or clear the mark     |
 | `/refresh`                      | Fetch the selected contact's key again and report any change |
 | `/session`                      | Show how messages with the selected contact are protected    |
-| `/send <path>`                  | Send a file to the selected contact (also `/file`, `/attach`) |
+| `/send <path>`                  | Send a file to the selected contact or group (also `/file`, `/attach`) |
 | `/get [all]`                    | Fetch the newest file waiting in this chat, or `all` of them (double-click its line also fetches) |
 | `/files auto\|ask`              | Fetch this contact's files as they arrive, or wait for `/get` (the default) |
 | `/open`                         | Open the last file received in this chat (or double-click its line) |
@@ -151,6 +159,12 @@ refused. Received files are saved under their own name in
 | `/marks ascii\|unicode\|auto`   | Draw the marks in ASCII if your terminal shows boxes for them |
 | `/theme dark\|light\|mono`      | Colours for a dark or a light background, or none at all     |
 | `/accept <n>`                   | Accept a contact request from the Requests pane              |
+| `/group new <name>`             | Make a group (needs a relay on 0.9.0); its pane opens after the contacts |
+| `/group add <contact>` / `remove <member>` / `leave` | Membership, by an admin; anyone may leave |
+| `/group members` / `info` / `rename <name>` / `admin add\|remove <member>` | List, describe, rename, appoint |
+| `/group invite [copy]` / `link reset` / `join <link>` | Show or copy the group's invite link (and its QR code), void old links, or ask to join by one |
+| `/group rejoin` / `forget`      | Ask the admins to re-add you after a missed change; drop a group you left or were removed from |
+| `/accept g<n>` / `/decline g<n>` | Take or turn down a group invitation from a stranger (a contact's is taken at once) |
 | `/block <n or id>`              | Drop everything from that id from now on                     |
 | `/unblock <id>`, `/blocked`     | Undo a block; list blocked ids                               |
 | `/me`                           | Show your own id                                             |
@@ -220,6 +234,7 @@ silver-relay --invite-token <T>       only register new identities that present 
 silver-relay --anonymous-sends-per-minute <N>  messages an unauthenticated connection may submit per minute, default 30; 0 turns anonymous submission off (env SILVER_RELAY_ANONYMOUS_SENDS_PER_MINUTE)
 silver-relay --max-blob-mib <N>       largest encrypted file to store, default 16; 0 turns file transfer off (env SILVER_RELAY_MAX_BLOB_MIB)
 silver-relay --blob-storage-mib <N>   encrypted file bytes to keep in total, default 1024 (env SILVER_RELAY_BLOB_STORAGE_MIB)
+silver-relay --max-groups <N>         group sequencer entries to keep at most, default 100000; 0 for no cap (env SILVER_RELAY_MAX_GROUPS)
 silver-relay --ephemeral              keep everything in memory only
 RUST_LOG=debug silver-relay           relay log level
 ```
@@ -571,8 +586,24 @@ it does not, is in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
   it costs bandwidth, so it is off by default, and the threat model says
   exactly what it hides and what it does not.
 
-What it does **not** do yet: groups, and more than one device per
-identity. The ordered plan is in [ROADMAP.md](ROADMAP.md).
+* **Groups on MLS**: a group is an MLS group (RFC 9420, through OpenMLS)
+  on the `MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519` suite, so its
+  key agreement is post-quantum like the one-to-one handshake. Each
+  member's leaf is signed by their identity key and carries their sealing
+  key, so a group message is one MLS ciphertext sealed separately to every
+  member into the ordinary envelope: the relay sees envelopes to people
+  and no group, keeps no membership list, and orders membership changes
+  with one counter per group it can move only for a token members of the
+  current epoch derive. Admins add and remove members and every member's
+  client checks every change against the group's rules, refusing and
+  marking the group broken rather than let an intruder in; anyone may
+  leave; invite links carry a secret an admin can rotate. Members refresh
+  their keys weekly so a compromise heals. Group messages are signed
+  inside MLS and so, unlike one-to-one messages, are not deniable; the
+  threat model says what the relay can still infer.
+
+What it does **not** do yet: more than one device per identity. The
+ordered plan is in [ROADMAP.md](ROADMAP.md).
 
 ## Development
 
