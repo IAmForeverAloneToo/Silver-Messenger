@@ -36,7 +36,17 @@ keep it updated, and know what to do when something goes wrong.
 4. **Install.** The README's installer (`deploy/install.sh`, or the
    "Deploy relay" workflow) with `SILVER_DOMAIN` and `SILVER_EMAIL`, or
    `deploy/compose.yml`. The installer sets up the service, the admin
-   socket, the daily backup timer and the firewall.
+   socket, the daily backup timer and the firewall. On Debian and Ubuntu
+   the release's package does the first part: `apt install
+   ./silver-messenger_<version>_<arch>.deb` puts the relay in `/usr/bin`,
+   installs its unit without enabling it and makes its user; then write
+   `/etc/silver-relay/relay.env` (owner root, group `silver`, mode 640)
+   with `SILVER_RELAY_LISTEN=0.0.0.0:443`, `SILVER_RELAY_ACME_DOMAIN`,
+   `SILVER_RELAY_ACME_EMAIL` and
+   `SILVER_RELAY_ADMIN_SOCKET=/run/silver-relay/admin.sock`, and
+   `systemctl enable --now silver-relay`. The backup timer and the
+   firewall are the installer's; with the package, set them up yourself
+   ("Backups" below, and port 443 alone open).
 5. **Decide who may register.** A relay for a known group of people
    should require an invite token: `silver-relay admin invite-set` prints
    a random one, which people pass to the client once (`silver --invite`,

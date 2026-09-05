@@ -81,6 +81,51 @@ relay to see.
   with every colour pair at high contrast, for low vision. Accepting a
   contact request opens the chat straight away rather than passing
   through System.
+- **Client robustness.** A panic leaves the terminal usable: one hook
+  undoes exactly what the client set up (the mouse, the paste and focus
+  reports, the title, the alternate screen, raw mode) before the message
+  prints, in the full mode and in reader mode alike. A crash or a kill
+  leaves a store that opens: every whole-file write is synced before it
+  is renamed into place, and a history line cut short by a crash no
+  longer swallows the line appended after it; a kill test in
+  `silver-client` runs a writer child, kills it at random moments and
+  checks the store it left, on every platform CI tests. Memory stays
+  flat: a conversation keeps its newest two thousand lines in memory
+  (the file keeps all of them, the chat's title says so, and `/search`
+  reads the files, groups included now), the System pane its newest
+  five hundred, and the updates waiting for a message are capped. A
+  soak test (`tests/tui/soak.py`) exchanges messages for as long as it
+  is told and checks each process's memory is flat; CI runs three
+  minutes of it on every push, and the workflow can be dispatched for
+  up to six hours.
+- **Distribution.** Every channel installs the bytes the release
+  publishes, by checksum: a Homebrew tap in this repository (`brew tap
+  iamforeveralonetoo/silver <repository url>`, then `brew install
+  silver-messenger`, on macOS and Linux); a Debian package per
+  architecture built in the release workflow from the Linux archives,
+  attached beside them, in `SHA256SUMS` and attested, which installs
+  both binaries and the relay's unit (not enabled); a PKGBUILD for Arch
+  (`silver-messenger-bin`, in `packaging/aur/`, for the AUR once
+  published); and winget manifests (`packaging/winget/`, for
+  `winget-pkgs` once submitted). `packaging/update.sh` rewrites them all
+  for a release from its `SHA256SUMS`, and the release attaches the
+  result as an archive. The release workflow signs the Windows
+  executables (Authenticode) and signs and notarises the macOS ones
+  when the repository holds the secrets, and says so when it does not;
+  README says how to compare a signed download with a rebuild. CI
+  builds, lints and installs the Debian package, checks the PKGBUILD
+  and its `.SRCINFO`, validates the manifests against Microsoft's
+  schemas, and taps, audits, installs and tests the formula on macOS.
+- **A contributor guide and a FAQ.** `CONTRIBUTING.md` says how to
+  build, which checks a change must pass, how a change is proposed
+  (an issue or a design note first when it decides something, one
+  change per pull request with its tests and its documents), and what
+  the code holds to. `docs/FAQ.md` answers, in short, the questions
+  people ask first: what a relay is and who runs one, what the relay
+  sees, how to know you are talking to the right person, what "secure"
+  means here and what it does not, lost laptops, several computers,
+  phones, forgotten passphrases, disappearing messages, files, backups,
+  updates and where to report a problem.
 
 ### Changed
 

@@ -67,6 +67,12 @@ here is that a name never points at a torn file, which the rename gives,
 and a lost rename (the old contents stay) is the same as a crash a moment
 earlier.
 
+The kill test found a second thing to fix: a line cut short by a crash
+has no newline, and the next append used to glue its line onto it, so
+the load skipped both. An append now looks at the file's last byte and
+starts a fresh line when it must; the cut line alone is lost. (Corrected
+when the code landed: the note said only the cut line was ever lost.)
+
 The kill test (`crates/silver-client/tests/kill.rs`) runs its own test
 binary as the child, told by an environment variable to be the writer:
 a loop that saves the config with a counter in `sidebar_width`, the
@@ -84,15 +90,23 @@ waits a random 5 to 60 ms, kills it, opens the store, and checks:
 * a `.tmp` file left beside a store file does not stop the file loading.
 
 Ten rounds plain, ten under a passphrase. The test runs on Linux, macOS
-and Windows in CI's test job.
+and Windows in CI's test job. Each child carries on from what the last
+one left, so a cut line is followed by whole ones; the kill waits for
+the child's first round (the unlock alone takes longer than the random
+wait), and the reads and reactions are checked for the rounds that child
+reported, since a kill between a round's entry and its read leaves the
+entry without one for good, as a crash between two writes does in life.
+(Corrected when the code landed.)
 
 ## 5. Memory
 
 * `HISTORY_WINDOW = 2_000` lines per conversation, contacts and groups
-  alike. Loading takes the newest window from the file; recording a line
-  past the window drops the oldest and clears the selection and the new
-  marker if they referred to it. A line is a few hundred bytes, so a
-  window is under a megabyte and fifty busy chats under fifty.
+  alike. Loading reads the file whole, as it must to apply the update
+  lines, learns every id and keeps the newest window, so the transient
+  cost of a start is the file and the steady cost the window; recording
+  a line past the window drops the oldest and clears the selection and
+  the new marker if they referred to it. A line is a few hundred bytes,
+  so a window is under a megabyte and fifty busy chats under fifty.
 * `SYSTEM_WINDOW = 500`: the System pane drops its oldest line past it.
 * `LATE_CAP = 1_000` updates waiting for their message, oldest dropped
   first, on top of the day each waits at most.
@@ -105,13 +119,16 @@ and Windows in CI's test job.
 
 ## 6. The soak test
 
-`tests/tui/soak.py` uses the pty harness: a relay, alice and bob
-befriended, then a loop for the given minutes. Every 200 ms one side
-sends a numbered line; every 50th message the receiver reacts, every
-100th the sender edits its last line, every 150th deletes it. Every 30 s
-the script samples `VmRSS` from `/proc/<pid>/status` for the three
-processes (Linux only, which is where it runs), checks both screens
-still show the newest numbered line, and prints a row. At the end:
+`tests/tui/soak.py` uses the pty harness: a relay with its abuse limits
+lifted (the defaults allow sixty sends a minute, which a soak passes in
+a quarter of one; the first run found this), alice and bob befriended,
+then a loop for the given minutes. About four times a second one side
+sends a numbered line (typing through the pty takes most of the time);
+every 50th message the receiver reacts, every 100th the sender edits
+its last line, every 150th deletes it. Every 30 s the script samples
+`VmRSS` from `/proc/<pid>/status` for the three processes (Linux only,
+which is where it runs), checks both screens still show the newest
+numbered line, and prints a row. At the end:
 
 * every process is alive and the last line sent each way is on the other
   screen;
@@ -125,8 +142,23 @@ run is by hand: `tests/tui/soak.py --minutes 1440`.
 
 ## 7. Results
 
-To be filled in when the code lands: the length of the longest run made
-and its memory figures.
+The longest run so far is an hour, made on the day the code landed, on
+a debug build, with the relay's abuse limits lifted:
+
+| Time | Messages | alice | bob | relay |
+| --- | --- | --- | --- | --- |
+| start | 0 | 37 MiB | 37 MiB | 26 MiB |
+| 30 min | 6,965 | 45 MiB | 47 MiB | 26 MiB |
+| 60 min | 13,742 | 49 MiB | 51 MiB | 26 MiB |
+
+Each client's memory at the end is within a tenth of its memory at the
+half, and flat over the last twenty minutes; the relay's did not move.
+The rise of the first forty minutes is what fills once and stays full:
+the window of two thousand lines a side, the seen-id set (twenty
+thousand ids, not full yet at the end), and the allocator's own
+plateau. A three-minute run passes in CI on every push. The day-long
+run has not been made yet; `tests/tui/soak.py --minutes 1440` makes it,
+and its figures belong here when it has.
 
 ## 8. Tests
 

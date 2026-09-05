@@ -446,16 +446,30 @@ those who want to pay for it (46).
         the pty suite can check of reader mode it checks, and the
         check against each platform's screen reader is a manual protocol
         in docs/TERMINALS.md, unchecked until someone runs it.
-52. [ ] **Client robustness** (S). The terminal restored on a panic,
+52. [x] **Client robustness** (S). The terminal restored on a panic,
         atomic writes for every store file checked under a kill test,
         memory caps for history and the seen-id set, and a soak test
-        that runs a client for a day against a local relay.
-53. [ ] **Distribution** (M). Authenticode on Windows and notarisation on
+        that runs a client for a day against a local relay. Shipped:
+        one panic hook that undoes exactly what the client set up, the
+        kill test on every platform CI tests, the windows and caps, and
+        `tests/tui/soak.py` for as long as it is told (three minutes on
+        every push; an hour run by hand with memory flat, recorded in
+        docs/design/robustness.md; the day-long run is still to be made).
+53. [x] **Distribution** (M). Authenticode on Windows and notarisation on
         macOS, a Homebrew tap, winget, an AUR package and a Debian
-        package, each built from the same reproducible release.
-54. [ ] **Contributor guide and FAQ** (S). How to build, test and propose
+        package, each built from the same reproducible release. Shipped:
+        a Debian package built in the release workflow from the Linux
+        archives, a Homebrew tap in this repository, a PKGBUILD and
+        winget manifests written from each release's checksums, and the
+        signing and notarising steps, which run once the maintainer's
+        certificate and Apple membership are in the secrets; pushing to
+        the AUR and submitting to winget-pkgs are the maintainer's, and
+        docs/design/distribution.md says where each channel stands.
+54. [x] **Contributor guide and FAQ** (S). How to build, test and propose
         a change; a FAQ for people who are not developers, written from
-        the questions the first users ask.
+        the questions the first users ask. Shipped as CONTRIBUTING.md and
+        docs/FAQ.md; the FAQ starts from the questions a messenger like
+        this is asked and grows with the ones that come in.
 
 ## Phase 11: 1.0
 

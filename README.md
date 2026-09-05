@@ -11,7 +11,10 @@ it. What the relay, the network and a stolen laptop can and cannot learn is
 spelled out in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md); how the code
 measures up against the OWASP ASVS controls is in
 [docs/SECURITY_ASSESSMENT.md](docs/SECURITY_ASSESSMENT.md); how to report
-a vulnerability is in [SECURITY.md](SECURITY.md).
+a vulnerability is in [SECURITY.md](SECURITY.md). The questions people
+ask first, with short answers, are in [docs/FAQ.md](docs/FAQ.md); how to
+build, test and propose a change is in
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Layout
 
@@ -57,9 +60,24 @@ and paste behave as you expect. In the classic console the client draws
 ASCII marks (`v`, `vv`, `x`, `..`) by itself; `/marks` changes that, and
 `--no-mouse` hands selection and right-click paste back to the console.
 
-**macOS:** the binaries are not notarised yet, so the first start may be
-refused. Right-click `silver` and choose Open once, or run
-`xattr -d com.apple.quarantine silver`.
+**macOS:** until a release is notarised (the release notes say), the
+first start may be refused. Right-click `silver` and choose Open once, or
+run `xattr -d com.apple.quarantine silver`.
+
+**With a package manager:** each of these installs the release archive
+above by its checksum, so what arrives is what the release page carries.
+
+```sh
+brew tap iamforeveralonetoo/silver https://github.com/IAmForeverAloneToo/Silver-Messenger
+brew install silver-messenger                 # macOS and Linux (Homebrew)
+winget install IAmForeverAloneToo.SilverMessenger   # Windows, once the manifest is in winget-pkgs (the release notes say)
+sudo apt install ./silver-messenger_0.10.0_amd64.deb   # Debian and Ubuntu: the .deb from the release page, amd64 or arm64
+makepkg -si                                   # Arch: in packaging/aur/ of this repository (silver-messenger-bin), or from the AUR once published
+```
+
+The Debian package puts `silver` and `silver-relay` in `/usr/bin` and
+installs the relay's systemd unit without enabling it;
+[docs/OPERATING.md](docs/OPERATING.md) says how to run a relay from it.
 
 ### Verifying a release
 
@@ -85,6 +103,13 @@ RUSTFLAGS="--remap-path-prefix=$PWD=/src --remap-path-prefix=$HOME/.cargo=/cargo
 cargo auditable build --release --locked --workspace --target x86_64-unknown-linux-musl
 sha256sum target/x86_64-unknown-linux-musl/release/silver-relay   # compare with SHA256SUMS
 ```
+
+A signed Windows or macOS executable (the release notes say whether a
+release is signed) differs from a rebuild by its signature alone: strip
+it and compare (`osslsigncode remove-signature -in silver.exe -out
+plain.exe` on any platform, `codesign --remove-signature silver` on a
+Mac). The Linux archives, the Debian packages and the container image
+carry no embedded signature and reproduce byte for byte.
 
 `silver --check-release` asks the releases page once whether a newer
 version exists and prints the answer. It never runs by itself, downloads
@@ -173,7 +198,7 @@ refused. Received files are saved under their own name in
 | `/delete me`                    | Remove any message from your devices only; the other side keeps its copy |
 | `/timer <30s\|5m\|1h\|8h\|1d\|1w\|off>` | Messages in this chat disappear that long after you send them or they read them, on every device; in a group, admins only; `/timer` alone shows the setting |
 | `/files encrypt on\|off`, `/files decrypt` | Keep received files as ciphertext (needs a protected data directory; `/open` still reads them), or write a plain copy of the last one |
-| `/search <text>`                | Find messages in the selected chat, or in all chats from System |
+| `/search <text>`                | Find messages in the selected chat or group, or in every chat and group from System; it reads the history files, so lines older than the screen holds are found |
 | `/receipts on\|off`             | Tell contacts when you have read their messages (default on) |
 | `/notify all\|bell\|off`        | Bell and desktop notification, bell only, or nothing         |
 | `/marks ascii\|unicode\|auto`   | Draw the marks in ASCII if your terminal shows boxes for them |
@@ -712,6 +737,16 @@ contents of `minisign.key` in the repository secret `MINISIGN_SECRET_KEY`
 (the key is generated unencrypted so the workflow can use it; the secret
 store protects it). Until then the workflow says so and publishes
 `SHA256SUMS` unsigned; the provenance attestation is there either way.
+The executables themselves are signed the same way, when the secrets
+exist: on Windows with Authenticode from `AUTHENTICODE_PFX` (the PKCS#12
+file, base64) and `AUTHENTICODE_PASSWORD`; on macOS with a Developer ID
+Application certificate from `APPLE_CERTIFICATE_P12` (base64) and
+`APPLE_CERTIFICATE_PASSWORD`, then notarised under `APPLE_ID`,
+`APPLE_TEAM_ID` and `APPLE_APP_PASSWORD` (an app-specific password). With
+none of a platform's secrets the workflow says so and publishes that
+platform unsigned; with some but not all it fails, since a half-set
+secret is a mistake. A bare executable takes a signature but no stapled
+notarisation ticket, so Gatekeeper asks Apple about it the first time.
 
 Security problems go through [SECURITY.md](SECURITY.md), not the issue
 tracker.
@@ -722,7 +757,11 @@ and reads the screen back through a terminal emulator (`pip install pyte`
 first; `tests/tui/run.sh` runs them all, `TERMS="xterm-256color linux"`
 for both terminal types, and `test_tmux.py` drives a client inside tmux).
 Which terminals are known to work, and how, is in
-[docs/TERMINALS.md](docs/TERMINALS.md).
+[docs/TERMINALS.md](docs/TERMINALS.md). `tests/tui/soak.py --minutes N`
+runs a relay and two clients exchanging messages for that long and
+watches each process's memory: CI runs three minutes of it on every push,
+the workflow can be dispatched for up to six hours, and
+`--minutes 1440` is the day-long run.
 
 The end-to-end tests in `crates/silver-client/tests/e2e.rs` start a relay
 on a random port, connect two clients, and check both directions, offline
@@ -733,6 +772,9 @@ capabilities and receipts, file transfer (chunking, progress, a missing
 blob, a tampered hash, a relay without file storage), groups, and
 devices (`tests/devices.rs`: a device linked by its link, a message
 reaching every device under one id, a revoked device cut off).
+`tests/kill.rs` runs a writer child that saves the store as fast as it
+can, kills it at random moments, and checks that the store opens with
+nothing but the line being written lost.
 
 ## License
 
