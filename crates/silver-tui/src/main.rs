@@ -424,6 +424,11 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
                     .context("loading the relay's key log")?
                     .shared(),
             ),
+            devices: Some(
+                silver_client::DeviceState::load(&store, identity.user_id())
+                    .context("loading the device list")?
+                    .shared(),
+            ),
         };
         let (client, events) = Client::spawn(relay_url.clone(), Arc::new(identity), options)?;
         let app = app::App::new(

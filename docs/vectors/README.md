@@ -63,7 +63,7 @@ ML-KEM interface reproduces the ciphertexts exactly.
 | `handshake.json` | a whole handshake from fixed keys and a fixed seed: the bundle as served, every intermediate value, the `InitHeader`, the first message; classical (v2), hybrid (v3) and post-quantum ratchet (v4) |
 | `ratchet.json` | two round trips with late and out-of-order delivery: every header and ciphertext, and what each ratchet step drew; v2 and v4 |
 | `envelope.json` | the sealed-sender layer from a fixed seed: signed (v1) and deniable (v4) |
-| `body.json` | the padded encoding of each body kind |
+| `body.json` | the padded encoding of each body kind, a copy for a second device naming its message's id and a device revocation among them |
 | `transparency.json` | the subject, bundle and statement leaves (bundles with and without a device list, a linked device's own, and a device revocation among them), and a three-entry chain with every hash and head |
 | `group.json` | the group context and leaf seal-key extensions as bytes, the invite link key and join proof, the sequencer token hash, and an application message's plaintext (section 13); the MLS messages themselves follow RFC 9420 |
 | `blob.json` | file chunk nonces, associated data and ciphertexts |

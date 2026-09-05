@@ -14,13 +14,13 @@
 
 use silver_protocol::transparency::{LogEntry, LogHead, LogPosition, ReplayError};
 use silver_protocol::wire::ClientFrame;
-use silver_protocol::{KeyBundle, Revocation, Succession, UserId, now_ms};
+use silver_protocol::{DeviceRevocation, KeyBundle, Revocation, Succession, UserId, now_ms};
 use tokio::sync::oneshot;
 
-use crate::connection::{ClientError, ClientEvent, TransparencyEvent};
+use crate::connection::{ClientError, ClientEvent, Lookup, TransparencyEvent};
 use crate::transparency::{HeadCheck, SharedLog};
 
-pub(crate) type LookupReply = oneshot::Sender<Result<Option<KeyBundle>, ClientError>>;
+pub(crate) type LookupReply = oneshot::Sender<Result<Lookup, ClientError>>;
 
 /// What a step decided: frames for the relay, events for the front end.
 #[derive(Default)]
@@ -37,6 +37,12 @@ pub(crate) struct Answer {
     pub succession: Option<Succession>,
     pub head: Option<LogHead>,
     pub logged: Option<LogPosition>,
+    /// The linked devices' bundles and the device revocations the relay
+    /// attached (section 14), each checked against the log on its own:
+    /// one that does not hold up is dropped from the answer and reported,
+    /// and the rest of the answer stands.
+    pub device_bundles: Vec<KeyBundle>,
+    pub device_revocations: Vec<DeviceRevocation>,
     pub replies: Vec<LookupReply>,
 }
 
@@ -404,8 +410,11 @@ fn transparency(event: TransparencyEvent) -> ClientEvent {
     ClientEvent::Transparency(event)
 }
 
-/// Check the answer against the log and settle or refuse it.
-fn resolve(log: &SharedLog, answer: Answer, step: &mut Step) {
+/// Check the answer against the log and settle or refuse it. The devices'
+/// bundles and revocations that came with it are checked one by one: a
+/// device whose bundle or revocation the log does not bear out is left
+/// out and reported, and the answer for the account stands.
+fn resolve(log: &SharedLog, mut answer: Answer, step: &mut Step) {
     let check = lock(log).check_lookup(
         &answer.user_id,
         answer.bundle.as_ref(),
@@ -413,21 +422,58 @@ fn resolve(log: &SharedLog, answer: Answer, step: &mut Step) {
         answer.succession.as_ref(),
         answer.logged,
     );
-    match check {
-        Ok(()) => settle(answer, step),
-        Err(problem) => {
-            let problem = problem.to_string();
-            refuse(answer, &problem, step);
+    if let Err(problem) = check {
+        let problem = problem.to_string();
+        refuse(answer, &problem, step);
+        return;
+    }
+    let log = lock(log);
+    let revocations = std::mem::take(&mut answer.device_revocations);
+    let (kept, dropped): (Vec<_>, Vec<_>) = revocations.into_iter().partition(|r| {
+        log.latest(&r.device)
+            .and_then(|l| l.revocation)
+            .is_some_and(|logged| logged.leaf == r.transparency_leaf())
+    });
+    for revocation in dropped {
+        step.events.push(transparency(TransparencyEvent::Lookup {
+            who: revocation.device,
+            problem: crate::transparency::Discrepancy::UnloggedStatement.to_string(),
+        }));
+    }
+    answer.device_revocations = kept;
+    let bundles = std::mem::take(&mut answer.device_bundles);
+    for bundle in bundles {
+        let revocation = answer
+            .device_revocations
+            .iter()
+            .find(|r| r.device == bundle.user_id);
+        match log.check_device_lookup(&bundle.user_id, &bundle, revocation) {
+            Ok(()) => answer.device_bundles.push(bundle),
+            Err(problem) => step.events.push(transparency(TransparencyEvent::Lookup {
+                who: bundle.user_id,
+                problem: problem.to_string(),
+            })),
         }
     }
+    drop(log);
+    settle(answer, step);
 }
 
 /// Hand the answer to the callers, and raise the lifecycle statements it
 /// carried (validly signed ones only; the front end matches them against
 /// the contact it has pinned).
 fn settle(answer: Answer, step: &mut Step) {
+    let lookup = Lookup {
+        bundle: answer.bundle,
+        device_bundles: answer.device_bundles,
+        device_revocations: answer
+            .device_revocations
+            .into_iter()
+            .filter(|r| r.verify().is_ok())
+            .collect(),
+    };
     for reply in answer.replies {
-        let _ = reply.send(Ok(answer.bundle.clone()));
+        let _ = reply.send(Ok(lookup.clone()));
     }
     if let Some(revocation) = answer.revocation
         && revocation.verify().is_ok()
@@ -438,6 +484,9 @@ fn settle(answer: Answer, step: &mut Step) {
         && succession.verify().is_ok()
     {
         step.events.push(ClientEvent::PeerSucceeded { succession });
+    }
+    for revocation in lookup.device_revocations {
+        step.events.push(ClientEvent::DeviceRevoked { revocation });
     }
 }
 
@@ -560,10 +609,7 @@ mod tests {
     fn answer_for(
         relay: &Relay,
         bundle: &KeyBundle,
-    ) -> (
-        Answer,
-        oneshot::Receiver<Result<Option<KeyBundle>, ClientError>>,
-    ) {
+    ) -> (Answer, oneshot::Receiver<Result<Lookup, ClientError>>) {
         let (tx, rx) = oneshot::channel();
         (
             Answer {
@@ -573,6 +619,8 @@ mod tests {
                 succession: None,
                 head: Some(relay.head()),
                 logged: relay.latest(&bundle.user_id),
+                device_bundles: Vec::new(),
+                device_revocations: Vec::new(),
                 replies: vec![tx],
             },
             rx,
@@ -627,7 +675,10 @@ mod tests {
         let step = tail.on_answer(answer);
         assert!(!step.send.is_empty(), "it fetches first");
         let got = drive(&mut tail, &relay, step, 10);
-        assert_eq!(rx.blocking_recv().unwrap().unwrap(), Some(current.clone()));
+        assert_eq!(
+            rx.blocking_recv().unwrap().unwrap().bundle,
+            Some(current.clone())
+        );
         assert!(!got.iter().any(|e| matches!(
             e,
             ClientEvent::Transparency(TransparencyEvent::Lookup { .. })
@@ -655,7 +706,76 @@ mod tests {
         let (answer, rx) = answer_for(&relay, &old);
         let step = off.on_answer(answer);
         assert!(step.send.is_empty() && step.events.is_empty());
-        assert_eq!(rx.blocking_recv().unwrap().unwrap(), Some(old));
+        assert_eq!(rx.blocking_recv().unwrap().unwrap().bundle, Some(old));
+    }
+
+    #[test]
+    fn the_devices_that_come_with_an_answer_are_checked_one_by_one() {
+        let mut relay = Relay::new();
+        let alice = Identity::generate();
+        let laptop = Identity::generate();
+        let phone = Identity::generate();
+        let certify = |device: &Identity| alice.certify_device(&device.user_id(), "", 1).unwrap();
+        // The laptop's bundle is logged; the phone's is not. A revocation
+        // of the phone is logged.
+        let laptop_bundle = laptop.key_bundle().as_device_of(certify(&laptop));
+        relay.log_bundle(&laptop_bundle);
+        let phone_bundle = phone.key_bundle().as_device_of(certify(&phone));
+        let revocation = alice.revoke_device(&phone.user_id(), 2);
+        relay.log(
+            &phone.user_id(),
+            EntryKind::Revocation,
+            revocation.transparency_leaf(),
+        );
+        let account = alice
+            .key_bundle()
+            .with_devices(&alice, vec![certify(&laptop), certify(&phone)])
+            .unwrap();
+        relay.log_bundle(&account);
+        let log = LogStore::ephemeral().shared();
+        let mut tail = Tail::new(Some(log));
+
+        let (tx, rx) = oneshot::channel();
+        let unlogged = alice.revoke_device(&laptop.user_id(), 3);
+        let step = tail.on_answer(Answer {
+            user_id: alice.user_id(),
+            bundle: Some(account.clone()),
+            revocation: None,
+            succession: None,
+            head: Some(relay.head()),
+            logged: relay.latest(&alice.user_id()),
+            device_bundles: vec![laptop_bundle.clone(), phone_bundle],
+            device_revocations: vec![revocation.clone(), unlogged],
+            replies: vec![tx],
+        });
+        let got = drive(&mut tail, &relay, step, 10);
+        let lookup = rx.blocking_recv().unwrap().unwrap();
+        assert_eq!(lookup.bundle, Some(account));
+        assert_eq!(
+            lookup.device_bundles,
+            vec![laptop_bundle],
+            "the unlogged phone bundle is left out"
+        );
+        assert_eq!(
+            lookup.device_revocations,
+            vec![revocation.clone()],
+            "the unlogged revocation is left out"
+        );
+        let complaints: Vec<_> = got
+            .iter()
+            .filter_map(|e| match e {
+                ClientEvent::Transparency(TransparencyEvent::Lookup { who, .. }) => Some(*who),
+                _ => None,
+            })
+            .collect();
+        let mut expected = vec![phone.user_id(), laptop.user_id()];
+        expected.sort();
+        let mut complaints_sorted = complaints;
+        complaints_sorted.sort();
+        assert_eq!(complaints_sorted, expected);
+        assert!(got.iter().any(
+            |e| matches!(e, ClientEvent::DeviceRevoked { revocation: r } if *r == revocation)
+        ));
     }
 
     #[test]
@@ -680,6 +800,8 @@ mod tests {
             succession: None,
             head: Some(relay.head()),
             logged: relay.latest(&alice.user_id()),
+            device_bundles: Vec::new(),
+            device_revocations: Vec::new(),
             replies: vec![tx],
         });
         let got = drive(&mut tail, &relay, step, 10);

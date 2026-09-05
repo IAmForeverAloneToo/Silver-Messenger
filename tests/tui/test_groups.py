@@ -54,7 +54,9 @@ def main():
     assert a.wait("you are an admin"), "back to the group"
     a.type("/group add carol\r")
     assert a.wait("· you added carol"), "carol added to the group"
-    assert c.wait("Requests"), "carol's Requests pane appears"
+    # The word "Requests" is on the welcome screen too; the invitation's
+    # own line says the request is there to select.
+    assert c.wait("invites you to the group team"), "carol is told of the invitation"
     c.key(SHIFT_TAB)
     assert c.wait("g1. team"), "the invitation is listed"
     assert c.has("a group of 3, from"), "with its size and sender"

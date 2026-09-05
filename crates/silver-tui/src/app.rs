@@ -2584,6 +2584,7 @@ impl App {
                         Content::Receipt { .. }
                         | Content::Revocation(_)
                         | Content::Succession(_)
+                        | Content::DeviceRevocation(_)
                         | Content::Cover { .. }
                         | Content::Sync(_)
                         | Content::Provision(_) => None,
@@ -2773,8 +2774,13 @@ impl App {
                 self.note_heard(from);
 
                 // Sequence numbers: drop replays, mention gaps and resets.
+                // Each of a contact's devices numbers its own stream.
                 let name = self.contact_name(&from);
-                let check = sequence::check(self.contacts[index].received, message.sequence);
+                let stream = message.device.as_ref().map(|c| c.device);
+                let check = sequence::check(
+                    self.contacts[index].received_from(stream.as_ref()),
+                    message.sequence,
+                );
                 match check {
                     SequenceCheck::Replay => {
                         self.system(
@@ -2794,7 +2800,7 @@ impl App {
                     SequenceCheck::Fresh | SequenceCheck::Legacy => {}
                 }
                 if check != SequenceCheck::Legacy {
-                    self.contacts[index].received = Some(message.sequence);
+                    self.contacts[index].note_received(stream.as_ref(), message.sequence);
                     self.persist_contacts();
                 }
 
@@ -2824,10 +2830,10 @@ impl App {
                         self.known_ids.insert(message.id);
                         return;
                     }
-                    // What one's own devices say to each other; nothing
-                    // for a contact to show, and this client keeps no
-                    // devices yet.
-                    Content::Sync(_) | Content::Provision(_) => {
+                    // What one's own devices say to each other reaches the
+                    // front end as its own events; a device revocation is
+                    // handled from DeviceRevoked. None is a line.
+                    Content::Sync(_) | Content::Provision(_) | Content::DeviceRevocation(_) => {
                         self.known_ids.insert(message.id);
                         return;
                     }
@@ -2916,6 +2922,28 @@ impl App {
             ClientEvent::PeerSucceeded { succession } => self.handle_peer_succeeded(succession),
             ClientEvent::Transparency(event) => self.handle_transparency(event),
             ClientEvent::Group { from, id, body } => self.on_group_body(from, id, body),
+            // What this account's other devices say, and a device being
+            // linked or unlinked, are shown once the terminal client keeps
+            // devices of its own; the client library already applies the
+            // device list and drops sessions with a revoked device.
+            ClientEvent::Sync { .. } | ClientEvent::Provision { .. } => {}
+            ClientEvent::DeviceRevoked { revocation } => {
+                if let Some(index) = self.contact_index(&revocation.account)
+                    && let Some(bundle) = &mut self.contacts[index].bundle
+                    && bundle.devices.iter().any(|d| d.device == revocation.device)
+                {
+                    // The pinned list is the account's signed word; the
+                    // relay's next lookup replaces it whole. Until then the
+                    // client sends no copy to a device it saw revoked.
+                    tracing::debug!(
+                        "a device of {}'s was revoked",
+                        self.contacts[index].display_name()
+                    );
+                }
+            }
+            ClientEvent::DeviceGone { account, .. } => {
+                tracing::debug!("a device of {}… is gone", account.short());
+            }
             ClientEvent::Error(text) => {
                 self.system(Level::Warn, text.clone());
                 self.toast(text);
@@ -3442,6 +3470,7 @@ impl App {
             Content::Receipt { .. }
             | Content::Revocation(_)
             | Content::Succession(_)
+            | Content::DeviceRevocation(_)
             | Content::Cover { .. }
             | Content::Sync(_)
             | Content::Provision(_) => return,

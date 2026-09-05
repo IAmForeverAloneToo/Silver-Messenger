@@ -1,12 +1,13 @@
 //! Background relay connection with reconnect, auth and envelope handling.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
+use silver_protocol::device::{Provision, Sync};
 use silver_protocol::envelope::capability;
 use silver_protocol::group::{GroupBody, GroupId};
 use silver_protocol::wire::{
@@ -15,6 +16,7 @@ use silver_protocol::wire::{
 };
 
 use crate::CAPABILITIES;
+use crate::devices::{SharedDevices, Spread, spread_of};
 use crate::files::{self, FileInfo};
 use crate::outbox::Outbox;
 use crate::proxy::Proxy;
@@ -24,9 +26,10 @@ use crate::tail::{Answer, Step, Tail};
 use crate::tls::{ConnectOptions, Connectors, Observed, connectors, observing_connector};
 use crate::transparency::SharedLog;
 use silver_protocol::{
-    Body, Content, Envelope, Identity, KeyBundle, Message, ProtocolError, Revocation, Sequence,
-    Succession, UserId, now_ms, open_bytes, seal_bytes, seal_bytes_unsigned,
+    Body, Content, DeviceRevocation, Envelope, Identity, KeyBundle, Message, ProtocolError,
+    Revocation, Sequence, Succession, UserId, now_ms, open_bytes, seal_bytes, seal_bytes_unsigned,
 };
+use tokio::sync::mpsc::WeakSender;
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -97,6 +100,39 @@ pub enum ClientEvent {
         id: String,
         body: Box<GroupBody>,
     },
+    /// One of this account's own devices said something (`docs/PROTOCOL.md`
+    /// section 14): a copy of what it sent or received, what it showed, a
+    /// change to the contact list, or the device list. Raised only for a
+    /// device of this account; a `sync` from anyone else is dropped. The
+    /// client applied a device list from the primary itself before
+    /// raising it.
+    Sync { device: UserId, sync: Box<Sync> },
+    /// A provisioning message arrived from `from`. A device that printed a
+    /// link opens it with the link's secret; anyone else ignores it.
+    Provision {
+        from: UserId,
+        provision: Box<Provision>,
+    },
+    /// A valid device revocation reached us, from a lookup or pushed
+    /// inside a message. The client dropped its sessions with the device;
+    /// the front end drops the device from the contact's list.
+    DeviceRevoked { revocation: DeviceRevocation },
+    /// The relay refused a copy for `device` as one it does not deliver
+    /// to: the device is gone (revoked, or evicted). The client dropped
+    /// its sessions with it and fetches `account`'s list afresh before
+    /// the next message.
+    DeviceGone { account: UserId, device: UserId },
+}
+
+/// What a lookup answered (`docs/PROTOCOL.md` section 14): the bundle,
+/// the linked devices' bundles the relay attached (each verified as the
+/// account's and on its list, revoked ones dropped), and the device
+/// revocations it holds (each verified).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Lookup {
+    pub bundle: Option<KeyBundle>,
+    pub device_bundles: Vec<KeyBundle>,
+    pub device_revocations: Vec<DeviceRevocation>,
 }
 
 /// What the relay said about a key package deposit.
@@ -176,12 +212,24 @@ pub enum ClientError {
 enum Command {
     Send {
         envelope: Envelope,
+        /// Set when the envelope is one of several that carry one message
+        /// (section 14): the message is reported sent once every one of
+        /// them is.
+        copy: Option<Copy>,
         reply: oneshot::Sender<Result<(), ClientError>>,
     },
     Lookup {
         user_id: UserId,
-        reply: oneshot::Sender<Result<Option<KeyBundle>, ClientError>>,
+        reply: oneshot::Sender<Result<Lookup, ClientError>>,
     },
+    /// Tell the relay one of this account's devices is revoked; answered
+    /// once the relay has stored it.
+    RevokeDevice {
+        revocation: DeviceRevocation,
+        reply: oneshot::Sender<Result<(), ClientError>>,
+    },
+    /// Publish our bundle again: the device list changed.
+    Republish,
     /// Put every chunk of an encrypted file on the relay.
     Upload {
         blob: String,
@@ -325,12 +373,98 @@ fn report(progress: &Option<mpsc::Sender<Progress>>, done: usize, total: usize) 
 /// What [`Client::send_message`] did.
 #[derive(Debug)]
 pub struct Delivery {
+    /// The envelope to the recipient's primary, whose id is the message's.
     pub envelope: Envelope,
     /// The bundle the message was sealed for; pin it.
     pub bundle: KeyBundle,
     /// The relay served a different long-term key than the pinned one.
     pub key_changed: bool,
     pub forward_secret: bool,
+    /// The copies for the recipient's other devices and for this account's
+    /// own (section 14). [`ClientEvent::Sent`] for the message comes once
+    /// the relay has taken every one of them, under `envelope`'s id.
+    pub copies: Vec<Envelope>,
+}
+
+/// One envelope's place in a message sent to several devices.
+#[derive(Clone, Debug)]
+struct Copy {
+    /// The message's id: the id of the envelope to the recipient's primary.
+    message: String,
+    /// Whose device this copy is for.
+    account: UserId,
+    device: UserId,
+    /// This is the envelope to the recipient's primary, the message itself.
+    primary: bool,
+}
+
+#[derive(Default)]
+struct FanOut {
+    pending: HashSet<String>,
+    failed: bool,
+}
+
+/// Messages sent to several devices, until the relay has answered for
+/// every envelope of each.
+#[derive(Default)]
+struct FanOuts {
+    copies: HashMap<String, Copy>,
+    messages: HashMap<String, FanOut>,
+}
+
+/// What settling one envelope means for its message.
+enum Settled {
+    /// The envelope was a message of its own.
+    Alone,
+    /// Others of the same message are still pending.
+    Waiting,
+    /// The last envelope of the message: it went through.
+    Message(String),
+    /// The last envelope of a message whose own envelope was refused,
+    /// which was reported then.
+    Failed,
+}
+
+impl FanOuts {
+    fn register(&mut self, envelope_id: String, copy: Copy) {
+        self.messages
+            .entry(copy.message.clone())
+            .or_default()
+            .pending
+            .insert(envelope_id.clone());
+        self.copies.insert(envelope_id, copy);
+    }
+
+    fn copy(&self, envelope_id: &str) -> Option<&Copy> {
+        self.copies.get(envelope_id)
+    }
+
+    fn fail(&mut self, message: &str) {
+        if let Some(fanout) = self.messages.get_mut(message) {
+            fanout.failed = true;
+        }
+    }
+
+    /// The relay answered for `envelope_id`, one way or the other.
+    fn done(&mut self, envelope_id: &str) -> Settled {
+        let Some(copy) = self.copies.remove(envelope_id) else {
+            return Settled::Alone;
+        };
+        let Some(fanout) = self.messages.get_mut(&copy.message) else {
+            return Settled::Alone;
+        };
+        fanout.pending.remove(envelope_id);
+        if !fanout.pending.is_empty() {
+            return Settled::Waiting;
+        }
+        let failed = fanout.failed;
+        self.messages.remove(&copy.message);
+        if failed {
+            Settled::Failed
+        } else {
+            Settled::Message(copy.message)
+        }
+    }
 }
 
 /// Cheap-to-clone handle to the connection task.
@@ -351,6 +485,46 @@ pub struct Client {
     cover: Arc<AtomicBool>,
     /// Whether the bundle advertises `groups`.
     groups: Arc<AtomicBool>,
+    /// This device's view of its account's devices, when it keeps one.
+    devices: Option<SharedDevices>,
+    /// Bundles of other people's linked devices and of this account's own,
+    /// as last looked up, for sealing copies to them.
+    device_bundles: DeviceBundles,
+    /// When each contact's device list was last fetched, so it is
+    /// refreshed at most once an hour by itself.
+    device_checks: DeviceChecks,
+    /// The device each contact last wrote from, which cover traffic goes to.
+    last_device: LastDevice,
+}
+
+type DeviceBundles = Arc<Mutex<HashMap<UserId, KeyBundle>>>;
+type DeviceChecks = Arc<Mutex<HashMap<UserId, Instant>>>;
+type LastDevice = Arc<Mutex<HashMap<UserId, UserId>>>;
+
+/// How often a contact's device list is fetched again without a reason.
+const DEVICE_LIST_REFRESH: Duration = Duration::from_secs(3600);
+
+/// A [`Client`] handle that does not keep the connection task alive: the
+/// task holds one, to pass what a contact on an older client sent to this
+/// account's other devices.
+#[derive(Clone)]
+struct WeakClient {
+    cmd_tx: WeakSender<Command>,
+    client: Client,
+}
+
+impl WeakClient {
+    fn upgrade(&self) -> Option<Client> {
+        let cmd_tx = self.cmd_tx.upgrade()?;
+        Some(Client {
+            cmd_tx,
+            ..self.client.clone()
+        })
+    }
+}
+
+fn lock<T>(shared: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    shared.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 impl Client {
@@ -370,39 +544,58 @@ impl Client {
         let (ev_tx, ev_rx) = mpsc::channel(256);
         let relay_features = Arc::new(Mutex::new(Vec::new()));
         let groups = Arc::new(AtomicBool::new(options.groups));
+        let client = Self {
+            identity: identity.clone(),
+            cmd_tx: cmd_tx.clone(),
+            ev_tx: ev_tx.clone(),
+            pending: pending.clone(),
+            sessions: options.sessions.clone(),
+            upgrade_checks: Arc::new(Mutex::new(HashMap::new())),
+            relay_features: relay_features.clone(),
+            log: options.transparency.clone(),
+            cover: Arc::new(AtomicBool::new(false)),
+            groups: groups.clone(),
+            devices: options.devices.clone(),
+            device_bundles: Arc::new(Mutex::new(HashMap::new())),
+            device_checks: Arc::new(Mutex::new(HashMap::new())),
+            last_device: Arc::new(Mutex::new(HashMap::new())),
+        };
+        // The task's handle must not keep the task alive: a front end that
+        // drops every handle ends it.
+        let handle = WeakClient {
+            cmd_tx: cmd_tx.downgrade(),
+            client: client.clone(),
+        };
+        drop(cmd_tx);
         tokio::spawn(run(
             Setup {
                 relay_url,
-                identity: identity.clone(),
+                identity,
                 connectors,
                 proxy,
                 invite_token: options.invite_token.clone(),
-                sessions: options.sessions.clone(),
-                submit_authenticated: options.submit_authenticated,
-                relay_features: relay_features.clone(),
-                log: options.transparency.clone(),
-                groups: groups.clone(),
-            },
-            outbox,
-            pending.clone(),
-            cmd_rx,
-            ev_tx.clone(),
-        ));
-        Ok((
-            Self {
-                identity,
-                cmd_tx,
-                ev_tx,
-                pending,
                 sessions: options.sessions,
-                upgrade_checks: Arc::new(Mutex::new(HashMap::new())),
+                submit_authenticated: options.submit_authenticated,
                 relay_features,
                 log: options.transparency,
-                cover: Arc::new(AtomicBool::new(false)),
                 groups,
+                devices: options.devices,
+                device_bundles: client.device_bundles.clone(),
+                device_checks: client.device_checks.clone(),
+                last_device: client.last_device.clone(),
+                handle,
             },
-            ev_rx,
-        ))
+            outbox,
+            pending,
+            cmd_rx,
+            ev_tx,
+        ));
+        Ok((client, ev_rx))
+    }
+
+    /// This device's view of its account's devices, when it keeps one.
+    pub fn devices(&self) -> Option<&SharedDevices> {
+        self.devices.as_ref()
     }
 
     /// Advertise (or stop advertising) the `groups` bundle capability from
@@ -415,10 +608,16 @@ impl Client {
     /// [`Client::send_text`] does with the ones it seals. Resolves once it
     /// is in the outbox.
     pub async fn submit_envelope(&self, envelope: Envelope) -> Result<(), ClientError> {
+        self.queue(envelope, None).await
+    }
+
+    /// Queue an envelope, as one of a message's several when `copy` says so.
+    async fn queue(&self, envelope: Envelope, copy: Option<Copy>) -> Result<(), ClientError> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(Command::Send {
                 envelope,
+                copy,
                 reply: tx,
             })
             .await
@@ -579,11 +778,15 @@ impl Client {
     }
 
     /// The capabilities every body advertises: [`CAPABILITIES`], plus
-    /// `cover` while cover traffic is on.
+    /// `cover` while cover traffic is on and `devices` when this client
+    /// keeps a device state and so seals to every device it knows.
     pub fn capabilities(&self) -> Vec<&'static str> {
         let mut caps = CAPABILITIES.to_vec();
         if self.cover.load(Ordering::Relaxed) {
             caps.push(capability::COVER);
+        }
+        if self.devices.is_some() {
+            caps.push(capability::DEVICES);
         }
         caps
     }
@@ -697,16 +900,25 @@ impl Client {
 
     /// Fetch and verify someone's key bundle from the relay.
     pub async fn lookup(&self, user_id: UserId) -> Result<Option<KeyBundle>, ClientError> {
+        self.lookup_full(user_id).await.map(|l| l.bundle)
+    }
+
+    /// Fetch someone's key bundle from the relay with what the relay
+    /// attaches for devices (section 14): their linked devices' bundles and
+    /// the device revocations it holds. Everything is verified; the
+    /// devices' bundles are kept for sealing copies to them, and a
+    /// revocation ends this client's sessions with the device.
+    pub async fn lookup_full(&self, user_id: UserId) -> Result<Lookup, ClientError> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(Command::Lookup { user_id, reply: tx })
             .await
             .map_err(|_| ClientError::Stopped)?;
-        let bundle = tokio::time::timeout(REQUEST_TIMEOUT, rx)
+        let mut lookup = tokio::time::timeout(REQUEST_TIMEOUT, rx)
             .await
             .map_err(|_| ClientError::Timeout)?
             .map_err(|_| ClientError::NotConnected)??;
-        if let Some(b) = &bundle {
+        if let Some(b) = &lookup.bundle {
             if b.user_id != user_id {
                 return Err(ClientError::Relay(
                     "relay returned a bundle for the wrong user".into(),
@@ -714,7 +926,47 @@ impl Client {
             }
             b.verify()?;
         }
-        Ok(bundle)
+        lookup
+            .device_revocations
+            .retain(|r| r.verify().is_ok() && (r.account == user_id || r.device == user_id));
+        let listed = |device: &UserId| {
+            lookup
+                .bundle
+                .as_ref()
+                .is_some_and(|b| b.devices.iter().any(|d| d.device == *device))
+        };
+        let revoked = |device: &UserId| {
+            lookup
+                .device_revocations
+                .iter()
+                .any(|r| r.device == *device)
+        };
+        lookup.device_bundles.retain(|b| {
+            b.verify().is_ok()
+                && b.account() == Some(&user_id)
+                && listed(&b.user_id)
+                && !revoked(&b.user_id)
+        });
+        {
+            let mut cache = lock(&self.device_bundles);
+            for bundle in &lookup.device_bundles {
+                cache.insert(bundle.user_id, bundle.clone());
+            }
+            for revocation in &lookup.device_revocations {
+                cache.remove(&revocation.device);
+            }
+            // A device looked up on its own: keep its bundle too.
+            if let Some(bundle) = &lookup.bundle
+                && bundle.device_of.is_some()
+            {
+                cache.insert(user_id, bundle.clone());
+            }
+        }
+        for revocation in &lookup.device_revocations {
+            self.forget_sessions(&revocation.device);
+        }
+        lock(&self.device_checks).insert(user_id, Instant::now());
+        Ok(lookup)
     }
 
     /// Seal `text` for `to` and queue it for the relay. Resolves once the
@@ -723,6 +975,8 @@ impl Client {
     ///
     /// With a session store and a bundle that carries prekeys the message
     /// goes out under a forward-secret session; otherwise as protocol v1.
+    /// To this one bundle only; [`Client::send_content`] sends to every
+    /// device of a contact's.
     pub async fn send_text(&self, to: &KeyBundle, text: String) -> Result<Envelope, ClientError> {
         self.send_text_sequenced(to, text, Sequence::default())
             .await
@@ -748,18 +1002,40 @@ impl Client {
         content: Content,
         sequence: Sequence,
     ) -> Result<Envelope, ClientError> {
+        let (envelope, _) = self.seal_for(to, &content, sequence, None).await?;
+        self.queue(envelope.clone(), None).await?;
+        Ok(envelope)
+    }
+
+    /// Seal `content` for the owner of `to`, as a copy of `message_id`
+    /// when it is one; the envelope, and whether it went under a session.
+    async fn seal_for(
+        &self,
+        to: &KeyBundle,
+        content: &Content,
+        sequence: Sequence,
+        message_id: Option<&str>,
+    ) -> Result<(Envelope, bool), ClientError> {
+        // A linked device says whose it is in every body it sends.
+        let certificate = self
+            .devices
+            .as_ref()
+            .and_then(|d| lock(d).certificate().cloned());
         let plain = Body::plain_with_caps_and_head(
-            content,
+            content.clone(),
             now_ms(),
             sequence,
             &self.capabilities(),
             self.gossip_head(),
         )
+        .with_device(certificate)
+        .as_copy_of(message_id.map(str::to_owned))
         .encode()?;
         // Whether the body carries its own signature at the sealed layer.
         // A protocol-v4 ratchet body does not (it is deniable); every other
         // body is signed by our identity key.
         let mut deniable = false;
+        let mut forward_secret = false;
         let body = match &self.sessions {
             Some(sessions) if to.supports_sessions() => {
                 let result = sessions.lock().unwrap_or_else(|e| e.into_inner()).encrypt(
@@ -780,6 +1056,7 @@ impl Client {
                                 .await;
                         }
                         deniable = ratchet.v == 4;
+                        forward_secret = true;
                         Body::Ratchet(ratchet).encode()?
                     }
                     // Their prekey on the relay is one they will have thrown
@@ -818,16 +1095,7 @@ impl Client {
         } else {
             seal_bytes(&self.identity, to, &body)?
         };
-        let (tx, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(Command::Send {
-                envelope: envelope.clone(),
-                reply: tx,
-            })
-            .await
-            .map_err(|_| ClientError::Stopped)?;
-        rx.await.map_err(|_| ClientError::NotConnected)??;
-        Ok(envelope)
+        Ok((envelope, forward_secret))
     }
 
     /// Send `text` to `peer`, fetching their current bundle from the relay
@@ -846,7 +1114,13 @@ impl Client {
             .await
     }
 
-    /// [`Client::send_message`] for any content.
+    /// [`Client::send_message`] for any content. With a device state, the
+    /// message goes to every device of `peer`'s the bundle lists and, for
+    /// a text or a file, as a `sync` copy to every device of this
+    /// account's own (section 14); the relay is asked for the list again
+    /// at most once an hour, or once a device of theirs turned out to be
+    /// gone. Every copy carries the message's id, the id of the envelope
+    /// to `peer`, which is the id the message goes by everywhere.
     pub async fn send_content(
         &self,
         peer: UserId,
@@ -854,6 +1128,16 @@ impl Client {
         content: Content,
         sequence: Sequence,
     ) -> Result<Delivery, ClientError> {
+        if pinned.as_ref().is_some_and(|b| b.user_id != peer) {
+            return Err(ClientError::Relay(
+                "the pinned bundle is not the recipient's".into(),
+            ));
+        }
+        let spread = if self.devices.is_some() {
+            spread_of(&content)
+        } else {
+            Spread::Addressed
+        };
         let needs_fresh = match (&self.sessions, &pinned) {
             (_, None) => true,
             (None, Some(_)) => false,
@@ -870,12 +1154,17 @@ impl Client {
                     self.upgrade_check_due(&peer)
                 }
             }
-        };
+        } || (spread != Spread::Addressed && self.device_check_due(&peer));
         let mut bundle = pinned.clone();
+        let mut lookup = Lookup::default();
         if needs_fresh {
-            match self.lookup(peer).await {
-                Ok(Some(fresh)) => bundle = Some(fresh),
-                Ok(None) => {}
+            match self.lookup_full(peer).await {
+                Ok(fresh) => {
+                    if fresh.bundle.is_some() {
+                        bundle = fresh.bundle.clone();
+                    }
+                    lookup = fresh;
+                }
                 Err(e) if bundle.is_none() => return Err(e),
                 Err(e) => debug!("using the pinned bundle for {peer}: lookup failed: {e}"),
             }
@@ -888,16 +1177,271 @@ impl Client {
             // Sessions were agreed with the old key; they cannot continue.
             self.forget_sessions(&peer);
         }
-        let envelope = self
-            .send_content_sequenced(&bundle, content, sequence)
+
+        // Where the message itself goes: to the primary, or, for cover, to
+        // the device they last wrote from.
+        let mut target = bundle.clone();
+        if spread == Spread::LastDevice {
+            let last = lock(&self.last_device).get(&peer).copied();
+            if let Some(device) = last
+                && device != peer
+                && bundle.devices.iter().any(|d| d.device == device)
+                && let Some(device_bundle) = self.device_bundle_for(&device, &peer, &lookup).await
+            {
+                target = device_bundle;
+            }
+        }
+        let (envelope, forward_secret) = self.seal_for(&target, &content, sequence, None).await?;
+        let message = envelope.id.clone();
+
+        // The copies: their other devices, then a sync copy for our own.
+        let mut copies = Vec::new();
+        if matches!(spread, Spread::Everywhere | Spread::TheirDevices) {
+            for certificate in &bundle.devices {
+                let device = certificate.device;
+                if lookup.device_revocations.iter().any(|r| r.device == device) {
+                    continue;
+                }
+                let Some(device_bundle) = self.device_bundle_for(&device, &peer, &lookup).await
+                else {
+                    debug!(
+                        "no bundle for a device of {}…; no copy for it",
+                        peer.short()
+                    );
+                    continue;
+                };
+                match self
+                    .seal_for(&device_bundle, &content, sequence, Some(&message))
+                    .await
+                {
+                    Ok((copy, _)) => copies.push((copy, device, peer)),
+                    Err(e) => debug!("no copy for a device of {}…: {e}", peer.short()),
+                }
+            }
+        }
+        if spread == Spread::Everywhere {
+            let sync = Content::Sync(Sync::Sent {
+                peer,
+                id: message.clone(),
+                sent_at_ms: now_ms(),
+                content: Box::new(content.clone()),
+            });
+            for (envelope, device) in self.seal_for_siblings(&sync).await {
+                copies.push((envelope, device, self.account()));
+            }
+        }
+
+        // Queue the message first, then its copies, each knowing the others.
+        let fanned_out = !copies.is_empty();
+        self.queue(
+            envelope.clone(),
+            fanned_out.then(|| Copy {
+                message: message.clone(),
+                account: peer,
+                device: target.user_id,
+                primary: true,
+            }),
+        )
+        .await?;
+        let mut queued = Vec::with_capacity(copies.len());
+        for (copy, device, account) in copies {
+            self.queue(
+                copy.clone(),
+                Some(Copy {
+                    message: message.clone(),
+                    account,
+                    device,
+                    primary: false,
+                }),
+            )
             .await?;
-        let forward_secret = self.session_info(&peer).is_some();
+            queued.push(copy);
+        }
         Ok(Delivery {
             envelope,
             bundle,
             key_changed,
             forward_secret,
+            copies: queued,
         })
+    }
+
+    /// Tell every other device of this account something (section 14):
+    /// the envelopes queued, one per device that could be reached. A
+    /// device with no bundle on the relay, or one no session can be
+    /// started with, is skipped.
+    pub async fn send_sync(&self, sync: Sync) -> Result<Vec<Envelope>, ClientError> {
+        if self.devices.is_none() {
+            return Err(ClientError::Relay(
+                "this client keeps no device state".into(),
+            ));
+        }
+        let content = Content::Sync(sync);
+        let mut queued = Vec::new();
+        for (envelope, _) in self.seal_for_siblings(&content).await {
+            self.queue(envelope.clone(), None).await?;
+            queued.push(envelope);
+        }
+        Ok(queued)
+    }
+
+    /// `content` sealed for each of this account's other devices that can
+    /// be reached: under a session, since what one's devices say to each
+    /// other is never sent in the clear to a long-term key alone.
+    async fn seal_for_siblings(&self, content: &Content) -> Vec<(Envelope, UserId)> {
+        let Some(devices) = &self.devices else {
+            return Vec::new();
+        };
+        let (account, siblings) = {
+            let d = lock(devices);
+            (d.account(), d.siblings())
+        };
+        let mut out = Vec::new();
+        for sibling in siblings {
+            let Some(bundle) = self.sibling_bundle(&sibling, &account).await else {
+                debug!("no bundle for a device of ours; no copy for it");
+                continue;
+            };
+            if !bundle.supports_sessions() {
+                debug!("a device of ours publishes no prekeys; no copy for it");
+                continue;
+            }
+            match self
+                .seal_for(&bundle, content, Sequence::default(), None)
+                .await
+            {
+                Ok((envelope, true)) => out.push((envelope, sibling)),
+                Ok((_, false)) => debug!("a device of ours cannot be reached under a session"),
+                Err(e) => debug!("no copy for a device of ours: {e}"),
+            }
+        }
+        out
+    }
+
+    /// The account this device belongs to: its own id on a primary.
+    fn account(&self) -> UserId {
+        self.devices
+            .as_ref()
+            .map_or_else(|| self.identity.user_id(), |d| lock(d).account())
+    }
+
+    /// The bundle of `device`, one of `account`'s linked devices: from the
+    /// lookup that came with the account's, from what was looked up before,
+    /// or from the relay now.
+    async fn device_bundle_for(
+        &self,
+        device: &UserId,
+        account: &UserId,
+        lookup: &Lookup,
+    ) -> Option<KeyBundle> {
+        if let Some(bundle) = lookup.device_bundles.iter().find(|b| b.user_id == *device) {
+            return Some(bundle.clone());
+        }
+        if let Some(bundle) = lock(&self.device_bundles).get(device) {
+            return Some(bundle.clone());
+        }
+        match self.lookup_full(*device).await {
+            Ok(Lookup {
+                bundle: Some(bundle),
+                device_revocations,
+                ..
+            }) if bundle.account() == Some(account)
+                && !device_revocations.iter().any(|r| r.device == *device) =>
+            {
+                Some(bundle)
+            }
+            Ok(_) => None,
+            Err(e) => {
+                debug!("looking a device up: {e}");
+                None
+            }
+        }
+    }
+
+    /// The bundle of `sibling`, one of this account's own devices, or the
+    /// primary's.
+    async fn sibling_bundle(&self, sibling: &UserId, account: &UserId) -> Option<KeyBundle> {
+        if let Some(bundle) = lock(&self.device_bundles).get(sibling) {
+            return Some(bundle.clone());
+        }
+        let bundle = match self.lookup_full(*sibling).await {
+            Ok(Lookup {
+                bundle: Some(bundle),
+                ..
+            }) => bundle,
+            Ok(_) => return None,
+            Err(e) => {
+                debug!("looking a device of ours up: {e}");
+                return None;
+            }
+        };
+        let ours = if *sibling == *account {
+            bundle.user_id == *account
+        } else {
+            bundle.account() == Some(account)
+        };
+        if !ours {
+            return None;
+        }
+        lock(&self.device_bundles).insert(*sibling, bundle.clone());
+        Some(bundle)
+    }
+
+    /// Whether `peer`'s device list is due to be fetched again.
+    fn device_check_due(&self, peer: &UserId) -> bool {
+        lock(&self.device_checks)
+            .get(peer)
+            .is_none_or(|at| at.elapsed() >= DEVICE_LIST_REFRESH)
+    }
+
+    /// Revoke `device`, one of this account's (the primary only): the
+    /// statement goes to the relay, which cuts the device off, then the
+    /// bundle is published again without the device and the remaining
+    /// devices are told. The statement is returned for the front end to
+    /// push to contacts inside their next message.
+    pub async fn revoke_device(&self, device: UserId) -> Result<DeviceRevocation, ClientError> {
+        let devices = self
+            .devices
+            .as_ref()
+            .ok_or_else(|| ClientError::Relay("this client keeps no device state".into()))?;
+        if lock(devices).is_linked() {
+            return Err(ClientError::Relay(
+                "only the primary revokes devices".into(),
+            ));
+        }
+        if !self.relay_supports(feature::DEVICES) {
+            return Err(ClientError::Relay("the relay does not keep devices".into()));
+        }
+        let revocation = self.identity.revoke_device(&device, now_ms());
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::RevokeDevice {
+                revocation: revocation.clone(),
+                reply: tx,
+            })
+            .await
+            .map_err(|_| ClientError::Stopped)?;
+        tokio::time::timeout(REQUEST_TIMEOUT, rx)
+            .await
+            .map_err(|_| ClientError::Timeout)?
+            .map_err(|_| ClientError::NotConnected)??;
+        lock(devices)
+            .revoke(revocation.clone())
+            .map_err(|e| ClientError::Relay(e.to_string()))?;
+        self.forget_sessions(&device);
+        lock(&self.device_bundles).remove(&device);
+        self.cmd_tx
+            .send(Command::Republish)
+            .await
+            .map_err(|_| ClientError::Stopped)?;
+        let sync = match lock(devices).sync_content() {
+            Content::Sync(sync) => sync,
+            _ => unreachable!("the device list is sync content"),
+        };
+        if let Err(e) = self.send_sync(sync).await {
+            debug!("telling our devices about a revocation: {e}");
+        }
+        Ok(revocation)
     }
 
     /// Encrypt the file at `path` and park it on the relay. The returned
@@ -1017,6 +1561,11 @@ struct Setup {
     relay_features: Arc<Mutex<Vec<String>>>,
     log: Option<SharedLog>,
     groups: Arc<AtomicBool>,
+    devices: Option<SharedDevices>,
+    device_bundles: DeviceBundles,
+    device_checks: DeviceChecks,
+    last_device: LastDevice,
+    handle: WeakClient,
 }
 
 enum Exit {
@@ -1026,24 +1575,20 @@ enum Exit {
 
 async fn run(
     setup: Setup,
-    mut outbox: Outbox,
+    outbox: Outbox,
     pending: PendingIds,
     mut cmd_rx: mpsc::Receiver<Command>,
     ev_tx: mpsc::Sender<ClientEvent>,
 ) {
     let mut backoff = Duration::from_secs(1);
-    let mut transfers = Transfers::default();
+    let mut queues = Queues {
+        outbox,
+        pending,
+        transfers: Transfers::default(),
+        fanouts: FanOuts::default(),
+    };
     loop {
-        let outcome = session(
-            &setup,
-            &mut outbox,
-            &pending,
-            &mut transfers,
-            &mut cmd_rx,
-            &ev_tx,
-            &mut backoff,
-        )
-        .await;
+        let outcome = session(&setup, &mut queues, &mut cmd_rx, &ev_tx, &mut backoff).await;
         let reason = match outcome {
             Ok(Exit::Shutdown) => return,
             Ok(Exit::Disconnected(reason)) => reason,
@@ -1069,19 +1614,27 @@ async fn run(
                 _ = &mut sleep => break,
                 cmd = cmd_rx.recv() => match cmd {
                     Some(Command::Shutdown) | None => return,
-                    Some(Command::Send { envelope, reply }) => {
-                        outbox.push(envelope);
-                        sync_pending(&pending, &outbox);
+                    Some(Command::Send { envelope, copy, reply }) => {
+                        if let Some(copy) = copy {
+                            queues.fanouts.register(envelope.id.clone(), copy);
+                        }
+                        queues.outbox.push(envelope);
+                        sync_pending(&queues.pending, &queues.outbox);
                         let _ = reply.send(Ok(()));
                     }
                     Some(Command::Lookup { reply, .. }) => {
                         let _ = reply.send(Err(ClientError::NotConnected));
                     }
+                    Some(Command::RevokeDevice { reply, .. }) => {
+                        let _ = reply.send(Err(ClientError::NotConnected));
+                    }
+                    // The next connection publishes the bundle as it stands.
+                    Some(Command::Republish) => {}
                     Some(Command::Upload { blob, chunks, progress, reply }) => {
-                        transfers.queue_upload(blob, chunks, progress, reply);
+                        queues.transfers.queue_upload(blob, chunks, progress, reply);
                     }
                     Some(Command::Download { blob, total, progress, reply }) => {
-                        transfers.queue_download(blob, total, progress, reply);
+                        queues.transfers.queue_download(blob, total, progress, reply);
                     }
                     // While disconnected these are dropped; the front end
                     // resends them once reconnected.
@@ -1103,7 +1656,15 @@ async fn run(
     }
 }
 
-type Lookups = HashMap<UserId, Vec<oneshot::Sender<Result<Option<KeyBundle>, ClientError>>>>;
+type Lookups = HashMap<UserId, Vec<oneshot::Sender<Result<Lookup, ClientError>>>>;
+
+/// What the relay's next `published` answers: a publish of ours, or a
+/// device revocation, which the relay acknowledges the same way. Frames
+/// are answered in the order they were sent.
+enum Expect {
+    Publish,
+    RevokeDevice(oneshot::Sender<Result<(), ClientError>>),
+}
 type DepositReplies = VecDeque<oneshot::Sender<Result<KeyPackageStatus, ClientError>>>;
 type KeyPackageReplies = HashMap<
     UserId,
@@ -1142,16 +1703,31 @@ enum Submission {
     Anonymous(Submitter),
 }
 
+/// What outlives one connection: the outbox, the ids the front end
+/// watches, the transfers under way and the messages awaiting the relay's
+/// word on every one of their envelopes.
+struct Queues {
+    outbox: Outbox,
+    pending: PendingIds,
+    transfers: Transfers,
+    fanouts: FanOuts,
+}
+
 /// One authenticated connection, from connect to disconnect.
 async fn session(
     setup: &Setup,
-    outbox: &mut Outbox,
-    pending: &PendingIds,
-    transfers: &mut Transfers,
+    queues: &mut Queues,
     cmd_rx: &mut mpsc::Receiver<Command>,
     ev_tx: &mpsc::Sender<ClientEvent>,
     backoff: &mut Duration,
 ) -> anyhow::Result<Exit> {
+    let Queues {
+        outbox,
+        pending,
+        transfers,
+        fanouts,
+    } = queues;
+    let pending: &PendingIds = pending;
     let relay_url = setup.relay_url.as_str();
     let identity = setup.identity.as_ref();
     debug!("connecting to {relay_url}");
@@ -1210,6 +1786,7 @@ async fn session(
     sink.send(text(&publish_frame(setup)?)).await?;
     let mut published = false;
     let mut republished = 0u32;
+    let mut expecting: VecDeque<Expect> = VecDeque::from([Expect::Publish]);
 
     // --- steady state ------------------------------------------------------
     let mut lookups: Lookups = HashMap::new();
@@ -1256,15 +1833,32 @@ async fn session(
                     let _ = sink.close().await;
                     return Ok(Exit::Shutdown);
                 }
-                Some(Command::Send { envelope, reply }) => {
+                Some(Command::Send { envelope, copy, reply }) => {
                     // Queue first: if the write fails the envelope is resent
                     // on the next connection.
+                    if let Some(copy) = copy {
+                        fanouts.register(envelope.id.clone(), copy);
+                    }
                     outbox.push(envelope.clone());
                     sync_pending(pending, outbox);
                     let _ = reply.send(Ok(()));
                     if published && !submit(&mut sink, &mut submission, envelope).await {
                         return Ok(Exit::Disconnected("send failed".into()));
                     }
+                }
+                Some(Command::RevokeDevice { revocation, reply }) => {
+                    let frame = ClientFrame::RevokeDevice { revocation };
+                    if let Err(e) = sink.send(text(&frame)).await {
+                        let _ = reply.send(Err(ClientError::Relay(e.to_string())));
+                        return Ok(Exit::Disconnected("send failed".into()));
+                    }
+                    expecting.push_back(Expect::RevokeDevice(reply));
+                }
+                Some(Command::Republish) => {
+                    if sink.send(text(&publish_frame(setup)?)).await.is_err() {
+                        return Ok(Exit::Disconnected("publish failed".into()));
+                    }
+                    expecting.push_back(Expect::Publish);
                 }
                 Some(Command::Lookup { user_id, reply }) => {
                     if let Err(e) = sink.send(text(&ClientFrame::Lookup { user_id })).await {
@@ -1380,10 +1974,10 @@ async fn session(
                     }
                 }
                 Some(SubmitEvent::Sent { id }) => {
-                    accepted(id, outbox, pending, ev_tx).await;
+                    accepted(id, outbox, pending, fanouts, ev_tx).await;
                 }
                 Some(SubmitEvent::Rejected { id, code, message }) => {
-                    refused(id, code, message, outbox, pending, ev_tx, &mut retry_at).await;
+                    refused(id, code, message, outbox, pending, fanouts, setup, ev_tx, &mut retry_at).await;
                 }
             },
             frame = read_frame(&mut stream) => {
@@ -1410,10 +2004,10 @@ async fn session(
                         }
                     }
                     ServerFrame::Sent { id } => {
-                        accepted(id, outbox, pending, ev_tx).await;
+                        accepted(id, outbox, pending, fanouts, ev_tx).await;
                     }
                     ServerFrame::Rejected { id, code, message } => {
-                        refused(id, code, message, outbox, pending, ev_tx, &mut retry_at).await;
+                        refused(id, code, message, outbox, pending, fanouts, setup, ev_tx, &mut retry_at).await;
                     }
                     ServerFrame::LookupResult {
                         user_id,
@@ -1422,10 +2016,8 @@ async fn session(
                         succession,
                         head,
                         logged,
-                        // The linked devices' bundles and revocations are
-                        // read once the client keeps sessions per device.
-                        device_bundles: _,
-                        device_revocations: _,
+                        device_bundles,
+                        device_revocations,
                     } => {
                         // Handed over (and any lifecycle statement raised)
                         // once checked against the transparency log, when
@@ -1438,6 +2030,8 @@ async fn session(
                             succession,
                             head,
                             logged,
+                            device_bundles,
+                            device_revocations,
                             replies,
                         });
                         if !dispatch(step, &mut sink, ev_tx).await {
@@ -1459,6 +2053,16 @@ async fn session(
                     ServerFrame::Error { code, message } if !published => {
                         // Our Publish was refused: this connection is useless.
                         return Ok(Exit::Disconnected(format!("{message} ({code:?})")));
+                    }
+                    // Answers come in order: an error while a device
+                    // revocation is the next thing to be answered is its
+                    // refusal.
+                    ServerFrame::Error { code, message }
+                        if matches!(expecting.front(), Some(Expect::RevokeDevice(_))) =>
+                    {
+                        if let Some(Expect::RevokeDevice(reply)) = expecting.pop_front() {
+                            let _ = reply.send(Err(ClientError::Relay(format!("{message} ({code:?})"))));
+                        }
                     }
                     // An error is not tied to a request; a pending key
                     // package deposit or fetch is the likeliest to have
@@ -1491,6 +2095,13 @@ async fn session(
                             .await;
                     }
                     ServerFrame::Published => {
+                        match expecting.pop_front() {
+                            Some(Expect::RevokeDevice(reply)) => {
+                                let _ = reply.send(Ok(()));
+                                continue;
+                            }
+                            Some(Expect::Publish) | None => {}
+                        }
                         if !published {
                             published = true;
                             info!("connected to {relay_url}");
@@ -1547,6 +2158,7 @@ async fn session(
                             if sink.send(text(&publish_frame(setup)?)).await.is_err() {
                                 return Ok(Exit::Disconnected("publish failed".into()));
                             }
+                            expecting.push_back(Expect::Publish);
                         }
                     }
                     ServerFrame::Pong => {}
@@ -1600,6 +2212,20 @@ fn publish_frame(setup: &Setup) -> anyhow::Result<ClientFrame> {
     if setup.groups.load(Ordering::Relaxed) {
         caps.push(silver_protocol::bundle::capability::GROUPS.to_owned());
     }
+    // With a device state: a linked device says whose it is, a primary
+    // lists its devices, and either reads sync and may be sent to per
+    // device (section 14).
+    let bundle = match &setup.devices {
+        Some(devices) => {
+            let devices = lock(devices);
+            caps.push(silver_protocol::bundle::capability::DEVICES.to_owned());
+            match devices.certificate() {
+                Some(certificate) => bundle.as_device_of(certificate.clone()),
+                None => bundle.with_devices(&setup.identity, devices.devices().to_vec())?,
+            }
+        }
+        None => bundle,
+    };
     let bundle = if caps.is_empty() {
         bundle
     } else {
@@ -1809,23 +2435,42 @@ async fn flush_outbox(sink: &mut WsSink, submission: &mut Submission, outbox: &O
     true
 }
 
+/// The relay took envelope `id`. A message sent to several devices is
+/// reported sent once every one of its envelopes is.
 async fn accepted(
     id: String,
     outbox: &mut Outbox,
     pending: &PendingIds,
+    fanouts: &mut FanOuts,
     ev_tx: &mpsc::Sender<ClientEvent>,
 ) {
     outbox.remove(&id);
     sync_pending(pending, outbox);
-    let _ = ev_tx.send(ClientEvent::Sent { id }).await;
+    match fanouts.done(&id) {
+        Settled::Alone => {
+            let _ = ev_tx.send(ClientEvent::Sent { id }).await;
+        }
+        Settled::Message(message) => {
+            let _ = ev_tx.send(ClientEvent::Sent { id: message }).await;
+        }
+        Settled::Waiting | Settled::Failed => {}
+    }
 }
 
+/// The relay refused envelope `id`. For a message sent to several devices:
+/// a refusal of the envelope to the recipient's primary is the message's;
+/// a copy refused as for a device the relay does not deliver to means the
+/// device is gone, and the sender learns so; any other refused copy is
+/// reported and the message still counts as sent once the rest are.
+#[allow(clippy::too_many_arguments)]
 async fn refused(
     id: String,
     code: ErrorCode,
     message: String,
     outbox: &mut Outbox,
     pending: &PendingIds,
+    fanouts: &mut FanOuts,
+    setup: &Setup,
     ev_tx: &mpsc::Sender<ClientEvent>,
     retry_at: &mut Option<tokio::time::Instant>,
 ) {
@@ -1846,12 +2491,48 @@ async fn refused(
     }
     outbox.remove(&id);
     sync_pending(pending, outbox);
-    let _ = ev_tx
-        .send(ClientEvent::Rejected {
-            id,
-            reason: format!("{message} ({code:?})"),
-        })
-        .await;
+    let reason = format!("{message} ({code:?})");
+    let Some(copy) = fanouts.copy(&id).cloned() else {
+        let _ = ev_tx.send(ClientEvent::Rejected { id, reason }).await;
+        return;
+    };
+    if copy.primary {
+        fanouts.fail(&copy.message);
+        let _ = ev_tx
+            .send(ClientEvent::Rejected {
+                id: copy.message.clone(),
+                reason,
+            })
+            .await;
+    } else if code == ErrorCode::NotFound {
+        debug!(
+            "a copy for a device of {}… was refused as unknown: the device is gone",
+            copy.account.short()
+        );
+        if let Some(sessions) = &setup.sessions
+            && let Err(e) = lock(sessions).forget(&copy.device)
+        {
+            warn!("could not drop sessions with a gone device: {e:#}");
+        }
+        lock(&setup.device_bundles).remove(&copy.device);
+        lock(&setup.device_checks).remove(&copy.account);
+        let _ = ev_tx
+            .send(ClientEvent::DeviceGone {
+                account: copy.account,
+                device: copy.device,
+            })
+            .await;
+    } else {
+        let _ = ev_tx
+            .send(ClientEvent::Error(format!(
+                "a copy for a device of {}… was refused: {reason}",
+                copy.account.short()
+            )))
+            .await;
+    }
+    if let Settled::Message(message) = fanouts.done(&id) {
+        let _ = ev_tx.send(ClientEvent::Sent { id: message }).await;
+    }
 }
 
 /// If `content` is an identity-lifecycle statement, the event to raise for
@@ -1904,27 +2585,28 @@ async fn deliver(
             caps,
             head,
             device,
+            id: message_id,
         }) => {
-            if let Some(event) = lifecycle_event(&content) {
-                let _ = ev_tx.send(event).await;
-                return;
-            }
-            *peer_head = head.map(|h| (from, h));
-            let _ = ev_tx
-                .send(ClientEvent::Message(Box::new(Message {
-                    id,
+            plain_received(
+                setup,
+                Received {
+                    envelope_id: id,
                     from,
                     to: opened.to,
+                    signed: opened.signed,
+                    forward_secret: false,
                     sent_at_ms,
                     sequence,
                     content,
-                    forward_secret: false,
-                    signed: opened.signed,
                     caps,
                     head,
                     device,
-                })))
-                .await;
+                    message_id,
+                },
+                ev_tx,
+                peer_head,
+            )
+            .await;
             return;
         }
         Ok(Body::Ratchet(body)) => {
@@ -1999,27 +2681,28 @@ async fn deliver(
             caps,
             head,
             device,
+            id: message_id,
         }) => {
-            if let Some(event) = lifecycle_event(&content) {
-                let _ = ev_tx.send(event).await;
-                return;
-            }
-            *peer_head = head.map(|h| (from, h));
-            let _ = ev_tx
-                .send(ClientEvent::Message(Box::new(Message {
-                    id,
+            plain_received(
+                setup,
+                Received {
+                    envelope_id: id,
                     from,
                     to: opened.to,
+                    signed: opened.signed,
+                    forward_secret,
                     sent_at_ms,
                     sequence,
                     content,
-                    forward_secret,
-                    signed: opened.signed,
                     caps,
                     head,
                     device,
-                })))
-                .await;
+                    message_id,
+                },
+                ev_tx,
+                peer_head,
+            )
+            .await;
         }
         Ok(Body::Ratchet(_) | Body::Group(_)) => {
             let _ = ev_tx
@@ -2033,6 +2716,184 @@ async fn deliver(
                 .send(ClientEvent::Error(format!(
                     "could not read envelope {id}: {e}"
                 )))
+                .await;
+        }
+    }
+}
+
+/// A plain body as it came out of an envelope, before it is attributed.
+struct Received {
+    envelope_id: String,
+    /// The key that sealed the envelope: a device's, which may be a linked
+    /// device of the account the message is from.
+    from: UserId,
+    to: UserId,
+    signed: bool,
+    forward_secret: bool,
+    sent_at_ms: u64,
+    sequence: Sequence,
+    content: Content,
+    caps: Vec<String>,
+    head: Option<silver_protocol::LogHead>,
+    device: Option<silver_protocol::DeviceCertificate>,
+    message_id: Option<String>,
+}
+
+/// Attribute a plain body and report it (`docs/PROTOCOL.md` section 14):
+/// a body with a device certificate is from the account the certificate
+/// names, once the certificate verifies for the key that sealed the
+/// envelope; `sync` is taken from this account's own devices only, and a
+/// device list from the primary is applied; a device revocation ends the
+/// sessions with the device; a text or file from a sender that did not
+/// address this account's other devices is passed on to them by the
+/// primary.
+async fn plain_received(
+    setup: &Setup,
+    received: Received,
+    ev_tx: &mpsc::Sender<ClientEvent>,
+    peer_head: &mut Option<(UserId, silver_protocol::LogHead)>,
+) {
+    let Received {
+        envelope_id,
+        from,
+        to,
+        signed,
+        forward_secret,
+        sent_at_ms,
+        sequence,
+        content,
+        caps,
+        head,
+        device,
+        message_id,
+    } = received;
+    let account = match &device {
+        Some(certificate) => {
+            if certificate.verify().is_err() || certificate.device != from {
+                warn!(
+                    "envelope {envelope_id} carries a device certificate that is not the sender's; dropped"
+                );
+                let _ = ev_tx
+                    .send(ClientEvent::Error(format!(
+                        "a message from {}… claimed a device certificate that does not verify; dropped",
+                        from.short()
+                    )))
+                    .await;
+                return;
+            }
+            certificate.account
+        }
+        None => from,
+    };
+    let id = message_id.unwrap_or(envelope_id);
+    match content {
+        Content::Sync(sync) => {
+            let ours = setup.devices.as_ref().is_some_and(|d| {
+                let d = lock(d);
+                from != d.me() && d.is_ours(&from) && account == d.account()
+            });
+            if !ours {
+                debug!(
+                    "sync content from {}…, not a device of ours; dropped",
+                    from.short()
+                );
+                return;
+            }
+            if let Sync::Devices { devices, revoked } = &sync
+                && let Some(state) = &setup.devices
+            {
+                let mut state = lock(state);
+                if state.is_linked() && from == state.account() {
+                    match state.set_list(devices.clone(), revoked.clone()) {
+                        Ok(newly) => {
+                            for device in newly {
+                                if let Some(sessions) = &setup.sessions
+                                    && let Err(e) = lock(sessions).forget(&device)
+                                {
+                                    warn!("could not drop sessions with a revoked device: {e:#}");
+                                }
+                                lock(&setup.device_bundles).remove(&device);
+                            }
+                        }
+                        Err(e) => {
+                            warn!("the device list the primary sent does not hold up: {e:#}");
+                            return;
+                        }
+                    }
+                } else {
+                    debug!("a device list from a device that is not the primary; ignored");
+                }
+            }
+            let _ = ev_tx
+                .send(ClientEvent::Sync {
+                    device: from,
+                    sync: Box::new(sync),
+                })
+                .await;
+        }
+        Content::Provision(provision) => {
+            let _ = ev_tx
+                .send(ClientEvent::Provision {
+                    from,
+                    provision: Box::new(provision),
+                })
+                .await;
+        }
+        Content::DeviceRevocation(revocation) => {
+            if revocation.verify().is_err() {
+                debug!("a device revocation that does not verify; dropped");
+                return;
+            }
+            if let Some(sessions) = &setup.sessions
+                && let Err(e) = lock(sessions).forget(&revocation.device)
+            {
+                warn!("could not drop sessions with a revoked device: {e:#}");
+            }
+            lock(&setup.device_bundles).remove(&revocation.device);
+            let _ = ev_tx.send(ClientEvent::DeviceRevoked { revocation }).await;
+        }
+        content => {
+            if let Some(event) = lifecycle_event(&content) {
+                let _ = ev_tx.send(event).await;
+                return;
+            }
+            *peer_head = head.map(|h| (account, h));
+            lock(&setup.last_device).insert(account, from);
+            // A sender that sealed to this account alone (a client before
+            // 0.9.0): the primary passes a copy to the account's other
+            // devices, which such a sender knows nothing of.
+            let forwards = setup.devices.as_ref().is_some_and(|d| {
+                let d = lock(d);
+                !d.is_linked() && !d.siblings().is_empty()
+            }) && !caps.iter().any(|c| c == capability::DEVICES)
+                && matches!(content, Content::Text { .. } | Content::File { .. });
+            if forwards && let Some(client) = setup.handle.upgrade() {
+                let sync = Sync::Received {
+                    from: account,
+                    id: id.clone(),
+                    sent_at_ms,
+                    content: Box::new(content.clone()),
+                };
+                tokio::spawn(async move {
+                    if let Err(e) = client.send_sync(sync).await {
+                        debug!("passing a message on to our other devices: {e}");
+                    }
+                });
+            }
+            let _ = ev_tx
+                .send(ClientEvent::Message(Box::new(Message {
+                    id,
+                    from: account,
+                    to,
+                    sent_at_ms,
+                    sequence,
+                    content,
+                    forward_secret,
+                    signed,
+                    caps,
+                    head,
+                    device,
+                })))
                 .await;
         }
     }

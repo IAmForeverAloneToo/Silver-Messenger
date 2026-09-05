@@ -1,5 +1,5 @@
 {
-  "description": "Bodies as encoded before sealing: JSON in the field order given, padded with spaces to a multiple of 160 bytes. Plain (v1) bodies for each content kind (a text from a linked device carrying its certificate, and a sync copy between one's own devices, among them), ratchet bodies (v2, with and without the InitHeader), and group bodies (v5: an application message inline, a Welcome parked in the blob store, a join request with its proof).",
+  "description": "Bodies as encoded before sealing: JSON in the field order given, padded with spaces to a multiple of 160 bytes. Plain (v1) bodies for each content kind (a text from a linked device carrying its certificate, the copy of a text for a second device of the recipient's naming the message's id, a sync copy between one's own devices and a device revocation, among them), ratchet bodies (v2, with and without the InitHeader), and group bodies (v5: an application message inline, a Welcome parked in the blob store, a join request with its proof).",
   "cases": [
     {
       "name": "text",
@@ -175,6 +175,50 @@
       },
       "outputs": {
         "encoded": "{\"sent_at_ms\":1700000000000,\"epoch\":81985529216486895,\"seq\":43,\"content\":{\"type\":\"text\",\"body\":\"hello from my laptop\"},\"caps\":[\"devices\"],\"device\":{\"account\":\"BMnz2CXfYkwNGcm7fYd6cXv8GLkE2WZbdjwtvCnPhv3U\",\"device\":\"HKXbhy1hMGH6XtJVNqLTeKnKC76BLADeWhurDyrrVD3p\",\"created_at_ms\":1700000003000,\"name\":\"laptop\",\"signature\":\"2JdA1z2KLwIcT3Js9XMm8ruwlOmaH1eWe11gTcgbDfks+zEzuLDVgn38cOTBYUDM7A0ZrmS9aWSuD7YIEqfvBA==\"}}                                                                     ",
+        "encoded_len": 480
+      }
+    },
+    {
+      "name": "text_copy_for_a_device",
+      "inputs": {
+        "kind": "plain",
+        "content": {
+          "type": "text",
+          "body": "hello"
+        },
+        "sent_at_ms": 1700000000000,
+        "epoch": 81985529216486895,
+        "seq": 44,
+        "caps": [
+          "devices"
+        ],
+        "id": "0f0e0d0c-0b0a-4908-8706-050403020100"
+      },
+      "outputs": {
+        "encoded": "{\"sent_at_ms\":1700000000000,\"epoch\":81985529216486895,\"seq\":44,\"content\":{\"type\":\"text\",\"body\":\"hello\"},\"caps\":[\"devices\"],\"id\":\"0f0e0d0c-0b0a-4908-8706-050403020100\"}                                                                                                                                                         ",
+        "encoded_len": 320
+      }
+    },
+    {
+      "name": "device_revocation",
+      "inputs": {
+        "kind": "plain",
+        "content": {
+          "type": "device_revocation",
+          "account": "BMnz2CXfYkwNGcm7fYd6cXv8GLkE2WZbdjwtvCnPhv3U",
+          "device": "HKXbhy1hMGH6XtJVNqLTeKnKC76BLADeWhurDyrrVD3p",
+          "created_at_ms": 1700000000000,
+          "signature": "Glq0uElyNlGeSetHRzUdMkQ2e7GZnoWmiJ/S5m3qDulK+VmexjRP9dyALVF1n+Pklx/J4OnYa+Fs81YO1hUmBA=="
+        },
+        "sent_at_ms": 1700000000000,
+        "epoch": 81985529216486895,
+        "seq": 42,
+        "caps": [
+          "devices"
+        ]
+      },
+      "outputs": {
+        "encoded": "{\"sent_at_ms\":1700000000000,\"epoch\":81985529216486895,\"seq\":42,\"content\":{\"type\":\"device_revocation\",\"account\":\"BMnz2CXfYkwNGcm7fYd6cXv8GLkE2WZbdjwtvCnPhv3U\",\"device\":\"HKXbhy1hMGH6XtJVNqLTeKnKC76BLADeWhurDyrrVD3p\",\"created_at_ms\":1700000000000,\"signature\":\"Glq0uElyNlGeSetHRzUdMkQ2e7GZnoWmiJ/S5m3qDulK+VmexjRP9dyALVF1n+Pklx/J4OnYa+Fs81YO1hUmBA==\"},\"caps\":[\"devices\"]}                                                                                                                 ",
         "encoded_len": 480
       }
     },

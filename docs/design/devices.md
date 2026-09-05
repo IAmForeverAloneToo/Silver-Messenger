@@ -198,6 +198,30 @@ devices find their copy and show it as sent (5.3). A contact with two
 linked devices and a sender with one costs four envelopes where one was
 sent; the sizes stay what they were.
 
+The message goes by one id everywhere: the id of the envelope to the
+contact's primary. Every other envelope is a copy, and its body says so
+in a new optional field `id` (6.2), so the recipient's devices record and
+acknowledge the same message whatever envelope brought it, and the
+sender's devices, told the id in the sync copy, mark the same line when
+the receipts come. The relay sees envelopes with ids of their own, as it
+must (it de-duplicates by id), and nothing that ties them together.
+
+A client reports a message sent once the relay has taken every envelope
+of it. The envelope to the contact's primary refused for good is the
+message refused; a copy refused as for a device the relay does not
+deliver to (`not_found`) means the device is gone, and the sender drops
+its sessions with it and fetches the list again before the next message;
+any other refused copy is reported and the message still counts as sent
+once the rest are, since it reached the person.
+
+Not every content spreads alike: a text or a file goes to every device of
+the contact's and, as a sync copy, to every device of one's own; a
+receipt or a lifecycle statement (an identity's or a device's) goes to
+every device of the contact's and to no device of one's own, which learn
+what was read by `sync read` and what was revoked by `sync devices`;
+cover goes to the one device the contact last wrote from; `sync` and a
+provisioning message go to the one device addressed.
+
 Sessions with a contact's devices start the way sessions do now: a fresh
 lookup of the device's bundle (with a one-time prekey), a handshake in
 the first message. The initiator rule and the five-sessions-per-peer cap
@@ -306,7 +330,17 @@ the target's hand-out budget one prekey per device.
 ### 6.2 Body fields and capabilities
 
 * `device` (optional, any body version): the sender's certificate (5.4).
+* `id` (optional, plain bodies): the id the message goes by, on a copy
+  for a device other than the one the message was first sealed for
+  (5.1); printable ASCII, at most 64 bytes. Absent when the envelope's
+  id is the message's.
 * Content kind `sync` (5.3), with `kind` as listed.
+* Content kind `device_revocation`: a device revocation (4.4) pushed to
+  a contact inside a message, as identity revocations are, so the
+  contact drops its sessions with the device at once rather than at its
+  next lookup. Only to contacts that advertise `devices` in their
+  bodies, which know the kind; a client before 0.9.0 would refuse the
+  whole body as unreadable.
 * In-body capability `devices`: the sender is a 0.9.0 client that seals
   to every device it knows (5.3, 5.4). Advertised always from 0.9.0.
 * Bundle capability `devices`: the identity's client reads `sync`, is a
@@ -464,14 +498,29 @@ one device today.
   provisioning message, `sync` bodies; what to fan out to, given a
   contact and one's own list.
 * `Client::send_content` becomes send-to-account: it resolves the
-  account's devices and one's own, encrypts per session, submits every
-  envelope, and reports one `Delivery` per message: sent when every
-  envelope was accepted, failed when the relay refused any for good, with
-  the `Sent`/`Rejected` events aggregated as group messages' are.
-* Receiving: a body from a device is attributed to its account through
-  the certificate or the contact's list; `sync` bodies from one's own
-  devices update contacts, marks, the device list, or add a line.
-* The transparency check treats device ids as subjects like any other.
+  account's devices (from the bundle it holds or fetches; the devices'
+  bundles come with the account's lookup, or from a lookup of the device)
+  and one's own, encrypts per session, submits every envelope, and
+  reports one `Delivery` per message with the copies listed; the
+  `Sent`/`Rejected` events are aggregated as 5.1 says, under the
+  message's id. `Client::send_sync` tells one's own devices something;
+  `Client::revoke_device` (the primary) sends the statement, republishes
+  without the device and syncs the list.
+* Receiving: a body with a certificate is from the account the
+  certificate names, once the certificate verifies for the key that
+  sealed the envelope (else the message is dropped as a forgery); the
+  front end sees `from` as the account and `device` as the certificate.
+  `sync` is taken from one's own devices only and raised as an event of
+  its own; a device list from the primary is applied by the client before
+  the event. A `device_revocation` ends the sessions with the device. A
+  text or file from a sender whose body does not advertise `devices` is
+  passed on by the primary as `sync received`.
+* The transparency check treats device ids as subjects like any other:
+  a device's bundle that comes with an account's answer is checked
+  against the device's latest logged bundle, and a served device
+  revocation against the revocation logged under the device; one that
+  does not hold up is left out of the answer and reported, and the
+  answer for the account stands.
 
 ### 8.3 Interface
 

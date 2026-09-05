@@ -12,14 +12,19 @@
 //! outbox.json          outgoing envelopes the relay has not accepted yet
 //! requests.json        messages from people who are not contacts yet
 //! blocked.json         ids whose messages are dropped
+//! devices.json         the account's linked devices and revocations
 //! history/<user>.jsonl one line per message, per peer
 //! ```
+//!
+//! On a linked device `identity.json` also carries, under `linked`, the
+//! account it belongs to and the certificate the account signed for it.
 //!
 //! With a passphrase set, every file is encrypted with the vault's data key
 //! (see [`crate::vault`]); history files are encrypted line by line. Files
 //! written before the passphrase was set are recognised as plaintext and
 //! re-encrypted when the passphrase is set.
 
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -31,6 +36,7 @@ use silver_protocol::envelope::ReceiptKind;
 use silver_protocol::wire::url_host;
 use silver_protocol::{Identity, IdentitySecrets, KeyBundle, Revocation, Sequence, UserId};
 
+use crate::devices::{DevicesFile, Linked};
 use crate::files::FileInfo;
 use crate::sessions::{PrekeyFile, SessionsFile};
 use crate::vault::{FileCipher, Kdf, LINE_PREFIX, VaultError, VaultFile};
@@ -46,6 +52,7 @@ const OUTBOX_FILE: &str = "outbox.json";
 const TRANSPARENCY_FILE: &str = crate::transparency::LOG_NAME;
 const REQUESTS_FILE: &str = "requests.json";
 const BLOCKED_FILE: &str = "blocked.json";
+const DEVICES_FILE: &str = "devices.json";
 const HISTORY_DIR: &str = "history";
 
 /// Client-side configuration.
@@ -224,6 +231,11 @@ pub struct Contact {
     /// arrives; cleared only by removing and re-adding them.
     #[serde(default)]
     pub revoked: bool,
+    /// The last sequence accepted from each of their linked devices, which
+    /// number their own streams (`docs/PROTOCOL.md` section 14); the
+    /// primary's is `received`.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub device_received: HashMap<UserId, Sequence>,
 }
 
 impl Contact {
@@ -238,6 +250,25 @@ impl Contact {
             caps: Vec::new(),
             auto_files: false,
             revoked: false,
+            device_received: HashMap::new(),
+        }
+    }
+
+    /// The last sequence accepted from `device` (`None`: their primary).
+    pub fn received_from(&self, device: Option<&UserId>) -> Option<Sequence> {
+        match device {
+            None => self.received,
+            Some(device) => self.device_received.get(device).copied(),
+        }
+    }
+
+    /// Note the sequence just accepted from `device` (`None`: their primary).
+    pub fn note_received(&mut self, device: Option<&UserId>, sequence: Sequence) {
+        match device {
+            None => self.received = Some(sequence),
+            Some(device) => {
+                self.device_received.insert(*device, sequence);
+            }
         }
     }
 
@@ -608,6 +639,7 @@ impl Store {
             TRANSPARENCY_FILE,
             REQUESTS_FILE,
             BLOCKED_FILE,
+            DEVICES_FILE,
         ] {
             let path = self.root.join(name);
             if !path.exists() {
@@ -715,6 +747,60 @@ impl Store {
 
     pub fn has_identity(&self) -> bool {
         self.root.join(IDENTITY_FILE).exists()
+    }
+
+    /// What `identity.json` says under `linked`: on a linked device, the
+    /// account and this key's certificate; nothing on a primary.
+    pub fn load_linked(&self) -> anyhow::Result<Option<Linked>> {
+        #[derive(Deserialize)]
+        struct IdentityFile {
+            #[serde(default)]
+            linked: Option<Linked>,
+        }
+        match self.read_file(IDENTITY_FILE)? {
+            None => Ok(None),
+            Some(bytes) => {
+                let file: IdentityFile =
+                    serde_json::from_slice(&bytes).context("parsing identity.json")?;
+                Ok(file.linked)
+            }
+        }
+    }
+
+    /// Write `linked` into `identity.json` next to the keys (`None` takes
+    /// it out), leaving everything else in the file as it was.
+    pub fn save_linked(&self, linked: Option<&Linked>) -> anyhow::Result<()> {
+        let bytes = self
+            .read_file(IDENTITY_FILE)?
+            .context("there is no identity to link")?;
+        let mut file: serde_json::Value =
+            serde_json::from_slice(&bytes).context("parsing identity.json")?;
+        let object = file
+            .as_object_mut()
+            .context("identity.json is not an object")?;
+        match linked {
+            Some(linked) => {
+                object.insert("linked".into(), serde_json::to_value(linked)?);
+            }
+            None => {
+                object.remove("linked");
+            }
+        }
+        let text = serde_json::to_string_pretty(&file)?;
+        self.write_file(IDENTITY_FILE, text.as_bytes(), true)
+    }
+
+    /// The account's devices as this device last knew them.
+    pub fn load_devices(&self) -> anyhow::Result<DevicesFile> {
+        self.read_json_or_default(DEVICES_FILE)
+    }
+
+    pub fn save_devices(&self, devices: &DevicesFile) -> anyhow::Result<()> {
+        self.write_file(
+            DEVICES_FILE,
+            serde_json::to_string_pretty(devices)?.as_bytes(),
+            false,
+        )
     }
 
     /// Overwrite the identity, e.g. when restoring a backup.
@@ -1248,6 +1334,61 @@ mod tests {
         let history = store.load_history(&peer).unwrap();
         assert_eq!(history[1].receipt, Some(ReceiptKind::Read));
         assert_eq!(history[1].text, "[file] a.txt → /home/me/a.txt");
+    }
+
+    #[test]
+    fn a_linked_device_and_the_device_list_are_kept_next_to_the_keys() {
+        let (store, dir) = temp_store();
+        let (laptop, _) = store.load_or_create_identity().unwrap();
+        assert!(store.load_linked().unwrap().is_none());
+        assert_eq!(store.load_devices().unwrap(), DevicesFile::default());
+
+        // Linking writes under `linked`, leaving the keys as they were.
+        let alice = Identity::generate();
+        let linked = Linked {
+            account: alice.user_id(),
+            certificate: alice
+                .certify_device(&laptop.user_id(), "laptop", 1)
+                .unwrap(),
+        };
+        store.save_linked(Some(&linked)).unwrap();
+        assert_eq!(store.load_linked().unwrap(), Some(linked.clone()));
+        let (again, created) = store.load_or_create_identity().unwrap();
+        assert!(!created);
+        assert_eq!(again.user_id(), laptop.user_id());
+        let text = fs::read_to_string(dir.path().join("identity.json")).unwrap();
+        assert!(text.contains("\"linked\"") && text.contains("signing_seed"));
+        store.save_linked(None).unwrap();
+        assert!(store.load_linked().unwrap().is_none());
+        assert_eq!(
+            store.load_or_create_identity().unwrap().0.user_id(),
+            laptop.user_id()
+        );
+
+        // The list round-trips through its own file.
+        let phone = Identity::generate();
+        let list = DevicesFile {
+            devices: vec![linked.certificate.clone()],
+            revoked: vec![alice.revoke_device(&phone.user_id(), 2)],
+        };
+        store.save_devices(&list).unwrap();
+        assert_eq!(store.load_devices().unwrap(), list);
+        // And the per-device sequences of a contact.
+        let mut contact = Contact::new(alice.user_id());
+        assert_eq!(contact.received_from(Some(&laptop.user_id())), None);
+        contact.note_received(None, Sequence { epoch: 1, seq: 3 });
+        contact.note_received(Some(&laptop.user_id()), Sequence { epoch: 2, seq: 1 });
+        store.save_contacts(std::slice::from_ref(&contact)).unwrap();
+        let loaded = store.load_contacts().unwrap().remove(0);
+        assert_eq!(
+            loaded.received_from(None),
+            Some(Sequence { epoch: 1, seq: 3 })
+        );
+        assert_eq!(
+            loaded.received_from(Some(&laptop.user_id())),
+            Some(Sequence { epoch: 2, seq: 1 })
+        );
+        assert_eq!(loaded.received_from(Some(&phone.user_id())), None);
     }
 
     #[test]

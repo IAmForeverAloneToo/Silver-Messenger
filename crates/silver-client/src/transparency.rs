@@ -351,6 +351,40 @@ impl LogStore {
         Ok(())
     }
 
+    /// What a lookup showed about a linked device, compared with the log:
+    /// its bundle must be the device's latest logged one, and a logged
+    /// revocation of the device (its account's statement, logged under
+    /// the device) must be served with it. The relay claims no position
+    /// for a device it attaches to an account's answer, so none is
+    /// compared.
+    pub fn check_device_lookup(
+        &self,
+        device: &UserId,
+        bundle: &KeyBundle,
+        revocation: Option<&silver_protocol::DeviceRevocation>,
+    ) -> Result<(), Discrepancy> {
+        let latest = self.latest(device);
+        match latest.and_then(|l| l.bundle) {
+            None => return Err(Discrepancy::UnloggedBundle),
+            Some(logged) if logged.leaf != bundle.transparency_leaf() => {
+                return Err(Discrepancy::NotLatestBundle {
+                    logged: logged.index,
+                });
+            }
+            Some(_) => {}
+        }
+        match (latest.and_then(|l| l.revocation), revocation) {
+            (Some(logged), None) => Err(Discrepancy::WithheldRevocation {
+                logged: logged.index,
+            }),
+            (Some(logged), Some(r)) if r.transparency_leaf() != logged.leaf => {
+                Err(Discrepancy::UnloggedStatement)
+            }
+            (None, Some(_)) => Err(Discrepancy::UnloggedStatement),
+            _ => Ok(()),
+        }
+    }
+
     fn note_checkpoint(&mut self, head: LogHead) {
         self.state.checkpoints.push(Checkpoint {
             index: head.index,

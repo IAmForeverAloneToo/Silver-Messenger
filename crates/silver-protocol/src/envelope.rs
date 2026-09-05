@@ -102,6 +102,22 @@ pub enum Content {
     /// sealed under the key the link's secret derives, so only the device
     /// that printed the link reads it.
     Provision(crate::device::Provision),
+    /// A signed statement that one of the sender's devices is no longer its
+    /// own (section 14). Verified by its own signature, so it is trusted
+    /// however it arrived; the recipient drops its sessions with the device
+    /// and stops sending to it. Only sent to peers that advertised
+    /// `devices`, which know the kind.
+    DeviceRevocation(crate::device::DeviceRevocation),
+}
+
+/// Longest id a plain body may name for the message it is a copy of; an
+/// envelope id is a 36-character UUID.
+pub const MAX_MESSAGE_ID_BYTES: usize = 64;
+
+/// Whether `id` may name a message: printable ASCII, not empty, not too
+/// long. The envelope ids this crate makes always pass.
+pub fn is_valid_message_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= MAX_MESSAGE_ID_BYTES && id.bytes().all(|b| b.is_ascii_graphic())
 }
 
 /// How far a message got on the recipient's side. Ordered: read implies
@@ -192,6 +208,14 @@ struct PlainBody {
     /// primary and from clients before 0.9.0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     device: Option<crate::device::DeviceCertificate>,
+    /// The id the message goes by, when this body is a copy of it sealed
+    /// for another device than the one the message was first sealed for
+    /// (section 14): a message to an account with several devices is one
+    /// message under one id, whatever envelope each copy travels in, so
+    /// every device's receipts name the same id. Absent when the
+    /// envelope's id is the message's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
 }
 
 /// A ratchet body: a plain body encrypted again under a session.
@@ -219,6 +243,9 @@ pub enum Body {
         head: Option<crate::transparency::LogHead>,
         /// The sender's device certificate, when it is a linked device.
         device: Option<crate::device::DeviceCertificate>,
+        /// The message's id, when this is a copy for another device and
+        /// the envelope's id is not it.
+        id: Option<String>,
     },
     Ratchet(RatchetBody),
     /// One MLS message for one group (v5); see [`crate::group`].
@@ -263,6 +290,7 @@ impl Body {
             caps: caps.iter().map(|c| (*c).to_owned()).collect(),
             head,
             device: None,
+            id: None,
         }
     }
 
@@ -271,6 +299,15 @@ impl Body {
     pub fn with_device(mut self, certificate: Option<crate::device::DeviceCertificate>) -> Self {
         if let Self::Plain { device, .. } = &mut self {
             *device = certificate;
+        }
+        self
+    }
+
+    /// The same plain body as a copy of the message `message_id`, for a
+    /// device other than the one the message was first sealed for.
+    pub fn as_copy_of(mut self, message_id: Option<String>) -> Self {
+        if let Self::Plain { id, .. } = &mut self {
+            *id = message_id;
         }
         self
     }
@@ -285,15 +322,24 @@ impl Body {
                 caps,
                 head,
                 device,
-            } => serde_json::to_vec(&PlainBody {
-                sent_at_ms: *sent_at_ms,
-                epoch: sequence.epoch,
-                seq: sequence.seq,
-                content: content.clone(),
-                caps: caps.clone(),
-                head: *head,
-                device: device.clone(),
-            }),
+                id,
+            } => {
+                if let Some(id) = id
+                    && !is_valid_message_id(id)
+                {
+                    return Err(ProtocolError::Malformed("message id".into()));
+                }
+                serde_json::to_vec(&PlainBody {
+                    sent_at_ms: *sent_at_ms,
+                    epoch: sequence.epoch,
+                    seq: sequence.seq,
+                    content: content.clone(),
+                    caps: caps.clone(),
+                    head: *head,
+                    device: device.clone(),
+                    id: id.clone(),
+                })
+            }
             Self::Ratchet(body) => serde_json::to_vec(body),
             Self::Group(body) => {
                 body.validate()?;
@@ -314,6 +360,11 @@ impl Body {
         match version.v {
             0 | 1 => {
                 let body: PlainBody = serde_json::from_slice(bytes).map_err(malformed)?;
+                if let Some(id) = &body.id
+                    && !is_valid_message_id(id)
+                {
+                    return Err(ProtocolError::Malformed("message id".into()));
+                }
                 Ok(Self::Plain {
                     sent_at_ms: body.sent_at_ms,
                     sequence: Sequence {
@@ -324,6 +375,7 @@ impl Body {
                     caps: body.caps,
                     head: body.head,
                     device: body.device,
+                    id: body.id,
                 })
             }
             2 | 4 => Ok(Self::Ratchet(
@@ -559,8 +611,9 @@ pub fn open(recipient: &Identity, envelope: &Envelope) -> Result<Message, Protoc
             caps,
             head,
             device,
+            id,
         } => Ok(Message {
-            id: opened.id,
+            id: id.unwrap_or(opened.id),
             from: opened.from,
             to: opened.to,
             sent_at_ms,

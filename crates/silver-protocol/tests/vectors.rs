@@ -1940,6 +1940,8 @@ enum BodyIn {
         head: Option<LogHead>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         device: Option<DeviceCertificate>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
     },
     Ratchet(RatchetBody),
     /// Wrapped in a field: a group body has a `kind` of its own.
@@ -1966,6 +1968,7 @@ fn body() {
         caps: caps.into_iter().map(str::to_owned).collect(),
         head,
         device: None,
+        id: None,
     };
     let alice_id = alice().identity();
     let (a, init) = Session::initiate_with_rng(
@@ -1985,10 +1988,12 @@ fn body() {
         "Bodies as encoded before sealing: JSON in the field order given, \
          padded with spaces to a multiple of 160 bytes. Plain (v1) bodies \
          for each content kind (a text from a linked device carrying its \
-         certificate, and a sync copy between one's own devices, among \
-         them), ratchet bodies (v2, with and without the InitHeader), and \
-         group bodies (v5: an application message inline, a Welcome parked \
-         in the blob store, a join request with its proof).",
+         certificate, the copy of a text for a second device of the \
+         recipient's naming the message's id, a sync copy between one's \
+         own devices and a device revocation, among them), ratchet bodies \
+         (v2, with and without the InitHeader), and group bodies (v5: an \
+         application message inline, a Welcome parked in the blob store, a \
+         join request with its proof).",
         vec![
             ("text", plain(text("hello"), vec![], None)),
             (
@@ -2075,7 +2080,33 @@ fn body() {
                     caps: vec![capability::DEVICES.to_owned()],
                     head: None,
                     device: Some(laptop_certificate()),
+                    id: None,
                 },
+            ),
+            (
+                "text_copy_for_a_device",
+                BodyIn::Plain {
+                    content: text("hello"),
+                    sent_at_ms: 1_700_000_000_000,
+                    epoch: 0x0123_4567_89ab_cdef,
+                    seq: 44,
+                    caps: vec![capability::DEVICES.to_owned()],
+                    head: None,
+                    device: None,
+                    id: Some("0f0e0d0c-0b0a-4908-8706-050403020100".into()),
+                },
+            ),
+            (
+                "device_revocation",
+                plain(
+                    Content::DeviceRevocation(
+                        alice()
+                            .identity()
+                            .revoke_device(&laptop_certificate().device, 1_700_000_000_000),
+                    ),
+                    vec![capability::DEVICES],
+                    None,
+                ),
             ),
             (
                 "sync_sent",
@@ -2163,6 +2194,7 @@ fn body() {
                     caps,
                     head,
                     device,
+                    id,
                 } => Body::plain_with_caps_and_head(
                     content.clone(),
                     *sent_at_ms,
@@ -2173,7 +2205,8 @@ fn body() {
                     &caps.iter().map(String::as_str).collect::<Vec<_>>(),
                     *head,
                 )
-                .with_device(device.clone()),
+                .with_device(device.clone())
+                .as_copy_of(id.clone()),
                 BodyIn::Ratchet(body) => Body::Ratchet(body.clone()),
                 BodyIn::Group { body } => Body::Group(body.clone()),
             };
@@ -2189,6 +2222,7 @@ fn body() {
                         caps,
                         head,
                         device,
+                        id,
                     },
                     BodyIn::Plain {
                         content: c,
@@ -2198,13 +2232,14 @@ fn body() {
                         caps: cs,
                         head: h,
                         device: d,
+                        id: i,
                     },
                 ) => {
                     assert_eq!(
                         (sent_at_ms, sequence.epoch, sequence.seq),
                         (*t, *epoch, *seq)
                     );
-                    assert_eq!((&content, &caps, &head, &device), (c, cs, h, d));
+                    assert_eq!((&content, &caps, &head, &device, &id), (c, cs, h, d, i));
                     if let Some(device) = &device {
                         device.verify().unwrap();
                     }

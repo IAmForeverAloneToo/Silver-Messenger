@@ -59,6 +59,13 @@ pub struct ConnectOptions {
     /// packages on deposit and takes part in groups
     /// (`docs/PROTOCOL.md` section 13).
     pub groups: bool,
+    /// This device's view of its account's devices (`docs/PROTOCOL.md`
+    /// section 14). With one, the client seals every message to every
+    /// device of the recipient's and of its own, reads `sync` content from
+    /// its own devices, publishes the device list (or, on a linked device,
+    /// its certificate) and advertises `devices`; without one it is a
+    /// client of one device that neither links nor is sent to per device.
+    pub devices: Option<crate::devices::SharedDevices>,
 }
 
 impl std::fmt::Debug for ConnectOptions {
@@ -71,6 +78,7 @@ impl std::fmt::Debug for ConnectOptions {
             .field("outbox_cipher", &self.outbox_cipher.is_some())
             .field("invite_token", &self.invite_token.is_some())
             .field("sessions", &self.sessions.is_some())
+            .field("devices", &self.devices.is_some())
             .field("submit_authenticated", &self.submit_authenticated)
             .field("groups", &self.groups)
             .finish()

@@ -149,12 +149,13 @@ proptest! {
                         caps: cs,
                         head: h,
                         device,
+                        id,
                     } => {
                         prop_assert_eq!((t, sequence.epoch, sequence.seq), (sent_at_ms, epoch, seq));
                         prop_assert_eq!(c, content);
                         prop_assert_eq!(cs, caps);
                         prop_assert_eq!(h, head);
-                        prop_assert!(device.is_none());
+                        prop_assert!(device.is_none() && id.is_none());
                     }
                     Body::Ratchet(_) | Body::Group(_) => {
                         prop_assert!(false, "a plain body decoded as another kind")
