@@ -2703,6 +2703,9 @@ impl App {
             ClientEvent::PeerRevoked { revocation } => self.handle_peer_revoked(revocation),
             ClientEvent::PeerSucceeded { succession } => self.handle_peer_succeeded(succession),
             ClientEvent::Transparency(event) => self.handle_transparency(event),
+            ClientEvent::Group { id, .. } => {
+                tracing::debug!(%id, "a group message; this client does not show groups yet");
+            }
             ClientEvent::Error(text) => {
                 self.system(Level::Warn, text.clone());
                 self.toast(text);

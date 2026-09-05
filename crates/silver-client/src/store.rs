@@ -662,7 +662,7 @@ impl Store {
         }
     }
 
-    fn read_json_or_default<T: Default + for<'de> Deserialize<'de>>(
+    pub(crate) fn read_json_or_default<T: Default + for<'de> Deserialize<'de>>(
         &self,
         name: &str,
     ) -> anyhow::Result<T> {
@@ -672,6 +672,25 @@ impl Store {
                 serde_json::from_slice(&bytes).with_context(|| format!("parsing {name}"))
             }
         }
+    }
+
+    /// A private (0600) JSON file, written whole.
+    pub(crate) fn write_json_private<T: Serialize>(
+        &self,
+        name: &str,
+        value: &T,
+    ) -> anyhow::Result<()> {
+        let bytes = serde_json::to_vec(value).with_context(|| format!("encoding {name}"))?;
+        self.write_file(name, &bytes, true)
+    }
+
+    /// A private file's bytes, if it exists.
+    pub(crate) fn read_private_file(&self, name: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        self.read_file(name)
+    }
+
+    pub(crate) fn write_private_file(&self, name: &str, bytes: &[u8]) -> anyhow::Result<()> {
+        self.write_file(name, bytes, true)
     }
 
     // --- identity, config, contacts ------------------------------------------

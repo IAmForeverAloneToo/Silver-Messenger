@@ -12,6 +12,7 @@ pub mod backup;
 pub mod connection;
 pub mod cover;
 pub mod files;
+pub mod groups;
 pub mod invite;
 pub mod keystore;
 mod outbox;
@@ -29,11 +30,15 @@ pub mod vault;
 
 pub use backup::{BackupPayload, export_backup, import_backup, read_backup};
 pub use connection::{
-    Client, ClientError, ClientEvent, DEFAULT_RELAY_URL, Delivery, Progress, TransparencyEvent,
-    observe_relay,
+    Client, ClientError, ClientEvent, DEFAULT_RELAY_URL, Delivery, KeyPackageStatus, Progress,
+    SequencerAnswer, TransparencyEvent, observe_relay,
 };
 pub use cover::CoverSchedule;
 pub use files::{FileInfo, human_size};
+pub use groups::{
+    Change, GroupError, GroupEvent, GroupLink, GroupRecord, GroupState, Groups, HeldWelcome,
+    MemberInfo, Outgoing, Staged,
+};
 pub use invite::InviteLink;
 pub use proxy::Proxy;
 pub use receipts::ReceiptQueue;

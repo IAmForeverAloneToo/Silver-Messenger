@@ -40,6 +40,8 @@ pub(crate) enum SubmitEvent {
     },
     /// A file chunk answer: `BlobAck`, `BlobRejected` or `BlobChunk`.
     Blob(Box<ServerFrame>),
+    /// The group sequencer's answer: `GroupState` or `GroupRejected`.
+    Group(Box<ServerFrame>),
     /// The connection dropped; frames handed over since `Ready` and not
     /// answered must be resent after the next `Ready`.
     Down {
@@ -190,6 +192,9 @@ async fn session(
                     Ok(frame @ (ServerFrame::BlobAck { .. }
                         | ServerFrame::BlobRejected { .. }
                         | ServerFrame::BlobChunk { .. })) => SubmitEvent::Blob(Box::new(frame)),
+                    Ok(frame @ (ServerFrame::GroupState { .. } | ServerFrame::GroupRejected { .. })) => {
+                        SubmitEvent::Group(Box::new(frame))
+                    }
                     Ok(ServerFrame::Error { code: ErrorCode::Unauthenticated, message }) => {
                         warn!("relay refused anonymous submission: {message}");
                         return Ok(Exit::Refused);

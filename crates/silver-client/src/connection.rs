@@ -1,6 +1,6 @@
 //! Background relay connection with reconnect, auth and envelope handling.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -8,8 +8,10 @@ use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use silver_protocol::envelope::capability;
+use silver_protocol::group::{GroupBody, GroupId};
 use silver_protocol::wire::{
-    ClientFrame, ErrorCode, ServerFrame, auth_signature, auth_signature_bound, feature, url_host,
+    ClientFrame, ErrorCode, KeyPackageDeposit, ServerFrame, auth_signature, auth_signature_bound,
+    feature, url_host,
 };
 
 use crate::CAPABILITIES;
@@ -86,6 +88,37 @@ pub enum ClientEvent {
     /// contact saw, or the log itself, does not add up — or does, on first
     /// sync. See [`TransparencyEvent`].
     Transparency(TransparencyEvent),
+    /// A group body (`docs/PROTOCOL.md` section 13) arrived, for the
+    /// groups engine ([`crate::groups::Groups::receive`]). `from` is the
+    /// sealed layer's sender hint, which nothing at this layer
+    /// authenticates; the engine takes the sender from MLS.
+    Group {
+        from: UserId,
+        id: String,
+        body: Box<GroupBody>,
+    },
+}
+
+/// What the relay said about a key package deposit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyPackageStatus {
+    pub remaining: u32,
+    pub consumed: Vec<[u8; 32]>,
+}
+
+/// What the relay's group sequencer answered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SequencerAnswer {
+    /// Accepted; the entry stands at this epoch.
+    Stands(u64),
+    /// The entry is at another epoch, this one.
+    Stale(u64),
+    /// A create for an entry that exists with other values, at this epoch.
+    Exists(u64),
+    NotFound,
+    Forbidden,
+    RateLimited,
+    Other(String),
 }
 
 /// What checking the relay's transparency log turned up.
@@ -171,6 +204,24 @@ enum Command {
     },
     Succeed {
         succession: silver_protocol::Succession,
+    },
+    /// Replace our key package deposit at the relay.
+    KeyPackages {
+        packages: Vec<KeyPackageDeposit>,
+        last_resort: Option<KeyPackageDeposit>,
+        reply: oneshot::Sender<Result<KeyPackageStatus, ClientError>>,
+    },
+    /// Ask for one of `user_id`'s key packages.
+    KeyPackage {
+        user_id: UserId,
+        reply: oneshot::Sender<Result<Option<(KeyPackageDeposit, bool)>, ClientError>>,
+    },
+    /// A `GroupCreate` or `GroupCommit`, on the anonymous connection when
+    /// it is up.
+    Sequencer {
+        group: GroupId,
+        frame: Box<ClientFrame>,
+        reply: oneshot::Sender<Result<SequencerAnswer, ClientError>>,
     },
     Shutdown,
 }
@@ -292,6 +343,8 @@ pub struct Client {
     log: Option<SharedLog>,
     /// Whether to advertise cover traffic (see [`crate::cover`]).
     cover: Arc<AtomicBool>,
+    /// Whether the bundle advertises `groups`.
+    groups: Arc<AtomicBool>,
 }
 
 impl Client {
@@ -310,6 +363,7 @@ impl Client {
         let (cmd_tx, cmd_rx) = mpsc::channel(64);
         let (ev_tx, ev_rx) = mpsc::channel(256);
         let relay_features = Arc::new(Mutex::new(Vec::new()));
+        let groups = Arc::new(AtomicBool::new(options.groups));
         tokio::spawn(run(
             Setup {
                 relay_url,
@@ -321,6 +375,7 @@ impl Client {
                 submit_authenticated: options.submit_authenticated,
                 relay_features: relay_features.clone(),
                 log: options.transparency.clone(),
+                groups: groups.clone(),
             },
             outbox,
             pending.clone(),
@@ -338,9 +393,176 @@ impl Client {
                 relay_features,
                 log: options.transparency,
                 cover: Arc::new(AtomicBool::new(false)),
+                groups,
             },
             ev_rx,
         ))
+    }
+
+    /// Advertise (or stop advertising) the `groups` bundle capability from
+    /// the next publish on.
+    pub fn set_groups(&self, on: bool) {
+        self.groups.store(on, Ordering::Relaxed);
+    }
+
+    /// Queue an already sealed envelope for the relay, as
+    /// [`Client::send_text`] does with the ones it seals. Resolves once it
+    /// is in the outbox.
+    pub async fn submit_envelope(&self, envelope: Envelope) -> Result<(), ClientError> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::Send {
+                envelope,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| ClientError::Stopped)?;
+        rx.await.map_err(|_| ClientError::Stopped)?
+    }
+
+    /// Put already encrypted chunks on the relay under `blob`.
+    pub async fn upload_chunks(
+        &self,
+        blob: String,
+        chunks: Vec<Vec<u8>>,
+    ) -> Result<(), ClientError> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::Upload {
+                blob,
+                chunks,
+                progress: None,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| ClientError::Stopped)?;
+        tokio::time::timeout(TRANSFER_TIMEOUT, rx)
+            .await
+            .map_err(|_| ClientError::Timeout)?
+            .map_err(|_| ClientError::NotConnected)?
+    }
+
+    /// Fetch the `total` chunks of `blob` from the relay, still encrypted.
+    pub async fn download_chunks(
+        &self,
+        blob: String,
+        total: u32,
+    ) -> Result<Vec<Vec<u8>>, ClientError> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::Download {
+                blob,
+                total,
+                progress: None,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| ClientError::Stopped)?;
+        tokio::time::timeout(TRANSFER_TIMEOUT, rx)
+            .await
+            .map_err(|_| ClientError::Timeout)?
+            .map_err(|_| ClientError::NotConnected)?
+    }
+
+    /// Replace our key package deposit at the relay; what it holds after.
+    pub async fn deposit_key_packages(
+        &self,
+        packages: Vec<KeyPackageDeposit>,
+        last_resort: Option<KeyPackageDeposit>,
+    ) -> Result<KeyPackageStatus, ClientError> {
+        if !self.relay_supports(feature::GROUPS) {
+            return Err(ClientError::Relay("the relay does not serve groups".into()));
+        }
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::KeyPackages {
+                packages,
+                last_resort,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| ClientError::Stopped)?;
+        tokio::time::timeout(REQUEST_TIMEOUT, rx)
+            .await
+            .map_err(|_| ClientError::Timeout)?
+            .map_err(|_| ClientError::NotConnected)?
+    }
+
+    /// One of `user_id`'s key packages from the relay, and whether it is
+    /// the last-resort one; `None` when they have none on deposit. The
+    /// bytes are verified by the groups engine, not here.
+    pub async fn key_package_for(
+        &self,
+        user_id: UserId,
+    ) -> Result<Option<(KeyPackageDeposit, bool)>, ClientError> {
+        if !self.relay_supports(feature::GROUPS) {
+            return Err(ClientError::Relay("the relay does not serve groups".into()));
+        }
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::KeyPackage { user_id, reply: tx })
+            .await
+            .map_err(|_| ClientError::Stopped)?;
+        tokio::time::timeout(REQUEST_TIMEOUT, rx)
+            .await
+            .map_err(|_| ClientError::Timeout)?
+            .map_err(|_| ClientError::NotConnected)?
+    }
+
+    /// Register a group with the relay's sequencer.
+    pub async fn group_create(
+        &self,
+        created: crate::groups::Created,
+    ) -> Result<SequencerAnswer, ClientError> {
+        self.sequencer(
+            created.group,
+            ClientFrame::GroupCreate {
+                group: created.group,
+                epoch: created.epoch,
+                next: created.next,
+            },
+        )
+        .await
+    }
+
+    /// Ask the relay's sequencer to move a group on for a staged commit.
+    pub async fn group_commit(
+        &self,
+        staged: crate::groups::Staged,
+    ) -> Result<SequencerAnswer, ClientError> {
+        self.sequencer(
+            staged.group,
+            ClientFrame::GroupCommit {
+                group: staged.group,
+                epoch: staged.epoch,
+                token: staged.token,
+                next: staged.next,
+            },
+        )
+        .await
+    }
+
+    async fn sequencer(
+        &self,
+        group: GroupId,
+        frame: ClientFrame,
+    ) -> Result<SequencerAnswer, ClientError> {
+        if !self.relay_supports(feature::GROUPS) {
+            return Err(ClientError::Relay("the relay does not serve groups".into()));
+        }
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::Sequencer {
+                group,
+                frame: Box::new(frame),
+                reply: tx,
+            })
+            .await
+            .map_err(|_| ClientError::Stopped)?;
+        tokio::time::timeout(REQUEST_TIMEOUT, rx)
+            .await
+            .map_err(|_| ClientError::Timeout)?
+            .map_err(|_| ClientError::NotConnected)?
     }
 
     /// Advertise cover traffic in every body from now on (or stop). The
@@ -769,6 +991,7 @@ struct Setup {
     submit_authenticated: bool,
     relay_features: Arc<Mutex<Vec<String>>>,
     log: Option<SharedLog>,
+    groups: Arc<AtomicBool>,
 }
 
 enum Exit {
@@ -838,6 +1061,15 @@ async fn run(
                     // While disconnected these are dropped; the front end
                     // resends them once reconnected.
                     Some(Command::Revoke { .. }) | Some(Command::Succeed { .. }) => {}
+                    Some(Command::KeyPackages { reply, .. }) => {
+                        let _ = reply.send(Err(ClientError::NotConnected));
+                    }
+                    Some(Command::KeyPackage { reply, .. }) => {
+                        let _ = reply.send(Err(ClientError::NotConnected));
+                    }
+                    Some(Command::Sequencer { reply, .. }) => {
+                        let _ = reply.send(Err(ClientError::NotConnected));
+                    }
                 },
             }
         }
@@ -846,6 +1078,35 @@ async fn run(
 }
 
 type Lookups = HashMap<UserId, Vec<oneshot::Sender<Result<Option<KeyBundle>, ClientError>>>>;
+type DepositReplies = VecDeque<oneshot::Sender<Result<KeyPackageStatus, ClientError>>>;
+type KeyPackageReplies = HashMap<
+    UserId,
+    VecDeque<oneshot::Sender<Result<Option<(KeyPackageDeposit, bool)>, ClientError>>>,
+>;
+type SequencerReplies =
+    HashMap<GroupId, VecDeque<oneshot::Sender<Result<SequencerAnswer, ClientError>>>>;
+
+/// Hand the sequencer's answer to whoever asked for that group.
+fn answer_sequencer(frame: ServerFrame, sequencer: &mut SequencerReplies) {
+    let (group, answer) = match frame {
+        ServerFrame::GroupState { group, epoch } => (group, SequencerAnswer::Stands(epoch)),
+        ServerFrame::GroupRejected { group, code, epoch } => (
+            group,
+            match (code, epoch) {
+                (ErrorCode::Stale, Some(epoch)) => SequencerAnswer::Stale(epoch),
+                (ErrorCode::Exists, Some(epoch)) => SequencerAnswer::Exists(epoch),
+                (ErrorCode::NotFound, _) => SequencerAnswer::NotFound,
+                (ErrorCode::Forbidden, _) => SequencerAnswer::Forbidden,
+                (ErrorCode::RateLimited, _) => SequencerAnswer::RateLimited,
+                (code, _) => SequencerAnswer::Other(format!("{code:?}")),
+            },
+        ),
+        _ => return,
+    };
+    if let Some(reply) = sequencer.get_mut(&group).and_then(VecDeque::pop_front) {
+        let _ = reply.send(Ok(answer));
+    }
+}
 
 /// Where outgoing envelopes go on this connection.
 enum Submission {
@@ -926,6 +1187,9 @@ async fn session(
 
     // --- steady state ------------------------------------------------------
     let mut lookups: Lookups = HashMap::new();
+    let mut deposits: DepositReplies = VecDeque::new();
+    let mut key_package_replies: KeyPackageReplies = HashMap::new();
+    let mut sequencer: SequencerReplies = HashMap::new();
     let Transfers { uploads, downloads } = transfers;
     let mut keepalive = tokio::time::interval(KEEPALIVE);
     keepalive.tick().await; // first tick fires immediately; skip it
@@ -993,6 +1257,38 @@ async fn session(
                         return Ok(Exit::Disconnected("succeed failed".into()));
                     }
                 }
+                Some(Command::KeyPackages { packages, last_resort, reply }) => {
+                    let frame = ClientFrame::KeyPackages { packages, last_resort };
+                    if let Err(e) = sink.send(text(&frame)).await {
+                        let _ = reply.send(Err(ClientError::Relay(e.to_string())));
+                        return Ok(Exit::Disconnected("send failed".into()));
+                    }
+                    deposits.push_back(reply);
+                }
+                Some(Command::KeyPackage { user_id, reply }) => {
+                    if let Err(e) = sink.send(text(&ClientFrame::KeyPackage { user_id })).await {
+                        let _ = reply.send(Err(ClientError::Relay(e.to_string())));
+                        return Ok(Exit::Disconnected("send failed".into()));
+                    }
+                    key_package_replies.entry(user_id).or_default().push_back(reply);
+                }
+                Some(Command::Sequencer { group, frame, reply }) => {
+                    // On the anonymous connection when it is up, so the
+                    // relay does not learn who committed; on this one
+                    // otherwise, rather than wait.
+                    let frame = *frame;
+                    let handed = match send_frame(&mut sink, &mut submission, frame.clone()).await {
+                        Handed::Waiting => {
+                            if sink.send(text(&frame)).await.is_ok() { Handed::Sent } else { Handed::Broken }
+                        }
+                        other => other,
+                    };
+                    if handed == Handed::Broken {
+                        let _ = reply.send(Err(ClientError::NotConnected));
+                        return Ok(Exit::Disconnected("send failed".into()));
+                    }
+                    sequencer.entry(group).or_default().push_back(reply);
+                }
                 // Transfers asked for before `Published` (the relay replays
                 // the mailbox first, and a delivered file is fetched at
                 // once) wait for it; `Published` resumes them.
@@ -1036,6 +1332,7 @@ async fn session(
                         return Ok(Exit::Disconnected("send failed".into()));
                     }
                 }
+                Some(SubmitEvent::Group(frame)) => answer_sequencer(*frame, &mut sequencer),
                 Some(SubmitEvent::Down { reason }) => {
                     debug!("anonymous submission down: {reason}");
                     if let Submission::Anonymous(s) = &mut submission {
@@ -1128,6 +1425,25 @@ async fn session(
                         // Our Publish was refused: this connection is useless.
                         return Ok(Exit::Disconnected(format!("{message} ({code:?})")));
                     }
+                    // An error is not tied to a request; a pending key
+                    // package deposit or fetch is the likeliest to have
+                    // caused it (their refusals are specific), a lookup
+                    // otherwise, whose caller times out.
+                    ServerFrame::Error { code, message } if !deposits.is_empty() => {
+                        if let Some(reply) = deposits.pop_front() {
+                            let _ = reply.send(Err(ClientError::Relay(format!("{message} ({code:?})"))));
+                        }
+                    }
+                    ServerFrame::Error { code, message }
+                        if key_package_replies.values().any(|q| !q.is_empty()) =>
+                    {
+                        if let Some(reply) = key_package_replies
+                            .values_mut()
+                            .find_map(|q| q.pop_front())
+                        {
+                            let _ = reply.send(Err(ClientError::Relay(format!("{message} ({code:?})"))));
+                        }
+                    }
                     ServerFrame::Error { code: ErrorCode::RateLimited, message } => {
                         // A lookup was refused; its caller times out. Say why.
                         let _ = ev_tx
@@ -1199,11 +1515,24 @@ async fn session(
                         }
                     }
                     ServerFrame::Pong => {}
-                    ServerFrame::KeyPackageStatus { .. }
-                    | ServerFrame::KeyPackageResult { .. }
-                    | ServerFrame::GroupState { .. }
-                    | ServerFrame::GroupRejected { .. } => {
-                        debug!("ignoring a group frame; this client keeps no groups yet");
+                    ServerFrame::KeyPackageStatus { remaining, consumed } => {
+                        if let Some(reply) = deposits.pop_front() {
+                            let _ = reply.send(Ok(KeyPackageStatus {
+                                remaining,
+                                consumed: consumed.into_iter().map(|r| r.0).collect(),
+                            }));
+                        }
+                    }
+                    ServerFrame::KeyPackageResult { user_id, package, last_resort } => {
+                        if let Some(reply) = key_package_replies
+                            .get_mut(&user_id)
+                            .and_then(VecDeque::pop_front)
+                        {
+                            let _ = reply.send(Ok(package.map(|p| (p, last_resort))));
+                        }
+                    }
+                    frame @ (ServerFrame::GroupState { .. } | ServerFrame::GroupRejected { .. }) => {
+                        answer_sequencer(frame, &mut sequencer);
                     }
                     ServerFrame::Challenge { .. } | ServerFrame::AuthOk { .. } => {
                         debug!("ignoring unexpected handshake frame mid-session");
@@ -1222,22 +1551,24 @@ fn publish_frame(setup: &Setup) -> anyhow::Result<ClientFrame> {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .prekeys_for_publish(&setup.identity, now_ms())?;
-            // Advertise the protocol-v4 ratchet, but only when we actually
-            // publish ML-KEM keys, since v4 needs the post-quantum handshake.
-            let bundle = setup.identity.key_bundle_with(prekeys);
-            if bundle.supports_post_quantum() {
-                bundle.with_caps(
-                    &setup.identity,
-                    crate::BUNDLE_CAPABILITIES
-                        .iter()
-                        .map(|c| (*c).to_owned())
-                        .collect(),
-                )
-            } else {
-                bundle
-            }
+            setup.identity.key_bundle_with(prekeys)
         }
         None => setup.identity.key_bundle(),
+    };
+    // Advertise the protocol-v4 ratchet, but only when we actually publish
+    // ML-KEM keys, since v4 needs the post-quantum handshake; and groups
+    // when the front end keeps a groups engine.
+    let mut caps: Vec<String> = Vec::new();
+    if bundle.supports_post_quantum() {
+        caps.extend(crate::BUNDLE_CAPABILITIES.iter().map(|c| (*c).to_owned()));
+    }
+    if setup.groups.load(Ordering::Relaxed) {
+        caps.push(silver_protocol::bundle::capability::GROUPS.to_owned());
+    }
+    let bundle = if caps.is_empty() {
+        bundle
+    } else {
+        bundle.with_caps(&setup.identity, caps)
     };
     Ok(ClientFrame::Publish {
         bundle,
@@ -1603,13 +1934,12 @@ async fn deliver(
                 }
             }
         }
-        Ok(Body::Group(_)) => {
+        Ok(Body::Group(body)) => {
             let _ = ev_tx
-                .send(ClientEvent::Undecryptable {
+                .send(ClientEvent::Group {
                     from,
                     id,
-                    reason: "it is a group message, which this client does not take part in yet"
-                        .into(),
+                    body: Box::new(body),
                 })
                 .await;
             return;

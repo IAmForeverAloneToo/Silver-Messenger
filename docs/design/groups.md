@@ -246,9 +246,10 @@ Properties:
   expire; a live group refreshes its entry with every commit.
 
 The sequencer frames go on any connection, authenticated or anonymous;
-clients use the anonymous one, so the relay does not learn which identity
-committed. They count against the connection's `send` budget and against
-the address's registration budget for `group_create`.
+clients use the anonymous one while it is up, so the relay does not learn
+which identity committed, and the authenticated one when it is not,
+rather than wait. They count against the connection's `send` budget and
+against the address's registration budget for `group_create`.
 
 ### 5.3 Ordering at the receiver
 
@@ -376,14 +377,18 @@ members and seals the Welcome to the new one. If the sequencer says
 `stale`, it discards the pending commit, processes what arrived, and
 retries once, then reports.
 
-The invitee's client verifies the Welcome (the sender's credential, every
-member's leaf against its identity, the group context's extensions and
-required capabilities, the ciphersuite) and then, if the sender is a
-contact, joins at once and shows the group; if the sender is a stranger,
-holds the Welcome in the Requests pane as "X invites you to <name>
-(n members)" until `/accept` or `/block`, as held messages are today. A
-Welcome held past the key package's lifetime, or whose group has since
-moved on, still joins at that epoch and catches up from the mailbox.
+The invitee's client verifies the Welcome (the sender's credential and
+that it is an admin's, every member's leaf against its identity, the
+group context's extensions and required capabilities, the ciphersuite)
+and joins at once in MLS terms: the key package secret is spent by the
+Welcome, and a joined group stays in sync while the user decides. The
+group stands as *invited* until the user says yes; nothing of it is
+shown or sent before that. If the sender is a contact, the front end says
+yes on the user's behalf and shows the group; if the sender is a
+stranger, the invitation waits in the Requests pane as "X invites you to
+<name> (n members)" until `/accept` or `/decline`, as held messages do
+today. Declining drops the state; the admin's group keeps a dead leaf
+until they notice and remove it.
 
 ### 7.3 Join by link
 
@@ -467,12 +472,17 @@ personal alias for a group with `/alias`, as for contacts.
 
 ### 8.1 Storage
 
-* `groups.redb`: an OpenMLS `StorageProvider` over redb, one table per
-  kind of entry OpenMLS stores, every value encrypted under the vault
-  data key when protection is on (the JSON stores are encrypted the same
-  way today). OpenMLS's deletions become deletions; redb reuses freed
-  pages, so at-rest forward secrecy is best effort, as it is for the
-  sessions file. The key package private parts live here too.
+* `groups.mls`: OpenMLS's in-memory storage, written whole to the data
+  directory after every change and encrypted under the vault data key
+  when protection is on, exactly as the sessions file is. OpenMLS deletes
+  what it no longer needs from the map (spent key package secrets, old
+  epoch keys) and the next write drops them from the file, so at-rest
+  forward secrecy is best effort, as it is for the sessions file. The
+  key package private parts live here too. Writing the whole map costs a
+  rewrite per message; for the groups this client is meant for (a few,
+  of tens of members) that is a few hundred kilobytes, and a redb-backed
+  provider that writes only what changed is the optimisation to make if
+  it ever shows.
 * `groups.json`: the client's own index, one entry per group: id, name
   and alias, our role, the members as last seen (ids and sealing keys),
   the last 64 sequencer tokens, the hold queue, read position, muted
@@ -706,6 +716,7 @@ A throwaway program against OpenMLS 0.9.0 with the
   fetcher the credential, the signature key and the leaf extensions to
   check against the identity, which is what 6.1 needs.
 
-Still open, to be settled by the implementation: whether the redb-backed
-storage provider's write amplification is acceptable for a busy group,
-or whether a write-behind cache with explicit flush points is needed.
+Settled by the implementation: the storage is OpenMLS's memory storage
+written whole (section 8.1), not a redb provider; the write cost is
+acceptable at this scale and the provider is the optimisation to make if
+it stops being so.

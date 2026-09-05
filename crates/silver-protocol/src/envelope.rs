@@ -415,9 +415,39 @@ pub fn seal_bytes_unsigned_with_rng<R: RngCore + CryptoRng>(
     seal_bytes_inner(sender, recipient, body, false, rng)
 }
 
+/// Seal a group body (v5) for a member known only by id and sealing key,
+/// as the MLS tree lists them: no sealed-layer signature, the way
+/// [`seal_bytes_unsigned`] works, without needing the member's bundle.
+pub fn seal_bytes_unsigned_to(
+    sender: &Identity,
+    to: UserId,
+    dh_public: &DhPublic,
+    body: &[u8],
+) -> Result<Envelope, ProtocolError> {
+    seal_bytes_to(sender, to, dh_public, body, false, &mut OsRng)
+}
+
 fn seal_bytes_inner<R: RngCore + CryptoRng>(
     sender: &Identity,
     recipient: &KeyBundle,
+    body: &[u8],
+    sign: bool,
+    rng: &mut R,
+) -> Result<Envelope, ProtocolError> {
+    seal_bytes_to(
+        sender,
+        recipient.user_id,
+        &recipient.dh_public,
+        body,
+        sign,
+        rng,
+    )
+}
+
+fn seal_bytes_to<R: RngCore + CryptoRng>(
+    sender: &Identity,
+    to: UserId,
+    recipient_dh: &DhPublic,
     body: &[u8],
     sign: bool,
     rng: &mut R,
@@ -428,11 +458,11 @@ fn seal_bytes_inner<R: RngCore + CryptoRng>(
 
     let ephemeral = EphemeralSecret::random_from_rng(&mut *rng);
     let ephemeral_public = PublicKey::from(&ephemeral).to_bytes();
-    let shared = ephemeral.diffie_hellman(&recipient.dh_public.as_x25519());
+    let shared = ephemeral.diffie_hellman(&recipient_dh.as_x25519());
     if !shared.was_contributory() {
         return Err(ProtocolError::WeakKey);
     }
-    let key = derive_key(shared.as_bytes(), &ephemeral_public, &recipient.dh_public.0);
+    let key = derive_key(shared.as_bytes(), &ephemeral_public, &recipient_dh.0);
 
     let mut nonce = [0u8; 24];
     rng.fill_bytes(&mut nonce);
@@ -443,7 +473,7 @@ fn seal_bytes_inner<R: RngCore + CryptoRng>(
     let signature = if sign {
         sender.sign(
             ENVELOPE_DOMAIN,
-            &signed_bytes(&recipient.user_id, &ephemeral_public, &nonce, body),
+            &signed_bytes(&to, &ephemeral_public, &nonce, body),
         )
     } else {
         [0u8; 64]
@@ -460,7 +490,7 @@ fn seal_bytes_inner<R: RngCore + CryptoRng>(
             XNonce::from_slice(&nonce),
             Payload {
                 msg: &plaintext,
-                aad: &aad(&recipient.user_id, &ephemeral_public),
+                aad: &aad(&to, &ephemeral_public),
             },
         )
         .map_err(|_| ProtocolError::Malformed("encryption failed".into()))?;
@@ -470,7 +500,7 @@ fn seal_bytes_inner<R: RngCore + CryptoRng>(
     rng.fill_bytes(&mut id);
     Ok(Envelope {
         id: uuid::Builder::from_random_bytes(id).into_uuid().to_string(),
-        to: recipient.user_id,
+        to,
         ephemeral_public: DhPublic(ephemeral_public),
         nonce,
         ciphertext,
@@ -883,6 +913,16 @@ mod tests {
             .ciphertext
             .len();
         assert_eq!(env.ciphertext.len(), text_size + PAD_BLOCK);
+        // Sealing by id and sealing key alone, as the tree lists members,
+        // gives the same result.
+        let by_key = seal_bytes_unsigned_to(
+            &alice,
+            bob.user_id(),
+            &bob.dh_public(),
+            &body.encode().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(open_bytes(&bob, &by_key).unwrap().from, alice.user_id());
         // A signed group body opens too (the signature is simply not needed).
         let signed = seal_bytes(&alice, &bob.key_bundle(), &body.encode().unwrap()).unwrap();
         assert!(!open_bytes(&bob, &signed).unwrap().signed);

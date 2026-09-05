@@ -55,6 +55,10 @@ pub struct ConnectOptions {
     /// the log and heads are exchanged with contacts; without one nothing
     /// is checked.
     pub transparency: Option<crate::transparency::SharedLog>,
+    /// Advertise the `groups` bundle capability: this client keeps key
+    /// packages on deposit and takes part in groups
+    /// (`docs/PROTOCOL.md` section 13).
+    pub groups: bool,
 }
 
 impl std::fmt::Debug for ConnectOptions {
@@ -68,6 +72,7 @@ impl std::fmt::Debug for ConnectOptions {
             .field("invite_token", &self.invite_token.is_some())
             .field("sessions", &self.sessions.is_some())
             .field("submit_authenticated", &self.submit_authenticated)
+            .field("groups", &self.groups)
             .finish()
     }
 }

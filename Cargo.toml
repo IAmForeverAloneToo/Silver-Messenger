@@ -61,6 +61,14 @@ zeroize = { version = "1", features = ["derive"] }
 # rand_core 0.10 generation internally; keys are made from seeds we draw
 # ourselves, so nothing else has to move.
 ml-kem = { version = "0.3", features = ["zeroize", "getrandom"] }
+# Groups on MLS (RFC 9420); the post-quantum feature brings the hybrid
+# X-Wing ciphersuite of draft-ietf-mls-pq-ciphersuites (docs/design/groups.md).
+openmls = { version = "0.9", features = ["draft-ietf-mls-pq-ciphersuites"] }
+openmls_rust_crypto = { version = "0.6", features = ["draft-ietf-mls-pq-ciphersuites"] }
+openmls_basic_credential = "0.6"
+openmls_traits = "0.6"
+openmls_memory_storage = "0.6"
+tls_codec = "0.5"
 argon2 = "0.6"
 rpassword = "7"
 

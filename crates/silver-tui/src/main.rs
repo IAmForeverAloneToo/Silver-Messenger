@@ -418,6 +418,7 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
             invite_token: config.invite_token.clone(),
             sessions: Some(sessions),
             submit_authenticated: args.submit_authenticated,
+            groups: false,
             transparency: Some(
                 silver_client::LogStore::load(Some(store.transparency_path()), store.cipher())
                     .context("loading the relay's key log")?

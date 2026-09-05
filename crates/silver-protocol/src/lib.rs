@@ -74,7 +74,8 @@ pub use blob::BlobKey;
 pub use bundle::KeyBundle;
 pub use envelope::{
     Body, Content, Envelope, MAX_BODY_BYTES, MAX_CIPHERTEXT_BYTES, Message, Opened, RatchetBody,
-    Sequence, open, open_bytes, seal, seal_bytes, seal_bytes_unsigned, seal_with,
+    Sequence, open, open_bytes, seal, seal_bytes, seal_bytes_unsigned, seal_bytes_unsigned_to,
+    seal_with,
 };
 pub use error::ProtocolError;
 pub use group::{GroupBody, GroupId, GroupKind, GroupPlaintext, SilverGroup};
