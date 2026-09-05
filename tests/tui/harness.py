@@ -361,8 +361,8 @@ class Linking:
 class Pair:
     """The usual start: a relay, alice and bob connected, bob added by alice."""
 
-    def __init__(self, name, **term_kwargs):
-        self.relay = Relay()
+    def __init__(self, name, relay_extra=(), **term_kwargs):
+        self.relay = Relay(extra=relay_extra)
         self.a_dir, self.b_dir = fresh_dir(f"{name}-alice"), fresh_dir(f"{name}-bob")
         self.a_id, self.b_id = identity(self.a_dir), identity(self.b_dir)
         self.alice = Term(self.a_dir, self.relay.url, **term_kwargs)
