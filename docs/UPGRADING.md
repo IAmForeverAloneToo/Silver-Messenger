@@ -168,6 +168,27 @@ routine step.
   files where they are, untouched and unread; the groups in them are
   out of sync by the time 0.9.0 runs again, and their members re-add
   you.
+* **Clients and devices.** A 0.9.0 client keeps a device state from its
+  first start: `devices.json` in the data directory (the device list it
+  publishes and the revocations it issued; on a linked device, the list
+  as last synced) and, on a linked device, the account's certificate
+  under `linked` in `identity.json`. It advertises `devices` in its
+  bundle and in every body, seals each message once per device of the
+  recipient's and of its own, and reads the copies its own devices send;
+  nothing of this needs a change from the user, and a person with one
+  device is what they were. Linking (`silver --link` on the new
+  computer, `/devices link` on the old one, or the first-run prompt)
+  needs the relay on 0.9.0; a client with devices on an older relay says
+  so and works from the primary alone. A contact still on 0.8.0 keeps
+  talking to a person with devices: it seals to the account as before,
+  and the primary passes the message on. Rolling a client back to 0.8.0
+  leaves `devices.json` unread; a primary then publishes a bundle
+  without its device list, so contacts on 0.9.0 seal to it alone until
+  it is back, while its linked devices keep their certificates and carry
+  on when it returns. A linked device cannot be rolled back to 0.8.0
+  (0.8.0 does not read the `linked` field and would start as an
+  identity of its own); link it again from the primary once it is on
+  0.9.0.
 
 ### 0.8.0
 

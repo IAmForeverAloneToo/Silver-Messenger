@@ -99,7 +99,10 @@ certificate.
 `signature = sign_IK("silver-messenger/v5/device", account (32) || device (32)
 || created_at_ms (8 BE) || name length (1) || name)`, with `name` at most
 32 bytes of UTF-8 without control characters, chosen by the owner and
-shown only to the owner's devices. A certificate verifies against the
+shown only to the owner's devices; it travels in the certificate, which
+the bundle and every message from the device carry, so the relay and
+anyone who fetches the bundle can read it, and the threat model says
+so. A certificate verifies against the
 account's identity key alone, so a contact who has the account pinned
 can check a device without the relay. Certificates are never revoked in
 place: a device is revoked by a statement (4.4) and dropped from the

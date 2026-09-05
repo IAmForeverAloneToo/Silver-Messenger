@@ -103,7 +103,14 @@ What a relay stores for a user and serves on lookup:
   so the post-quantum ratchet needs a relay that keeps them. From 0.9.0
   the list may also carry `groups`: the client keeps MLS key packages on
   deposit and reads group bodies (section 13); a client adds a contact to
-  a group only when the contact's bundle says so.
+  a group only when the contact's bundle says so. And `devices`: the
+  client reads `sync` content from its own devices and may be sent to
+  per device (section 14).
+* From 0.9.0 a bundle may also carry the account's signed device list
+  (`devices`, `devices_signature`) or, on a linked device's bundle, the
+  account's certificate for it (`device_of`); section 14 gives them. A
+  relay older than 0.9.0 drops the three fields when it re-serialises
+  the bundle.
 
 ## 3. Envelope (the sealed-sender layer)
 
@@ -163,7 +170,8 @@ around it.
 { "sent_at_ms": 1700000000000, "epoch": 8271, "seq": 12,
   "content": { "type": "text", "body": "hello" },
   "caps": ["receipts", "files"],
-  "head": { "index": 4093, "hash": "<b64 32 bytes>" } }
+  "head": { "index": 4093, "hash": "<b64 32 bytes>" },
+  "device": { ... }, "id": "<message id>" }
 ```
 
 `seq` counts messages from this sender to this recipient from 1; `epoch` is
@@ -174,10 +182,16 @@ is described in 4.3. `head` (absent on clients before 0.8.0 and on clients
 whose relay keeps no log) is the head of the relay's transparency log as
 the sender last verified it, for the recipient to compare with its own
 (section 11); inside the encrypted body, the relay can neither read nor
-alter it. `content.type` is one of `text`, `receipt` (4.4), `file` (4.5),
-`revocation` and `succession` (section 10); unknown types are rejected by
-this implementation, which is why a sender only uses the latter four
-towards peers that advertised them.
+alter it. `device` (absent from a primary and from clients before
+0.9.0) is the sender's device certificate when the sender is a linked
+device, and `id` the id the message goes by when this body is a copy for
+another device than the one it was first sealed for; both are section
+14. `content.type` is one of `text`, `receipt` (4.4), `file` (4.5),
+`revocation` and `succession` (section 10), `sync`, `provision` and
+`device_revocation` (section 14); unknown types are rejected by this
+implementation, which is why a sender uses a kind beyond `text` only
+towards peers that advertised the matching capability (4.3), and `sync`
+and `provision` only towards devices of its own.
 
 ### 4.2 Ratchet body (v2 and v4)
 
@@ -245,6 +259,7 @@ the relay does not learn which clients have which features.
 | `padded_files` | Cuts a fetched file to its announced `size`, so the sender may pad the last chunk (4.5). |
 | `lifecycle` | Understands `revocation` and `succession` content: identity-lifecycle statements pushed inside a message (section 10). |
 | `cover` | Understands `cover` content and wants it: the client's user has cover traffic on (4.6). Advertised only while that is so. |
+| `devices` | Seals every message to every device of the recipient's it knows of (section 14), so the recipient's primary need not pass it on to its other devices; understands `device_revocation` content; and reads `sync` content from its own devices. Advertised always from 0.9.0. |
 
 ### 4.4 Receipts
 
@@ -504,6 +519,7 @@ first.
 | `blob_get` | `blob` | Ask for every chunk of a blob. |
 | `revoke` | `revocation` | A self-signed revocation (section 10). Accepted without `auth`, since the key may be lost; a one-shot, the connection then closes. |
 | `succeed` | `succession` | A cross-signed succession (section 10). Accepted without `auth`; a one-shot. |
+| `revoke_device` | `revocation` | A device revocation (section 14) by the connection's own identity, for one of its devices. After `publish`; answered `published`. |
 | `log_since` | `index` | The transparency log entries after `index` (section 11), a page at a time; the client asks again from the last index it got until it reaches the head. Rate limited with `lookup`. |
 | `key_packages` | `packages`, `last_resort`? | Replace the client's MLS key packages on deposit (section 13.4). Authenticated connections only, after `publish`. |
 | `key_package` | `user_id` | Ask for one of `user_id`'s key packages (13.4). Only from a connection that deposited its own; rate limited with `lookup`. |
@@ -519,7 +535,7 @@ first.
 | `auth_ok` | `user_id`, `features`?, `head`? | `features` lists strings from section 7.3; absent on older relays. `head` is the transparency log's head (section 11); absent without the `transparency` feature. |
 | `published` | | |
 | `prekey_status` | `one_time_remaining`, `consumed`? | After `published`, only to clients whose bundle carried prekeys: how many one-time keys are on deposit and which ids were handed out since they were published. |
-| `lookup_result` | `user_id`, `bundle` (or `null`), `revocation`?, `succession`?, `head`?, `logged`? | `revocation` and `succession` carry the lifecycle statements the relay holds for `user_id` (section 10), if any; older relays omit both fields. `head` is the transparency log's head at the time of the answer and `logged` where `user_id` last appears in it (section 11); absent without the `transparency` feature, `logged` also when nothing is logged for the identity. |
+| `lookup_result` | `user_id`, `bundle` (or `null`), `revocation`?, `succession`?, `head`?, `logged`?, `device_bundles`?, `device_revocations`? | `revocation` and `succession` carry the lifecycle statements the relay holds for `user_id` (section 10), if any; older relays omit both fields. `head` is the transparency log's head at the time of the answer and `logged` where `user_id` last appears in it (section 11); absent without the `transparency` feature, `logged` also when nothing is logged for the identity. `device_bundles` holds the linked devices' bundles of an account with devices, for a connection whose own bundle advertises `devices`, and `device_revocations` the device revocations the relay holds for `user_id` as an account or as a device (section 14); both absent when empty and on relays before 0.9.0. |
 | `log_entries` | `entries`, `head` | In answer to `log_since`: up to 256 entries in order (section 11), and the head the relay stands at. `entries` is empty when the index asked for was the head already. |
 | `sent` | `id` | The envelope is queued for delivery. |
 | `rejected` | `id`, `code`, `message` | The envelope was not queued. `rate_limited` means try again later; any other code is final. |
@@ -594,6 +610,7 @@ be linked through a resumed session.
 | `lifecycle` | The relay accepts `revoke` and `succeed`, keeps the statements, refuses to publish a revoked identity, and attaches the statements to `lookup_result` (section 10). Absent on relays before 0.8.0; contacts then learn only from the copy pushed inside a message. |
 | `transparency` | The relay keeps the hash-chained log of section 11, tells its head in `auth_ok` and `lookup_result`, and answers `log_since`. Absent on relays before 0.8.0; clients then check nothing against a log and send no `head` in their bodies. |
 | `groups` | The relay keeps MLS key packages on deposit and hands them out (`key_packages`, `key_package`) and runs the group epoch sequencer (`group_create`, `group_commit`), section 13. Absent on relays before 0.9.0; clients then show groups as unavailable on that relay. |
+| `devices` | The relay keeps the device list and the device certificate in bundles, verifies a device's claim on `publish`, answers `revoke_device` and cuts a revoked device off, and attaches the linked devices' bundles and the device revocations to `lookup_result` (section 14). Absent on relays before 0.9.0, which drop the device fields of a bundle; clients then link no devices. |
 
 A relay without the field is a v1 relay: it stores bundles as v1 (dropping
 `prekeys`, since it re-serialises what it parsed), so clients behind it
@@ -623,8 +640,14 @@ budget and against the target's hand-out budget of 30 an hour, which it
 shares with one-time prekeys; `group_create` and `group_commit` count as
 `send`, and `group_create` also against the address's 20 registrations
 an hour; 100 000 sequencer entries in total, each dropped after 180 days
-without a commit. Relay operators can change all of these and can
-require an invite token for first registrations.
+without a commit. Devices (section 14): at most 8 linked devices per
+account; a device registers as an identity, against the address's 20
+registrations an hour and the cap on identities; a `revoke_device`
+costs the address one of those registrations, as `revoke` and `succeed`
+do; a lookup of an account with devices takes one prekey of each kind
+from each device's deposit, under the device's own hand-out budget.
+Relay operators can change all of these and can require an invite token
+for first registrations.
 
 ### 7.5 Blob storage
 
@@ -721,6 +744,21 @@ without the key from the same message.
   request and fetched never, so acceptance later means asking the sender
   to send it again. Saved files never overwrite: a name already taken gets
   ` (2)`, ` (3)` and so on before the extension.
+* **Devices.** A client with a device state (section 14; every client
+  from 0.9.0) seals a text or file once per device of the recipient's
+  it knows of and once per other device of its own, a receipt or a
+  lifecycle statement once per device of the recipient's, and cover to
+  the device the recipient last wrote from. It fetches a contact's device
+  list again at most once an hour by itself, and at once when a copy is
+  refused for a revoked device or a message arrives from a device it
+  holds no bundle for; it starts a session with a device it finds on
+  the list before its next message, and drops its sessions with one that
+  is gone or revoked. It attributes a body carrying a device certificate
+  to the account the certificate names once the certificate verifies for
+  the key that sealed the envelope, and drops the body as a forgery
+  otherwise; it checks sequence numbers per device; it takes `sync` from
+  its own devices only; and, as a primary, it passes on a text or file
+  whose sender did not advertise `devices` to its other devices.
 * **Transport.** A client that has reached a relay host over `wss://`
   refuses to connect to that host over `ws://` from then on. A client may
   carry pins for the relay's TLS public key (the SHA-256 of the DER
@@ -863,8 +901,9 @@ a new identity, as before. Both statements are entered in the transparency
 log (section 11), so a relay that withholds one it holds is caught by the
 next contact who tails the log (a contact still learns from the copy pushed
 inside a message too, and withholding cannot forge a statement, only delay
-it). Lifecycle applies to one-to-one identities; group membership is
-separate.
+it). Lifecycle applies to identities; group membership is separate. An
+identity revocation covers the identity's devices, and a succession
+moves none of them (section 14).
 
 ## 11. Key transparency
 
@@ -899,7 +938,9 @@ An entry records one change:
   with `id` the 32 raw bytes of the identity key. Ids are random, so a
   reader learns nothing about whom an entry concerns unless it already
   knows the id; a contact computes the subject of the ids it has pinned.
-* `kind` is `bundle`, `revocation` or `succession`.
+* `kind` is `bundle`, `revocation` or `succession`. A device revocation
+  (section 14) is a `revocation` entry whose subject is the device, with
+  a leaf of its own (14.8).
 * `leaf` is the hash of the bundle or statement (11.2).
 * The entry's hash is
   `SHA-256("silver-messenger/v4/transparency-entry" || prev || index || subject || kind || leaf || at_ms)`,
@@ -929,11 +970,16 @@ SHA-256("silver-messenger/v4/transparency-bundle"
         || caps_signature? : 0x00, or 0x01 || caps_signature (64))
 ```
 
+When the bundle carries a device list or is a linked device's, the
+device fields of 14.8 follow `caps_signature` inside the hash; a bundle
+without them hashes as above.
+
 A **revocation's leaf** is
 `SHA-256("silver-messenger/v4/transparency-revocation" || identity || created_at_ms || signature)`
 and a **succession's**
 `SHA-256("silver-messenger/v4/transparency-succession" || old || new || created_at_ms || old_signature || new_signature)`,
-integers as 8 big-endian bytes.
+integers as 8 big-endian bytes. A **device revocation's leaf** is given
+in 14.8.
 
 ### 11.3 What the relay logs and serves
 
@@ -1015,9 +1061,11 @@ document: identities and every signature, the key derivations one by one,
 a whole handshake (v2, v3 and v4), two round trips of the ratchet with
 late and out-of-order delivery, the sealed layer (signed and deniable),
 the padded body encodings, the transparency log's hashes, file chunks,
-and the group extensions, link keys, join proofs and sequencer token
+the group extensions, link keys, join proofs and sequencer token
 hashes of section 13 (the MLS messages themselves are RFC 9420's, with
-its own vectors). Each case gives its inputs, every intermediate value on the way
+its own vectors), and the device certificates, lists and revocations,
+the link key, a provisioning message and a certificate as leaf bytes of
+section 14. Each case gives its inputs, every intermediate value on the way
 (each Diffie–Hellman output, each KDF input and output, each AEAD's
 associated data, the exact bytes under each signature) and its outputs.
 Where an operation draws randomness the vector fixes it with a seeded
@@ -1098,16 +1146,23 @@ of this section is ever sent to a client that does not advertise it.
   the final code point, groups are re-created under it.
 * **Credential**: `basic`, whose identity is the 32-byte user id (the raw
   Ed25519 verifying key of section 1). The leaf's signature key is that
-  same key. A leaf whose credential and signature key are not the same
-  bytes, or whose identity is not a valid key, is refused wherever a
-  leaf is seen: a key package handed out by the relay, the sender and
-  every member in a Welcome, every leaf a commit adds.
+  same key, or, for a linked device (section 14), the device's key with
+  the account's certificate for it in the `silver_device` extension
+  below. A leaf whose credential identity is not a valid key, or whose
+  signature key is neither the credential's key nor one that extension
+  certifies for it, is refused wherever a leaf is seen: a key package
+  handed out by the relay, the sender and every member in a Welcome,
+  every leaf a commit adds.
 * **Leaf node extension `0xF001`** (`silver_seal`, private use): the
   member's sealed-layer X25519 public key (`dh_public` of its bundle), 32
   raw bytes. Every key package and leaf carries it; a leaf without it is
   refused. It is what lets a member seal envelopes to every other member
   from the tree alone, without a lookup and without the relay in the
   loop, verified by the identity that signed the leaf.
+* **Leaf node extension `0xF002`** (`silver_device`, private use): a
+  linked device's certificate as bytes (14.1), by which a leaf whose
+  signature key is a device key verifies from the tree alone (14.7).
+  Absent from a primary's leaf.
 * **Group context extension `0xF000`** (`silver_group`, private use):
   the group's metadata, agreed by every member through the group context
   and changed only by a `GroupContextExtensions` proposal an admin
@@ -1124,9 +1179,9 @@ of this section is ever sent to a client that does not advertise it.
 * **Required capabilities**: every group's context carries a
   `RequiredCapabilities` extension listing extension types `0xF000` and
   `0xF001`, and every key package and leaf declares capabilities for the
-  one ciphersuite and those two extension types (default protocol
-  versions, credential types and proposal types), so a leaf that cannot
-  carry them cannot be added.
+  one ciphersuite, those two extension types and, from 0.9.0, `0xF002`
+  (default protocol versions, credential types and proposal types), so a
+  leaf that cannot carry them cannot be added.
 * **Configuration**: the pure-ciphertext wire format policy (handshake
   messages travel as `PrivateMessage`, never `PublicMessage`); the
   ratchet tree travels inside the Welcome (`ratchet_tree` extension), so
@@ -1195,9 +1250,10 @@ there are no `caps`.
 
 ### 13.4 Key packages
 
-An MLS `KeyPackage` for the suite of 13.1 with the leaf extension and
+An MLS `KeyPackage` for the suite of 13.1 with the leaf extensions and
 capabilities of 13.1, a 90-day lifetime, and the credential of its
-owner. A client keeps twenty on deposit and makes more when fewer than
+owner; each device deposits its own under its own id (14.7). A client
+keeps twenty on deposit and makes more when fewer than
 ten remain or one has expired; it keeps one more marked with the MLS
 `last_resort` extension, replaced every 30 days, which the relay hands
 out again and again once the others are gone. The private halves stay
@@ -1216,8 +1272,9 @@ The frames, on the authenticated connection after `publish`:
 | `key_package_result` | `user_id`, `package` (`{ref, expires_at_ms, data}` or `null`), `last_resort` (absent when false) | The oldest package on deposit, removed as it is handed out, while the target's hand-out budget lasts (30 an hour, shared with one-time prekeys, 7.1); the last-resort one, never removed, when the deposit is empty or the budget is spent; `null` when the identity has neither. |
 
 The fetcher verifies what it gets before adding: it parses the message,
-checks the leaf (13.1) against the `user_id` it asked for, the
-ciphersuite, and that the lifetime has not ended, and refuses to add on
+checks the leaf (13.1) against the identity it asked for (for a
+device's package, the account its certificate names), the ciphersuite,
+and that the lifetime has not ended, and refuses to add on
 any failure, naming the relay. A relay that hands out a stale package
 costs the new member's first epoch some forward secrecy, as a replayed
 one-time prekey does, and no more.
@@ -1277,13 +1334,14 @@ epoch 0 before anything else is sent.
 ### 13.6 Delivery
 
 A group message is one MLS ciphertext. The sender seals it once per
-member other than itself, to the member's `silver_seal` key from the
-tree, into an ordinary envelope (section 3) addressed to that member,
-and submits the envelopes as it submits one-to-one messages, on the
-anonymous connection where there is one. A commit goes to every member
-of the epoch it leaves; the Welcome it makes goes to every member it
-adds, alone. Each member finds the message in its own mailbox, under its
-own quota and expiry, and acknowledges it as any other. The relay keeps
+leaf other than its own, its own identity's other devices included
+(section 14), to the leaf's `silver_seal` key from the tree, into an
+ordinary envelope (section 3) addressed to that leaf's id, and submits
+the envelopes as it submits one-to-one messages, on the anonymous
+connection where there is one. A commit goes to every leaf of the epoch
+it leaves; the Welcome it makes goes to every leaf it adds, alone. Each
+device finds the message in its own mailbox, under its own quota and
+expiry, and acknowledges it as any other. The relay keeps
 no membership list and no group mailbox; what fan-out shows it is a
 burst of envelopes from one connection to a set of recipients, which the
 threat model records.
@@ -1343,8 +1401,10 @@ The admin's client checks the proof against the group's current
 that the joiner is not blocked and not a member, and adds the joiner as
 above; members see "X joined by link". The joiner's client remembers
 which admin it asked for which group and takes that admin's Welcome as
-the answer. A link names one admin; if that admin is gone the link is
-dead and another admin makes a new one.
+the answer. A link names one admin, by the id of the device that made
+it (section 14), so the request reaches the device whose owner is
+watching; if that admin is gone the link is dead and another admin makes
+a new one.
 
 **Admins.** The creator is the first admin; `/group admin add|remove`
 is a `GroupContextExtensions` commit changing `admins`. The last admin
@@ -1356,8 +1416,12 @@ group context of the epoch the commit leaves:
 
 * Add proposals, Remove proposals other than a member's own (13.9), and
   `GroupContextExtensions` proposals are accepted only in a commit whose
-  committer is an admin.
-* Every leaf added is valid (13.1).
+  committer is an admin; except that any committer may add and remove
+  leaves whose credential identity is its own, which are its devices
+  (section 14).
+* Every leaf added is valid (13.1). Membership, the admin list and the
+  cap below are read as identities: a leaf coming or going for an
+  identity that stays a member is a refresh, not an add or a removal.
 * The ciphersuite is unchanged, and the required capabilities still list
   `0xF000` and `0xF001`.
 * After the commit `admins` is not empty and lists only members, and
@@ -1381,21 +1445,26 @@ and dropped without changing anything.
 A member falls out of sync when it misses a commit for good (a full or
 expired mailbox, a lost race whose winning commit never arrived). It
 notices as in 13.6, marks the group out of sync, and sends a `rejoin`
-body (a fresh key package) to every admin it knows of. An admin's client
-checks the key package (13.1) against the member that sent it, that the
-sender is a current member, and commits a Remove of that member's old
-leaf and an Add of the new key package in one commit, sending the
-Welcome as for an add. The member keeps its history; the messages
-between are lost, and the client says so. `/group rejoin` sends the same
+body (a fresh key package) to every admin it knows of and to its own
+identity's other devices (section 14). A client that receives it checks
+the key package (13.1) against the sender, that the sender is a current
+member and that it may act for it (an admin, or a device of the same
+identity), and commits a Remove of the sender's old leaf and an Add of
+the new key package in one commit, sending the Welcome as for an add.
+The member keeps its history; the messages between are lost, and the
+client says so. `/group rejoin` sends the same
 request on demand.
 
 ### 13.9 Leave and remove
 
 * **Leave.** The member sends a Remove proposal for its own leaf, as a
-  `handshake` body to every other member, marks the group left, stops
-  reading it and deletes its MLS state. An admin's client that receives
-  the proposal commits it at once (a self-update commit that carries the
-  pending proposal); until one does, the leaver is still in the tree. A
+  `handshake` body to every other leaf, marks the group left, stops
+  reading it and deletes its MLS state. A leave is one leaf's: a device
+  leaves for itself, and its identity stays a member by its other
+  devices until they leave too (section 14). An admin's client that
+  receives the proposal commits it at once (a self-update commit that
+  carries the pending proposal); until one does, the leaver is still in
+  the tree. A
   proposal is accepted by reference only from the leaf it removes. The
   last admin of a group with other members cannot leave; the last member
   leaving deletes the group.
@@ -1431,3 +1500,460 @@ then costs N envelopes of about 500 bytes. The relay's per-recipient
 quota is unchanged, so a very active group of 256 fills an absent
 member's mailbox in about a thousand messages, after which that member
 rejoins on return (13.8).
+
+## 14. Devices
+
+An identity may run on several devices. The identity key stays on the
+device it was made on, the **primary**; every other device, a **linked
+device**, holds a key pair of its own (an Ed25519 signing key and an
+X25519 key, made exactly as an identity's are) and a **certificate** by
+which the identity key vouches for it. To the relay a linked device is
+one more identity: it logs in with its own key and has its own mailbox,
+bundle and prekeys, and nothing in routing changes. To a contact a
+person is still one user id: they add, verify and message the account,
+and the account's signed bundle says which devices to seal to. A
+device's id is the b58 of its signing key, 44 characters like a user id;
+the primary's device id is the user id. The reasoning behind each choice
+is in `docs/design/devices.md`; this section is what is on the wire.
+
+Devices need a relay on 0.9.0 or later, which advertises `devices`
+(7.3): a relay without it drops the device fields of a bundle when it
+re-serialises it, so a client behind one links nothing, and a client
+that has devices and finds itself on one says so and works from the
+primary alone. A contact on a client from before 0.9.0 keeps talking to
+a person with devices (14.4).
+
+### 14.1 Certificates and the device list
+
+A **device certificate** is the identity key's word that a device key is
+its own:
+
+```json
+{ "account": "<user id>", "device": "<device id>", "created_at_ms": n,
+  "name": "laptop", "signature": "<b64 64 bytes>" }
+```
+
+with `signature = sign("silver-messenger/v5/device", account (32) ||
+device (32) || created_at_ms (8 BE) || name length (1) || name)`, raw
+key bytes, and `name` the owner's name for the device: at most 32 bytes
+of UTF-8 without control characters, left out of the JSON when empty.
+Clients show the name to the owner's own devices only, but it is part
+of the certificate, which the bundle's list and every message from the
+device carry, so the relay and anyone who fetches the bundle can read
+it. A certificate whose `device` is the account's own key is malformed.
+It verifies against the account's identity key alone, so a contact that
+has the account pinned checks a device without the relay. As bytes (for
+the MLS leaf, 14.7) a certificate is the signed bytes followed by the
+signature:
+
+```text
+account (32) || device (32) || created_at_ms (8 BE) || name length (1) || name || signature (64)
+```
+
+A certificate is never revoked in place: a device goes by a revocation
+(14.2) and by leaving the list.
+
+The **device list** is in the account's bundle (section 2):
+
+```json
+"devices": [ <certificate>, ... ],
+"devices_signature": "<b64 64 bytes>"
+```
+
+`devices_signature = sign("silver-messenger/v5/device-list", dh_public
+(32) || count (2 BE) || (device (32) || created_at_ms (8 BE))*)` over
+the devices in ascending device id order, which is the order the list
+is in. The list holds the linked devices only (the primary is the
+bundle's owner) and at most 8 of them. A reader refuses a list out of
+order or with a duplicate, one longer than 8, one with a certificate
+that does not verify or names another account, and one without its
+signature. The signature covers the set and is bound to the bundle by
+its Diffie–Hellman key, so a relay can serve a stale list but not one
+with a device left out or one added.
+
+A **linked device's bundle** is an ordinary bundle signed by the device
+key (its own `dh_public`, prekeys and capabilities) plus
+
+```json
+"device_of": <certificate>
+```
+
+whose `device` must be the bundle's `user_id` and which must verify; a
+bundle with `device_of` lists no devices of its own. Whoever looks the
+device up learns whose it is. The relay verifies the certificate on
+`publish` (14.3) and clients verify it again.
+
+The bundle capability `devices` (section 2) says the identity's client
+reads `sync` content (14.5) and may be sent to per device: a primary on
+0.9.0 or later, or a linked device. A sender treats an account whose
+bundle lacks it as one device, the bundle's own.
+
+### 14.2 Revocation
+
+A **device revocation** is the identity key's word that a device is no
+longer its own:
+
+```json
+{ "account": "<user id>", "device": "<device id>", "created_at_ms": n,
+  "signature": "<b64 64 bytes>" }
+```
+
+`signature = sign("silver-messenger/v5/device-revocation", account (32)
+|| device (32) || created_at_ms (8 BE))`; one naming the account's own
+key is malformed. It carries its own signature and is trusted however it
+arrived: served in a `lookup_result` (14.3), pushed inside a message as
+the `device_revocation` content kind, or, among the owner's own devices,
+inside `sync devices` (14.5).
+
+The primary sends it to the relay in a `revoke_device` frame on its
+authenticated connection. The relay takes it only from the account that
+signed it, and only for a device it knows as that account's: one on the
+account's published list, or one whose own bundle carries the account's
+certificate; otherwise any account could cut any identity off by calling
+it a device of its own. Each statement costs the address one of its
+hourly registrations (7.4), as the other lifecycle statements do; one
+for a device already revoked is answered `published` again without a
+second entry, so a client that lost the reply may repeat itself. Once
+stored, the device is cut off: its connection is closed with the reason,
+its mailbox and its deposits of prekeys and key packages are dropped,
+its later logins and publishes are refused (`forbidden`), an envelope
+addressed to it is refused with `not_found`, and it is left out of the
+device bundles served with the account. Its bundle stays, as a revoked
+identity's does, so a lookup still answers with the bundle the log
+covers, and the statement beside it. The statement is logged (14.8),
+served on every lookup of the device and of the account, and kept for
+good.
+
+A contact that sees a valid revocation for a device drops its sessions
+with it, forgets the device's bundle and stops sending to it. The
+primary pushes the statement to contacts whose last message advertised
+`devices` (4.3), which know the kind; a client from before 0.9.0 would
+refuse the whole body. A device the relay tells it is revoked says so and
+stops; it does not erase itself on the relay's word alone, which a
+hostile relay could give, and its owner erases it (14.9).
+
+An **identity revocation** (10.1) covers every device: the relay closes
+the connections of the account's listed devices when the revocation
+arrives and refuses a device of a revoked account at login, and a
+contact that retires the account retires its devices with it. A
+**succession** (10.2) moves nothing but the identity: the new key links
+its devices again.
+
+### 14.3 The relay
+
+| `type` | Fields | Notes |
+| --- | --- | --- |
+| `revoke_device` | `revocation` | A device revocation (14.2). On the account's authenticated connection, after `publish`; answered `published`. |
+
+`lookup_result` (section 7) gains two fields, both absent when empty.
+`device_bundles`, for an account with devices: the bundles of the
+devices on its list that have published a bundle claiming the account
+and are not revoked, each as the relay would serve it on its own lookup
+(a one-time prekey of each kind popped under the rules of 7.1, so a
+lookup of an account costs the target's hand-out budget one prekey per
+device). They are attached only for a connection whose own published
+bundle advertises `devices`, since any other client would not use them
+and their prekeys would be wasted; such a client, and anyone else, can
+look a device up by its id and get the same bundle. `device_revocations`,
+for every client: for an account, every one it has issued; for a device,
+its own, if any.
+
+On `publish` the relay verifies `device_of` when present (the
+certificate, and that the account is one it holds a bundle for and has
+not revoked), refuses a bundle from a revoked device whatever it now
+says, and refuses a list that names a device it holds a revocation for;
+the list's own signature and its cap are checked as part of the bundle.
+A device registers like any identity: it counts against the address's
+registrations for the hour and against the relay's cap on identities,
+and needs the invite token where one is required, which the owner passes
+to the new device as for any first registration. `auth_ok` lists
+`devices` among the features. The metrics `silver_relay_devices` (bundles
+that carry `device_of`) and `silver_relay_device_revocations_total` say
+how many there are.
+
+### 14.4 Delivery: one message, every device
+
+**Sessions** are per device. A client keeps sessions per peer id
+(section 8) and a device id is a peer id: one Double Ratchet session
+(or several, under the rules of section 8) with each device of a
+contact's, the primary being one, and with each other device of one's
+own. A session with a device starts as any session does, from the
+device's bundle: a fresh lookup, a one-time prekey, the handshake in the
+first message. The initiator rule and the cap on sessions per peer apply
+per device.
+
+**Fan-out.** A message to a contact is one plain body sealed once per
+session: to every device of the contact's and, as a `sync sent` copy
+(14.5), to every other device of one's own. Each becomes an envelope
+(section 3) to that device's id, sealed to that device's key and
+submitted as any envelope is, and every device finds it in its own
+mailbox. Not every content spreads alike:
+
+| Content | Goes to |
+| --- | --- |
+| `text`, `file` | every device of the recipient's, and a `sync sent` copy to every other device of one's own |
+| `receipt`, `revocation`, `succession`, `device_revocation` | every device of the recipient's; none of one's own |
+| `cover` | the one device of theirs they last wrote from, or their primary |
+| `sync`, `provision` | the one device addressed |
+
+**One id.** The message goes by one id everywhere: the id of the
+envelope to the contact's primary. Every other envelope of it is a copy,
+and a copy's plain body names the message in the optional field `id`
+(printable ASCII, 1 to 64 bytes), absent when the envelope's own id is
+the message's. So the recipient's devices store and acknowledge one
+message whatever envelope brought it, and the sender's devices, told the
+id in the sync copy, mark one line when the receipts come; receipts name
+that id and go to every device of the sender's account. The relay sees
+envelopes with ids of their own and nothing that ties them together.
+
+**Reporting.** A client reports a message sent once the relay has taken
+every envelope of it. The envelope to the contact's primary refused for
+good is the message refused. A copy refused with `not_found` is for a
+device the relay no longer delivers to: the sender drops its sessions
+with that device and fetches the account's list again before its next
+message. Any other refused copy is reported without failing the message,
+since it reached the person.
+
+**The sender's certificate.** A plain body from a linked device carries
+the sender's certificate in the optional field `device` (4.1; in a
+ratchet body it is in the inner plain body), so the recipient attributes
+the message to the account and verifies the device without a lookup. A
+body from a primary carries no `device`. The recipient checks that the
+certificate verifies and that its `device` is the key that sealed the
+envelope (the sender id of section 3); a body whose certificate fails
+either check is dropped as a forgery and reported, not held as a
+request. The message is then the account's: it lands in the account's
+conversation, one from a device of an account that is not a contact is a
+request from that account, and the sequence numbers (4.1) are checked
+per device, since each device numbers its own stream. A certificate from
+a device the recipient holds no bundle for makes it fetch the account's
+list afresh before its next message, so the new device gets its copies
+from then on.
+
+**Learning a contact's devices.** A client learns the list from the
+account's bundle: on adding the contact, on every fresh lookup before a
+session starts, when the user asks, and when a message arrives from a
+device it does not know. By itself it fetches a contact's list again at
+most once an hour, and the relay says when it is stale by refusing a copy
+for a revoked device. A sender that finds a new device on the list
+starts a session with it before its next message; one that finds a
+device gone, or is served a revocation for it, drops its sessions with
+it. The devices' bundles come with the account's lookup (14.3) or from a
+lookup of the device, and are kept for the next message.
+
+**Capability.** A client that seals per device advertises `devices` in
+the `caps` of every body it sends (4.3); a client from 0.9.0 does so
+always. A recipient's primary uses it to tell whether the sender
+addressed the account's other devices itself, or whether to pass the
+message on to them (14.5).
+
+### 14.5 Sync between one's own devices
+
+What one device of an account does, its other devices are told inside
+ordinary bodies, as the `sync` content kind:
+
+```json
+{ "type": "sync", "kind": "sent", "peer": "<user id>", "id": "<message id>", "sent_at_ms": n, "content": { ... } }
+{ "type": "sync", "kind": "received", "from": "<user id>", "id": "<message id>", "sent_at_ms": n, "content": { ... } }
+{ "type": "sync", "kind": "read", "peer": "<user id>", "ids": [ "<message id>", ... ] }
+{ "type": "sync", "kind": "contact", "action": "add", "user": "<user id>", "alias": "...", "bundle": { ... } }
+{ "type": "sync", "kind": "devices", "devices": [ <certificate>, ... ], "revoked": [ <revocation>, ... ] }
+{ "type": "sync", "kind": "leave" }
+```
+
+* `sent`: a copy of a `text` or `file` this device sent to `peer`, under
+  the message's id; the others show it as their own line in that
+  conversation and mark it as the receipts name it.
+* `received`: a `text` or `file` from `from` that the sender did not
+  address to the account's other devices, which is a body that did not
+  advertise `devices` (a client before 0.9.0, which seals to the account
+  alone). The primary passes such a message on, and only such; one from
+  a sender that advertised the capability reached every device by
+  itself. Receipts for it leave from the primary alone.
+* `read`: messages from `peer` this device showed, so the others need
+  not send `read` receipts for them and no longer count them unread.
+* `contact`: a change to the contact list, with `action` one of `add`
+  (`user`, `alias`?, `bundle`?), `remove` (`user`), `alias` (`user`,
+  `alias`?), `verify` (`user`, `verified`), `block` (`user`), `unblock`
+  (`user`) and `files` (`user`, `auto`).
+* `devices`: the account's device list as the primary now publishes it
+  and every revocation it has issued. Applied only when the sender is
+  the primary; a device revoked by it is dropped with its sessions, and a
+  linked device takes its own certificate from it when the primary
+  renamed it (14.9).
+* `leave`: this device asks to be unlinked; the primary revokes it on
+  receipt (14.2) and the other devices ignore it.
+
+`sync` content is accepted only from a device certified for one's own
+account (the primary, or a device on the list), is dropped without a
+word from anyone else, and is never sent to anyone else. It is numbered
+with `seq` like any body and travels in a session. Group messages need
+no sync: every leaf gets its own copy (14.7).
+
+### 14.6 Linking
+
+A device is linked by a **link** it prints and the primary takes:
+
+```text
+silver://link/<device id b58>?secret=<16 bytes b58>&relay=<percent-encoded url>[&name=<percent-encoded name>]
+```
+
+The new device (`silver --link`) makes its keys, registers a bundle with
+the relay (without `device_of` yet, and with prekeys, so the primary can
+start a session with it), prints the link with a QR code of it, and
+waits ten minutes. `secret` is 16 random bytes made for this link, and
+the link is good once. The relay named is the one the device registered
+with, which must be the primary's.
+
+The primary, handed the link, makes the certificate (`created_at_ms`
+now, the name from the link or from the owner), looks the device up,
+starts a session with it, and sends one body of the `provision` content
+kind:
+
+```json
+{ "type": "provision", "nonce": "<b64 24 bytes>", "ciphertext": "<b64>" }
+```
+
+```text
+link_key    = HKDF-SHA256(salt = none, ikm = secret, info = "silver-messenger/v5/link")   -> 32 bytes
+ciphertext  = XChaCha20-Poly1305(link_key, nonce, plaintext,
+                                 aad = "silver-messenger/v5/provision" || device (32))
+```
+
+with the plaintext at most 8 MiB, JSON:
+
+```json
+{ "account": "<user id>", "certificate": <certificate>,
+  "devices": [ <certificate>, ... ], "revoked": [ <revocation>, ... ],
+  "snapshot": { "type": "file", ... } }
+```
+
+the account, its certificate for the device, the device list as it is
+published from now on (the new device on it) and the revocations it has
+issued, and the reference of the **snapshot** as a `file` content (4.5),
+absent when there is nothing to send. The session already hides the
+message from the relay; the layer under the link's secret keeps it from
+anyone who saw the device id and sent something under a secret of their
+own, which the device cannot open and ignores as it ignores any message
+it cannot open. The device checks that the message opens under its
+link's key, names the sender as `account`, certifies its own key for
+that account, and lists that account's devices and revocations alone;
+it keeps the certificate and the list, publishes its bundle again with
+`device_of`, and is linked. The primary, once the relay has confirmed
+its own publish with the device on the list, tells its other devices the
+list (`sync devices`) and adds the device to every group it is in
+(14.7). A link the primary never answers expires and the device says so;
+a provisioning message for a link that has expired or was used is
+ignored.
+
+The snapshot is one JSON document sent as a padded file (4.5) through
+the blob store (7.5), under a key of its own that the `file` content
+carries:
+
+```json
+{ "format": "silver-messenger-snapshot", "version": 1, "created_at_ms": n,
+  "contacts": [ { "user": "<user id>", "alias": "...", "bundle": { ... },
+                  "verified": true, "auto_files": true, "revoked": true, "caps": [ ... ] }, ... ],
+  "blocked": [ "<user id>", ... ],
+  "groups": [ { "id": "<group id b64>", "name": "...", "alias": "..." }, ... ],
+  "history": { "<user id>": [ <line>, ... ], ... },
+  "group_history": { "<group id b64>": [ <line>, ... ], ... } }
+```
+
+the contacts with the owner's marks (the pinned bundle among them, and
+the fields that are false or empty left out), the blocked ids, the
+groups the account is in (which the device holds as expected until
+their Welcomes come, 14.7), and the last N days of history with each
+contact and group (30 unless the owner says otherwise, 0 for none),
+oldest first, each line a history entry as the client keeps it (`id`,
+`direction`, `timestamp_ms`, `text`, a `file` reference, `from` in a
+group) with the furthest `receipt` it got. A snapshot larger than a file
+may be (16 MiB) is cut at its oldest lines, whatever conversation they
+are in, until it fits. The device takes the contacts with their sequence
+numbers reset, since it numbers its own stream, and the lines it does
+not have; a snapshot it cannot fetch leaves it linked with an empty
+contact list, and it says so. Nothing syncs history later: from the
+moment the device is linked, what happens reaches it as it happens
+(14.4, 14.5), and what it misses while off waits in its own mailbox.
+
+### 14.7 Groups
+
+A device is a leaf (section 13). Its credential (13.1) is the account's
+user id and its signature key is the device key, and the leaf carries
+
+* **Leaf node extension `0xF002`** (`silver_device`, private use): the
+  device's certificate as bytes (14.1). Present in every linked device's
+  leaf and absent from a primary's.
+
+A leaf verifies when its credential identity and its signature key are
+the same key (a primary), or when it carries a `silver_device` whose
+`device` is the signature key, whose `account` is the credential
+identity, and whose signature verifies. Every key package and leaf from
+0.9.0 declares capability for `0xF002` beside `0xF000` and `0xF001`;
+the required capabilities of a group are unchanged. A member of a group
+is an identity, and its leaves are its devices, one per device, each
+with key packages of its own on deposit under the device's id (13.4). An
+admin adding an account fetches its device list and one key package per
+device and adds every device in one commit; a device linked later is
+added by one of the account's own devices. Messages, commits and
+Welcomes go to every leaf, one's own identity's other devices included,
+each sealed to the device it is for (13.6).
+
+The rules of 13.7 gain one: a committer, admin or not, may add leaves
+whose credential identity is its own and remove leaves whose credential
+identity is its own. What a commit does is read as identities, so a
+device coming or going is a refresh to everyone else, and an identity's
+last leaf going is its removal or its leave. A Welcome from a device of
+one's own identity, or for a group the primary named at link time
+(14.6), is taken without asking. Rejoin (13.8) is per leaf: a device out
+of sync asks the admins and its identity's other devices, and any of
+them re-adds it. Leaving (13.9) is per leaf: one device's leave takes
+that leaf out, and the identity stays a member by its other devices. An
+invite link's `via` (13.7) names the device that made it.
+
+### 14.8 Transparency
+
+A bundle's leaf (11.2) grows by the device fields, and only when the
+bundle has any, so the leaf of a bundle without devices is what it was,
+and a relay that drops the fields and a client that keeps them agree on
+it:
+
+```text
+|| devices.len (2 BE) || (device (32) || created_at_ms (8 BE))*
+|| devices_signature? : 0x00, or 0x01 || devices_signature (64)
+|| device_of? : 0x00, or 0x01 || len (4 BE) || certificate bytes (14.1)
+```
+
+A device revocation is logged as a `revocation` entry (11.1) whose
+subject is the device (an identity to the relay), with leaf
+`SHA-256("silver-messenger/v5/transparency-device-revocation" ||
+account (32) || device (32) || created_at_ms (8 BE) || signature (64))`;
+there is no new entry kind, so a client from before devices replays the
+log as before. A device's own bundles are logged under the device as an
+identity's are. A client applies the checks of 11.4 to device ids as to
+any subject: a device's bundle that comes with an account's answer is
+checked against the device's latest logged bundle leaf, and a served
+device revocation against the one logged under the device; a device
+whose answer does not hold up is left out and reported, and the answer
+for the account stands.
+
+### 14.9 Names, leaving, and what it does not do
+
+The primary renames a device by certifying the same key again under the
+new name, which reaches the device in the next `sync devices` and the
+list it is on; there is no way for a device to ask for a name. A linked
+device leaves by `sync leave` to the primary, and erases its keys,
+contacts and history once the relay has taken the message; the primary
+revokes it on receipt.
+
+History is not synced after the link; a device that was off has what
+waited in its mailbox. Contacts verify the identity, never a device: the
+safety number is the account's, and a linked device's loss changes
+nothing a contact has to check once it is revoked. The identity key
+stays on the primary: a lost primary is a lost identity key, restored
+from the backup (which carries the device list and, on a linked device,
+its link), and a linked device can revoke neither the identity nor
+another device. A succession moves no devices. A relay cannot add a
+device (the list is signed) or make a certificate, and a revoked device
+it keeps serving is caught by the log; what it learns of devices, and
+what a device's thief gets, `THREAT_MODEL.md` says.

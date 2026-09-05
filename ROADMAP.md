@@ -396,13 +396,25 @@ those who want to pay for it (46).
         members' own mailboxes rather than group mailboxes, with a
         relay-side epoch sequencer ordering commits; PROTOCOL.md
         section 13.
-48. [ ] **Multiple devices** (L). Each device has its own keys under the
+48. [x] **Multiple devices** (L). Each device has its own keys under the
         identity, listed in the bundle and signed by the identity key;
         linking by a QR code and a short-lived secret; every device is a
         leaf in the MLS tree of every conversation it belongs to;
         optional encrypted history sync through the relay. Signal's
         Sesame is the reference for the device list. The design note
-        is docs/design/devices.md.
+        is docs/design/devices.md. Done in 0.9.0: the identity key
+        stays on the primary and every other device is certified by
+        it; one Double Ratchet session per pair of devices, a message
+        sealed once per device of both people under one id, and what
+        one's own devices do told between them as `sync` content;
+        linking by a link with a one-time secret, answered through the
+        relay with the certificate and a snapshot of the contacts,
+        groups and recent history, which is the one history sync there
+        is; a device is a leaf of its own in groups, signed by the
+        device key with the certificate in the leaf; revocation by a
+        signed statement the relay serves, logs and enforces; a client
+        from 0.8.0 keeps talking to a person with devices through the
+        primary. PROTOCOL.md section 14.
 49. [ ] **Usernames scoped to a relay** (M). `alice` as a signed claim,
         unique on that relay, resolved by the relay and verified by the
         client against the signature, with the safety number still the

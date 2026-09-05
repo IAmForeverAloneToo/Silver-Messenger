@@ -49,6 +49,50 @@ means behaviour or the wire protocol changed in a way worth reading about.
   sealing keys; the `groups` relay feature and bundle capability; the
   key package and sequencer frames. Vectors, property tests and a fuzz
   target cover the new encodings.
+- **Multiple devices.** One identity on several computers. The identity
+  key stays where it was made, the primary; every other device has keys
+  of its own and a certificate signed by the identity key, listed in the
+  account's bundle and signed there as a whole, so contacts learn a
+  person's devices from the person's own word and a relay cannot add
+  one. To link a computer, run `silver --link` on it (or say yes to the
+  first-run prompt): it prints a link and a QR code, and `/devices link
+  <link> [days]` on the primary certifies it, sends it the contacts, the
+  groups and the last thirty days of history as a snapshot through the
+  relay, sealed under a one-time secret only that computer holds, and
+  adds it to every group. From then on a message to a contact goes to
+  every device of theirs and a copy to every device of your own, each
+  under its own forward-secret session and all under one id, so every
+  device shows the same conversation, what one device sends the others
+  show as sent, what one reads the others stop counting unread, and a
+  contact added, renamed, verified or blocked on one is so on all. In
+  groups each device is a leaf of its own. `/devices` lists them,
+  `/devices remove <n>` revokes one (the relay cuts it off, contacts
+  drop it, its group leaves go), `/devices name <n> <name>` renames one,
+  and `/devices leave confirm` on a linked device erases it. Contacts
+  verify the person, never a device: the safety number and the id are
+  the identity's, and a linked device's loss costs what it held and
+  nothing a contact must re-check. A contact on 0.8.0 keeps working (the
+  primary passes their messages on); linking needs a relay on 0.9.0. At
+  most eight devices per identity; history is not synced after the link.
+  Protocol section 14, the threat model, and `docs/design/devices.md`
+  have the details.
+- **Relay: devices.** The relay keeps the device list and the device
+  certificate in bundles, checks a device's claim to its account when
+  it publishes, hands a client the linked devices' bundles with the
+  account's (one prekey each), takes `revoke_device` from the account
+  and cuts the device off (its connection closed, its mailbox and
+  deposits dropped, its logins and envelopes for it refused), and logs
+  the revocation in the transparency log under the device. A linked
+  device is one more identity to the relay, against the same caps and
+  invite token; two metrics count devices and revocations. No switch.
+- **Protocol: devices.** Device certificates, the signed device list in
+  the bundle and `device_of` on a device's bundle, device revocations
+  and the `revoke_device` frame, the `device` and `id` body fields, the
+  `sync`, `provision` and `device_revocation` content kinds, the
+  `devices` capability and feature, the `silver_device` leaf extension
+  (`0xF002`), the link and the provisioning seal, and the snapshot
+  format. Vectors cover each statement, the link key, a provisioning
+  message and the leaf bytes.
 
 ## 0.8.0 - 2026-09-05
 

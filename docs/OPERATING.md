@@ -15,7 +15,10 @@ and prekeys (all public), the queued envelopes for each recipient
 bans and settings an administrator made, and counters. It sees who a
 message is for, when it arrived and roughly how big it is, and the
 address of the connection that brought it; it cannot read a message,
-forge one, or impersonate a user. The threat model spells this out.
+forge one, or impersonate a user. From 0.9.0 a person may run several
+devices; each is one more identity to the relay, with its own mailbox
+and keys, named in the person's bundle, and the relay keeps the signed
+statement that ends one. The threat model spells this out.
 
 So the operator's duties are the ordinary ones of a server that holds
 private metadata: keep it up, keep its key and its database to itself,
@@ -100,8 +103,8 @@ capitals with `SILVER_RELAY_` in front: `--max-connections` is
 | Limit | Default | What it bounds | Change it when |
 | --- | --- | --- | --- |
 | `--invite-token` | none | Who may register a new identity | You want a closed relay; `admin invite-set` changes it without a restart |
-| `--max-identities` | 100000 | Identities the relay keeps | A small relay: set it to the number of people you expect, with room |
-| `--registrations-per-hour` | 20 per address | New identities from one address | A shared address (a NAT, a Tor exit) registers many people at once |
+| `--max-identities` | 100000 | Identities the relay keeps, linked devices included (each person's devices count, at most eight per person) | A small relay: set it to the number of people you expect, times the devices each may link, with room |
+| `--registrations-per-hour` | 20 per address | New identities from one address; a linked device registers as one, and a device revocation costs one too | A shared address (a NAT, a Tor exit) registers many people at once |
 | `--connections-per-address` | 16 | Open connections from one address | Many users behind one NAT (raise), or abuse (lower) |
 | `--max-connections` | 4096 | Open connections in total | The host is bigger or smaller than that |
 | `--idle-timeout-secs` | 120 | A silent connection is closed after this | Clients ping every 30 seconds; only if a network needs longer |

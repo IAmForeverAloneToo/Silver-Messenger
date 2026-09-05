@@ -131,6 +131,19 @@ after the contacts, with each line showing who wrote it. Groups run on
 MLS (RFC 9420) with a post-quantum hybrid suite and need a relay on
 0.9.0; the relay never learns who is in a group.
 
+One identity can run on several computers. On the new one run `silver
+--link` (or answer yes when a first start asks whether to link this
+computer to an identity you already have): it prints a link and a QR
+code. On the computer you already use, `/devices link <link>` takes it
+in: the new device gets your contacts, your groups and the last thirty
+days of history, and from then on every message reaches both, what you
+send on one shows on the other, and contacts see one person with one id
+and one safety number. `/devices` lists your devices, `/devices remove
+<n>` cuts one off for good (a lost laptop, say), and `/devices leave
+confirm` on a linked computer erases it. Your identity key stays on the
+computer it was made on; a linked device holds keys of its own and a
+certificate from it. Needs a relay on 0.9.0.
+
 Sent messages carry a mark: `⋯` waiting for the relay, `✓` accepted by the
 relay, `✓✓` delivered to the contact's device, `✓✓` in colour read, `✗`
 refused. Received files are saved under their own name in
@@ -168,6 +181,10 @@ refused. Received files are saved under their own name in
 | `/block <n or id>`              | Drop everything from that id from now on                     |
 | `/unblock <id>`, `/blocked`     | Undo a block; list blocked ids                               |
 | `/me`                           | Show your own id                                             |
+| `/devices`                      | List your identity's devices: their names, when each was linked, and which one this is |
+| `/devices link <link> [days]`   | Take in a computer that printed a link with `silver --link`, sending it that many days of history (default 30, 0 for none) |
+| `/devices remove <n>` / `name <n> <name>` / `join` | Revoke a device, rename one, or add your devices to the groups they are not in yet (all on the primary) |
+| `/devices leave confirm`        | On a linked device: ask the primary to revoke it, erase its keys, contacts and history, and exit |
 | `/relay <ws-url>`               | Change the relay (used on next start)                        |
 | `/lock`                         | Forget the keys until the passphrase is typed again (needs one; `lock_after_minutes` in config.json does it by itself) |
 | `/help`, `/quit`                |                                                              |
@@ -210,6 +227,8 @@ silver --check-release     ask the releases page once whether a newer version ex
 silver --invite <TOKEN>    invite token for a relay that only registers invited identities; remembered (env SILVER_INVITE)
 silver --print-id          print your user id and exit
 silver --print-invite      print your invite link (silver://add/<id>?relay=…) and exit
+silver --link              make this (empty) data directory a device of an identity you use elsewhere: register with the relay, print a link and a QR code for /devices link on the other computer, and wait ten minutes for it
+silver --device-name <N>   with --link: what your own devices call this one, up to 32 characters; the primary may name it instead (env SILVER_DEVICE_NAME)
 silver --no-mouse          leave the mouse to the terminal: no wheel scrolling, but text selects without Shift (env SILVER_NO_MOUSE)
 silver --ascii             draw marks in ASCII (v, vv, x, ..); chosen by itself in the classic Windows console (env SILVER_ASCII)
 silver --theme <NAME>      dark (default), light for a light background, or mono for no colour; NO_COLOR means mono (env SILVER_THEME)
@@ -601,9 +620,23 @@ it does not, is in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
   their keys weekly so a compromise heals. Group messages are signed
   inside MLS and so, unlike one-to-one messages, are not deniable; the
   threat model says what the relay can still infer.
+* **Devices** (0.9.0 on): a linked device is a key pair of its own,
+  certified by your identity key, which never leaves the computer it was
+  made on. Your bundle lists your devices, signed as a whole, so a
+  contact seals every message once per device of yours (and once per
+  device of their own, so their other devices have it too), each under
+  its own forward-secret session, all under one id; the relay sees a few
+  more envelopes and no shared key. What one of your devices does the
+  others are told inside ordinary messages that only your own devices
+  can send. Linking sends the new device its certificate and a snapshot
+  of your contacts and recent history through the relay, sealed under a
+  one-time secret it printed; removing one is a signed statement the
+  relay serves, logs and enforces and contacts act on. In groups each
+  device is a leaf of its own.
 
-What it does **not** do yet: more than one device per identity. The
-ordered plan is in [ROADMAP.md](ROADMAP.md).
+What it does **not** do yet: disappearing messages, edits, replies and
+reactions, or a client for a phone. The ordered plan is in
+[ROADMAP.md](ROADMAP.md).
 
 ## Development
 
@@ -651,8 +684,10 @@ on a random port, connect two clients, and check both directions, offline
 queueing, reconnection after the relay goes away, forward-secret sessions
 (including handshakes that wait in the mailbox, restarts, a peer that lost
 its session state, and a peer without prekeys), anonymous submission,
-capabilities and receipts, and file transfer (chunking, progress, a missing
-blob, a tampered hash, a relay without file storage).
+capabilities and receipts, file transfer (chunking, progress, a missing
+blob, a tampered hash, a relay without file storage), groups, and
+devices (`tests/devices.rs`: a device linked by its link, a message
+reaching every device under one id, a revoked device cut off).
 
 ## License
 

@@ -1,8 +1,8 @@
 # Threat model
 
 What Silver Messenger protects, against whom, and where it falls short.
-Every claim here is about the code on `main` at the end of Phase 8 (the
-0.8.0 line). The "Gaps" section at the end points at the roadmap item that
+Every claim here is about the code on `main` at the end of Phase 9 (the
+0.9.0 line). The "Gaps" section at the end points at the roadmap item that
 closes each one, or says that nothing is planned. Keep this document honest
 before adding features. The wire format is specified in
 [PROTOCOL.md](PROTOCOL.md); how the code measures up control by control is
@@ -26,8 +26,10 @@ problem is in [SECURITY.md](../SECURITY.md).
 | Asset | Where it lives | Why it matters |
 | --- | --- | --- |
 | Message content | Only on the two endpoints, and inside sealed envelopes in transit | The point of the program |
-| Identity key (Ed25519) | `identity.json` on the client | Whoever holds it *is* you: can sign as you and start sessions as you |
-| Long-term Diffie–Hellman key (X25519) | `identity.json` on the client | Opens the sealed layer of every envelope ever addressed to you; with the session state, reads v2 messages |
+| Identity key (Ed25519) | `identity.json` on the primary, and nowhere else | Whoever holds it *is* you: can sign as you, start sessions as you, and link and revoke devices |
+| Long-term Diffie–Hellman key (X25519) | `identity.json` on each device, its own | Opens the sealed layer of every envelope ever addressed to that device; with the session state, reads v2 messages |
+| Device key and certificate | `identity.json` on a linked device (its own Ed25519 and X25519 keys, and under `linked` the account's certificate for it) | Whoever holds them reads and writes as you, on that device, until the primary revokes it; the certificate itself is public |
+| Device list and revocations | `devices.json` on every device (the list the primary publishes and the revocations it issued; on a linked device, as last synced) | Public, signed by the identity key; says which devices contacts seal to |
 | Prekeys and session state | `prekeys.json`, `sessions.json` on the client | Current ratchet keys and the private halves of published prekeys (X25519 and ML-KEM): reads messages in flight and the ones not yet ratcheted past |
 | Contact list and history | `contacts.json`, `history/`, `outbox.json` on the client | Who you talk to and what was said |
 | Group state | `groups.mls`, `groups.json`, `history/group-*.jsonl` on the client | The MLS tree and epoch secrets of every group (reads its messages until the next commit you miss), the key package private halves, who is in which group, and what was said there |
@@ -43,8 +45,10 @@ problem is in [SECURITY.md](../SECURITY.md).
   a corporate proxy, a hotel Wi-Fi).
 - **Stranger**: anyone who learns a user id. Ids are meant to be shareable.
 - **Malicious contact**: someone you have added who later turns hostile.
-- **Device thief**: someone with the client's data directory, with or
-  without the running program's memory.
+- **Device thief**: someone with a client's data directory, with or
+  without the running program's memory. From 0.9.0 that directory may be
+  the primary's, which holds the identity key, or a linked device's,
+  which holds a device key and a certificate and no identity key.
 - **Holder of a compromised key**: the attacker has a user's long-term
   Diffie–Hellman key or identity key.
 - **Future quantum adversary**: someone who records traffic today and
@@ -136,6 +140,16 @@ Can:
 - See that a Welcome or a large commit went by, as a blob of that size
   (a group of a dozen or more members, or many added at once), the way
   it sees a file.
+- See how many devices a person has, which ids they are and what the
+  owner named them: the device list, certificates and names included,
+  is in the signed bundle it serves, and each device logs in under its
+  own id, so it pairs devices with accounts and sees each device's
+  connections where it saw one client's. It sees a message to a person
+  with two devices as two envelopes from one anonymous connection within
+  a second, and the sender's copies to its own devices as more of them,
+  so it infers device counts from bursts as it infers group sizes
+  (protocol section 14). It learns nothing new about content or senders:
+  a copy for another device is an ordinary sealed envelope.
 
 Cannot:
 
@@ -169,6 +183,14 @@ Cannot:
   with a token that members of the current epoch derive (it keeps a
   hash, not the token), and a removed member cannot either; what it can
   do to a group is what it can do to a mailbox, refuse or delay.
+- Add a device to anyone's account, or forge a device certificate: the
+  list is signed as a whole by the identity key and bound to the bundle,
+  every certificate is the identity key's signature, and clients verify
+  both. It can serve a stale list or keep serving a device its owner
+  revoked, and is caught for either by the transparency log, where a
+  device's bundles and its revocation are logged under the device as an
+  identity's are; a revoked device is also refused by the relay itself
+  and dropped by every contact the primary's next message reaches.
 
 ### Network observer
 
@@ -213,7 +235,12 @@ connections, 20 new identities and 256 MiB of uploads an hour; mailboxes,
 file storage and the number of identities are capped, and an operator can
 require an invite token to register at all. Flooding a mailbox to its cap
 remains possible for anyone with the id; filling the relay's shared file
-storage takes as many addresses as there are 256 MiB shares in it.
+storage takes as many addresses as there are 256 MiB shares in it. From
+your bundle they also learn how many devices you have, their ids and the
+names you gave them (the certificates are in the bundle, so a name like
+"office" is public; the client shows names to your own devices only),
+can look each up as they look you up, and can fill each device's mailbox
+as they can yours.
 
 ### Malicious contact
 
@@ -229,6 +256,13 @@ They learn when their messages reached your client and, unless you turn
 read receipts off, roughly when you looked at them, which says when you
 are at the keyboard. Cannot forge messages from someone else. Cannot learn
 your other contacts. Cannot decrypt messages between you and others.
+Cannot pass a device off as yours or as anyone else's: a device
+certificate verifies only against the account it names, a body whose
+certificate does not verify for the key that sealed the envelope is
+dropped as a forgery, and a `sync` message from anyone but your own
+devices is dropped without a word. What they learn of your devices is
+what a stranger learns from your bundle, plus which device each message
+of yours came from, which the certificate in it says.
 
 In a group, a contact who is a member sees everything said in it, as in
 any group, and learns the member list, which is what a group is. A
@@ -266,10 +300,11 @@ exception in every case: they are saved as ordinary files so other
 programs can open them.
 
 With the keys (a thief who also has the key store, the passphrase, or the
-memory of a running, unlocked client), they get the identity keys, the
-prekeys and session state, the full history, contacts, and any queued
-outgoing messages. They can impersonate you and read future messages to
-you. What they cannot do, thanks to the ratchet, is read messages that
+memory of a running, unlocked client), they get the keys the directory
+holds (on the primary the identity key, on a linked device its own device
+key and certificate), the prekeys and session state, the full history,
+contacts, and any queued outgoing messages. They can impersonate you and
+read future messages to you. What they cannot do, thanks to the ratchet, is read messages that
 were already received and ratcheted past if those were recorded in
 transit: the message keys are gone. The same holds for groups: the
 thief reads and writes in every group you are in until the next commit
@@ -288,8 +323,32 @@ key. The same certificate in a thief's hands is a denial of service — they
 can publish it and kill your identity — which you recover from by starting
 a new one, so it is no worse than the loss of the keys it sits beside. A
 backup file (`--export-backup`) is encrypted under its own passphrase and
-holds the identity keys, the revocation certificate and contacts (not
-sessions or prekeys), so it deserves the same care as the data directory.
+holds the identity keys, the revocation certificate, contacts and the
+device list (not sessions or prekeys), so it deserves the same care as
+the data directory.
+
+From 0.9.0 the directory may be one device of several (protocol section
+14), and which one matters. A **linked device's** thief gets what that
+device holds: its history from the day it was linked (and the snapshot
+of recent history and the contact list it was given then), its sessions
+with every contact's devices and with its siblings, the group epochs it
+is in, and the power to read and write as you until the primary revokes
+it, which `/devices remove` does at once. They do not get the identity
+key. Once the device is revoked, contacts have nothing to re-verify and
+the safety number is what it was: the revocation is served and logged
+by the relay, which cuts the device off, and pushed to contacts inside
+the next message, and they drop their sessions with the device; its
+leaves go from every group with the next commit, so it reads nothing
+sent after. A **primary's** thief gets what the identity thief above
+gets, and with it the power to link devices of their own and to revoke
+yours; the pre-signed revocation certificate ends the identity, devices
+included. A device the relay tells it is revoked stops and says so, but
+does not erase itself on the relay's word, since a hostile relay could
+say it falsely; its owner erases it (`/devices leave confirm`, or by
+hand). What is no better than before: every device holds every
+conversation from the day it was linked, so one device taken exposes
+what you read on any of them, which is the price of having the message
+on every device and the reason to link only computers you keep.
 
 ### Holder of a compromised long-term Diffie–Hellman key
 
@@ -321,7 +380,11 @@ victim's revocation is not undone by it, since the contact no longer has
 the old key pinned — and nothing here undoes what was already read. It
 does end the attacker's ability to be taken for the victim going forward,
 and the pre-signed certificate lets the victim revoke even when the
-attacker took the only copy of the key.
+attacker took the only copy of the key. With the identity key the
+attacker can also certify devices of their own and revoke the victim's:
+a device the victim did not link shows in `/devices`, every list change
+is a logged bundle change, and the revocation ends every device with the
+identity.
 
 ### Future quantum adversary with a recording
 
@@ -431,6 +494,18 @@ independent rebuild is the answer to that.
   across membership changes are MLS's; every member refreshes its leaf
   within a week. Group messages are signed inside MLS and are not
   deniable.
+- **Devices** (0.9.0 on): a linked device is a key pair of its own
+  (Ed25519 and X25519, like an identity's) with a certificate signed by
+  the identity key, which never leaves the primary; the account's bundle
+  lists its devices, signed as a whole and bound to the bundle. A message
+  is sealed once per device of the recipient's and once per other device
+  of the sender's, each under its own Double Ratchet session, so every
+  device has it and no key is shared between devices. A device is
+  revoked by a signed statement the relay serves, logs and enforces and
+  contacts act on. Linking sends the new device its certificate and a
+  snapshot through the relay, sealed under a key from a one-time secret
+  the device printed. In groups a device is a leaf of its own, signed by
+  the device key with the certificate in the leaf.
 - **At rest**: a per-installation data key, wrapped by the OS key store or
   by a passphrase through Argon2id; every file under it is
   XChaCha20-Poly1305.
@@ -458,6 +533,10 @@ signed by design.
    members see everything said in it and each other's ids; an admin
    decides who those members are. An invitation from a contact is taken
    on your behalf; one from a stranger waits for you.
+6. **Which computers to link.** A linked device reads and writes as you
+   until you remove it, and holds every conversation from the day it was
+   linked. Its loss costs what it held and nothing a contact must
+   re-check; the primary's loss is the identity's.
 
 ## Supply chain
 
@@ -527,14 +606,20 @@ maintainer's account plus signing key both being taken.
   tampering cases, end-to-end tests through a real relay (sessions,
   handshakes waiting in the mailbox, restarts, lost state, anonymous
   submission, files, TLS with trusted and untrusted roots, key pins,
-  proxies, groups forming, talking and shrinking), the groups engine
-  against a fake sequencer (every membership rule refused, a forged
-  commit breaking the group for everyone honest, a removed member unable
-  to read on, crossed commits, a lost race, out of sync and rejoin, a
-  rewound sequencer caught up), pseudo-terminal tests of the client
-  under two terminal types, and a test that renders peer-controlled text
-  through the real terminal backend and asserts nothing unescaped
-  reaches it.
+  proxies, groups forming, talking and shrinking, a device linked by
+  its link while a stranger's message under another secret is ignored,
+  a message reaching both devices of an account under one id, a
+  revoked device cut off and dropped, sync from a stranger dropped),
+  the groups engine against a fake sequencer (every membership rule
+  refused, a forged commit breaking the group for everyone honest, a
+  removed member unable to read on, crossed commits, a lost race, out of
+  sync and rejoin, a rewound sequencer caught up, a forged device leaf
+  refused, a device added and removed by its own identity and refused
+  to anyone else's), the relay's rules for device claims and
+  revocations, pseudo-terminal tests of the client under two terminal
+  types (a laptop linked, unlinked and erased among them), and a test
+  that renders peer-controlled text through the real terminal backend
+  and asserts nothing unescaped reaches it.
 - MLS itself: its security is RFC 9420's and the literature's, not
   modelled here; the Verifpal models cover the one-to-one handshake and
   ratchet only. The parts around MLS that are this program's (the
@@ -566,7 +651,7 @@ maintainer's account plus signing key both being taken.
 | History kept until the user removes it | By design; an expiry setting could follow if asked for. |
 | A panic in the terminal client can leave the terminal in raw mode | Small; next client pass. |
 | Groups: what the relay learns, and what a member can do | Groups exist from 0.9.0 (roadmap item 47) and this document says what they protect. What remains, by design: the relay sees a group's size and membership by inference from delivery bursts and sees each group's epoch move; group messages are not deniable; a rogue member can wedge a group (every honest client stops rather than accept a rule-breaking commit) and an admin has to make it anew; a leaver stays in the tree until an admin's client commits the leave, and a declined invitation leaves a dead leaf until an admin removes it; a member absent past its mailbox's quota rejoins and loses the messages between. Cover traffic does not cover groups. |
-| Multiple devices are not designed yet, so nothing here says what they protect | Roadmap item 48; this document grows when it does. |
+| Multiple devices: what a second device adds to the attack surface | Done (0.9.0, roadmap item 48), and this document says what devices protect: the identity key stays on the primary, a linked device is certified and revocable, contacts verify the identity and never a device, the relay cannot add or keep a device unseen (`PROTOCOL.md` section 14). What remains, by design: the relay learns how many devices a person has and which ids, and infers it again from delivery bursts; a linked device holds every conversation from the day it was linked plus the snapshot it was given, so its theft exposes what the person read anywhere; a revoked device is told so but erases itself only on its owner's word; the primary's loss is still the identity's, restored from the backup; a succession moves no devices. |
 
 ## Out of scope
 
