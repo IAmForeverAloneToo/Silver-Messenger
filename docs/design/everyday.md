@@ -109,8 +109,9 @@ padded like any body, so the relay sees a reaction as it sees a receipt.
 * `delete`: the messages named are removed on receipt, author's only,
   any age. The recipient keeps a placeholder line ("a message was
   deleted") and, for a file already fetched, the saved file.
-* `reaction`: `emoji` is 1 to 16 bytes of UTF-8 without control
-  characters, or empty to remove the sender's reaction. One reaction per
+* `reaction`: `emoji` is 1 to 32 bytes of UTF-8 without control, blank
+  or invisible characters (the zero width joiner of emoji sequences is
+  allowed), or empty to remove the sender's reaction. One reaction per
   sender per message; a new one replaces it. Any member of a
   conversation may react to any message in it, its own included.
 * `timer`: the conversation's disappearing-message timer from now on,

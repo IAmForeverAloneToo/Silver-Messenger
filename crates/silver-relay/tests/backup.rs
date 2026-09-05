@@ -18,15 +18,7 @@ fn populate(dir: &std::path::Path) -> Identity {
         .set_one_time_prekeys(&bob.user_id(), &[PrekeySecret::generate(2, 0).one_time()])
         .unwrap();
     let alice = Identity::generate();
-    let envelope = seal(
-        &alice,
-        &bob.key_bundle(),
-        Content::Text {
-            body: "kept".into(),
-        },
-        0,
-    )
-    .unwrap();
+    let envelope = seal(&alice, &bob.key_bundle(), Content::text("kept"), 0).unwrap();
     store.enqueue(&envelope, 1, Limits::default()).unwrap();
     bob
 }

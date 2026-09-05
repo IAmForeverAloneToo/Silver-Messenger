@@ -1020,7 +1020,7 @@ impl App {
     // --- sending -------------------------------------------------------------
 
     pub(super) fn send_group_text(&mut self, group: GroupId, text: String) {
-        self.send_group_content(group, Content::Text { body: text.clone() }, text);
+        self.send_group_content(group, Content::text(text.clone()), text);
     }
 
     fn send_group_content(&mut self, group: GroupId, content: Content, shown: String) {
@@ -1258,7 +1258,7 @@ impl App {
                         continue; // an invitation not accepted yet
                     }
                     let (text, pending) = match content {
-                        Content::Text { body } => (body, None),
+                        Content::Text { body, .. } => (body, None),
                         Content::File { .. } => {
                             let info = FileInfo::from_content(&content).expect("file content");
                             match info.check() {

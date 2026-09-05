@@ -1,5 +1,5 @@
 {
-  "description": "Bodies as encoded before sealing: JSON in the field order given, padded with spaces to a multiple of 160 bytes. Plain (v1) bodies for each content kind (a text from a linked device carrying its certificate, the copy of a text for a second device of the recipient's naming the message's id, a sync copy between one's own devices and a device revocation, among them), ratchet bodies (v2, with and without the InitHeader), and group bodies (v5: an application message inline, a Welcome parked in the blob store, a join request with its proof).",
+  "description": "Bodies as encoded before sealing: JSON in the field order given, padded with spaces to a multiple of 160 bytes. Plain (v1) bodies for each content kind (a text from a linked device carrying its certificate, the copy of a text for a second device of the recipient's naming the message's id, a sync copy between one's own devices, a device revocation, a reply, an edit, a deletion, a reaction given and one withdrawn, and a timer, among them), ratchet bodies (v2, with and without the InitHeader), and group bodies (v5: an application message inline, a Welcome parked in the blob store, a join request with its proof).",
   "cases": [
     {
       "name": "text",
@@ -247,6 +247,130 @@
       "outputs": {
         "encoded": "{\"sent_at_ms\":1700000000000,\"epoch\":81985529216486895,\"seq\":42,\"content\":{\"type\":\"sync\",\"kind\":\"sent\",\"peer\":\"2fYtRY8g36vouXvfE2ysTB9foJeA5L7AAZNEF5faBhsC\",\"id\":\"00000000-0000-4000-8000-000000000002\",\"sent_at_ms\":1700000000000,\"content\":{\"type\":\"text\",\"body\":\"hello, bob\"}},\"caps\":[\"devices\"]}                           ",
         "encoded_len": 320
+      }
+    },
+    {
+      "name": "reply",
+      "inputs": {
+        "kind": "plain",
+        "content": {
+          "type": "text",
+          "body": "yes, tomorrow",
+          "reply_to": "0f0e0d0c-0b0a-4908-8706-050403020100"
+        },
+        "sent_at_ms": 1700000000000,
+        "epoch": 81985529216486895,
+        "seq": 42
+      },
+      "outputs": {
+        "encoded": "{\"sent_at_ms\":1700000000000,\"epoch\":81985529216486895,\"seq\":42,\"content\":{\"type\":\"text\",\"body\":\"yes, tomorrow\",\"reply_to\":\"0f0e0d0c-0b0a-4908-8706-050403020100\"}}                                                                                                                                                              ",
+        "encoded_len": 320
+      }
+    },
+    {
+      "name": "edit",
+      "inputs": {
+        "kind": "plain",
+        "content": {
+          "type": "edit",
+          "id": "0f0e0d0c-0b0a-4908-8706-050403020100",
+          "body": "yes, on Tuesday"
+        },
+        "sent_at_ms": 1700000000000,
+        "epoch": 81985529216486895,
+        "seq": 42,
+        "caps": [
+          "edits"
+        ]
+      },
+      "outputs": {
+        "encoded": "{\"sent_at_ms\":1700000000000,\"epoch\":81985529216486895,\"seq\":42,\"content\":{\"type\":\"edit\",\"id\":\"0f0e0d0c-0b0a-4908-8706-050403020100\",\"body\":\"yes, on Tuesday\"},\"caps\":[\"edits\"]}                                                                                                                                                 ",
+        "encoded_len": 320
+      }
+    },
+    {
+      "name": "delete",
+      "inputs": {
+        "kind": "plain",
+        "content": {
+          "type": "delete",
+          "ids": [
+            "0f0e0d0c-0b0a-4908-8706-050403020100",
+            "00000000-0000-4000-8000-000000000001"
+          ]
+        },
+        "sent_at_ms": 1700000000000,
+        "epoch": 81985529216486895,
+        "seq": 42,
+        "caps": [
+          "edits"
+        ]
+      },
+      "outputs": {
+        "encoded": "{\"sent_at_ms\":1700000000000,\"epoch\":81985529216486895,\"seq\":42,\"content\":{\"type\":\"delete\",\"ids\":[\"0f0e0d0c-0b0a-4908-8706-050403020100\",\"00000000-0000-4000-8000-000000000001\"]},\"caps\":[\"edits\"]}                                                                                                                              ",
+        "encoded_len": 320
+      }
+    },
+    {
+      "name": "reaction",
+      "inputs": {
+        "kind": "plain",
+        "content": {
+          "type": "reaction",
+          "id": "0f0e0d0c-0b0a-4908-8706-050403020100",
+          "emoji": "👍"
+        },
+        "sent_at_ms": 1700000000000,
+        "epoch": 81985529216486895,
+        "seq": 42,
+        "caps": [
+          "reactions"
+        ]
+      },
+      "outputs": {
+        "encoded": "{\"sent_at_ms\":1700000000000,\"epoch\":81985529216486895,\"seq\":42,\"content\":{\"type\":\"reaction\",\"id\":\"0f0e0d0c-0b0a-4908-8706-050403020100\",\"emoji\":\"👍\"},\"caps\":[\"reactions\"]}                                                                                                                                                   ",
+        "encoded_len": 320
+      }
+    },
+    {
+      "name": "reaction_removed",
+      "inputs": {
+        "kind": "plain",
+        "content": {
+          "type": "reaction",
+          "id": "0f0e0d0c-0b0a-4908-8706-050403020100",
+          "emoji": ""
+        },
+        "sent_at_ms": 1700000000000,
+        "epoch": 81985529216486895,
+        "seq": 42,
+        "caps": [
+          "reactions"
+        ]
+      },
+      "outputs": {
+        "encoded": "{\"sent_at_ms\":1700000000000,\"epoch\":81985529216486895,\"seq\":42,\"content\":{\"type\":\"reaction\",\"id\":\"0f0e0d0c-0b0a-4908-8706-050403020100\",\"emoji\":\"\"},\"caps\":[\"reactions\"]}                                                                                                                                                       ",
+        "encoded_len": 320
+      }
+    },
+    {
+      "name": "timer",
+      "inputs": {
+        "kind": "plain",
+        "content": {
+          "type": "timer",
+          "seconds": 86400
+        },
+        "sent_at_ms": 1700000000000,
+        "epoch": 81985529216486895,
+        "seq": 42,
+        "caps": [
+          "timers"
+        ]
+      },
+      "outputs": {
+        "encoded": "{\"sent_at_ms\":1700000000000,\"epoch\":81985529216486895,\"seq\":42,\"content\":{\"type\":\"timer\",\"seconds\":86400},\"caps\":[\"timers\"]}                                    ",
+        "encoded_len": 160
       }
     },
     {

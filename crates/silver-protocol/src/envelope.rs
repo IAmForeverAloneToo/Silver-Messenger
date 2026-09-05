@@ -58,13 +58,15 @@ pub struct Envelope {
 pub enum Content {
     Text {
         body: String,
+        /// The id of the message this one answers, in the same
+        /// conversation (section 4.7). A reader that does not know the
+        /// field shows the text alone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_to: Option<String>,
     },
     /// Acknowledges the messages with these ids. Only sent to peers whose
     /// messages advertised the `receipts` capability.
-    Receipt {
-        kind: ReceiptKind,
-        ids: Vec<String>,
-    },
+    Receipt { kind: ReceiptKind, ids: Vec<String> },
     /// A file parked on the relay as an encrypted blob; everything needed
     /// to fetch and read it. Only sent to peers that advertised `files`.
     File {
@@ -75,7 +77,26 @@ pub enum Content {
         chunks: u32,
         #[serde(with = "b64_array")]
         sha256: [u8; 32],
+        /// As on a text: the message this file answers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_to: Option<String>,
     },
+    /// The new text of the message `id`, which the sender sent (section
+    /// 4.7). Only sent to peers that advertised `edits`; a recipient
+    /// applies it only from the author.
+    Edit { id: String, body: String },
+    /// The sender asks that its messages named here be removed wherever
+    /// they were delivered (section 4.7). Only sent to peers that
+    /// advertised `edits`; applied only for the author's own messages.
+    Delete { ids: Vec<String> },
+    /// The sender's reaction to the message `id`: a short string, or empty
+    /// to remove the sender's reaction (section 4.7). One per sender per
+    /// message. Only sent to peers that advertised `reactions`.
+    Reaction { id: String, emoji: String },
+    /// The conversation's disappearing-message timer from now on, in
+    /// seconds; 0 turns it off (section 4.7). Only sent to peers that
+    /// advertised `timers`; in a group, applied only from an admin.
+    Timer { seconds: u64 },
     /// A signed statement that the sender's identity is revoked (dead).
     /// Verified by its own signature, so it is trusted however it arrived.
     /// Only sent to peers that advertised `lifecycle`.
@@ -91,9 +112,7 @@ pub enum Content {
     /// padded size the way real messages do. Only sent to peers that
     /// advertised `cover`, which a client does only while its user has
     /// cover traffic on, so both sides have agreed to the cost.
-    Cover {
-        pad: String,
-    },
+    Cover { pad: String },
     /// What one of the sender's own devices tells another (section 14);
     /// accepted only from a device certified for the recipient's own
     /// account, ignored from anyone else.
@@ -118,6 +137,110 @@ pub const MAX_MESSAGE_ID_BYTES: usize = 64;
 /// long. The envelope ids this crate makes always pass.
 pub fn is_valid_message_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= MAX_MESSAGE_ID_BYTES && id.bytes().all(|b| b.is_ascii_graphic())
+}
+
+/// Longest reaction, in bytes of UTF-8: an emoji with its modifiers and
+/// joiners (a family is 18 bytes), or a few characters.
+pub const MAX_REACTION_BYTES: usize = 32;
+
+/// Characters a reaction may not carry besides controls and blanks: the
+/// invisible ones that reorder or hide what is around them. The zero
+/// width joiner (U+200D) is not among them, since emoji sequences are
+/// built with it.
+fn is_invisible(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200B}'
+            | '\u{200C}'
+            | '\u{200E}'
+            | '\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}'
+    )
+}
+/// Longest disappearing-message timer, in seconds: a year.
+pub const MAX_TIMER_SECONDS: u64 = 365 * 24 * 60 * 60;
+/// Most messages one `delete` names.
+pub const MAX_DELETE_IDS: usize = 64;
+
+impl Content {
+    /// A text that answers nothing.
+    pub fn text(body: impl Into<String>) -> Self {
+        Self::Text {
+            body: body.into(),
+            reply_to: None,
+        }
+    }
+
+    /// The message this text or file answers, if it is a reply.
+    pub fn reply_to(&self) -> Option<&str> {
+        match self {
+            Self::Text { reply_to, .. } | Self::File { reply_to, .. } => reply_to.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Check the bounds of section 4.7: every message id named is a valid
+    /// one, a reaction is short and printable, a timer is at most a year,
+    /// a deletion names at least one and at most [`MAX_DELETE_IDS`]
+    /// messages. A copy between one's own devices is checked for what it
+    /// carries. Called when a body is encoded and when one is decoded.
+    pub fn check(&self) -> Result<(), ProtocolError> {
+        let malformed = |what: &str| ProtocolError::Malformed(what.into());
+        let id_ok = |id: &str, what: &str| {
+            if is_valid_message_id(id) {
+                Ok(())
+            } else {
+                Err(malformed(what))
+            }
+        };
+        match self {
+            Self::Text { reply_to, .. } | Self::File { reply_to, .. } => match reply_to {
+                Some(id) => id_ok(id, "reply_to is not a message id"),
+                None => Ok(()),
+            },
+            Self::Edit { id, .. } => id_ok(id, "edit names no message id"),
+            Self::Delete { ids } => {
+                if ids.is_empty() || ids.len() > MAX_DELETE_IDS {
+                    return Err(malformed("delete names no messages, or too many"));
+                }
+                ids.iter()
+                    .try_for_each(|id| id_ok(id, "delete names something that is no message id"))
+            }
+            Self::Reaction { id, emoji } => {
+                id_ok(id, "reaction names no message id")?;
+                if emoji.len() > MAX_REACTION_BYTES {
+                    return Err(malformed("reaction too long"));
+                }
+                if emoji
+                    .chars()
+                    .any(|c| c.is_control() || c.is_whitespace() || is_invisible(c))
+                {
+                    return Err(malformed(
+                        "reaction with a control, blank or invisible character",
+                    ));
+                }
+                Ok(())
+            }
+            Self::Timer { seconds } => {
+                if *seconds > MAX_TIMER_SECONDS {
+                    return Err(malformed("timer longer than a year"));
+                }
+                Ok(())
+            }
+            Self::Sync(crate::device::Sync::Sent { content, .. })
+            | Self::Sync(crate::device::Sync::Received { content, .. }) => content.check(),
+            Self::Receipt { .. }
+            | Self::Revocation(_)
+            | Self::Succession(_)
+            | Self::Cover { .. }
+            | Self::Sync(_)
+            | Self::Provision(_)
+            | Self::DeviceRevocation(_) => Ok(()),
+        }
+    }
 }
 
 /// How far a message got on the recipient's side. Ordered: read implies
@@ -156,6 +279,15 @@ pub mod capability {
     /// message to its other devices; and it reads `sync` content from its
     /// own devices.
     pub const DEVICES: &str = "devices";
+    /// The client understands `Content::Edit` and `Content::Delete`
+    /// (section 4.7): it shows an edited message in its new form and
+    /// removes a deleted one.
+    pub const EDITS: &str = "edits";
+    /// The client understands `Content::Reaction` (section 4.7).
+    pub const REACTIONS: &str = "reactions";
+    /// The client understands `Content::Timer` (section 4.7): it deletes
+    /// messages of a conversation with a timer when their time comes.
+    pub const TIMERS: &str = "timers";
 }
 
 /// Bodies are padded to a multiple of this many bytes, so a relay sees
@@ -329,6 +461,7 @@ impl Body {
                 {
                     return Err(ProtocolError::Malformed("message id".into()));
                 }
+                content.check()?;
                 serde_json::to_vec(&PlainBody {
                     sent_at_ms: *sent_at_ms,
                     epoch: sequence.epoch,
@@ -365,6 +498,7 @@ impl Body {
                 {
                     return Err(ProtocolError::Malformed("message id".into()));
                 }
+                body.content.check()?;
                 Ok(Self::Plain {
                     sent_at_ms: body.sent_at_ms,
                     sequence: Sequence {
@@ -752,7 +886,147 @@ mod tests {
     use crate::session::Session;
 
     fn text(s: &str) -> Content {
-        Content::Text { body: s.into() }
+        Content::text(s)
+    }
+
+    #[test]
+    fn the_everyday_kinds_round_trip_within_their_bounds() {
+        let id = "0f0e0d0c-0b0a-4908-8706-050403020100".to_owned();
+        let good = vec![
+            Content::Text {
+                body: "yes".into(),
+                reply_to: Some(id.clone()),
+            },
+            Content::Edit {
+                id: id.clone(),
+                body: "yes, on Tuesday".into(),
+            },
+            Content::Delete {
+                ids: vec![id.clone(), "m2".into()],
+            },
+            Content::Reaction {
+                id: id.clone(),
+                emoji: "👍🏽".into(),
+            },
+            Content::Reaction {
+                id: id.clone(),
+                emoji: "👨\u{200d}👩\u{200d}👧".into(),
+            },
+            Content::Reaction {
+                id: id.clone(),
+                emoji: "❤\u{fe0f}".into(),
+            },
+            Content::Reaction {
+                id: id.clone(),
+                emoji: String::new(),
+            },
+            Content::Timer { seconds: 0 },
+            Content::Timer {
+                seconds: MAX_TIMER_SECONDS,
+            },
+        ];
+        for content in good {
+            assert!(content.check().is_ok(), "{content:?}");
+            let bytes = Body::plain(content.clone(), 1, Sequence::default())
+                .encode()
+                .unwrap();
+            let Body::Plain { content: back, .. } = Body::decode(&bytes).unwrap() else {
+                panic!("a plain body");
+            };
+            assert_eq!(back, content);
+        }
+        // A text that answers nothing carries no field, as before 0.10.0.
+        let plain = serde_json::to_string(&Content::text("hi")).unwrap();
+        assert_eq!(plain, r#"{"type":"text","body":"hi"}"#);
+        assert_eq!(Content::text("hi").reply_to(), None);
+        // And a text with the field is read by a reader that does not know
+        // it: the field is ignored, the text stands.
+        #[derive(serde::Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        enum Older {
+            Text { body: String },
+        }
+        let json = serde_json::to_string(&Content::Text {
+            body: "hi".into(),
+            reply_to: Some(id.clone()),
+        })
+        .unwrap();
+        let Older::Text { body } = serde_json::from_str(&json).unwrap();
+        assert_eq!(body, "hi");
+
+        let bad = vec![
+            Content::Text {
+                body: "yes".into(),
+                reply_to: Some(String::new()),
+            },
+            Content::Text {
+                body: "yes".into(),
+                reply_to: Some("a b".into()),
+            },
+            Content::Edit {
+                id: "x".repeat(MAX_MESSAGE_ID_BYTES + 1),
+                body: "text".into(),
+            },
+            Content::Delete { ids: Vec::new() },
+            Content::Delete {
+                ids: vec![id.clone(); MAX_DELETE_IDS + 1],
+            },
+            Content::Delete {
+                ids: vec!["\u{7}".into()],
+            },
+            Content::Reaction {
+                id: id.clone(),
+                emoji: "x".repeat(MAX_REACTION_BYTES + 1),
+            },
+            Content::Reaction {
+                id: id.clone(),
+                emoji: "a\u{200b}".into(),
+            },
+            Content::Reaction {
+                id: id.clone(),
+                emoji: "\u{202e}ok".into(),
+            },
+            Content::Reaction {
+                id: id.clone(),
+                emoji: "\n".into(),
+            },
+            Content::Reaction {
+                id: id.clone(),
+                emoji: "a b".into(),
+            },
+            Content::Timer {
+                seconds: MAX_TIMER_SECONDS + 1,
+            },
+        ];
+        for content in bad {
+            assert!(
+                matches!(content.check(), Err(ProtocolError::Malformed(_))),
+                "{content:?}"
+            );
+            assert!(
+                Body::plain(content.clone(), 1, Sequence::default())
+                    .encode()
+                    .is_err(),
+                "{content:?}"
+            );
+            // Decoding is as strict as encoding: a malformed one made by
+            // hand is refused.
+            let json = format!(
+                r#"{{"sent_at_ms":1,"content":{}}}"#,
+                serde_json::to_string(&content).unwrap()
+            );
+            assert!(Body::decode(json.as_bytes()).is_err(), "{content:?}");
+        }
+        // A sync copy is checked for what it carries.
+        let copy = Content::Sync(crate::device::Sync::Sent {
+            peer: Identity::generate().user_id(),
+            id: "m1".into(),
+            sent_at_ms: 1,
+            content: Box::new(Content::Timer {
+                seconds: MAX_TIMER_SECONDS + 1,
+            }),
+        });
+        assert!(copy.check().is_err());
     }
 
     #[test]

@@ -113,7 +113,7 @@ mod tests {
 
     fn envelope(text: &str) -> Envelope {
         let (a, b) = (Identity::generate(), Identity::generate());
-        seal(&a, &b.key_bundle(), Content::Text { body: text.into() }, 0).unwrap()
+        seal(&a, &b.key_bundle(), Content::text(text), 0).unwrap()
     }
 
     #[test]

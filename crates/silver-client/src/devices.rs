@@ -361,7 +361,12 @@ pub enum Spread {
 /// How far `content` spreads.
 pub fn spread_of(content: &Content) -> Spread {
     match content {
-        Content::Text { .. } | Content::File { .. } => Spread::Everywhere,
+        Content::Text { .. }
+        | Content::File { .. }
+        | Content::Edit { .. }
+        | Content::Delete { .. }
+        | Content::Reaction { .. }
+        | Content::Timer { .. } => Spread::Everywhere,
         Content::Receipt { .. }
         | Content::Revocation(_)
         | Content::Succession(_)
@@ -593,10 +598,7 @@ mod tests {
     #[test]
     fn contents_spread_as_the_design_says() {
         use silver_protocol::envelope::ReceiptKind;
-        assert_eq!(
-            spread_of(&Content::Text { body: "x".into() }),
-            Spread::Everywhere
-        );
+        assert_eq!(spread_of(&Content::text("x")), Spread::Everywhere);
         assert_eq!(
             spread_of(&Content::Receipt {
                 kind: ReceiptKind::Read,
@@ -618,9 +620,28 @@ mod tests {
         assert_eq!(
             spread_of(&Content::Sync(Sync::Read {
                 peer: alice.user_id(),
-                ids: vec![]
+                ids: vec![],
+                at_ms: None,
             })),
             Spread::Addressed
         );
+        // What one device edits, deletes, reacts to or times, its siblings
+        // apply too, so those go where a text goes.
+        for content in [
+            Content::Edit {
+                id: "m1".into(),
+                body: "again".into(),
+            },
+            Content::Delete {
+                ids: vec!["m1".into()],
+            },
+            Content::Reaction {
+                id: "m1".into(),
+                emoji: "👍".into(),
+            },
+            Content::Timer { seconds: 60 },
+        ] {
+            assert_eq!(spread_of(&content), Spread::Everywhere);
+        }
     }
 }

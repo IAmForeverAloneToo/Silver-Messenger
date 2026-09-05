@@ -75,9 +75,7 @@ fn damaged_envelopes_and_chunks_are_refused_without_panicking() {
     let sealed = seal(
         &alice,
         &bob.key_bundle(),
-        Content::Text {
-            body: "hello".into(),
-        },
+        Content::text("hello"),
         1_700_000_000_000,
     )
     .unwrap();

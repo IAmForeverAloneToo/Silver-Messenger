@@ -120,7 +120,7 @@ fn deliver(
 }
 
 fn text(s: &str) -> Content {
-    Content::Text { body: s.into() }
+    Content::text(s)
 }
 
 /// Alice creates a group and adds bob and carol; everyone is in sync.

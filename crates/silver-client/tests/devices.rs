@@ -84,7 +84,7 @@ fn options(
 fn text_of(ev: &ClientEvent) -> Option<(UserId, Option<UserId>, String, String)> {
     match ev {
         ClientEvent::Message(m) => match &m.content {
-            Content::Text { body } => Some((
+            Content::Text { body, .. } => Some((
                 m.from,
                 m.device.as_ref().map(|c| c.device),
                 m.id.clone(),
@@ -165,7 +165,7 @@ fn seq(epoch: u64, seq: u64) -> Sequence {
 }
 
 fn text(body: &str) -> Content {
-    Content::Text { body: body.into() }
+    Content::text(body)
 }
 
 #[tokio::test]
@@ -510,6 +510,7 @@ async fn sync_is_taken_from_ones_own_devices_only() {
             Content::Sync(Sync::Read {
                 peer: bob.user_id(),
                 ids: vec!["x".into()],
+                at_ms: None,
             }),
             Sequence::default(),
         )
@@ -521,6 +522,7 @@ async fn sync_is_taken_from_ones_own_devices_only() {
         .send_sync(Sync::Read {
             peer: bob.user_id(),
             ids: vec!["y".into()],
+            at_ms: None,
         })
         .await
         .unwrap();

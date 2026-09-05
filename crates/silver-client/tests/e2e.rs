@@ -75,7 +75,7 @@ async fn wait_for(
 fn body(ev: &ClientEvent) -> Option<(&silver_protocol::UserId, &str)> {
     match ev {
         ClientEvent::Message(m) => match &m.content {
-            Content::Text { body } => Some((&m.from, body.as_str())),
+            Content::Text { body, .. } => Some((&m.from, body.as_str())),
             _ => None,
         },
         _ => None,
@@ -706,12 +706,7 @@ async fn clients_with_prekeys_talk_over_forward_secret_sessions() {
     let got = wait_for(&mut bob_ev, "bob's message", |e| message(e).is_some()).await;
     let m = message(&got).unwrap();
     assert_eq!(m.from, alice.user_id());
-    assert_eq!(
-        m.content,
-        Content::Text {
-            body: "hello under a session".into()
-        }
-    );
+    assert_eq!(m.content, Content::text("hello under a session"));
     assert_eq!(m.sequence, Sequence { epoch: 1, seq: 1 });
     assert!(m.forward_secret);
     // Both clients advertise the v4 ratchet, so the session runs it and the
@@ -861,7 +856,7 @@ async fn handshakes_wait_in_the_mailbox_and_sessions_survive_restarts() {
             ClientEvent::SessionEstablished { .. } => established += 1,
             ClientEvent::Message(m) => {
                 assert!(m.forward_secret);
-                let Content::Text { body } = m.content else {
+                let Content::Text { body, .. } = m.content else {
                     panic!("expected text");
                 };
                 texts.push(body);

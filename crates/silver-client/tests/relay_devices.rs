@@ -182,13 +182,7 @@ fn is_error(frame: &ServerFrame, code: ErrorCode) -> bool {
 
 fn envelope_to(from: &Identity, to: &Identity, text: &str) -> ClientFrame {
     ClientFrame::Send {
-        envelope: seal(
-            from,
-            &to.key_bundle(),
-            Content::Text { body: text.into() },
-            0,
-        )
-        .unwrap(),
+        envelope: seal(from, &to.key_bundle(), Content::text(text), 0).unwrap(),
     }
 }
 

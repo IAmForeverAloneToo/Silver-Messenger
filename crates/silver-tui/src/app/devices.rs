@@ -674,6 +674,9 @@ impl App {
 
     pub(super) fn on_sync(&mut self, device: UserId, sync: Sync) {
         match sync {
+            // A sibling's "delete for me" is applied where deletions are
+            // (docs/design/everyday.md); nothing here does yet.
+            Sync::Remove { .. } => {}
             Sync::Sent {
                 peer,
                 id,
@@ -754,7 +757,7 @@ impl App {
                     self.unread.entry(from).or_default().push(id);
                 }
             }
-            Sync::Read { peer, ids } => {
+            Sync::Read { peer, ids, .. } => {
                 if let Some(unread) = self.unread.get_mut(&peer) {
                     unread.retain(|i| !ids.contains(i));
                 }
@@ -922,7 +925,7 @@ impl App {
 /// The line a sent or received copy shows, for a text or a file.
 fn line_text(content: &Content) -> Option<String> {
     match content {
-        Content::Text { body } => Some(body.clone()),
+        Content::Text { body, .. } => Some(body.clone()),
         Content::File { .. } => {
             FileInfo::from_content(content).map(|i| format!("[file] {}", i.label()))
         }

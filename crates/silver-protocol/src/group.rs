@@ -56,6 +56,12 @@ pub const EXTENSION_SEAL: u16 = 0xF001;
 /// device leaf from the tree alone (section 14). Absent from a primary's
 /// leaf, whose signature key is the identity key.
 pub const EXTENSION_DEVICE: u16 = 0xF002;
+/// Declared in the capabilities of every key package and leaf from 0.10.0
+/// and never carried as an extension: a leaf that declares it reads the
+/// everyday content kinds of section 4.7 (edit, delete, reaction, timer)
+/// in application messages. A client sends one of those to a group only
+/// when every leaf in the tree declares this.
+pub const EXTENSION_EVERYDAY: u16 = 0xF003;
 /// The MLS exporter label of the token a committer shows the relay's
 /// epoch sequencer; the context is the group id, the length 32.
 pub const SEQUENCER_LABEL: &str = "silver-messenger/v1/group-sequencer";
@@ -275,6 +281,7 @@ pub struct GroupPlaintext {
 
 impl GroupPlaintext {
     pub fn encode(&self) -> Result<Vec<u8>, ProtocolError> {
+        self.content.check()?;
         let bytes =
             serde_json::to_vec(self).map_err(|e| ProtocolError::Malformed(e.to_string()))?;
         if bytes.len() > MAX_BODY_BYTES {
@@ -292,6 +299,7 @@ impl GroupPlaintext {
         if plain.id.is_empty() || plain.id.len() > MAX_ID_BYTES {
             return Err(ProtocolError::Malformed("group message: bad id".into()));
         }
+        plain.content.check()?;
         Ok(plain)
     }
 }
@@ -712,9 +720,7 @@ mod tests {
         let plain = GroupPlaintext {
             id: "0f0e0d0c-0b0a-4908-8706-050403020100".into(),
             sent_at_ms: 5,
-            content: Content::Text {
-                body: "hi all".into(),
-            },
+            content: Content::text("hi all"),
             head: Some(LogHead {
                 index: 1,
                 hash: [4; 32],
@@ -728,13 +734,26 @@ mod tests {
             )
             .is_err()
         );
+        // The content's bounds hold inside a group message too.
+        assert!(
+            GroupPlaintext::decode(
+                br#"{"id":"m1","sent_at_ms":1,"content":{"type":"timer","seconds":99999999999}}"#
+            )
+            .is_err()
+        );
         let big = GroupPlaintext {
-            content: Content::Text {
-                body: "x".repeat(MAX_BODY_BYTES),
+            content: Content::text("x".repeat(MAX_BODY_BYTES)),
+            ..plain.clone()
+        };
+        assert!(matches!(big.encode(), Err(ProtocolError::TooLarge(_))));
+        let bad = GroupPlaintext {
+            content: Content::Reaction {
+                id: "m1".into(),
+                emoji: "\n".into(),
             },
             ..plain
         };
-        assert!(matches!(big.encode(), Err(ProtocolError::TooLarge(_))));
+        assert!(matches!(bad.encode(), Err(ProtocolError::Malformed(_))));
     }
 
     #[test]

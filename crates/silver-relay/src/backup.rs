@@ -1192,13 +1192,7 @@ mod tests {
         let alice = Identity::generate();
         for (to, texts) in [(&bob, vec!["one", "two", "three"]), (&carol, vec!["four"])] {
             for text in texts {
-                let envelope = seal(
-                    &alice,
-                    &to.key_bundle(),
-                    Content::Text { body: text.into() },
-                    0,
-                )
-                .unwrap();
+                let envelope = seal(&alice, &to.key_bundle(), Content::text(text), 0).unwrap();
                 store.enqueue(&envelope, 10, Limits::default()).unwrap();
             }
         }

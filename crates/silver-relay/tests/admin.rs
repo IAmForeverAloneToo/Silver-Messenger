@@ -40,15 +40,7 @@ async fn the_socket_lists_evicts_bans_and_sets_the_invite_token() {
         .set_one_time_prekeys(&bob.user_id(), &[PrekeySecret::generate(2, 0).one_time()])
         .unwrap();
     let alice = Identity::generate();
-    let envelope = seal(
-        &alice,
-        &bob.key_bundle(),
-        Content::Text {
-            body: "waiting".into(),
-        },
-        0,
-    )
-    .unwrap();
+    let envelope = seal(&alice, &bob.key_bundle(), Content::text("waiting"), 0).unwrap();
     store.enqueue(&envelope, 1, Limits::default()).unwrap();
 
     let (state, _dir, socket) = start(

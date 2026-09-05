@@ -329,7 +329,7 @@ fn xchacha_encrypt(key: &[u8], nonce: &[u8], plaintext: &[u8], aad: &[u8]) -> Ve
 }
 
 fn text(s: &str) -> Content {
-    Content::Text { body: s.into() }
+    Content::text(s)
 }
 
 // ---------------------------------------------------------------------------
@@ -1990,7 +1990,9 @@ fn body() {
          for each content kind (a text from a linked device carrying its \
          certificate, the copy of a text for a second device of the \
          recipient's naming the message's id, a sync copy between one's \
-         own devices and a device revocation, among them), ratchet bodies \
+         own devices, a device revocation, a reply, an edit, a deletion, \
+         a reaction given and one withdrawn, and a timer, among them), \
+         ratchet bodies \
          (v2, with and without the InitHeader), and group bodies (v5: an \
          application message inline, a Welcome parked in the blob store, a \
          join request with its proof).",
@@ -2036,6 +2038,7 @@ fn body() {
                         ),
                         chunks: 2,
                         sha256: label32("file hash"),
+                        reply_to: None,
                     },
                     vec![],
                     None,
@@ -2118,6 +2121,71 @@ fn body() {
                         content: Box::new(text("hello, bob")),
                     }),
                     vec![capability::DEVICES],
+                    None,
+                ),
+            ),
+            (
+                "reply",
+                plain(
+                    Content::Text {
+                        body: "yes, tomorrow".into(),
+                        reply_to: Some("0f0e0d0c-0b0a-4908-8706-050403020100".into()),
+                    },
+                    vec![],
+                    None,
+                ),
+            ),
+            (
+                "edit",
+                plain(
+                    Content::Edit {
+                        id: "0f0e0d0c-0b0a-4908-8706-050403020100".into(),
+                        body: "yes, on Tuesday".into(),
+                    },
+                    vec![capability::EDITS],
+                    None,
+                ),
+            ),
+            (
+                "delete",
+                plain(
+                    Content::Delete {
+                        ids: vec![
+                            "0f0e0d0c-0b0a-4908-8706-050403020100".into(),
+                            "00000000-0000-4000-8000-000000000001".into(),
+                        ],
+                    },
+                    vec![capability::EDITS],
+                    None,
+                ),
+            ),
+            (
+                "reaction",
+                plain(
+                    Content::Reaction {
+                        id: "0f0e0d0c-0b0a-4908-8706-050403020100".into(),
+                        emoji: "👍".into(),
+                    },
+                    vec![capability::REACTIONS],
+                    None,
+                ),
+            ),
+            (
+                "reaction_removed",
+                plain(
+                    Content::Reaction {
+                        id: "0f0e0d0c-0b0a-4908-8706-050403020100".into(),
+                        emoji: String::new(),
+                    },
+                    vec![capability::REACTIONS],
+                    None,
+                ),
+            ),
+            (
+                "timer",
+                plain(
+                    Content::Timer { seconds: 86_400 },
+                    vec![capability::TIMERS],
                     None,
                 ),
             ),

@@ -1009,7 +1009,7 @@ impl Client {
         text: String,
         sequence: Sequence,
     ) -> Result<Envelope, ClientError> {
-        self.send_content_sequenced(to, Content::Text { body: text }, sequence)
+        self.send_content_sequenced(to, Content::text(text), sequence)
             .await
     }
 
@@ -1129,7 +1129,7 @@ impl Client {
         text: String,
         sequence: Sequence,
     ) -> Result<Delivery, ClientError> {
-        self.send_content(peer, pinned, Content::Text { body: text }, sequence)
+        self.send_content(peer, pinned, Content::text(text), sequence)
             .await
     }
 

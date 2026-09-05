@@ -364,8 +364,25 @@ pub enum Sync {
         content: Box<Content>,
     },
     /// Messages from `peer` this device showed, so the others need not
-    /// send read receipts for them.
-    Read { peer: UserId, ids: Vec<String> },
+    /// send read receipts for them, and so a disappearing message's clock
+    /// starts on every device from the same moment (`at_ms`, absent from
+    /// a device before 0.10.0).
+    Read {
+        peer: UserId,
+        ids: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at_ms: Option<u64>,
+    },
+    /// Messages this device removed for itself ("delete for me"), which
+    /// the others remove too: `peer`'s conversation or `group`'s, one of
+    /// the two.
+    Remove {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        peer: Option<UserId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group: Option<crate::group::GroupId>,
+        ids: Vec<String>,
+    },
     /// A change to the contact list.
     Contact {
         #[serde(flatten)]
@@ -558,17 +575,33 @@ mod tests {
                 peer,
                 id: "m1".into(),
                 sent_at_ms: 3,
-                content: Box::new(Content::Text { body: "hi".into() }),
+                content: Box::new(Content::text("hi")),
             },
             Sync::Received {
                 from: peer,
                 id: "m2".into(),
                 sent_at_ms: 4,
-                content: Box::new(Content::Text { body: "yo".into() }),
+                content: Box::new(Content::text("yo")),
             },
             Sync::Read {
                 peer,
                 ids: vec!["m1".into()],
+                at_ms: None,
+            },
+            Sync::Read {
+                peer,
+                ids: vec!["m1".into()],
+                at_ms: Some(5),
+            },
+            Sync::Remove {
+                peer: Some(peer),
+                group: None,
+                ids: vec!["m1".into()],
+            },
+            Sync::Remove {
+                peer: None,
+                group: Some(crate::group::GroupId([9u8; 32])),
+                ids: vec!["g1".into()],
             },
             Sync::Contact {
                 action: ContactAction::Alias {
@@ -599,5 +632,13 @@ mod tests {
         }))
         .unwrap();
         assert!(json.contains("\"action\":\"block\""), "{json}");
+        // A read without a moment is what a device before 0.10.0 sends.
+        let json = serde_json::to_string(&Sync::Read {
+            peer,
+            ids: vec!["m1".into()],
+            at_ms: None,
+        })
+        .unwrap();
+        assert!(!json.contains("at_ms"), "{json}");
     }
 }

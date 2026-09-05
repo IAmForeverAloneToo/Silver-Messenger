@@ -1615,6 +1615,7 @@ impl App {
                 self.sync(silver_protocol::device::Sync::Read {
                     peer: id,
                     ids: shown.clone(),
+                    at_ms: Some(silver_protocol::now_ms()),
                 });
             }
             if self.read_receipts && self.contact_supports(&id, capability::RECEIPTS) {
@@ -2567,7 +2568,7 @@ impl App {
         }
         let peer = self.contacts[index].user_id;
         self.new_marker = None; // answered: nothing is "new" any more
-        self.send_content_to(peer, Content::Text { body: text });
+        self.send_content_to(peer, Content::text(text));
     }
 
     /// Number and send any content to a contact; the outcome arrives as
@@ -2717,7 +2718,7 @@ impl App {
                         }
                     }
                     let text = match &content {
-                        Content::Text { body } => Some(body.clone()),
+                        Content::Text { body, .. } => Some(body.clone()),
                         Content::File { .. } => FileInfo::from_content(&content)
                             .map(|i| format!("[file] {}", i.label())),
                         // Receipts, lifecycle statements and cover traffic
@@ -2730,6 +2731,12 @@ impl App {
                         | Content::Cover { .. }
                         | Content::Sync(_)
                         | Content::Provision(_) => None,
+                        // An edit, a deletion, a reaction or a timer changes
+                        // what other lines show and is no line itself.
+                        Content::Edit { .. }
+                        | Content::Delete { .. }
+                        | Content::Reaction { .. }
+                        | Content::Timer { .. } => None,
                     };
                     if let Some(text) = text {
                         // The relay may have answered before this event was
@@ -2969,7 +2976,7 @@ impl App {
                 }
 
                 let (text, file) = match message.content {
-                    Content::Text { body } => (body, None),
+                    Content::Text { body, .. } => (body, None),
                     Content::File { .. } => {
                         let info = FileInfo::from_content(&message.content).expect("file content");
                         (format!("[file] {}", info.label()), Some(info))
@@ -2998,6 +3005,16 @@ impl App {
                     // front end as its own events; a device revocation is
                     // handled from DeviceRevoked. None is a line.
                     Content::Sync(_) | Content::Provision(_) | Content::DeviceRevocation(_) => {
+                        self.known_ids.insert(message.id);
+                        return;
+                    }
+                    // An edit, a deletion, a reaction or a timer changes
+                    // what other lines show; nothing here applies them yet
+                    // (docs/design/everyday.md), so none is a line.
+                    Content::Edit { .. }
+                    | Content::Delete { .. }
+                    | Content::Reaction { .. }
+                    | Content::Timer { .. } => {
                         self.known_ids.insert(message.id);
                         return;
                     }
@@ -3618,7 +3635,7 @@ impl App {
         let from = message.from;
         let mut file = None;
         let text = match message.content {
-            Content::Text { body } => body,
+            Content::Text { body, .. } => body,
             Content::File { .. } => {
                 let info = FileInfo::from_content(&message.content).expect("file content");
                 match info.check() {
@@ -3639,7 +3656,11 @@ impl App {
             | Content::DeviceRevocation(_)
             | Content::Cover { .. }
             | Content::Sync(_)
-            | Content::Provision(_) => return,
+            | Content::Provision(_)
+            | Content::Edit { .. }
+            | Content::Delete { .. }
+            | Content::Reaction { .. }
+            | Content::Timer { .. } => return,
         };
         // Strangers get bounded room: so many senders, so much per sender.
         let mut text: String = text.chars().take(MAX_HELD_CHARS).collect();
@@ -4051,14 +4072,7 @@ mod tests {
                 .get(&peer.user_id())
                 .is_none_or(|t| t.is_empty())
         );
-        let message = message_from(
-            "t1",
-            &peer,
-            me,
-            silver_protocol::Content::Text {
-                body: "hello".into(),
-            },
-        );
+        let message = message_from("t1", &peer, me, silver_protocol::Content::text("hello"));
         app.handle_client_event(ClientEvent::Message(Box::new(message)));
         assert_eq!(app.threads[&peer.user_id()].len(), 1);
         assert_eq!(app.cover_schedule.len(), 1);
@@ -4066,12 +4080,7 @@ mod tests {
         // A contact who does not advertise cover is never covered.
         let other = Identity::generate();
         app.contacts.push(Contact::new(other.user_id()));
-        let mut message = message_from(
-            "t2",
-            &other,
-            me,
-            silver_protocol::Content::Text { body: "hi".into() },
-        );
+        let mut message = message_from("t2", &other, me, silver_protocol::Content::text("hi"));
         message.caps = Vec::new();
         app.handle_client_event(ClientEvent::Message(Box::new(message)));
         assert_eq!(app.cover_schedule.len(), 1);
@@ -4223,7 +4232,7 @@ mod tests {
     }
 
     fn text(s: &str) -> Content {
-        Content::Text { body: s.into() }
+        Content::text(s)
     }
 
     fn group_texts(app: &App, group: &GroupId) -> Vec<String> {

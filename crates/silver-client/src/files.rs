@@ -135,6 +135,7 @@ impl FileInfo {
                 key,
                 chunks,
                 sha256,
+                ..
             } => Some(Self {
                 name: name.clone(),
                 size: *size,
@@ -155,6 +156,7 @@ impl FileInfo {
             key: self.key,
             chunks: self.chunks,
             sha256: self.sha256,
+            reply_to: None,
         }
     }
 

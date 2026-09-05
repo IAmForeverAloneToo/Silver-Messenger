@@ -2496,15 +2496,8 @@ mod lifecycle_tests {
             )
             .unwrap();
         assert_eq!(state.stats().devices, 1);
-        let to_laptop = |text: &str| {
-            seal(
-                &alice,
-                &laptop.key_bundle(),
-                Content::Text { body: text.into() },
-                0,
-            )
-            .unwrap()
-        };
+        let to_laptop =
+            |text: &str| seal(&alice, &laptop.key_bundle(), Content::text(text), 0).unwrap();
         // Online, with mail waiting.
         let (tx, mut rx) = mpsc::unbounded_channel();
         state.register(laptop.user_id(), tx);

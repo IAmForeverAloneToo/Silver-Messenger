@@ -2466,13 +2466,7 @@ mod tests {
     }
 
     fn envelope(from: &Identity, to: &Identity, text: &str) -> Envelope {
-        seal(
-            from,
-            &to.key_bundle(),
-            Content::Text { body: text.into() },
-            0,
-        )
-        .unwrap()
+        seal(from, &to.key_bundle(), Content::text(text), 0).unwrap()
     }
 
     #[test]

@@ -130,7 +130,7 @@ async fn wait_for(
 }
 
 fn text(s: &str) -> Content {
-    Content::Text { body: s.into() }
+    Content::text(s)
 }
 
 #[tokio::test]

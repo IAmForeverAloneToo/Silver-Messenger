@@ -9,8 +9,8 @@ use proptest::prelude::*;
 use silver_protocol::blob::{BlobKey, CHUNK_BYTES, open_chunk, seal_chunk};
 use silver_protocol::device::DeviceCertificate;
 use silver_protocol::envelope::{
-    Body, Content, MAX_BODY_BYTES, PAD_BLOCK, ReceiptKind, Sequence, capability, open_bytes,
-    seal_bytes, seal_bytes_unsigned,
+    Body, Content, MAX_BODY_BYTES, MAX_DELETE_IDS, MAX_MESSAGE_ID_BYTES, MAX_TIMER_SECONDS,
+    PAD_BLOCK, ReceiptKind, Sequence, capability, open_bytes, seal_bytes, seal_bytes_unsigned,
 };
 use silver_protocol::group::{
     BlobRef, GroupBody, GroupId, GroupKind, GroupPlaintext, MAX_INLINE_MLS_BYTES, MAX_MEMBERS,
@@ -52,8 +52,11 @@ fn caps() -> impl Strategy<Value = Vec<String>> {
             capability::FILES,
             capability::PADDED_FILES,
             capability::LIFECYCLE,
+            capability::EDITS,
+            capability::REACTIONS,
+            capability::TIMERS,
         ]),
-        0..=4,
+        0..=7,
     )
     .prop_map(|caps| caps.into_iter().map(str::to_owned).collect())
 }
@@ -62,11 +65,24 @@ fn head() -> impl Strategy<Value = Option<LogHead>> {
     prop::option::of((any::<u64>(), hash()).prop_map(|(index, hash)| LogHead { index, hash }))
 }
 
+/// A message id as section 4 allows: printable ASCII, 1 to 64 bytes.
+fn message_id() -> impl Strategy<Value = String> {
+    prop::collection::vec(0x21u8..=0x7e, 1..=MAX_MESSAGE_ID_BYTES)
+        .prop_map(|bytes| String::from_utf8(bytes).unwrap())
+}
+
+/// A reaction within its bounds: no blanks, no controls, at most 16 bytes.
+fn reaction() -> impl Strategy<Value = String> {
+    prop::sample::select(vec!["👍", "❤️", "😂", "👍🏽", "ok", "!", "", "🎉🎉"])
+        .prop_map(str::to_owned)
+}
+
 fn content() -> impl Strategy<Value = Content> {
     let alice = identity(1);
     let bob = identity(2);
     prop_oneof![
-        text(300).prop_map(|body| Content::Text { body }),
+        (text(300), prop::option::of(message_id()))
+            .prop_map(|(body, reply_to)| Content::Text { body, reply_to }),
         (prop::bool::ANY, prop::collection::vec(text(40), 0..8)).prop_map(|(read, ids)| {
             Content::Receipt {
                 kind: if read {
@@ -77,19 +93,32 @@ fn content() -> impl Strategy<Value = Content> {
                 ids,
             }
         }),
-        (text(100), any::<u64>(), hash(), any::<u32>()).prop_map(
-            move |(name, size, sha256, chunks)| Content::File {
-                name,
-                size,
-                blob: "00112233445566778899aabbccddeeff".into(),
-                key: BlobKey::from_parts(sha256, [7u8; 24]),
-                chunks,
-                sha256,
-            }
-        ),
+        (
+            text(100),
+            any::<u64>(),
+            hash(),
+            any::<u32>(),
+            prop::option::of(message_id())
+        )
+            .prop_map(
+                move |(name, size, sha256, chunks, reply_to)| Content::File {
+                    name,
+                    size,
+                    blob: "00112233445566778899aabbccddeeff".into(),
+                    key: BlobKey::from_parts(sha256, [7u8; 24]),
+                    chunks,
+                    sha256,
+                    reply_to,
+                }
+            ),
         any::<u64>().prop_map(move |at| Content::Revocation(alice.revocation(at))),
         any::<u64>().prop_map(move |at| Content::Succession(identity(1).succeed_to(&bob, at))),
         text(500).prop_map(|pad| Content::Cover { pad }),
+        (message_id(), text(300)).prop_map(|(id, body)| Content::Edit { id, body }),
+        prop::collection::vec(message_id(), 1..=MAX_DELETE_IDS)
+            .prop_map(|ids| Content::Delete { ids }),
+        (message_id(), reaction()).prop_map(|(id, emoji)| Content::Reaction { id, emoji }),
+        (0..=MAX_TIMER_SECONDS).prop_map(|seconds| Content::Timer { seconds }),
     ]
 }
 
@@ -174,7 +203,7 @@ proptest! {
     fn body_size_limit_is_exact(len in 0usize..40_000) {
         // The bytes around the text in the encoding, an upper bound.
         const FRAMING: usize = 100;
-        let body = Body::plain(Content::Text { body: "x".repeat(len) }, 0, Sequence::default());
+        let body = Body::plain(Content::text("x".repeat(len)), 0, Sequence::default());
         match body.encode() {
             Ok(encoded) => {
                 prop_assert!(encoded.len() <= MAX_BODY_BYTES);

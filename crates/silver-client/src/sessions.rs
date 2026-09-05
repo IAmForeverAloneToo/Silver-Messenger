@@ -636,7 +636,7 @@ mod tests {
     use silver_protocol::{Body, Content, Sequence};
 
     fn plain(text: &str) -> Vec<u8> {
-        Body::plain(Content::Text { body: text.into() }, 0, Sequence::default())
+        Body::plain(Content::text(text), 0, Sequence::default())
             .encode()
             .unwrap()
     }
@@ -644,7 +644,7 @@ mod tests {
     fn text_of(bytes: &[u8]) -> String {
         match Body::decode(bytes).unwrap() {
             Body::Plain {
-                content: Content::Text { body },
+                content: Content::Text { body, .. },
                 ..
             } => body,
             _ => panic!("expected a plain body"),
