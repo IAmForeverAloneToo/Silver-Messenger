@@ -1,5 +1,5 @@
 {
-  "description": "The transparency log's hashes: the subject an identity's entries are filed under, the leaf of a bundle (one-time prekeys excluded) and of each statement, and a three-entry chain with the hash and head after each entry.",
+  "description": "The transparency log's hashes: the subject an identity's entries are filed under, the leaf of a bundle (one-time prekeys excluded; with and without a device list, and a linked device's own) and of each statement, and a three-entry chain with the hash and head after each entry.",
   "cases": [
     {
       "name": "subject",
@@ -137,6 +137,78 @@
       "outputs": {
         "kind": "succession_leaf",
         "leaf": "VrHV913oKJo3ESFvcUJhTncULVTbOT2h+b5l/nzzs3g="
+      }
+    },
+    {
+      "name": "bundle_leaf_with_devices",
+      "inputs": {
+        "kind": "bundle_leaf",
+        "bundle": {
+          "user_id": "BMnz2CXfYkwNGcm7fYd6cXv8GLkE2WZbdjwtvCnPhv3U",
+          "dh_public": "hfONDEWnbp+RhDaf/Cgoc5Tdfc2VbuQIxDm5wepqymY=",
+          "signature": "qkos4t0pDw91x3a6CCEuCf8WmPFJAVVGIZm0iEsQJgRNoSDuEtKhu4Vl5oIVkGIbBOz+kt3vnc31njGLL70lDg==",
+          "devices": [
+            {
+              "account": "BMnz2CXfYkwNGcm7fYd6cXv8GLkE2WZbdjwtvCnPhv3U",
+              "device": "HKXbhy1hMGH6XtJVNqLTeKnKC76BLADeWhurDyrrVD3p",
+              "created_at_ms": 1700000003000,
+              "name": "laptop",
+              "signature": "2JdA1z2KLwIcT3Js9XMm8ruwlOmaH1eWe11gTcgbDfks+zEzuLDVgn38cOTBYUDM7A0ZrmS9aWSuD7YIEqfvBA=="
+            },
+            {
+              "account": "BMnz2CXfYkwNGcm7fYd6cXv8GLkE2WZbdjwtvCnPhv3U",
+              "device": "HZTbNWhBP2BjGHoLHGauy2tZZMoQDSMUgfzhQzofasZm",
+              "created_at_ms": 1700000004000,
+              "name": "server",
+              "signature": "f8UOXEJf7osS2rCy99mf9Vn22OSwl3ajLy5QvMmoEWpei/0n46nAFkGb9Daq42nRO89qc1P4/antj5Djw8zbCQ=="
+            }
+          ],
+          "devices_signature": "HhdJ0cB8s+fqCA+4zNKf9dQsQ6X7xgingY+RFbL4aqftdOpL2BVsXMra0sj9v8aFGm/pvi9J7srvjLgUuPOuAg=="
+        }
+      },
+      "outputs": {
+        "kind": "bundle_leaf",
+        "preimage": "meh6jVIXlsWbqezs2y5qbzoe2A6giL4QSrNPJg6tRAOF840MRadun5GENp/8KChzlN19zZVu5AjEObnB6mrKZqpKLOLdKQ8Pdcd2ugghLgn/FpjxSQFVRiGZtIhLECYETaEg7hLSobuFZeaCFZBiGwTs/pLd753N9Z4xiy+9JQ4AAAAAAAAAAvJ6Cwfc9RW7zbYGy0ldGKsdtvj/Uy4LKu1yKPSa6gtjAAABi8/lc7j2C6Ui0kZIEN+m3cqMcSw4RHAkhi4UnpoezyfZTs4yfAAAAYvP5XegAR4XSdHAfLPn6ggPuMzSn/XULEOl+8YIp4GPkRWy+Gqn7XTqS9gVbFzK2tLI/b/GhRpv6b4vSe7K74y4FLjzrgIA",
+        "leaf": "A2Q/9EE9CWKaokeP5RCcgHgUggfWoJzy5tVcsi5ZdDE="
+      }
+    },
+    {
+      "name": "device_bundle_leaf",
+      "inputs": {
+        "kind": "bundle_leaf",
+        "bundle": {
+          "user_id": "HKXbhy1hMGH6XtJVNqLTeKnKC76BLADeWhurDyrrVD3p",
+          "dh_public": "0RjY0ZTkOnEWGSb9A5apn95RMaBWECSe93VoSqJWJlQ=",
+          "signature": "NQ1C3FcW47blZYxOUxJerjnewaSnWU7YxMDTnnF4jEmVodvQg/HUZGlTZGadQ3RenGminL9uLqaWD0raBwU1Cg==",
+          "device_of": {
+            "account": "BMnz2CXfYkwNGcm7fYd6cXv8GLkE2WZbdjwtvCnPhv3U",
+            "device": "HKXbhy1hMGH6XtJVNqLTeKnKC76BLADeWhurDyrrVD3p",
+            "created_at_ms": 1700000003000,
+            "name": "laptop",
+            "signature": "2JdA1z2KLwIcT3Js9XMm8ruwlOmaH1eWe11gTcgbDfks+zEzuLDVgn38cOTBYUDM7A0ZrmS9aWSuD7YIEqfvBA=="
+          }
+        }
+      },
+      "outputs": {
+        "kind": "bundle_leaf",
+        "preimage": "8noLB9z1FbvNtgbLSV0Yqx22+P9TLgsq7XIo9JrqC2PRGNjRlOQ6cRYZJv0Dlqmf3lExoFYQJJ73dWhKolYmVDUNQtxXFuO25WWMTlMSXq453sGkp1lO2MTA055xeIxJlaHb0IPx1GRpU2RmnUN0Xpxpopy/bi6mlg9K2gcFNQoAAAAAAAAAAAABAAAAj5noeo1SF5bFm6ns7Nsuam86HtgOoIi+EEqzTyYOrUQD8noLB9z1FbvNtgbLSV0Yqx22+P9TLgsq7XIo9JrqC2MAAAGLz+VzuAZsYXB0b3DYl0DXPYovAhxPcmz1cybyu7CU6ZofV5Z7XWBNyBsN+Sz7MTO4sNWCffxw5MFhQMzsDRmuZL1pZK4PtggSp+8E",
+        "leaf": "VeKW9RF9tzfTn8seRHuXXh3oTqb/mEmmRDLCm0sMA+k="
+      }
+    },
+    {
+      "name": "device_revocation_leaf",
+      "inputs": {
+        "kind": "device_revocation_leaf",
+        "revocation": {
+          "account": "BMnz2CXfYkwNGcm7fYd6cXv8GLkE2WZbdjwtvCnPhv3U",
+          "device": "HKXbhy1hMGH6XtJVNqLTeKnKC76BLADeWhurDyrrVD3p",
+          "created_at_ms": 1700000005000,
+          "signature": "nNZ1oSaK0QQ8dHPtJKGGnSOaf44BYWviUovRsoLhxSe/AjtZqXgqykroCB8DtnC085cELPro/InlThDd4ZvlAA=="
+        }
+      },
+      "outputs": {
+        "kind": "device_revocation_leaf",
+        "leaf": "2lgYs8HQ1RIjTACqnASKApkD/Aq90YEPa+2mpwdnJ1o="
       }
     },
     {

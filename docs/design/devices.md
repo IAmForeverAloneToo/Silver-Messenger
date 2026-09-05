@@ -277,13 +277,18 @@ whether to forward (5.3).
 | `auth_ok` features | `devices` | The relay keeps the device list and `device_of` in bundles, answers `revoke_device`, attaches device bundles to lookups. Absent before 0.10.0; clients then do not link. |
 | `publish` | unchanged frame | The relay verifies `device_of` when present and refuses a bundle whose certificate does not verify, whose account is unknown to it, revoked, or has revoked this device, or that lists more than 8 devices or a device it knows to be revoked. A device registers like any identity: it counts against the address's registrations and the identity cap, and takes an invite token where one is required (the primary's link carries it, 7.1). |
 
-Transparency: the bundle leaf grows by the device list (4.3); a device
-revocation is entry kind 4 with leaf
-`SHA-256("silver-messenger/v5/transparency-device-revocation" || account || device || created_at_ms || signature)`,
-subject the account. A device's own bundles are logged under the device
-as an identity's are. The client's checks (11.4) apply to device bundles
-as to any bundle, and a device revocation the log holds must be in the
-account's answer as an identity revocation must.
+Transparency: the bundle leaf grows by the device list (4.3), and only
+when the bundle has one, so the leaf of a bundle without devices is
+what it was and a relay that drops the fields and a client that keeps
+them agree on it. A device revocation is logged as a `revocation` entry
+whose subject is the *device* (an identity to the relay) with leaf
+`SHA-256("silver-messenger/v5/transparency-device-revocation" || account || device || created_at_ms || signature)`;
+no new entry kind, so a client from before devices replays the log as
+before and never looks a device up, while a client that does expects
+the statement in the device's answer as it expects an identity
+revocation in an identity's. A device's own bundles are logged under the
+device as an identity's are. The client's checks (11.4) apply to device
+bundles as to any bundle.
 
 Limits: 8 linked devices per account; `revoke_device` counts against the
 address's registrations for the hour like the other statements; a

@@ -3,6 +3,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ProtocolError;
+use crate::device::{
+    DEVICE_LIST_DOMAIN, DeviceCertificate, check_device_list, device_list_signed_bytes,
+};
 use crate::encoding::{b64_array, b64_opt_array};
 use crate::identity::{DhPublic, Identity, UserId};
 use crate::prekey::Prekeys;
@@ -24,6 +27,11 @@ pub mod capability {
     /// be added to a group. Advertised only while a deposit exists, so a
     /// contact whose bundle lacks it is not looked up for a key package.
     pub const GROUPS: &str = "groups";
+    /// The client reads `sync` content from its own devices and may be
+    /// sent to per device (`docs/PROTOCOL.md` section 14): it is a primary
+    /// on 0.10.0 or later, or a linked device. A sender treats an account
+    /// whose bundle lacks it as one device, the bundle's own.
+    pub const DEVICES: &str = "devices";
 }
 
 /// A user's X25519 public key, signed by their identity key, plus (for
@@ -51,6 +59,23 @@ pub struct KeyBundle {
         with = "b64_opt_array"
     )]
     pub caps_signature: Option<[u8; 64]>,
+    /// The account's linked devices (section 14), in ascending device id
+    /// order, signed as a whole by `devices_signature`. Empty on a bundle
+    /// without devices and on one a relay before 0.10.0 served.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub devices: Vec<DeviceCertificate>,
+    /// The identity key's signature over `devices`; present whenever
+    /// `devices` is.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "b64_opt_array"
+    )]
+    pub devices_signature: Option<[u8; 64]>,
+    /// On a linked device's bundle: whose device it is, by the account's
+    /// own signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_of: Option<DeviceCertificate>,
 }
 
 impl KeyBundle {
@@ -64,8 +89,10 @@ impl KeyBundle {
         v
     }
 
-    /// Check that `dh_public`, the signed prekey (if any) and the
-    /// capabilities (if any) were really signed by `user_id`.
+    /// Check that `dh_public`, the signed prekey (if any), the capabilities
+    /// (if any) and the device list (if any) were really signed by
+    /// `user_id`, and that a `device_of` certificate names this key and
+    /// verifies against the account it claims.
     pub fn verify(&self) -> Result<(), ProtocolError> {
         self.user_id
             .verify(BUNDLE_DOMAIN, &self.dh_public.0, &self.signature)?;
@@ -80,7 +107,65 @@ impl KeyBundle {
                 &signature,
             )?;
         }
+        if !self.devices.is_empty() {
+            check_device_list(&self.user_id, &self.devices)?;
+            let signature = self
+                .devices_signature
+                .ok_or(ProtocolError::InvalidSignature)?;
+            self.user_id.verify(
+                DEVICE_LIST_DOMAIN,
+                &device_list_signed_bytes(&self.dh_public.0, &self.devices),
+                &signature,
+            )?;
+        }
+        if let Some(certificate) = &self.device_of {
+            certificate.verify()?;
+            if certificate.device != self.user_id {
+                return Err(ProtocolError::Malformed(
+                    "the device certificate names another key".into(),
+                ));
+            }
+            if !self.devices.is_empty() {
+                return Err(ProtocolError::Malformed(
+                    "a linked device lists no devices of its own".into(),
+                ));
+            }
+        }
         Ok(())
+    }
+
+    /// The same bundle listing `devices` as this identity's, signed.
+    /// `identity` must own the bundle; the list is sorted here.
+    pub fn with_devices(
+        mut self,
+        identity: &Identity,
+        mut devices: Vec<DeviceCertificate>,
+    ) -> Result<Self, ProtocolError> {
+        devices.sort_by(|a, b| a.device.cmp(&b.device));
+        if devices.is_empty() {
+            self.devices = Vec::new();
+            self.devices_signature = None;
+            return Ok(self);
+        }
+        check_device_list(&self.user_id, &devices)?;
+        self.devices_signature = Some(identity.sign(
+            DEVICE_LIST_DOMAIN,
+            &device_list_signed_bytes(&self.dh_public.0, &devices),
+        ));
+        self.devices = devices;
+        Ok(self)
+    }
+
+    /// The same bundle marked as a linked device's, by the account's
+    /// certificate for this key.
+    pub fn as_device_of(mut self, certificate: DeviceCertificate) -> Self {
+        self.device_of = Some(certificate);
+        self
+    }
+
+    /// The account this bundle's owner is a linked device of, if it is one.
+    pub fn account(&self) -> Option<&UserId> {
+        self.device_of.as_ref().map(|c| &c.account)
     }
 
     /// Whether the owner can be talked to with forward-secret sessions.

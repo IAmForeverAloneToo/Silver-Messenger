@@ -94,6 +94,14 @@ pub enum Content {
     Cover {
         pad: String,
     },
+    /// What one of the sender's own devices tells another (section 14);
+    /// accepted only from a device certified for the recipient's own
+    /// account, ignored from anyone else.
+    Sync(crate::device::Sync),
+    /// The message that links a new device: everything it needs to start,
+    /// sealed under the key the link's secret derives, so only the device
+    /// that printed the link reads it.
+    Provision(crate::device::Provision),
 }
 
 /// How far a message got on the recipient's side. Ordered: read implies
@@ -127,6 +135,11 @@ pub mod capability {
     /// setting is on, so cover flows only between two clients whose users
     /// both agreed to it.
     pub const COVER: &str = "cover";
+    /// The client sends to every device of the recipient's it knows of
+    /// (section 14), so the recipient's primary need not forward the
+    /// message to its other devices; and it reads `sync` content from its
+    /// own devices.
+    pub const DEVICES: &str = "devices";
 }
 
 /// Bodies are padded to a multiple of this many bytes, so a relay sees
@@ -173,6 +186,12 @@ struct PlainBody {
     /// keeps no log.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     head: Option<crate::transparency::LogHead>,
+    /// The sender's device certificate when the sender is a linked device
+    /// (section 14), so the recipient can attribute the message to the
+    /// account and verify the device without a lookup. Absent from a
+    /// primary and from clients before 0.10.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    device: Option<crate::device::DeviceCertificate>,
 }
 
 /// A ratchet body: a plain body encrypted again under a session.
@@ -198,6 +217,8 @@ pub enum Body {
         caps: Vec<String>,
         /// The sender's last verified transparency log head, if any.
         head: Option<crate::transparency::LogHead>,
+        /// The sender's device certificate, when it is a linked device.
+        device: Option<crate::device::DeviceCertificate>,
     },
     Ratchet(RatchetBody),
     /// One MLS message for one group (v5); see [`crate::group`].
@@ -241,7 +262,17 @@ impl Body {
             content,
             caps: caps.iter().map(|c| (*c).to_owned()).collect(),
             head,
+            device: None,
         }
+    }
+
+    /// The same plain body carrying the sender's device certificate; a
+    /// ratchet or group body is returned unchanged.
+    pub fn with_device(mut self, certificate: Option<crate::device::DeviceCertificate>) -> Self {
+        if let Self::Plain { device, .. } = &mut self {
+            *device = certificate;
+        }
+        self
     }
 
     /// The body as bytes, padded to a multiple of [`PAD_BLOCK`].
@@ -253,6 +284,7 @@ impl Body {
                 content,
                 caps,
                 head,
+                device,
             } => serde_json::to_vec(&PlainBody {
                 sent_at_ms: *sent_at_ms,
                 epoch: sequence.epoch,
@@ -260,6 +292,7 @@ impl Body {
                 content: content.clone(),
                 caps: caps.clone(),
                 head: *head,
+                device: device.clone(),
             }),
             Self::Ratchet(body) => serde_json::to_vec(body),
             Self::Group(body) => {
@@ -290,6 +323,7 @@ impl Body {
                     content: body.content,
                     caps: body.caps,
                     head: body.head,
+                    device: body.device,
                 })
             }
             2 | 4 => Ok(Self::Ratchet(
@@ -330,6 +364,11 @@ pub struct Message {
     /// for the recipient to compare with its own; see
     /// [`crate::transparency`]. Absent from older clients.
     pub head: Option<crate::transparency::LogHead>,
+    /// The sender's device certificate when `from` is a linked device of
+    /// some account (section 14); absent from a primary and from older
+    /// clients. Not yet verified: the recipient checks it against the
+    /// account it names.
+    pub device: Option<crate::device::DeviceCertificate>,
 }
 
 /// The sealed layer of an envelope, opened: who sent it and the raw body.
@@ -519,6 +558,7 @@ pub fn open(recipient: &Identity, envelope: &Envelope) -> Result<Message, Protoc
             content,
             caps,
             head,
+            device,
         } => Ok(Message {
             id: opened.id,
             from: opened.from,
@@ -530,6 +570,7 @@ pub fn open(recipient: &Identity, envelope: &Envelope) -> Result<Message, Protoc
             signed: opened.signed,
             caps,
             head,
+            device,
         }),
         Body::Ratchet(_) => Err(ProtocolError::Malformed(
             "body is encrypted under a session".into(),

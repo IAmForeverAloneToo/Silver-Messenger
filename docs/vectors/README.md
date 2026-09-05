@@ -58,15 +58,16 @@ ML-KEM interface reproduces the ciphertexts exactly.
 | File | What it fixes |
 | --- | --- |
 | `identity.json` | user id, X25519 public key and bundle signature from an identity's two secrets; the safety number of a pair |
-| `signatures.json` | the exact bytes and domain of every other signature: signed prekey, ML-KEM prekey, bundle capabilities, revocation, succession, relay login (v1 and host-bound) |
+| `signatures.json` | the exact bytes and domain of every other signature: signed prekey, ML-KEM prekey, bundle capabilities, revocation, succession, device certificate, device list, device revocation, relay login (v1 and host-bound) |
 | `kdf.json` | the session id, the handshake secret (X3DH and PQXDH, with and without a one-time prekey), the root KDF (v2, and v4 with and without an ML-KEM secret), the chain KDF, a message key's AEAD key and nonce |
 | `handshake.json` | a whole handshake from fixed keys and a fixed seed: the bundle as served, every intermediate value, the `InitHeader`, the first message; classical (v2), hybrid (v3) and post-quantum ratchet (v4) |
 | `ratchet.json` | two round trips with late and out-of-order delivery: every header and ciphertext, and what each ratchet step drew; v2 and v4 |
 | `envelope.json` | the sealed-sender layer from a fixed seed: signed (v1) and deniable (v4) |
 | `body.json` | the padded encoding of each body kind |
-| `transparency.json` | the subject, bundle and statement leaves, and a three-entry chain with every hash and head |
+| `transparency.json` | the subject, bundle and statement leaves (bundles with and without a device list, a linked device's own, and a device revocation among them), and a three-entry chain with every hash and head |
 | `group.json` | the group context and leaf seal-key extensions as bytes, the invite link key and join proof, the sequencer token hash, and an application message's plaintext (section 13); the MLS messages themselves follow RFC 9420 |
 | `blob.json` | file chunk nonces, associated data and ciphertexts |
+| `device.json` | linking a device (section 14): the link key from the link's secret, a provisioning message sealed under it, and a device certificate as the bytes a group leaf carries |
 
 ## Changing them
 

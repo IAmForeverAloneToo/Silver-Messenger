@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::bundle::KeyBundle;
+use crate::device::DeviceRevocation;
 use crate::encoding::b64_array;
 use crate::identity::UserId;
 use crate::lifecycle::{Revocation, Succession};
@@ -37,6 +38,9 @@ pub const BUNDLE_LEAF_DOMAIN: &[u8] = b"silver-messenger/v4/transparency-bundle"
 pub const REVOCATION_LEAF_DOMAIN: &[u8] = b"silver-messenger/v4/transparency-revocation";
 /// Domain of a succession's leaf.
 pub const SUCCESSION_LEAF_DOMAIN: &[u8] = b"silver-messenger/v4/transparency-succession";
+/// Domain of a device revocation's leaf (section 14).
+pub const DEVICE_REVOCATION_LEAF_DOMAIN: &[u8] =
+    b"silver-messenger/v5/transparency-device-revocation";
 
 /// Most entries a relay hands out per `LogSince`.
 pub const LOG_PAGE: usize = 256;
@@ -216,6 +220,48 @@ impl KeyBundle {
                 h.update(signature);
             }
         }
+        // The device fields (section 14) follow only when the bundle has
+        // any, so the leaf of a bundle without them is what it was before
+        // devices existed: a relay that does not keep the fields and a
+        // client that does compute the same leaf for the same bundle.
+        if !self.devices.is_empty() || self.device_of.is_some() {
+            h.update((self.devices.len() as u16).to_be_bytes());
+            for device in &self.devices {
+                h.update(device.device.as_bytes());
+                h.update(device.created_at_ms.to_be_bytes());
+            }
+            match &self.devices_signature {
+                None => h.update([0u8]),
+                Some(signature) => {
+                    h.update([1u8]);
+                    h.update(signature);
+                }
+            }
+            match &self.device_of {
+                None => h.update([0u8]),
+                Some(certificate) => {
+                    h.update([1u8]);
+                    put_var(&mut h, &certificate.encode());
+                }
+            }
+        }
+        h.finalize().into()
+    }
+}
+
+impl DeviceRevocation {
+    /// The statement's leaf. A device revocation is logged as a
+    /// [`EntryKind::Revocation`] entry whose subject is the device (an
+    /// identity to the relay), with this leaf, so a client from before
+    /// devices reads the log as before; only a client that looks a device
+    /// up expects the statement in the answer (section 14).
+    pub fn transparency_leaf(&self) -> Hash {
+        let mut h = Sha256::new();
+        h.update(DEVICE_REVOCATION_LEAF_DOMAIN);
+        h.update(self.account.as_bytes());
+        h.update(self.device.as_bytes());
+        h.update(self.created_at_ms.to_be_bytes());
+        h.update(self.signature);
         h.finalize().into()
     }
 }

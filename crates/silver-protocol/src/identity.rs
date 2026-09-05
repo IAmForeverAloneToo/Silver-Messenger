@@ -178,6 +178,9 @@ impl Identity {
             prekeys: None,
             caps: Vec::new(),
             caps_signature: None,
+            devices: Vec::new(),
+            devices_signature: None,
+            device_of: None,
         }
     }
 

@@ -1422,6 +1422,10 @@ async fn session(
                         succession,
                         head,
                         logged,
+                        // The linked devices' bundles and revocations are
+                        // read once the client keeps sessions per device.
+                        device_bundles: _,
+                        device_revocations: _,
                     } => {
                         // Handed over (and any lifecycle statement raised)
                         // once checked against the transparency log, when
@@ -1899,6 +1903,7 @@ async fn deliver(
             content,
             caps,
             head,
+            device,
         }) => {
             if let Some(event) = lifecycle_event(&content) {
                 let _ = ev_tx.send(event).await;
@@ -1917,6 +1922,7 @@ async fn deliver(
                     signed: opened.signed,
                     caps,
                     head,
+                    device,
                 })))
                 .await;
             return;
@@ -1992,6 +1998,7 @@ async fn deliver(
             content,
             caps,
             head,
+            device,
         }) => {
             if let Some(event) = lifecycle_event(&content) {
                 let _ = ev_tx.send(event).await;
@@ -2010,6 +2017,7 @@ async fn deliver(
                     signed: opened.signed,
                     caps,
                     head,
+                    device,
                 })))
                 .await;
         }

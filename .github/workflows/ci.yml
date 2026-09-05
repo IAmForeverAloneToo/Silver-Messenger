@@ -209,7 +209,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [frames, envelope, blob_chunk, session, invite_link, file_name, stored, group_body]
+        target: [frames, envelope, blob_chunk, session, invite_link, file_name, stored, group_body, device]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master

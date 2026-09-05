@@ -57,6 +57,7 @@
 
 pub mod blob;
 pub mod bundle;
+pub mod device;
 pub mod encoding;
 pub mod envelope;
 mod error;
@@ -72,6 +73,7 @@ pub mod wire;
 
 pub use blob::BlobKey;
 pub use bundle::KeyBundle;
+pub use device::{ContactAction, DeviceCertificate, DeviceRevocation, Provision, Sync};
 pub use envelope::{
     Body, Content, Envelope, MAX_BODY_BYTES, MAX_CIPHERTEXT_BYTES, Message, Opened, RatchetBody,
     Sequence, open, open_bytes, seal, seal_bytes, seal_bytes_unsigned, seal_bytes_unsigned_to,

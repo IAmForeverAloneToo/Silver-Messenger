@@ -1,0 +1,64 @@
+{
+  "description": "Linking a device (section 14): the link key from the link's secret (HKDF-SHA256, no salt, the info given), a provisioning message sealed under it for one device (XChaCha20-Poly1305 with the associated data given; the nonce is the first 24 bytes the seeded generator yields), and a device certificate as the bytes a group leaf carries.",
+  "cases": [
+    {
+      "name": "link_key",
+      "inputs": {
+        "kind": "link_key",
+        "secret": "yLGNZFmSBTwvMj9uk5y3+Q=="
+      },
+      "outputs": {
+        "kind": "link_key",
+        "info": "silver-messenger/v5/link",
+        "key": "jkcXIwg1UgyFPHiAafJ8C4nQ/MuiJjGt/jRVXWHHgs8="
+      }
+    },
+    {
+      "name": "provision",
+      "inputs": {
+        "kind": "provision",
+        "secret": "yLGNZFmSBTwvMj9uk5y3+Q==",
+        "device": {
+          "signing_seed": "bd7i+fGF0hI3f8km5Br1bd0lcDebzfgO4GI62rxezO0=",
+          "dh_secret": "YijXZWAS+maZOrYKjtfv8yD16suWXNxOAIlhNqhEEAI="
+        },
+        "plaintext": "{\"account\":\"...\",\"contacts\":[]}",
+        "rng_seed": "AWke87SGOFatKPShR1rvYmIvOmzWI332D2wMN6ENVhQ="
+      },
+      "outputs": {
+        "kind": "provision",
+        "key": "jkcXIwg1UgyFPHiAafJ8C4nQ/MuiJjGt/jRVXWHHgs8=",
+        "aad": "c2lsdmVyLW1lc3Nlbmdlci92NS9wcm92aXNpb27yegsH3PUVu822BstJXRirHbb4/1MuCyrtcij0muoLYw==",
+        "nonce": "3/UnOopyDB07MUNcgSxmGDgJZJYO+CfE",
+        "ciphertext": "Iq6YORJj+u/3U0WCF0CKiTFvKnzSRK801ATmfV13xj+DncRebzjumyO6MsZ8cD8="
+      }
+    },
+    {
+      "name": "certificate_encoding",
+      "inputs": {
+        "kind": "certificate_encoding",
+        "account": {
+          "signing_seed": "BIsT39RgarB5ig+jiTdH7qqhm1324Tazmk4MXGbcZGo=",
+          "dh_secret": "ivF7/NVZVxgo68ET180l9VuoxGhe1O9WctzPHYea7uE="
+        },
+        "device": {
+          "signing_seed": "bd7i+fGF0hI3f8km5Br1bd0lcDebzfgO4GI62rxezO0=",
+          "dh_secret": "YijXZWAS+maZOrYKjtfv8yD16suWXNxOAIlhNqhEEAI="
+        },
+        "name": "laptop",
+        "created_at_ms": 1700000003000
+      },
+      "outputs": {
+        "kind": "certificate_encoding",
+        "certificate": {
+          "account": "BMnz2CXfYkwNGcm7fYd6cXv8GLkE2WZbdjwtvCnPhv3U",
+          "device": "HKXbhy1hMGH6XtJVNqLTeKnKC76BLADeWhurDyrrVD3p",
+          "created_at_ms": 1700000003000,
+          "name": "laptop",
+          "signature": "2JdA1z2KLwIcT3Js9XMm8ruwlOmaH1eWe11gTcgbDfks+zEzuLDVgn38cOTBYUDM7A0ZrmS9aWSuD7YIEqfvBA=="
+        },
+        "encoded": "meh6jVIXlsWbqezs2y5qbzoe2A6giL4QSrNPJg6tRAPyegsH3PUVu822BstJXRirHbb4/1MuCyrtcij0muoLYwAAAYvP5XO4BmxhcHRvcNiXQNc9ii8CHE9ybPVzJvK7sJTpmh9XlntdYE3IGw35LPsxM7iw1YJ9/HDkwWFAzOwNGa5kvWlkrg+2CBKn7wQ="
+      }
+    }
+  ]
+}

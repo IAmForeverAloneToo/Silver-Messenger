@@ -51,6 +51,11 @@ pub const EXTENSION_GROUP: u16 = 0xF000;
 /// Leaf node extension: the member's sealed-layer X25519 key, so members
 /// can seal envelopes to each other without a lookup.
 pub const EXTENSION_SEAL: u16 = 0xF001;
+/// Leaf node extension: a linked device's certificate
+/// ([`crate::device::DeviceCertificate::encode`]), so members verify a
+/// device leaf from the tree alone (section 14). Absent from a primary's
+/// leaf, whose signature key is the identity key.
+pub const EXTENSION_DEVICE: u16 = 0xF002;
 /// The MLS exporter label of the token a committer shows the relay's
 /// epoch sequencer; the context is the group id, the length 32.
 pub const SEQUENCER_LABEL: &str = "silver-messenger/v1/group-sequencer";

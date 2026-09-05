@@ -106,6 +106,83 @@
       }
     },
     {
+      "name": "device_certificate",
+      "inputs": {
+        "kind": "device_certificate",
+        "account": {
+          "signing_seed": "BIsT39RgarB5ig+jiTdH7qqhm1324Tazmk4MXGbcZGo=",
+          "dh_secret": "ivF7/NVZVxgo68ET180l9VuoxGhe1O9WctzPHYea7uE="
+        },
+        "device": {
+          "signing_seed": "bd7i+fGF0hI3f8km5Br1bd0lcDebzfgO4GI62rxezO0=",
+          "dh_secret": "YijXZWAS+maZOrYKjtfv8yD16suWXNxOAIlhNqhEEAI="
+        },
+        "name": "laptop",
+        "created_at_ms": 1700000003000
+      },
+      "outputs": {
+        "kind": "device_certificate",
+        "domain": "silver-messenger/v5/device",
+        "message": "meh6jVIXlsWbqezs2y5qbzoe2A6giL4QSrNPJg6tRAPyegsH3PUVu822BstJXRirHbb4/1MuCyrtcij0muoLYwAAAYvP5XO4BmxhcHRvcA==",
+        "signature": "2JdA1z2KLwIcT3Js9XMm8ruwlOmaH1eWe11gTcgbDfks+zEzuLDVgn38cOTBYUDM7A0ZrmS9aWSuD7YIEqfvBA=="
+      }
+    },
+    {
+      "name": "device_list",
+      "inputs": {
+        "kind": "device_list",
+        "signer": {
+          "signing_seed": "BIsT39RgarB5ig+jiTdH7qqhm1324Tazmk4MXGbcZGo=",
+          "dh_secret": "ivF7/NVZVxgo68ET180l9VuoxGhe1O9WctzPHYea7uE="
+        },
+        "devices": [
+          {
+            "device": {
+              "signing_seed": "bd7i+fGF0hI3f8km5Br1bd0lcDebzfgO4GI62rxezO0=",
+              "dh_secret": "YijXZWAS+maZOrYKjtfv8yD16suWXNxOAIlhNqhEEAI="
+            },
+            "name": "laptop",
+            "created_at_ms": 1700000003000
+          },
+          {
+            "device": {
+              "signing_seed": "WAJUFCNKS6q2+i7U+2PGz7bdh4jK7h6MyZ1wBm8h5v8=",
+              "dh_secret": "nw7oIRtolP1uu9lrT7fELwhocdwfw4OS7qKgn8YrIhU="
+            },
+            "name": "server",
+            "created_at_ms": 1700000004000
+          }
+        ]
+      },
+      "outputs": {
+        "kind": "device_list",
+        "domain": "silver-messenger/v5/device-list",
+        "message": "hfONDEWnbp+RhDaf/Cgoc5Tdfc2VbuQIxDm5wepqymYAAvJ6Cwfc9RW7zbYGy0ldGKsdtvj/Uy4LKu1yKPSa6gtjAAABi8/lc7j2C6Ui0kZIEN+m3cqMcSw4RHAkhi4UnpoezyfZTs4yfAAAAYvP5Xeg",
+        "signature": "HhdJ0cB8s+fqCA+4zNKf9dQsQ6X7xgingY+RFbL4aqftdOpL2BVsXMra0sj9v8aFGm/pvi9J7srvjLgUuPOuAg=="
+      }
+    },
+    {
+      "name": "device_revocation",
+      "inputs": {
+        "kind": "device_revocation",
+        "account": {
+          "signing_seed": "BIsT39RgarB5ig+jiTdH7qqhm1324Tazmk4MXGbcZGo=",
+          "dh_secret": "ivF7/NVZVxgo68ET180l9VuoxGhe1O9WctzPHYea7uE="
+        },
+        "device": {
+          "signing_seed": "bd7i+fGF0hI3f8km5Br1bd0lcDebzfgO4GI62rxezO0=",
+          "dh_secret": "YijXZWAS+maZOrYKjtfv8yD16suWXNxOAIlhNqhEEAI="
+        },
+        "created_at_ms": 1700000005000
+      },
+      "outputs": {
+        "kind": "device_revocation",
+        "domain": "silver-messenger/v5/device-revocation",
+        "message": "meh6jVIXlsWbqezs2y5qbzoe2A6giL4QSrNPJg6tRAPyegsH3PUVu822BstJXRirHbb4/1MuCyrtcij0muoLYwAAAYvP5XuI",
+        "signature": "nNZ1oSaK0QQ8dHPtJKGGnSOaf44BYWviUovRsoLhxSe/AjtZqXgqykroCB8DtnC085cELPro/InlThDd4ZvlAA=="
+      }
+    },
+    {
       "name": "relay_auth_v1",
       "inputs": {
         "kind": "relay_auth",

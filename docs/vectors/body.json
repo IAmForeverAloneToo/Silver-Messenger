@@ -1,5 +1,5 @@
 {
-  "description": "Bodies as encoded before sealing: JSON in the field order given, padded with spaces to a multiple of 160 bytes. Plain (v1) bodies for each content kind, ratchet bodies (v2, with and without the InitHeader), and group bodies (v5: an application message inline, a Welcome parked in the blob store, a join request with its proof).",
+  "description": "Bodies as encoded before sealing: JSON in the field order given, padded with spaces to a multiple of 160 bytes. Plain (v1) bodies for each content kind (a text from a linked device carrying its certificate, and a sync copy between one's own devices, among them), ratchet bodies (v2, with and without the InitHeader), and group bodies (v5: an application message inline, a Welcome parked in the blob store, a join request with its proof).",
   "cases": [
     {
       "name": "text",
@@ -149,6 +149,60 @@
       "outputs": {
         "encoded": "{\"sent_at_ms\":1700000000000,\"epoch\":81985529216486895,\"seq\":42,\"content\":{\"type\":\"cover\",\"pad\":\"abcdefghijklmnopqrstuvwxyz\"},\"caps\":[\"cover\"]}                  ",
         "encoded_len": 160
+      }
+    },
+    {
+      "name": "text_from_device",
+      "inputs": {
+        "kind": "plain",
+        "content": {
+          "type": "text",
+          "body": "hello from my laptop"
+        },
+        "sent_at_ms": 1700000000000,
+        "epoch": 81985529216486895,
+        "seq": 43,
+        "caps": [
+          "devices"
+        ],
+        "device": {
+          "account": "BMnz2CXfYkwNGcm7fYd6cXv8GLkE2WZbdjwtvCnPhv3U",
+          "device": "HKXbhy1hMGH6XtJVNqLTeKnKC76BLADeWhurDyrrVD3p",
+          "created_at_ms": 1700000003000,
+          "name": "laptop",
+          "signature": "2JdA1z2KLwIcT3Js9XMm8ruwlOmaH1eWe11gTcgbDfks+zEzuLDVgn38cOTBYUDM7A0ZrmS9aWSuD7YIEqfvBA=="
+        }
+      },
+      "outputs": {
+        "encoded": "{\"sent_at_ms\":1700000000000,\"epoch\":81985529216486895,\"seq\":43,\"content\":{\"type\":\"text\",\"body\":\"hello from my laptop\"},\"caps\":[\"devices\"],\"device\":{\"account\":\"BMnz2CXfYkwNGcm7fYd6cXv8GLkE2WZbdjwtvCnPhv3U\",\"device\":\"HKXbhy1hMGH6XtJVNqLTeKnKC76BLADeWhurDyrrVD3p\",\"created_at_ms\":1700000003000,\"name\":\"laptop\",\"signature\":\"2JdA1z2KLwIcT3Js9XMm8ruwlOmaH1eWe11gTcgbDfks+zEzuLDVgn38cOTBYUDM7A0ZrmS9aWSuD7YIEqfvBA==\"}}                                                                     ",
+        "encoded_len": 480
+      }
+    },
+    {
+      "name": "sync_sent",
+      "inputs": {
+        "kind": "plain",
+        "content": {
+          "type": "sync",
+          "kind": "sent",
+          "peer": "2fYtRY8g36vouXvfE2ysTB9foJeA5L7AAZNEF5faBhsC",
+          "id": "00000000-0000-4000-8000-000000000002",
+          "sent_at_ms": 1700000000000,
+          "content": {
+            "type": "text",
+            "body": "hello, bob"
+          }
+        },
+        "sent_at_ms": 1700000000000,
+        "epoch": 81985529216486895,
+        "seq": 42,
+        "caps": [
+          "devices"
+        ]
+      },
+      "outputs": {
+        "encoded": "{\"sent_at_ms\":1700000000000,\"epoch\":81985529216486895,\"seq\":42,\"content\":{\"type\":\"sync\",\"kind\":\"sent\",\"peer\":\"2fYtRY8g36vouXvfE2ysTB9foJeA5L7AAZNEF5faBhsC\",\"id\":\"00000000-0000-4000-8000-000000000002\",\"sent_at_ms\":1700000000000,\"content\":{\"type\":\"text\",\"body\":\"hello, bob\"}},\"caps\":[\"devices\"]}                           ",
+        "encoded_len": 320
       }
     },
     {

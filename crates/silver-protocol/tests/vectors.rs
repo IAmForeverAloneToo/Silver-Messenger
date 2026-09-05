@@ -28,6 +28,11 @@ use x25519_dalek::{PublicKey, StaticSecret};
 
 use silver_protocol::blob::{BlobKey, seal_chunk};
 use silver_protocol::bundle::{BUNDLE_CAPS_DOMAIN, BUNDLE_DOMAIN, capability as bundle_capability};
+use silver_protocol::device::{
+    DEVICE_DOMAIN, DEVICE_LIST_DOMAIN, DEVICE_REVOCATION_DOMAIN, DeviceCertificate,
+    DeviceRevocation, LINK_KEY_INFO, PROVISION_DOMAIN, Sync, link_key as device_link_key,
+    open_provision, seal_provision_with_rng,
+};
 use silver_protocol::encoding::{b64_array, b64_opt_array, from_base64, to_base64};
 use silver_protocol::envelope::{
     Body, Content, ENVELOPE_DOMAIN, Envelope, RatchetBody, ReceiptKind, Sequence, capability,
@@ -416,6 +421,21 @@ enum SignIn {
         new: Seeds,
         created_at_ms: u64,
     },
+    DeviceCertificate {
+        account: Seeds,
+        device: Seeds,
+        name: String,
+        created_at_ms: u64,
+    },
+    DeviceList {
+        signer: Seeds,
+        devices: Vec<DeviceIn>,
+    },
+    DeviceRevocation {
+        account: Seeds,
+        device: Seeds,
+        created_at_ms: u64,
+    },
     RelayAuth {
         signer: Seeds,
         #[serde(with = "b64_array")]
@@ -427,6 +447,14 @@ enum SignIn {
         #[serde(with = "b64_array")]
         nonce: [u8; 32],
     },
+}
+
+/// A device to certify: its keys, its name, when.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+struct DeviceIn {
+    device: Seeds,
+    name: String,
+    created_at_ms: u64,
 }
 
 /// Every signature is Ed25519 over `domain || 0x00 || message`.
@@ -479,6 +507,18 @@ enum SignOut {
     Succession {
         old: Signed,
         new: Signed,
+    },
+    DeviceCertificate {
+        #[serde(flatten)]
+        signed: Signed,
+    },
+    DeviceList {
+        #[serde(flatten)]
+        signed: Signed,
+    },
+    DeviceRevocation {
+        #[serde(flatten)]
+        signed: Signed,
     },
     RelayAuth {
         #[serde(flatten)]
@@ -549,6 +589,41 @@ fn signatures() {
                     old: alice(),
                     new: seeds("alice successor"),
                     created_at_ms: 1_700_000_002_000,
+                },
+            ),
+            (
+                "device_certificate",
+                SignIn::DeviceCertificate {
+                    account: alice(),
+                    device: seeds("alice laptop"),
+                    name: "laptop".into(),
+                    created_at_ms: 1_700_000_003_000,
+                },
+            ),
+            (
+                "device_list",
+                SignIn::DeviceList {
+                    signer: alice(),
+                    devices: vec![
+                        DeviceIn {
+                            device: seeds("alice laptop"),
+                            name: "laptop".into(),
+                            created_at_ms: 1_700_000_003_000,
+                        },
+                        DeviceIn {
+                            device: seeds("alice server"),
+                            name: "server".into(),
+                            created_at_ms: 1_700_000_004_000,
+                        },
+                    ],
+                },
+            ),
+            (
+                "device_revocation",
+                SignIn::DeviceRevocation {
+                    account: alice(),
+                    device: seeds("alice laptop"),
+                    created_at_ms: 1_700_000_005_000,
                 },
             ),
             (
@@ -653,6 +728,87 @@ fn signatures() {
                         SUCCESSION_ACCEPT_DOMAIN,
                         message,
                         succ.new_signature,
+                    ),
+                }
+            }
+            SignIn::DeviceCertificate {
+                account,
+                device,
+                name,
+                created_at_ms,
+            } => {
+                let account = account.identity();
+                let device = device.identity().user_id();
+                let cert = account
+                    .certify_device(&device, name, *created_at_ms)
+                    .unwrap();
+                cert.verify().unwrap();
+                let mut message = Vec::new();
+                message.extend_from_slice(account.user_id().as_bytes());
+                message.extend_from_slice(device.as_bytes());
+                message.extend_from_slice(&be64(*created_at_ms));
+                message.push(name.len() as u8);
+                message.extend_from_slice(name.as_bytes());
+                SignOut::DeviceCertificate {
+                    signed: Signed::checked(&account, DEVICE_DOMAIN, message, cert.signature),
+                }
+            }
+            SignIn::DeviceList { signer, devices } => {
+                let signer = signer.identity();
+                let certificates: Vec<DeviceCertificate> = devices
+                    .iter()
+                    .map(|d| {
+                        signer
+                            .certify_device(
+                                &d.device.identity().user_id(),
+                                &d.name,
+                                d.created_at_ms,
+                            )
+                            .unwrap()
+                    })
+                    .collect();
+                let bundle = signer
+                    .key_bundle()
+                    .with_devices(&signer, certificates)
+                    .unwrap();
+                bundle.verify().unwrap();
+                // Ascending device ids, whatever order they were given in.
+                assert!(bundle.devices.windows(2).all(|w| w[0].device < w[1].device));
+                let mut message = Vec::new();
+                message.extend_from_slice(&bundle.dh_public.0);
+                message.extend_from_slice(&(bundle.devices.len() as u16).to_be_bytes());
+                for device in &bundle.devices {
+                    message.extend_from_slice(device.device.as_bytes());
+                    message.extend_from_slice(&be64(device.created_at_ms));
+                }
+                SignOut::DeviceList {
+                    signed: Signed::checked(
+                        &signer,
+                        DEVICE_LIST_DOMAIN,
+                        message,
+                        bundle.devices_signature.unwrap(),
+                    ),
+                }
+            }
+            SignIn::DeviceRevocation {
+                account,
+                device,
+                created_at_ms,
+            } => {
+                let account = account.identity();
+                let device = device.identity().user_id();
+                let rev = account.revoke_device(&device, *created_at_ms);
+                rev.verify().unwrap();
+                let mut message = Vec::new();
+                message.extend_from_slice(account.user_id().as_bytes());
+                message.extend_from_slice(device.as_bytes());
+                message.extend_from_slice(&be64(*created_at_ms));
+                SignOut::DeviceRevocation {
+                    signed: Signed::checked(
+                        &account,
+                        DEVICE_REVOCATION_DOMAIN,
+                        message,
+                        rev.signature,
                     ),
                 }
             }
@@ -1782,6 +1938,8 @@ enum BodyIn {
         caps: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         head: Option<LogHead>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device: Option<DeviceCertificate>,
     },
     Ratchet(RatchetBody),
     /// Wrapped in a field: a group body has a `kind` of its own.
@@ -1807,6 +1965,7 @@ fn body() {
         seq: 42,
         caps: caps.into_iter().map(str::to_owned).collect(),
         head,
+        device: None,
     };
     let alice_id = alice().identity();
     let (a, init) = Session::initiate_with_rng(
@@ -1825,10 +1984,11 @@ fn body() {
         "body.json",
         "Bodies as encoded before sealing: JSON in the field order given, \
          padded with spaces to a multiple of 160 bytes. Plain (v1) bodies \
-         for each content kind, ratchet bodies (v2, with and without the \
-         InitHeader), and group bodies (v5: an application message inline, \
-         a Welcome parked in the blob store, a join request with its \
-         proof).",
+         for each content kind (a text from a linked device carrying its \
+         certificate, and a sync copy between one's own devices, among \
+         them), ratchet bodies (v2, with and without the InitHeader), and \
+         group bodies (v5: an application message inline, a Welcome parked \
+         in the blob store, a join request with its proof).",
         vec![
             ("text", plain(text("hello"), vec![], None)),
             (
@@ -1906,6 +2066,31 @@ fn body() {
                 ),
             ),
             (
+                "text_from_device",
+                BodyIn::Plain {
+                    content: text("hello from my laptop"),
+                    sent_at_ms: 1_700_000_000_000,
+                    epoch: 0x0123_4567_89ab_cdef,
+                    seq: 43,
+                    caps: vec![capability::DEVICES.to_owned()],
+                    head: None,
+                    device: Some(laptop_certificate()),
+                },
+            ),
+            (
+                "sync_sent",
+                plain(
+                    Content::Sync(Sync::Sent {
+                        peer: bob().identity().user_id(),
+                        id: "00000000-0000-4000-8000-000000000002".into(),
+                        sent_at_ms: 1_700_000_000_000,
+                        content: Box::new(text("hello, bob")),
+                    }),
+                    vec![capability::DEVICES],
+                    None,
+                ),
+            ),
+            (
                 "ratchet_v2_with_init",
                 BodyIn::Ratchet(RatchetBody {
                     v: 2,
@@ -1977,6 +2162,7 @@ fn body() {
                     seq,
                     caps,
                     head,
+                    device,
                 } => Body::plain_with_caps_and_head(
                     content.clone(),
                     *sent_at_ms,
@@ -1986,7 +2172,8 @@ fn body() {
                     },
                     &caps.iter().map(String::as_str).collect::<Vec<_>>(),
                     *head,
-                ),
+                )
+                .with_device(device.clone()),
                 BodyIn::Ratchet(body) => Body::Ratchet(body.clone()),
                 BodyIn::Group { body } => Body::Group(body.clone()),
             };
@@ -2001,6 +2188,7 @@ fn body() {
                         content,
                         caps,
                         head,
+                        device,
                     },
                     BodyIn::Plain {
                         content: c,
@@ -2009,13 +2197,17 @@ fn body() {
                         seq,
                         caps: cs,
                         head: h,
+                        device: d,
                     },
                 ) => {
                     assert_eq!(
                         (sent_at_ms, sequence.epoch, sequence.seq),
                         (*t, *epoch, *seq)
                     );
-                    assert_eq!((&content, &caps, &head), (c, cs, h));
+                    assert_eq!((&content, &caps, &head, &device), (c, cs, h, d));
+                    if let Some(device) = &device {
+                        device.verify().unwrap();
+                    }
                 }
                 (Body::Ratchet(decoded), BodyIn::Ratchet(body)) => assert_eq!(&decoded, body),
                 (Body::Group(decoded), BodyIn::Group { body }) => assert_eq!(&decoded, body),
@@ -2241,6 +2433,7 @@ enum TransparencyIn {
     BundleLeaf { bundle: Box<KeyBundle> },
     RevocationLeaf { revocation: Revocation },
     SuccessionLeaf { succession: Succession },
+    DeviceRevocationLeaf { revocation: DeviceRevocation },
     Chain { entries: Vec<EntryIn> },
 }
 
@@ -2263,6 +2456,10 @@ enum TransparencyOut {
         leaf: [u8; 32],
     },
     SuccessionLeaf {
+        #[serde(with = "b64_array")]
+        leaf: [u8; 32],
+    },
+    DeviceRevocationLeaf {
         #[serde(with = "b64_array")]
         leaf: [u8; 32],
     },
@@ -2315,7 +2512,41 @@ fn bundle_leaf_preimage(bundle: &KeyBundle) -> Vec<u8> {
             v.extend_from_slice(signature);
         }
     }
+    // The device section (section 14) only when the bundle has any.
+    if !bundle.devices.is_empty() || bundle.device_of.is_some() {
+        v.extend_from_slice(&(bundle.devices.len() as u16).to_be_bytes());
+        for device in &bundle.devices {
+            v.extend_from_slice(device.device.as_bytes());
+            v.extend_from_slice(&be64(device.created_at_ms));
+        }
+        match &bundle.devices_signature {
+            None => v.push(0),
+            Some(signature) => {
+                v.push(1);
+                v.extend_from_slice(signature);
+            }
+        }
+        match &bundle.device_of {
+            None => v.push(0),
+            Some(certificate) => {
+                v.push(1);
+                put_var(&mut v, &certificate.encode());
+            }
+        }
+    }
     v
+}
+
+/// Alice's certificate for her laptop, the device the vectors link.
+fn laptop_certificate() -> DeviceCertificate {
+    alice()
+        .identity()
+        .certify_device(
+            &seeds("alice laptop").identity().user_id(),
+            "laptop",
+            1_700_000_003_000,
+        )
+        .unwrap()
 }
 
 fn sha256_with_domain(domain: &[u8], preimage: &[u8]) -> [u8; 32] {
@@ -2339,9 +2570,10 @@ fn transparency() {
     run(
         "transparency.json",
         "The transparency log's hashes: the subject an identity's entries \
-         are filed under, the leaf of a bundle (one-time prekeys excluded) \
-         and of each statement, and a three-entry chain with the hash and \
-         head after each entry.",
+         are filed under, the leaf of a bundle (one-time prekeys excluded; \
+         with and without a device list, and a linked device's own) and of \
+         each statement, and a three-entry chain with the hash and head \
+         after each entry.",
         vec![
             (
                 "subject",
@@ -2378,6 +2610,49 @@ fn transparency() {
                 TransparencyIn::SuccessionLeaf {
                     succession: alice_id
                         .succeed_to(&seeds("alice successor").identity(), 1_700_000_002_000),
+                },
+            ),
+            (
+                "bundle_leaf_with_devices",
+                TransparencyIn::BundleLeaf {
+                    bundle: Box::new(
+                        alice_id
+                            .key_bundle()
+                            .with_devices(
+                                &alice_id,
+                                vec![
+                                    laptop_certificate(),
+                                    alice_id
+                                        .certify_device(
+                                            &seeds("alice server").identity().user_id(),
+                                            "server",
+                                            1_700_000_004_000,
+                                        )
+                                        .unwrap(),
+                                ],
+                            )
+                            .unwrap(),
+                    ),
+                },
+            ),
+            (
+                "device_bundle_leaf",
+                TransparencyIn::BundleLeaf {
+                    bundle: Box::new(
+                        seeds("alice laptop")
+                            .identity()
+                            .key_bundle()
+                            .as_device_of(laptop_certificate()),
+                    ),
+                },
+            ),
+            (
+                "device_revocation_leaf",
+                TransparencyIn::DeviceRevocationLeaf {
+                    revocation: alice_id.revoke_device(
+                        &seeds("alice laptop").identity().user_id(),
+                        1_700_000_005_000,
+                    ),
                 },
             ),
             (
@@ -2470,6 +2745,22 @@ fn transparency() {
                     )
                 );
                 TransparencyOut::SuccessionLeaf { leaf }
+            }
+            TransparencyIn::DeviceRevocationLeaf { revocation } => {
+                revocation.verify().unwrap();
+                let mut preimage = revocation.account.as_bytes().to_vec();
+                preimage.extend_from_slice(revocation.device.as_bytes());
+                preimage.extend_from_slice(&be64(revocation.created_at_ms));
+                preimage.extend_from_slice(&revocation.signature);
+                let leaf = revocation.transparency_leaf();
+                assert_eq!(
+                    leaf,
+                    sha256_with_domain(
+                        silver_protocol::transparency::DEVICE_REVOCATION_LEAF_DOMAIN,
+                        &preimage
+                    )
+                );
+                TransparencyOut::DeviceRevocationLeaf { leaf }
             }
             TransparencyIn::Chain { entries: inputs } => {
                 let mut head = LogHead::EMPTY;
@@ -2598,6 +2889,176 @@ fn blob() {
                 chunk_nonce,
                 aad: Bytes(aad),
                 ciphertext: Bytes(ciphertext),
+            }
+        },
+    );
+}
+
+// ---------------------------------------------------------------------------
+// device.json
+
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum DeviceVectorIn {
+    /// The key a provisioning message is sealed under, from the link's
+    /// secret.
+    LinkKey {
+        #[serde(with = "b64_array")]
+        secret: [u8; 16],
+    },
+    /// A provisioning message sealed for a device under the link key, the
+    /// nonce drawn from the seeded generator.
+    Provision {
+        #[serde(with = "b64_array")]
+        secret: [u8; 16],
+        device: Seeds,
+        plaintext: String,
+        #[serde(with = "b64_array")]
+        rng_seed: [u8; 32],
+    },
+    /// A certificate as bytes, for the MLS leaf extension.
+    CertificateEncoding {
+        account: Seeds,
+        device: Seeds,
+        name: String,
+        created_at_ms: u64,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum DeviceVectorOut {
+    LinkKey {
+        info: String,
+        #[serde(with = "b64_array")]
+        key: [u8; 32],
+    },
+    Provision {
+        #[serde(with = "b64_array")]
+        key: [u8; 32],
+        aad: Bytes,
+        #[serde(with = "b64_array")]
+        nonce: [u8; 24],
+        ciphertext: Bytes,
+    },
+    CertificateEncoding {
+        certificate: DeviceCertificate,
+        encoded: Bytes,
+    },
+}
+
+#[test]
+fn device() {
+    run(
+        "device.json",
+        "Linking a device (section 14): the link key from the link's secret \
+         (HKDF-SHA256, no salt, the info given), a provisioning message \
+         sealed under it for one device (XChaCha20-Poly1305 with the \
+         associated data given; the nonce is the first 24 bytes the seeded \
+         generator yields), and a device certificate as the bytes a group \
+         leaf carries.",
+        vec![
+            (
+                "link_key",
+                DeviceVectorIn::LinkKey {
+                    secret: label32("link secret")[..16].try_into().unwrap(),
+                },
+            ),
+            (
+                "provision",
+                DeviceVectorIn::Provision {
+                    secret: label32("link secret")[..16].try_into().unwrap(),
+                    device: seeds("alice laptop"),
+                    plaintext: "{\"account\":\"...\",\"contacts\":[]}".into(),
+                    rng_seed: label32("provision rng"),
+                },
+            ),
+            (
+                "certificate_encoding",
+                DeviceVectorIn::CertificateEncoding {
+                    account: alice(),
+                    device: seeds("alice laptop"),
+                    name: "laptop".into(),
+                    created_at_ms: 1_700_000_003_000,
+                },
+            ),
+        ],
+        |input| match input {
+            DeviceVectorIn::LinkKey { secret } => {
+                let key = device_link_key(secret);
+                let mut by_hand = [0u8; 32];
+                Hkdf::<Sha256>::new(None, secret)
+                    .expand(LINK_KEY_INFO, &mut by_hand)
+                    .unwrap();
+                assert_eq!(key, by_hand);
+                DeviceVectorOut::LinkKey {
+                    info: utf8(LINK_KEY_INFO),
+                    key,
+                }
+            }
+            DeviceVectorIn::Provision {
+                secret,
+                device,
+                plaintext,
+                rng_seed,
+            } => {
+                let key = device_link_key(secret);
+                let device = device.identity().user_id();
+                let sealed = seal_provision_with_rng(
+                    &key,
+                    &device,
+                    plaintext.as_bytes(),
+                    &mut VectorRng::new(*rng_seed),
+                )
+                .unwrap();
+                let nonce: [u8; 24] = VectorRng::new(*rng_seed).draw();
+                assert_eq!(sealed.nonce, nonce);
+                let mut aad = PROVISION_DOMAIN.to_vec();
+                aad.extend_from_slice(device.as_bytes());
+                let by_hand = XChaCha20Poly1305::new(Key::from_slice(&key))
+                    .encrypt(
+                        XNonce::from_slice(&nonce),
+                        Payload {
+                            msg: plaintext.as_bytes(),
+                            aad: &aad,
+                        },
+                    )
+                    .unwrap();
+                assert_eq!(sealed.ciphertext, by_hand);
+                assert_eq!(
+                    open_provision(&key, &device, &sealed).unwrap(),
+                    plaintext.as_bytes()
+                );
+                DeviceVectorOut::Provision {
+                    key,
+                    aad: Bytes(aad),
+                    nonce,
+                    ciphertext: Bytes(sealed.ciphertext),
+                }
+            }
+            DeviceVectorIn::CertificateEncoding {
+                account,
+                device,
+                name,
+                created_at_ms,
+            } => {
+                let account = account.identity();
+                let certificate = account
+                    .certify_device(&device.identity().user_id(), name, *created_at_ms)
+                    .unwrap();
+                let encoded = certificate.encode();
+                assert_eq!(DeviceCertificate::decode(&encoded).unwrap(), certificate);
+                let mut by_hand = certificate.account.as_bytes().to_vec();
+                by_hand.extend_from_slice(certificate.device.as_bytes());
+                by_hand.extend_from_slice(&be64(*created_at_ms));
+                by_hand.push(name.len() as u8);
+                by_hand.extend_from_slice(name.as_bytes());
+                by_hand.extend_from_slice(&certificate.signature);
+                assert_eq!(encoded, by_hand);
+                DeviceVectorOut::CertificateEncoding {
+                    certificate,
+                    encoded: Bytes(encoded),
+                }
             }
         },
     );

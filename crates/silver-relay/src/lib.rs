@@ -2010,6 +2010,8 @@ fn handle_frame(
                 succession,
                 head,
                 logged,
+                device_bundles: Vec::new(),
+                device_revocations: Vec::new(),
             }]
         }
         ClientFrame::Revoke { revocation } => match state.apply_revocation(revocation, conn.addr) {
@@ -2022,6 +2024,13 @@ fn handle_frame(
                 Err((code, message)) => vec![ServerFrame::error(code, message)],
             }
         }
+        // Served once the relay keeps devices (`docs/PROTOCOL.md` section
+        // 14); until then a client sees the feature missing and never
+        // sends one.
+        ClientFrame::RevokeDevice { .. } => vec![ServerFrame::error(
+            ErrorCode::Forbidden,
+            "this relay does not keep devices",
+        )],
         ClientFrame::Send { envelope } => vec![state.submit(envelope, &mut conn.sends, Some(me))],
         ClientFrame::Ack { id } => {
             state.ack(me, &id);

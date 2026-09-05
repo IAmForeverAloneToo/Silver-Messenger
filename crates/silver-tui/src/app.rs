@@ -2584,7 +2584,9 @@ impl App {
                         Content::Receipt { .. }
                         | Content::Revocation(_)
                         | Content::Succession(_)
-                        | Content::Cover { .. } => None,
+                        | Content::Cover { .. }
+                        | Content::Sync(_)
+                        | Content::Provision(_) => None,
                     };
                     if let Some(text) = text {
                         // The relay may have answered before this event was
@@ -2819,6 +2821,13 @@ impl App {
                     // line, no receipt, no notification, no unread mark. It
                     // counted as hearing from them above, which is its job.
                     Content::Cover { .. } => {
+                        self.known_ids.insert(message.id);
+                        return;
+                    }
+                    // What one's own devices say to each other; nothing
+                    // for a contact to show, and this client keeps no
+                    // devices yet.
+                    Content::Sync(_) | Content::Provision(_) => {
                         self.known_ids.insert(message.id);
                         return;
                     }
@@ -3433,7 +3442,9 @@ impl App {
             Content::Receipt { .. }
             | Content::Revocation(_)
             | Content::Succession(_)
-            | Content::Cover { .. } => return,
+            | Content::Cover { .. }
+            | Content::Sync(_)
+            | Content::Provision(_) => return,
         };
         // Strangers get bounded room: so many senders, so much per sender.
         let mut text: String = text.chars().take(MAX_HELD_CHARS).collect();
@@ -3764,6 +3775,7 @@ mod tests {
             signed: false,
             caps: vec![capability::COVER.to_owned()],
             head: None,
+            device: None,
         }
     }
 

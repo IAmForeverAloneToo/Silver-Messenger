@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ProtocolError;
 use crate::bundle::KeyBundle;
+use crate::device::DeviceRevocation;
 use crate::encoding::{b64, b64_array};
 use crate::envelope::Envelope;
 use crate::group::GroupId;
@@ -59,6 +60,11 @@ pub mod feature {
     /// (`GroupCreate`, `GroupCommit`); `docs/PROTOCOL.md` section 13.
     /// Without it, clients show groups as unavailable on this relay.
     pub const GROUPS: &str = "groups";
+    /// The relay keeps the device list and the device certificate in
+    /// bundles, answers `RevokeDevice`, and attaches the linked devices'
+    /// bundles to an account's `LookupResult` (`docs/PROTOCOL.md` section
+    /// 14). Without it, clients link no devices.
+    pub const DEVICES: &str = "devices";
 }
 
 /// One key package on deposit, as the relay stores it: opaque bytes with
@@ -123,6 +129,13 @@ pub enum ClientFrame {
     /// it on lookups of the old identity.
     Succeed {
         succession: Succession,
+    },
+    /// Revoke one of the account's devices (section 14). On the account's
+    /// authenticated connection; the relay stores and logs the statement,
+    /// serves it on lookups of the device and the account, and cuts the
+    /// device off.
+    RevokeDevice {
+        revocation: DeviceRevocation,
     },
     /// Hand an encrypted envelope to the relay for delivery. Accepted on an
     /// authenticated connection, or (on relays advertising
@@ -268,6 +281,16 @@ pub enum ServerFrame {
         head: Option<LogHead>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         logged: Option<LogPosition>,
+        /// For an account with linked devices (section 14): their bundles
+        /// as the relay would serve them on their own lookups, one-time
+        /// prekeys popped under the same rules. Absent on relays without
+        /// [`feature::DEVICES`] and for accounts without devices.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        device_bundles: Vec<KeyBundle>,
+        /// Device revocations the relay holds: for an account, every one it
+        /// issued; for a device, its own.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        device_revocations: Vec<DeviceRevocation>,
     },
     /// Transparency log entries in answer to `LogSince`, in order, and the
     /// head the relay stands at; `entries` is empty when `index` was the

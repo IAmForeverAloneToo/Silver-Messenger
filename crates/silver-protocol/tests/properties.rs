@@ -7,6 +7,7 @@
 use proptest::prelude::*;
 
 use silver_protocol::blob::{BlobKey, CHUNK_BYTES, open_chunk, seal_chunk};
+use silver_protocol::device::DeviceCertificate;
 use silver_protocol::envelope::{
     Body, Content, MAX_BODY_BYTES, PAD_BLOCK, ReceiptKind, Sequence, capability, open_bytes,
     seal_bytes, seal_bytes_unsigned,
@@ -147,11 +148,13 @@ proptest! {
                         content: c,
                         caps: cs,
                         head: h,
+                        device,
                     } => {
                         prop_assert_eq!((t, sequence.epoch, sequence.seq), (sent_at_ms, epoch, seq));
                         prop_assert_eq!(c, content);
                         prop_assert_eq!(cs, caps);
                         prop_assert_eq!(h, head);
+                        prop_assert!(device.is_none());
                     }
                     Body::Ratchet(_) | Body::Group(_) => {
                         prop_assert!(false, "a plain body decoded as another kind")
@@ -608,6 +611,107 @@ proptest! {
             _ => flip(&mut changed.new_signature, at),
         }
         prop_assert!(changed.verify().is_err());
+    }
+
+    /// A device certificate or revocation with any field changed does not
+    /// verify, and a certificate survives its byte encoding.
+    #[test]
+    fn device_statements_reject_any_change(
+        at_ms in any::<u64>(),
+        delta in 1u64..1000,
+        field in 0u8..5,
+        at in any::<usize>(),
+        name in "[a-z ]{0,32}",
+    ) {
+        let alice = identity(1);
+        let laptop = identity(2);
+        let carol = identity(3);
+
+        let cert = alice.certify_device(&laptop.user_id(), &name, at_ms).unwrap();
+        prop_assert!(cert.verify().is_ok());
+        prop_assert_eq!(DeviceCertificate::decode(&cert.encode()).unwrap(), cert.clone());
+        let mut changed = cert.clone();
+        match field {
+            0 => changed.account = carol.user_id(),
+            1 => changed.device = carol.user_id(),
+            2 => changed.created_at_ms = at_ms.wrapping_add(delta),
+            3 => changed.name.push('x'),
+            _ => flip(&mut changed.signature, at),
+        }
+        prop_assert!(changed.verify().is_err());
+
+        let rev = alice.revoke_device(&laptop.user_id(), at_ms);
+        prop_assert!(rev.verify().is_ok());
+        let mut changed = rev.clone();
+        match field {
+            0 => changed.account = carol.user_id(),
+            1 => changed.device = carol.user_id(),
+            2 => changed.created_at_ms = at_ms.wrapping_add(delta),
+            _ => flip(&mut changed.signature, at),
+        }
+        prop_assert!(changed.verify().is_err());
+    }
+
+    /// A bundle's device list verifies only as signed, in order, with
+    /// certificates of the bundle's own account; the leaf changes with the
+    /// list and is what it always was without one.
+    #[test]
+    fn device_lists_are_signed_as_a_whole(
+        n in 0usize..=8,
+        at_ms in any::<u64>(),
+        at in any::<usize>(),
+    ) {
+        let alice = identity(1);
+        let certify = |i: usize| {
+            alice
+                .certify_device(&identity(10 + i as u8).user_id(), "d", at_ms.wrapping_add(i as u64))
+                .unwrap()
+        };
+        let devices: Vec<_> = (0..n).map(certify).collect();
+        let bundle = alice.key_bundle().with_devices(&alice, devices).unwrap();
+        prop_assert!(bundle.verify().is_ok());
+        prop_assert!(bundle.devices.windows(2).all(|w| w[0].device < w[1].device));
+        let plain = alice.key_bundle();
+        if n == 0 {
+            prop_assert_eq!(bundle.transparency_leaf(), plain.transparency_leaf());
+            prop_assert!(bundle.devices_signature.is_none());
+            let nine: Vec<_> = (0..9).map(certify).collect();
+            prop_assert!(alice.key_bundle().with_devices(&alice, nine).is_err());
+        } else {
+            prop_assert_ne!(bundle.transparency_leaf(), plain.transparency_leaf());
+            let mut dropped = bundle.clone();
+            dropped.devices.pop();
+            prop_assert!(dropped.verify().is_err() || dropped.devices.is_empty());
+            let mut foreign = bundle.clone();
+            foreign.devices[0] = identity(2)
+                .certify_device(&identity(10).user_id(), "d", at_ms)
+                .unwrap();
+            prop_assert!(foreign.verify().is_err());
+            let mut damaged = bundle.clone();
+            flip(damaged.devices_signature.as_mut().unwrap(), at);
+            prop_assert!(damaged.verify().is_err());
+            if n > 1 {
+                let mut swapped = bundle.clone();
+                swapped.devices.swap(0, 1);
+                prop_assert!(swapped.verify().is_err());
+            }
+            // A linked device's bundle carries its certificate and no list.
+            let laptop = identity(10);
+            let certificate = bundle
+                .devices
+                .iter()
+                .find(|c| c.device == laptop.user_id())
+                .unwrap()
+                .clone();
+            let device_bundle = laptop.key_bundle().as_device_of(certificate.clone());
+            prop_assert!(device_bundle.verify().is_ok());
+            prop_assert_eq!(device_bundle.account(), Some(&alice.user_id()));
+            prop_assert_ne!(device_bundle.transparency_leaf(), laptop.key_bundle().transparency_leaf());
+            let mut wrong = identity(11).key_bundle().as_device_of(certificate);
+            prop_assert!(wrong.verify().is_err());
+            wrong.device_of = None;
+            prop_assert!(wrong.verify().is_ok());
+        }
     }
 }
 
