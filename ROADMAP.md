@@ -401,7 +401,8 @@ those who want to pay for it (46).
         linking by a QR code and a short-lived secret; every device is a
         leaf in the MLS tree of every conversation it belongs to;
         optional encrypted history sync through the relay. Signal's
-        Sesame is the reference for the device list.
+        Sesame is the reference for the device list. The design note
+        is docs/design/devices.md.
 49. [ ] **Usernames scoped to a relay** (M). `alice` as a signed claim,
         unique on that relay, resolved by the relay and verified by the
         client against the signature, with the safety number still the
