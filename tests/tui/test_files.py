@@ -64,7 +64,9 @@ def main():
     assert b.wait("fetched as they arrive"), "/files auto"
     a.type(f"/send {small}\r")
     assert b.wait(f"[file] notes.txt (170 B) {G.arrow} ") and b.wait("notes (2).txt"), "auto fetch, no overwrite"
-    assert history(pair.b_dir, pair.a_id)[-1]["text"].endswith("notes (2).txt")
+    # The last line with a text: a receipt line may land after it.
+    texts = [h["text"] for h in history(pair.b_dir, pair.a_id) if "text" in h]
+    assert texts[-1].endswith("notes (2).txt"), texts[-1]
 
     # Alice fetches bob's file with a double click on its line.
     b.type(f"/send {big}\r")

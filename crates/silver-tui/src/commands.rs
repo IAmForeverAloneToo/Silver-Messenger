@@ -51,8 +51,8 @@ pub const COMMANDS: &[CommandInfo] = &[
     cmd(
         "group",
         &["g"],
-        "<new|add|remove|leave|members|invite|join|link|admin|rename|info|rejoin|forget> …",
-        "groups: /group new <name>, /group add <contact>, /group remove <member>, /group leave, /group members, /group invite [copy], /group join <link>, /group link reset, /group admin add|remove <member>, /group rename <name>, /group info, /group rejoin, /group forget",
+        "<what> …",
+        "groups: new <name>, add <contact>, remove <member>, leave, members, invite [copy], join <link>, link reset, admin add|remove <member>, rename <name>, info, rejoin, forget",
     ),
     cmd(
         "decline",

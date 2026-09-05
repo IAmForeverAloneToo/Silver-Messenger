@@ -15,7 +15,7 @@ def main():
     time.sleep(1.5)
     assert a.wait_marks("hello bob", G.accepted), "stranger got a receipt?"
     b.key(SHIFT_TAB)
-    assert b.wait("Contact requests"), "requests pane"
+    assert b.wait("People who wrote to you"), "requests pane"
     b.type("/accept 1\r")
     assert b.wait("hello bob"), "accepted message moves into the chat"
     b.type("/alias alice\r")

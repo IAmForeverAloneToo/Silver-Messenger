@@ -20,11 +20,17 @@ def main():
     a.key(F1)
     assert a.wait("Help · any other key closes"), "F1 opens help"
     assert a.has("/add <id or link>") and a.has("more (PgDn)"), "help content"
-    a.key(PGDN)
-    a.key(PGDN)
-    assert a.wait("/send <path>"), "PgDn scrolls"
-    for _ in range(6):
+    # The table's length changes as commands come and go; what must hold is
+    # that PgDn brings the rest into view, page by page, down to the keys.
+    assert not a.has("/send <path>"), "the first page ends before /send"
+    pages = 0
+    while not a.has("/send <path>") and pages < 4:
         a.key(PGDN)
+        pages += 1
+    assert a.has("/send <path>") and pages >= 1, "PgDn scrolls"
+    while not a.has("Ctrl-Q quits") and pages < 12:
+        a.key(PGDN)
+        pages += 1
     assert a.has("Ctrl-Q quits") and a.has("Keys"), "end of help"
     a.key(ESC)
     time.sleep(0.3)

@@ -36,9 +36,16 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check advisories licenses bans sources
-      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+      # cargo audit itself, rather than the action around it: the action
+      # posts its findings as a check run, which needs a token that can
+      # write checks, and fails the job when it cannot; the command's own
+      # exit code says what matters (a vulnerability fails, an unmaintained
+      # crate warns), and installing a built binary is faster than
+      # compiling one.
+      - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          tool: cargo-audit@0.22.2
+      - run: cargo audit --file Cargo.lock
 
   test:
     name: test (${{ matrix.os }})
