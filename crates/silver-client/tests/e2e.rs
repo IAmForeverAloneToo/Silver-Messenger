@@ -750,6 +750,84 @@ async fn clients_with_prekeys_talk_over_forward_secret_sessions() {
 }
 
 #[tokio::test]
+async fn everyday_kinds_travel_under_a_session_and_advertise_what_they_need() {
+    let (url, _state) = start_relay().await;
+    let alice = Arc::new(Identity::generate());
+    let bob = Arc::new(Identity::generate());
+    let (alice_c, mut alice_ev) =
+        Client::spawn(url.clone(), alice.clone(), with_sessions(&alice)).unwrap();
+    let (bob_c, mut bob_ev) = Client::spawn(url.clone(), bob.clone(), with_sessions(&bob)).unwrap();
+    connected(&mut alice_ev, "alice").await;
+    connected(&mut bob_ev, "bob").await;
+
+    // A text first; every body says what this client reads.
+    let sent = alice_c
+        .send_message(
+            bob.user_id(),
+            None,
+            "hello".into(),
+            Sequence { epoch: 1, seq: 1 },
+        )
+        .await
+        .unwrap();
+    let got = wait_for(&mut bob_ev, "bob's text", |e| message(e).is_some()).await;
+    let m = message(&got).unwrap();
+    assert_eq!(m.id, sent.envelope.id);
+    for cap in ["edits", "reactions", "timers"] {
+        assert!(m.caps.iter().any(|c| c == cap), "{cap} in {:?}", m.caps);
+    }
+    // Then an edit of it, a reaction to it, its deletion and a timer,
+    // each a body under the same session, as a text is.
+    let kinds = [
+        Content::Edit {
+            id: sent.envelope.id.clone(),
+            body: "hello, bob".into(),
+        },
+        Content::Reaction {
+            id: sent.envelope.id.clone(),
+            emoji: "👋".into(),
+        },
+        Content::Delete {
+            ids: vec![sent.envelope.id.clone()],
+        },
+        Content::Timer { seconds: 86_400 },
+    ];
+    for (n, content) in kinds.iter().enumerate() {
+        let delivery = alice_c
+            .send_content(
+                bob.user_id(),
+                Some(sent.bundle.clone()),
+                content.clone(),
+                Sequence {
+                    epoch: 1,
+                    seq: 2 + n as u64,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(delivery.forward_secret);
+        let got = wait_for(&mut bob_ev, "bob's next", |e| message(e).is_some()).await;
+        let m = message(&got).unwrap();
+        assert_eq!(m.from, alice.user_id());
+        assert_eq!(&m.content, content);
+        assert!(m.forward_secret && !m.signed);
+    }
+    // A reply names the message answered and asks nothing of the reader.
+    let reply = Content::Text {
+        body: "and to you".into(),
+        reply_to: Some(sent.envelope.id.clone()),
+    };
+    bob_c
+        .send_content(alice.user_id(), None, reply.clone(), Sequence::default())
+        .await
+        .unwrap();
+    let got = wait_for(&mut alice_ev, "alice's reply", |e| message(e).is_some()).await;
+    assert_eq!(message(&got).unwrap().content, reply);
+    alice_c.shutdown().await;
+    bob_c.shutdown().await;
+}
+
+#[tokio::test]
 async fn a_peer_without_prekeys_is_sent_v1_and_understood() {
     let (url, _state) = start_relay().await;
     let alice = Arc::new(Identity::generate());

@@ -9,6 +9,10 @@
 //! does not mark the moment a message arrived or was looked at: a relay
 //! that sees a small message go back right after a delivery learns less
 //! when the gap varies.
+//!
+//! Reactions go through the same queue with the read receipts' wait: a
+//! reaction is the size of a receipt and, like one, follows a delivery
+//! closely, so it leaves with the same blur ([`ReceiptQueue::react`]).
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -28,6 +32,9 @@ pub const READ_JITTER: (Duration, Duration) = (Duration::from_secs(2), Duration:
 struct Pending {
     delivered: Vec<String>,
     read: Vec<String>,
+    /// Reactions to send, by the message reacted to: the last one given
+    /// before the batch leaves is the one that goes.
+    reactions: Vec<(String, String)>,
     due: Option<Instant>,
 }
 
@@ -81,6 +88,28 @@ impl ReceiptQueue {
         }
     }
 
+    /// Queue a reaction to the message `id` from `peer`'s conversation
+    /// (`emoji` empty to withdraw ours), to leave with the read receipts'
+    /// wait. A second reaction to the same message before the batch goes
+    /// replaces the first, as it would on arrival.
+    pub fn react(&mut self, peer: UserId, id: impl Into<String>, emoji: impl Into<String>) {
+        self.react_at(peer, id, emoji, Instant::now());
+    }
+
+    fn react_at(
+        &mut self,
+        peer: UserId,
+        id: impl Into<String>,
+        emoji: impl Into<String>,
+        now: Instant,
+    ) {
+        let pending = self.peers.entry(peer).or_default();
+        let id = id.into();
+        pending.reactions.retain(|(target, _)| *target != id);
+        pending.reactions.push((id, emoji.into()));
+        pending.wait(now, READ_JITTER.0, READ_JITTER.1);
+    }
+
     /// Whether anything is waiting.
     pub fn is_empty(&self) -> bool {
         self.peers.is_empty()
@@ -119,6 +148,9 @@ impl ReceiptQueue {
                         ids: std::mem::take(&mut pending.read),
                     },
                 ));
+            }
+            for (id, emoji) in std::mem::take(&mut pending.reactions) {
+                out.push((*peer, Content::Reaction { id, emoji }));
             }
             false
         });
@@ -182,6 +214,52 @@ mod tests {
 
         queue.read(b, "10");
         assert_eq!(queue.take_all().len(), 1);
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn reactions_wait_like_read_receipts_and_the_last_one_goes() {
+        let a = Identity::generate().user_id();
+        let start = Instant::now();
+        let mut queue = ReceiptQueue::default();
+        queue.react_at(a, "1", "👍", start);
+        queue.react_at(a, "2", "❤️", start);
+        queue.react_at(a, "1", "", start);
+        queue.delivered_at(a, "3", start);
+        let due = queue.peers[&a].due.unwrap() - start;
+        assert!(
+            due >= BATCH_DELAY + READ_JITTER.0 && due <= BATCH_DELAY + READ_JITTER.1,
+            "{due:?}"
+        );
+        assert!(queue.take_due(start + BATCH_DELAY).is_empty());
+        let out = queue.take_due(start + BATCH_DELAY + READ_JITTER.1 + Duration::from_millis(1));
+        assert_eq!(
+            out,
+            vec![
+                (
+                    a,
+                    Content::Receipt {
+                        kind: ReceiptKind::Delivered,
+                        ids: vec!["3".into()],
+                    },
+                ),
+                (
+                    a,
+                    Content::Reaction {
+                        id: "2".into(),
+                        emoji: "❤️".into(),
+                    },
+                ),
+                (
+                    a,
+                    Content::Reaction {
+                        id: "1".into(),
+                        emoji: String::new(),
+                    },
+                ),
+            ],
+            "one per message, the later replacing the earlier"
+        );
         assert!(queue.is_empty());
     }
 

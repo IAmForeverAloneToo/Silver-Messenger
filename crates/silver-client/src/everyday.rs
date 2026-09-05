@@ -6,9 +6,31 @@
 
 use std::fmt;
 
-use silver_protocol::envelope::MAX_TIMER_SECONDS;
+use silver_protocol::Content;
+use silver_protocol::envelope::{MAX_TIMER_SECONDS, capability};
 
 use crate::store::{Conversation, Direction, HistoryEntry, Store};
+
+/// The in-body capability (`docs/PROTOCOL.md` 4.3) a reader needs for
+/// `content`: `edits` for an edit or a deletion, `reactions` for a
+/// reaction, `timers` for a timer; `None` for what every client reads,
+/// a reply included. A sender uses a kind only towards a contact whose
+/// last message advertised its capability, and in a group only when
+/// every leaf declares the everyday extension type.
+pub fn needs_capability(content: &Content) -> Option<&'static str> {
+    match content {
+        Content::Edit { .. } | Content::Delete { .. } => Some(capability::EDITS),
+        Content::Reaction { .. } => Some(capability::REACTIONS),
+        Content::Timer { .. } => Some(capability::TIMERS),
+        _ => None,
+    }
+}
+
+/// The capability `content` needs that `caps`, a contact's advertised
+/// ones, lack: `None` when the content can go to them.
+pub fn missing_capability(content: &Content, caps: &[String]) -> Option<&'static str> {
+    needs_capability(content).filter(|needed| !caps.iter().any(|c| c == needed))
+}
 
 /// How long after sending a message its author may edit it or delete it
 /// for everyone: a day.
@@ -177,6 +199,45 @@ pub fn time_left(expires_at_ms: u64, now_ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_kind_needs_the_capability_that_names_it() {
+        let edit = Content::Edit {
+            id: "1".into(),
+            body: "x".into(),
+        };
+        let delete = Content::Delete {
+            ids: vec!["1".into()],
+        };
+        let reaction = Content::Reaction {
+            id: "1".into(),
+            emoji: "👍".into(),
+        };
+        let timer = Content::Timer { seconds: 60 };
+        let reply = Content::Text {
+            body: "yes".into(),
+            reply_to: Some("1".into()),
+        };
+        assert_eq!(needs_capability(&edit), Some("edits"));
+        assert_eq!(needs_capability(&delete), Some("edits"));
+        assert_eq!(needs_capability(&reaction), Some("reactions"));
+        assert_eq!(needs_capability(&timer), Some("timers"));
+        assert_eq!(needs_capability(&reply), None);
+        assert_eq!(needs_capability(&Content::text("plain")), None);
+
+        let older: Vec<String> = vec!["receipts".into(), "files".into()];
+        let current: Vec<String> = crate::CAPABILITIES
+            .iter()
+            .map(|c| (*c).to_owned())
+            .collect();
+        assert_eq!(missing_capability(&edit, &older), Some("edits"));
+        assert_eq!(missing_capability(&reaction, &older), Some("reactions"));
+        assert_eq!(missing_capability(&timer, &older), Some("timers"));
+        assert_eq!(missing_capability(&reply, &older), None);
+        for content in [edit, delete, reaction, timer, reply] {
+            assert_eq!(missing_capability(&content, &current), None);
+        }
+    }
 
     #[test]
     fn a_message_is_revised_within_a_day_of_sending() {

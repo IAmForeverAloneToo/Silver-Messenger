@@ -62,6 +62,9 @@ pub const CAPABILITIES: &[&str] = &[
     silver_protocol::envelope::capability::FILES,
     silver_protocol::envelope::capability::PADDED_FILES,
     silver_protocol::envelope::capability::LIFECYCLE,
+    silver_protocol::envelope::capability::EDITS,
+    silver_protocol::envelope::capability::REACTIONS,
+    silver_protocol::envelope::capability::TIMERS,
 ];
 
 /// Signed protocol capabilities this client advertises in its published key

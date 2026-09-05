@@ -1395,6 +1395,26 @@ impl App {
                         }
                     }
                 }
+                GroupEvent::TimerSet {
+                    group,
+                    by,
+                    seconds,
+                    changed,
+                } => {
+                    if !changed || !self.group_list.contains(&group) {
+                        continue;
+                    }
+                    let who = self.member_name(&by);
+                    let note = if seconds == 0 {
+                        format!("{who} turned disappearing messages off")
+                    } else {
+                        format!(
+                            "{who} set messages to disappear after {}",
+                            silver_client::everyday::describe_timer(seconds)
+                        )
+                    };
+                    self.note_in_group(group, &note);
+                }
                 GroupEvent::LeaveProposed { group, member } => {
                     // An admin takes the leaver out at once; the commit
                     // carries the pending proposal. Others hear of it

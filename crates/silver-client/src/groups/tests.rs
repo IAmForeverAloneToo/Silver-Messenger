@@ -232,6 +232,228 @@ fn a_group_is_created_joined_and_messaged() {
 }
 
 #[test]
+fn a_timer_is_an_admins_word_and_edits_and_reactions_pass_through() {
+    let mut seq = Sequencer::default();
+    let mut blobs = HashMap::new();
+    let (mut alice, mut bob, mut carol, group) = three(&mut seq, &mut blobs);
+    // Bob is no admin: his engine will not make a timer message.
+    assert!(matches!(
+        bob.groups
+            .send(&group, Content::Timer { seconds: 60 }, None, now_ms()),
+        Err(GroupError::NotAdmin)
+    ));
+    // A client of his that thought otherwise would be refused by every
+    // reader, which goes by its own record of who the admins are.
+    let bob_id = bob.id();
+    bob.groups
+        .file
+        .groups
+        .get_mut(&group)
+        .unwrap()
+        .members
+        .iter_mut()
+        .filter(|m| m.user == bob_id)
+        .for_each(|m| m.admin = true);
+    let out = bob
+        .groups
+        .send(&group, Content::Timer { seconds: 60 }, None, now_ms())
+        .unwrap();
+    deliver(out, &mut [&mut alice, &mut carol], &mut blobs);
+    for party in [&mut alice, &mut carol] {
+        let events = party.drain(&blobs);
+        assert!(
+            matches!(
+                events.as_slice(),
+                [GroupEvent::Refused { reason, .. }] if reason.contains("admin")
+            ),
+            "{events:?}"
+        );
+        assert_eq!(party.groups.get(&group).unwrap().expire_after_s, 0);
+    }
+    // Alice's applies, to her own record as it goes and to every reader's
+    // as it arrives; a repeat of the value is told apart from a change.
+    let out = alice
+        .groups
+        .send(&group, Content::Timer { seconds: 3600 }, None, now_ms())
+        .unwrap();
+    assert_eq!(alice.groups.get(&group).unwrap().expire_after_s, 3600);
+    deliver(out, &mut [&mut bob, &mut carol], &mut blobs);
+    for party in [&mut bob, &mut carol] {
+        assert_eq!(
+            party.drain(&blobs),
+            vec![GroupEvent::TimerSet {
+                group,
+                by: alice.id(),
+                seconds: 3600,
+                changed: true,
+            }]
+        );
+        assert_eq!(party.groups.get(&group).unwrap().expire_after_s, 3600);
+    }
+    let out = alice
+        .groups
+        .send(&group, Content::Timer { seconds: 3600 }, None, now_ms())
+        .unwrap();
+    deliver(out, &mut [&mut bob, &mut carol], &mut blobs);
+    assert_eq!(
+        bob.drain(&blobs),
+        vec![GroupEvent::TimerSet {
+            group,
+            by: alice.id(),
+            seconds: 3600,
+            changed: false,
+        }]
+    );
+    carol.drain(&blobs);
+    // An edit and a reaction pass with the sender's name on them; whether
+    // the sender may edit the message named is the reader's to check
+    // against its history.
+    let edit = Content::Edit {
+        id: "m1".into(),
+        body: "fixed".into(),
+    };
+    let out = bob
+        .groups
+        .send(&group, edit.clone(), None, now_ms())
+        .unwrap();
+    deliver(out, &mut [&mut alice, &mut carol], &mut blobs);
+    assert!(matches!(
+        alice.drain(&blobs).as_slice(),
+        [GroupEvent::Message { from, content, .. }] if *from == bob.id() && *content == edit
+    ));
+    carol.drain(&blobs);
+    let reaction = Content::Reaction {
+        id: "m1".into(),
+        emoji: "👍".into(),
+    };
+    let out = carol
+        .groups
+        .send(&group, reaction.clone(), None, now_ms())
+        .unwrap();
+    deliver(out, &mut [&mut alice, &mut bob], &mut blobs);
+    assert!(matches!(
+        bob.drain(&blobs).as_slice(),
+        [GroupEvent::Message { from, content, .. }] if *from == carol.id() && *content == reaction
+    ));
+    alice.drain(&blobs);
+}
+
+#[test]
+fn an_older_members_leaf_holds_the_new_kinds_back_until_it_is_refreshed() {
+    let mut seq = Sequencer::default();
+    let mut blobs = HashMap::new();
+    let (mut alice, mut bob, mut carol, group) = three(&mut seq, &mut blobs);
+    assert!(
+        alice
+            .groups
+            .members_without_everyday(&group)
+            .unwrap()
+            .is_empty()
+    );
+    // Dave's client is from before 0.10.0: his key package does not
+    // declare the everyday extension type.
+    let mut dave = Party::new();
+    dave.groups.declare_everyday(false);
+    let dave_kp = alice
+        .groups
+        .verify_key_package(&dave.id(), &dave.key_package(), now_ms())
+        .unwrap();
+    let staged = alice.groups.stage_add(&group, &[dave_kp]).unwrap();
+    assert_eq!(seq.commit(staged), Ok(2));
+    let out = alice.groups.commit_staged(&group, now_ms()).unwrap();
+    deliver(out, &mut [&mut bob, &mut carol, &mut dave], &mut blobs);
+    bob.drain(&blobs);
+    carol.drain(&blobs);
+    assert!(matches!(
+        dave.drain(&blobs).as_slice(),
+        [GroupEvent::Invited { .. }]
+    ));
+    dave.groups.accept_welcome(&group).unwrap();
+    // Everyone names dave and holds a reaction, an edit, a deletion and
+    // a timer back; a text goes as ever.
+    for party in [&mut alice, &mut bob, &mut carol] {
+        assert_eq!(
+            party.groups.members_without_everyday(&group).unwrap(),
+            vec![dave.id()]
+        );
+    }
+    let reaction = Content::Reaction {
+        id: "m".into(),
+        emoji: "👍".into(),
+    };
+    match bob.groups.send(&group, reaction.clone(), None, now_ms()) {
+        Err(GroupError::OlderMembers(older)) => assert_eq!(older, vec![dave.id()]),
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(
+        alice
+            .groups
+            .send(&group, Content::Timer { seconds: 60 }, None, now_ms()),
+        Err(GroupError::OlderMembers(_))
+    ));
+    assert!(matches!(
+        bob.groups.send(
+            &group,
+            Content::Delete {
+                ids: vec!["m".into()]
+            },
+            None,
+            now_ms()
+        ),
+        Err(GroupError::OlderMembers(_))
+    ));
+    let out = bob
+        .groups
+        .send(&group, text("plain"), None, now_ms())
+        .unwrap();
+    deliver(out, &mut [&mut alice, &mut carol, &mut dave], &mut blobs);
+    for party in [&mut alice, &mut carol, &mut dave] {
+        assert!(matches!(
+            party.drain(&blobs).as_slice(),
+            [GroupEvent::Message { .. }]
+        ));
+    }
+    // Dave's engine, from before, sees no reason to refresh its leaf; the
+    // one that knows the type does, at once, while a leaf that declares
+    // it waits its turn.
+    assert!(dave.groups.self_updates_due(now_ms()).is_empty());
+    dave.groups.declare_everyday(true);
+    assert_eq!(dave.groups.self_updates_due(now_ms()), vec![group]);
+    assert!(alice.groups.self_updates_due(now_ms()).is_empty());
+    // Dave upgraded: his refreshed leaf declares the type, and the kinds
+    // go to him.
+    let staged = dave.groups.stage_self_update(&group).unwrap();
+    assert_eq!(seq.commit(staged), Ok(3));
+    let out = dave.groups.commit_staged(&group, now_ms()).unwrap();
+    deliver(out, &mut [&mut alice, &mut bob, &mut carol], &mut blobs);
+    for party in [&mut alice, &mut bob, &mut carol] {
+        assert!(matches!(
+            party.drain(&blobs).as_slice(),
+            [GroupEvent::Changed { by, change: Change::Updated, .. }] if *by == dave.id()
+        ));
+        assert!(
+            party
+                .groups
+                .members_without_everyday(&group)
+                .unwrap()
+                .is_empty()
+        );
+    }
+    assert!(dave.groups.self_updates_due(now_ms()).is_empty());
+    let out = bob
+        .groups
+        .send(&group, reaction.clone(), None, now_ms())
+        .unwrap();
+    deliver(out, &mut [&mut alice, &mut carol, &mut dave], &mut blobs);
+    assert!(matches!(
+        dave.drain(&blobs).as_slice(),
+        [GroupEvent::Message { from, content, .. }] if *from == bob.id() && *content == reaction
+    ));
+    alice.drain(&blobs);
+    carol.drain(&blobs);
+}
+
+#[test]
 fn members_are_removed_and_leave_and_cannot_read_on() {
     let mut seq = Sequencer::default();
     let mut blobs = HashMap::new();

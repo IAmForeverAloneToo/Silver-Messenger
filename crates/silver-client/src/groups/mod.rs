@@ -38,9 +38,9 @@ use sha2::{Digest, Sha256};
 use silver_protocol::blob::{self, BlobKey, CHUNK_BYTES, MAX_FILE_BYTES, new_blob_id};
 use silver_protocol::encoding::b64_array;
 use silver_protocol::group::{
-    self, BlobRef, EXTENSION_DEVICE, EXTENSION_GROUP, EXTENSION_SEAL, GroupBody, GroupId,
-    GroupKind, GroupPlaintext, MAX_MEMBERS, SEQUENCER_LABEL, SilverGroup, decode_seal_key,
-    encode_seal_key,
+    self, BlobRef, EXTENSION_DEVICE, EXTENSION_EVERYDAY, EXTENSION_GROUP, EXTENSION_SEAL,
+    GroupBody, GroupId, GroupKind, GroupPlaintext, MAX_MEMBERS, SEQUENCER_LABEL, SilverGroup,
+    decode_seal_key, encode_seal_key,
 };
 use silver_protocol::wire::KeyPackageDeposit;
 use silver_protocol::{
@@ -91,6 +91,14 @@ pub struct MemberInfo {
     pub device: UserId,
     pub seal: DhPublic,
     pub admin: bool,
+}
+
+/// The short forms of `ids`, for a message that names members.
+fn short_list(ids: &[UserId]) -> String {
+    ids.iter()
+        .map(|u| format!("{}…", u.short()))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The distinct identities among `members`, in the order they first
@@ -273,13 +281,25 @@ pub struct ExpectedGroup {
 /// What a received group body turned out to be.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GroupEvent {
-    /// An application message from a member.
+    /// An application message from a member: a text, a file, an edit, a
+    /// deletion or a reaction (whether `from` may edit or delete the
+    /// message named is the caller's to check against its history); a
+    /// timer comes as [`GroupEvent::TimerSet`] instead.
     Message {
         group: GroupId,
         from: UserId,
         id: String,
         sent_at_ms: u64,
         content: Content,
+    },
+    /// An admin set the group's disappearing-message timer (section
+    /// 13.3), applied to the record already; `changed` is false for a
+    /// repeat of the value that stood, as a newcomer is told it.
+    TimerSet {
+        group: GroupId,
+        by: UserId,
+        seconds: u64,
+        changed: bool,
     },
     /// A member's transparency log head, to compare with ours.
     Head { from: UserId, head: LogHead },
@@ -407,6 +427,10 @@ pub enum GroupError {
     Full,
     #[error("the last admin cannot go; appoint another first")]
     LastAdmin,
+    /// A kind of message not every member's client reads (section
+    /// 13.3): the members whose client is older. Nothing was sent.
+    #[error("not sent: the client of {} is older and would not read it", short_list(.0))]
+    OlderMembers(Vec<UserId>),
     #[error("key package: {0}")]
     KeyPackage(String),
     #[error("mls: {0}")]
@@ -438,6 +462,10 @@ pub struct Groups {
     file: GroupsFile,
     handles: HashMap<GroupId, MlsGroup>,
     staged: HashMap<GroupId, StagedCommitData>,
+    /// Whether the leaves this engine makes declare the everyday
+    /// extension type (`docs/PROTOCOL.md` section 13.3); always, except
+    /// where a test stands in for a client from before 0.10.0.
+    declare_everyday: bool,
 }
 
 impl Groups {
@@ -505,7 +533,16 @@ impl Groups {
             file,
             handles: HashMap::new(),
             staged: HashMap::new(),
+            declare_everyday: true,
         }
+    }
+
+    /// Whether the key packages and leaf updates this engine makes from
+    /// now on declare the everyday extension type. On by default; off
+    /// only in a test that stands in for a member on 0.9.0, whose leaf
+    /// does not declare it, to see what its peers withhold.
+    pub fn declare_everyday(&mut self, declare: bool) {
+        self.declare_everyday = declare;
     }
 
     /// The identity this engine acts for: this key's own on a primary,
@@ -686,18 +723,19 @@ impl Groups {
         }
     }
 
-    fn capabilities() -> Capabilities {
-        Capabilities::new(
-            None,
-            Some(&[CIPHERSUITE]),
-            Some(&[
-                ExtensionType::Unknown(EXTENSION_GROUP),
-                ExtensionType::Unknown(EXTENSION_SEAL),
-                ExtensionType::Unknown(EXTENSION_DEVICE),
-            ]),
-            None,
-            None,
-        )
+    /// What a leaf of this engine's declares: the extension types it
+    /// reads, the everyday one among them (section 13.3) so that peers
+    /// know an edit, a deletion, a reaction or a timer is read here.
+    fn capabilities(&self) -> Capabilities {
+        let mut extensions = vec![
+            ExtensionType::Unknown(EXTENSION_GROUP),
+            ExtensionType::Unknown(EXTENSION_SEAL),
+            ExtensionType::Unknown(EXTENSION_DEVICE),
+        ];
+        if self.declare_everyday {
+            extensions.push(ExtensionType::Unknown(EXTENSION_EVERYDAY));
+        }
+        Capabilities::new(None, Some(&[CIPHERSUITE]), Some(&extensions), None, None)
     }
 
     /// The sealing key, and on a linked device the certificate.
@@ -717,7 +755,7 @@ impl Groups {
 
     fn new_key_package(&self, last_resort: bool, now_ms: u64) -> Result<KeyPackageRecord> {
         let mut builder = KeyPackage::builder()
-            .leaf_node_capabilities(Self::capabilities())
+            .leaf_node_capabilities(self.capabilities())
             .leaf_node_extensions(self.leaf_extensions())
             .key_package_lifetime(Lifetime::new(KEY_PACKAGE_LIFETIME_MS / 1000));
         if last_resort {
@@ -868,7 +906,7 @@ impl Groups {
             .wire_format_policy(PURE_CIPHERTEXT_WIRE_FORMAT_POLICY)
             .max_past_epochs(PAST_EPOCHS)
             .with_group_context_extensions(context)
-            .capabilities(Self::capabilities())
+            .capabilities(self.capabilities())
             .with_leaf_node_extensions(self.leaf_extensions())
             .map_err(mls_err)?
             .build())
@@ -1230,16 +1268,46 @@ impl Groups {
         )
     }
 
-    /// Groups whose leaf is due for a refresh.
-    pub fn self_updates_due(&self, now_ms: u64) -> Vec<GroupId> {
-        self.file
+    /// Groups whose leaf is due for a refresh: by age, or because the
+    /// leaf in the tree does not declare what this client reads (it was
+    /// made by an earlier version), which peers would take as a reason
+    /// to withhold an edit or a reaction.
+    pub fn self_updates_due(&mut self, now_ms: u64) -> Vec<GroupId> {
+        let active: Vec<GroupId> = self
+            .file
             .groups
             .iter()
-            .filter(|(_, r)| {
-                r.state == GroupState::Active && r.leaf_updated_ms + SELF_UPDATE_AFTER_MS <= now_ms
-            })
+            .filter(|(_, r)| r.state == GroupState::Active)
             .map(|(id, _)| *id)
-            .collect()
+            .collect();
+        let mut due = Vec::new();
+        for id in active {
+            let by_age = self.file.groups[&id].leaf_updated_ms + SELF_UPDATE_AFTER_MS <= now_ms;
+            let behind = self.declare_everyday
+                && load_handle(&mut self.handles, &self.provider, &id)
+                    .ok()
+                    .and_then(|h| h.own_leaf_node().map(declares_everyday))
+                    .is_some_and(|declares| !declares);
+            if by_age || behind {
+                due.push(id);
+            }
+        }
+        due
+    }
+
+    /// The members whose client is older than this kind of message: the
+    /// identities with a leaf in the tree that does not declare the
+    /// everyday extension type. Empty when an edit, a deletion, a
+    /// reaction or a timer can go to the group.
+    pub fn members_without_everyday(&mut self, group: &GroupId) -> Result<Vec<UserId>> {
+        let handle = load_handle(&mut self.handles, &self.provider, group)?;
+        let mut older = Vec::new();
+        for (_, leaf) in leaves_of(handle)? {
+            if !leaf.everyday && !older.contains(&leaf.account) {
+                older.push(leaf.account);
+            }
+        }
+        Ok(older)
     }
 
     fn stage(
@@ -1253,7 +1321,10 @@ impl Groups {
             return Err(GroupError::AlreadyStaged);
         }
         let recipients = self.others(group)?;
+        // The refreshed leaf declares what this client reads now, not
+        // what it read when it joined.
         let leaf = LeafNodeParameters::builder()
+            .with_capabilities(self.capabilities())
             .with_extensions(self.leaf_extensions())
             .build();
         let crypto = self.provider.crypto();
@@ -1390,7 +1461,11 @@ impl Groups {
 
     // --- sending -------------------------------------------------------------------
 
-    /// An application message to every member.
+    /// An application message to every member. An edit, a deletion, a
+    /// reaction or a timer goes only when every leaf declares the
+    /// everyday extension type (section 13.3); otherwise nothing is sent
+    /// and the error names the members whose client is older, since one
+    /// of theirs would report an unreadable message instead.
     pub fn send(
         &mut self,
         group: &GroupId,
@@ -1399,6 +1474,23 @@ impl Groups {
         now_ms: u64,
     ) -> Result<Outgoing> {
         self.active(group)?;
+        if crate::everyday::needs_capability(&content).is_some() {
+            let older = self.members_without_everyday(group)?;
+            if !older.is_empty() {
+                return Err(GroupError::OlderMembers(older));
+            }
+        }
+        // The timer is a setting of the group's: an admin's to set, and
+        // set here as it goes out.
+        let timer = match content {
+            Content::Timer { seconds } => {
+                if !self.record(group)?.is_admin(&self.account()) {
+                    return Err(GroupError::NotAdmin);
+                }
+                Some(seconds)
+            }
+            _ => None,
+        };
         let id = uuid::Uuid::new_v4().to_string();
         let plaintext = GroupPlaintext {
             id: id.clone(),
@@ -1416,6 +1508,9 @@ impl Groups {
         let recipients = self.others(group)?;
         let (body, upload) = self.frame(group, GroupKind::Message, message)?;
         let envelopes = self.seal_to(&recipients, &body)?;
+        if let Some(seconds) = timer {
+            self.record_mut(group)?.expire_after_s = seconds;
+        }
         self.persist()?;
         Ok(Outgoing {
             id: Some(id),
@@ -1882,6 +1977,29 @@ impl Groups {
                 if let Some(head) = plain.head {
                     events.push(GroupEvent::Head { from: sender, head });
                 }
+                if let Content::Timer { seconds } = plain.content {
+                    // The timer is a setting of the group's: an admin's
+                    // word, applied here; anyone else's counts for nothing.
+                    if !record.is_admin(&sender) {
+                        events.push(GroupEvent::Refused {
+                            group,
+                            reason: format!(
+                                "{}… set a timer without being an admin",
+                                sender.short()
+                            ),
+                        });
+                        return Ok(events);
+                    }
+                    let changed = record.expire_after_s != seconds;
+                    record.expire_after_s = seconds;
+                    events.push(GroupEvent::TimerSet {
+                        group,
+                        by: sender,
+                        seconds,
+                        changed,
+                    });
+                    return Ok(events);
+                }
                 events.push(GroupEvent::Message {
                     group,
                     from: sender,
@@ -2205,6 +2323,16 @@ struct Leaf {
     account: UserId,
     device: UserId,
     seal: DhPublic,
+    /// The leaf declares the everyday extension type: its client reads
+    /// an edit, a deletion, a reaction and a timer (section 13.3).
+    everyday: bool,
+}
+
+/// Whether `leaf` declares the everyday extension type.
+fn declares_everyday(leaf: &LeafNode) -> bool {
+    leaf.capabilities()
+        .extensions()
+        .contains(&ExtensionType::Unknown(EXTENSION_EVERYDAY))
 }
 
 /// The identity a leaf belongs to (`docs/PROTOCOL.md` section 13.1 and
@@ -2259,6 +2387,7 @@ fn verify_leaf(leaf: &LeafNode, expected: Option<&UserId>) -> Result<Leaf> {
         account,
         device,
         seal,
+        everyday: declares_everyday(leaf),
     })
 }
 
