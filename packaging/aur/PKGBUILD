@@ -2,7 +2,7 @@
 # The release archives by checksum. packaging/update.sh writes this file
 # and .SRCINFO for a release; edit it there.
 pkgname=silver-messenger-bin
-pkgver=0.9.0
+pkgver=0.10.0
 pkgrel=1
 pkgdesc="End-to-end encrypted messaging in your terminal: the client and the relay"
 arch=('x86_64' 'aarch64')
@@ -18,8 +18,8 @@ source_x86_64=("$url/releases/download/v$pkgver/silver-messenger-v$pkgver-x86_64
 source_aarch64=("$url/releases/download/v$pkgver/silver-messenger-v$pkgver-aarch64-unknown-linux-musl.tar.gz")
 sha256sums=('18d9f4e33ac689a634e0d33ad56af3373934d366f52164a7f16f57211257dd90'
             '8bb8f2bbe65eac4a8fbb88d287e2933057044773c0ee2dd47d0255f01f2c84f8')
-sha256sums_x86_64=('091951b1defb2d6eef155ad3417b8fcd9ebc5b31ee9083fd74a80f8a3ec100a3')
-sha256sums_aarch64=('d71d0cae5a7116460cadf520ec7b6468e41085356560be1c22a3102ffdec96ca')
+sha256sums_x86_64=('c02625734d15d3a5a6a23f05300a4a78b8a74ce5890392e2b831b294229e7fbb')
+sha256sums_aarch64=('0fef095b6a552707e90537cf8ec34b3b12208ab71a967f5f9393e88c3c75a323')
 
 package() {
   cd "silver-messenger-v$pkgver-$CARCH-unknown-linux-musl"

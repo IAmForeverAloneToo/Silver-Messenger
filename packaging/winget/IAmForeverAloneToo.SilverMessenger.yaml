@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.version.1.6.0.schema.json
 # packaging/update.sh writes the manifests for a release; edit it there.
 PackageIdentifier: IAmForeverAloneToo.SilverMessenger
-PackageVersion: 0.9.0
+PackageVersion: 0.10.0
 DefaultLocale: en-US
 ManifestType: version
 ManifestVersion: 1.6.0
