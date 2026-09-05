@@ -63,6 +63,8 @@ sysusers="$(sha256sum "$here/aur/silver-messenger.sysusers" | cut -d' ' -f1)"
 
 mkdir -p "$repo/HomebrewFormula"
 cat > "$repo/HomebrewFormula/silver-messenger.rb" <<EOF
+# frozen_string_literal: true
+
 # The Homebrew tap of Silver Messenger lives in its repository:
 #   brew tap iamforeveralonetoo/silver $url
 #   brew install silver-messenger

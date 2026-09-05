@@ -142,8 +142,9 @@ jobs:
         run: |
           docker run --rm -v "$PWD/packaging/aur:/aur:ro" archlinux:base-devel sh -ec '
             pacman -Sy --noconfirm --needed namcap >/dev/null
-            cp -r /aur /build && chown -R nobody /build && cd /build
-            su nobody -s /bin/sh -c "makepkg --printsrcinfo" | diff -u .SRCINFO -
+            useradd -m builder
+            cp -r /aur /build && chown -R builder /build && cd /build
+            su builder -s /bin/sh -c "makepkg --printsrcinfo" | diff -u .SRCINFO -
             namcap PKGBUILD | tee namcap.txt
             ! grep -q " E: " namcap.txt'
       - name: winget manifests against their schemas

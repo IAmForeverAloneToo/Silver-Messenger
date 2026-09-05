@@ -1,3 +1,5 @@
+# frozen_string_literal: true
+
 # The Homebrew tap of Silver Messenger lives in its repository:
 #   brew tap iamforeveralonetoo/silver https://github.com/IAmForeverAloneToo/Silver-Messenger
 #   brew install silver-messenger
