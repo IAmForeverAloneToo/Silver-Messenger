@@ -25,7 +25,7 @@
 //! re-encrypted when the passphrase is set.
 
 use std::collections::HashMap;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1275,11 +1275,17 @@ impl Store {
         let path = self.root.join(name);
         let mut file = OpenOptions::new()
             .create(true)
+            .read(true)
             .append(true)
             .open(&path)
             .with_context(|| format!("opening {}", path.display()))?;
         let mut line = encode_line(self.cipher.as_deref(), name, json);
         line.push('\n');
+        // A line cut short by a crash has no newline; start a fresh one
+        // rather than glue this line onto it and lose both.
+        if !ends_with_newline(&mut file)? {
+            line.insert(0, '\n');
+        }
         file.write_all(line.as_bytes())?;
         Ok(())
     }
@@ -1724,10 +1730,29 @@ fn encode_line(cipher: Option<&FileCipher>, name: &str, plain: &str) -> String {
     }
 }
 
-/// Write via a temp file + rename so a crash never leaves a half-written file.
+/// Whether `file` is empty or ends with a newline. Reads the last byte;
+/// an append goes to the end whatever the position after.
+fn ends_with_newline(file: &mut File) -> std::io::Result<bool> {
+    use std::io::{Read, Seek, SeekFrom};
+    if file.metadata()?.len() == 0 {
+        return Ok(true);
+    }
+    file.seek(SeekFrom::End(-1))?;
+    let mut last = [0u8; 1];
+    file.read_exact(&mut last)?;
+    Ok(last[0] == b'\n')
+}
+
+/// Write via a temp file + rename so a crash never leaves a half-written
+/// file, the temp file synced first so the name never points at an empty
+/// one after a power loss.
 fn write_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     let tmp = path.with_extension("tmp");
-    fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
+    let mut file = File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
+    file.write_all(bytes)
+        .with_context(|| format!("writing {}", tmp.display()))?;
+    file.sync_all()?;
+    drop(file);
     fs::rename(&tmp, path).with_context(|| format!("renaming into {}", path.display()))?;
     Ok(())
 }
@@ -1759,6 +1784,31 @@ mod tests {
     fn temp_store() -> (Store, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         (Store::open(dir.path()).unwrap(), dir)
+    }
+
+    #[test]
+    fn an_append_after_a_line_cut_short_starts_a_fresh_line() {
+        let (store, dir) = temp_store();
+        let peer = Identity::generate().user_id();
+        store.append_history(&peer, &entry(0)).unwrap();
+        // A crash in the middle of a write leaves the file without its
+        // final newline.
+        let path = dir.path().join(history_name(&peer));
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(b"{\"id\":\"1\",\"dir").unwrap();
+        drop(file);
+        store.append_history(&peer, &entry(2)).unwrap();
+        let ids: Vec<String> = store
+            .load_history(&peer)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(
+            ids,
+            ["0", "2"],
+            "the cut line is skipped, the next one is whole"
+        );
     }
 
     #[test]
