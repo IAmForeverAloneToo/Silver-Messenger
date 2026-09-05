@@ -15,11 +15,13 @@ def main():
     # A reply quotes the message it answers, on each side from that
     # side's own copy: "alice: hello bob" for bob, "you: hello bob" for
     # alice.
+    # The quote is waited for, not the text: the text is on the screen
+    # from the moment it is typed, in the input box.
     b.type("/reply yes, that one\r")
-    assert b.wait("yes, that one"), "the reply is sent"
-    assert b.has(G.reply + " alice: hello bob"), "quoted for bob"
-    assert a.wait("yes, that one"), "the reply arrives"
-    assert a.has(G.reply + " you: hello bob"), "quoted for alice"
+    assert b.wait(G.reply + " alice: hello bob"), "quoted for bob"
+    assert b.has("yes, that one"), "the reply is sent"
+    assert a.wait(G.reply + " you: hello bob"), "quoted for alice"
+    assert a.has("yes, that one"), "the reply arrives"
 
     # A reaction shows under the message: at once here, and there once it
     # has left with a receipt's wait.
