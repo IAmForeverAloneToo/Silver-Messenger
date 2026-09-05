@@ -74,7 +74,7 @@ pub const CAPABILITIES: &[&str] = &[
 pub const BUNDLE_CAPABILITIES: &[&str] = &[silver_protocol::bundle::capability::PQ_RATCHET];
 pub use silver_protocol as protocol;
 pub use store::{
-    Config, Contact, ContactRequest, Conversation, Direction, HeldMessage, HistoryEntry,
+    Config, Contact, ContactRequest, Conversation, Deletion, Direction, HeldMessage, HistoryEntry,
     Protection, Reaction, Store,
 };
 pub use tls::{ConnectOptions, Observed, Pin};

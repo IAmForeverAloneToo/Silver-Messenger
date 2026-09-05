@@ -440,14 +440,17 @@ struct ReadLine {
     at_ms: u64,
 }
 
-/// An edit: the message `edit` says `text` from now on; the edit's own id
-/// and time are kept for the record.
+/// An edit: the message `edit` says `text` from now on, by `from`
+/// (absent: one's own), which must be the message's author for the edit
+/// to apply; the edit's own id and time are kept for the record.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct EditLine {
     edit: String,
     text: String,
     edit_id: String,
     at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    from: Option<UserId>,
 }
 
 /// A reaction to the message `react` from `from` (absent: one's own);
@@ -461,10 +464,37 @@ struct ReactLine {
 }
 
 /// The message `gone` was removed for good: an entry for it and any line
-/// naming it, before or after this one, count for nothing.
+/// naming it, before or after this one, count for nothing. With `from`,
+/// the message was deleted for everyone by `from` before it arrived, and
+/// only an entry `from` wrote is dropped: nobody tombstones another's
+/// message.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct GoneLine {
     gone: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    from: Option<UserId>,
+}
+
+/// What a deletion for everyone did to the store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Deletion {
+    /// The entry is a placeholder now.
+    Applied,
+    /// The message is not held; a tombstone drops it should it arrive.
+    Tombstoned,
+    /// The entry is held and was not written by the one deleting; nothing
+    /// changed.
+    Refused,
+}
+
+/// Who wrote `entry` in `conversation`: the sender a group entry names;
+/// in a conversation with a contact, the contact for what was received
+/// and nobody (one's own) for what was sent.
+fn author_of(entry: &HistoryEntry, conversation: &Conversation) -> Option<UserId> {
+    entry.from.or(match (conversation, entry.direction) {
+        (Conversation::Contact(peer), Direction::Received) => Some(*peer),
+        _ => None,
+    })
 }
 
 /// What one line of a history file can be. Each kind has a key of its
@@ -1200,7 +1230,7 @@ impl Store {
         &self,
         group: &silver_protocol::GroupId,
     ) -> anyhow::Result<Vec<HistoryEntry>> {
-        self.load_history_named(&group_history_name(group))
+        self.load_history_named(&Conversation::Group(*group))
     }
 
     /// Record that the peer returned a receipt for messages we sent.
@@ -1284,7 +1314,7 @@ impl Store {
     /// The conversation with `peer`, receipts applied to the entries they
     /// refer to.
     pub fn load_history(&self, peer: &UserId) -> anyhow::Result<Vec<HistoryEntry>> {
-        self.load_history_named(&history_name(peer))
+        self.load_history_named(&Conversation::Contact(*peer))
     }
 
     /// A conversation's log, whichever kind it is.
@@ -1292,7 +1322,7 @@ impl Store {
         &self,
         conversation: &Conversation,
     ) -> anyhow::Result<Vec<HistoryEntry>> {
-        self.load_history_named(&conversation.file_name())
+        self.load_history_named(conversation)
     }
 
     /// Every line of a history file, decoded; unreadable lines are kept as
@@ -1327,9 +1357,10 @@ impl Store {
     /// lines are taken first and the update lines after, in their order,
     /// so an update that stands before its entry in the file (a group's
     /// crossed fan-out) applies all the same; a `gone` line removes its
-    /// entry wherever the entry stands.
-    fn load_history_named(&self, name: &str) -> anyhow::Result<Vec<HistoryEntry>> {
-        let lines = self.read_history_lines(name)?;
+    /// entry wherever the entry stands. An edit applies only to a message
+    /// its sender wrote, whichever came first.
+    fn load_history_named(&self, conversation: &Conversation) -> anyhow::Result<Vec<HistoryEntry>> {
+        let lines = self.read_history_lines(&conversation.file_name())?;
         let mut entries: Vec<HistoryEntry> = Vec::new();
         let mut updates = Vec::new();
         for line in lines.into_iter().flatten() {
@@ -1363,7 +1394,9 @@ impl Store {
                     }
                 }
                 HistoryLine::Edit(edit) => {
-                    if let Some(entry) = revisable(&mut entries, &edit.edit) {
+                    if let Some(entry) = revisable(&mut entries, &edit.edit)
+                        && author_of(entry, conversation) == edit.from
+                    {
                         let old = std::mem::replace(&mut entry.text, edit.text);
                         entry.previous.push(old);
                         entry.edited = true;
@@ -1380,7 +1413,12 @@ impl Store {
                         }
                     }
                 }
-                HistoryLine::Gone(gone) => entries.retain(|e| e.id != gone.gone),
+                HistoryLine::Gone(gone) => entries.retain(|e| {
+                    e.id != gone.gone
+                        || gone
+                            .from
+                            .is_some_and(|by| author_of(e, conversation) != Some(by))
+                }),
             }
         }
         Ok(entries)
@@ -1429,7 +1467,9 @@ impl Store {
     }
 
     /// The message `id` says `text` from now on, by the edit `edit_id`
-    /// made at `at_ms`; the earlier text stays in the file.
+    /// that `from` (`None`: oneself) made at `at_ms`; the earlier text
+    /// stays in the file. The edit applies, now or when the message
+    /// arrives, only if `from` wrote the message.
     pub fn append_edit(
         &self,
         conversation: &Conversation,
@@ -1437,12 +1477,14 @@ impl Store {
         text: &str,
         edit_id: &str,
         at_ms: u64,
+        from: Option<UserId>,
     ) -> anyhow::Result<()> {
         let line = EditLine {
             edit: id.to_owned(),
             text: text.to_owned(),
             edit_id: edit_id.to_owned(),
             at_ms,
+            from,
         };
         self.append_history_line(&conversation.file_name(), &serde_json::to_string(&line)?)
     }
@@ -1481,7 +1523,7 @@ impl Store {
         if !self.root.join(&name).exists() {
             return Ok(Vec::new());
         }
-        let before = self.load_history_named(&name)?;
+        let before = self.load_history_named(conversation)?;
         let removed: Vec<HistoryEntry> =
             before.into_iter().filter(|e| ids.contains(&e.id)).collect();
         let mut lines: Vec<Result<HistoryLine, String>> = self
@@ -1501,27 +1543,41 @@ impl Store {
             })
             .collect();
         for id in ids {
-            lines.push(Ok(HistoryLine::Gone(GoneLine { gone: id.clone() })));
+            lines.push(Ok(HistoryLine::Gone(GoneLine {
+                gone: id.clone(),
+                from: None,
+            })));
         }
         self.write_history_lines(&name, &lines)?;
         Ok(removed)
     }
 
-    /// The author deleted the message `id` for everyone: its entry becomes
-    /// a placeholder without text, file, earlier texts or reactions, and
-    /// the lines that edited it or reacted to it go. When the message is
-    /// not held (not arrived, or removed), a `gone` line is left so that a
-    /// late arrival's updates count for nothing. Returns whether an entry
-    /// was there.
-    pub fn mark_deleted(&self, conversation: &Conversation, id: &str) -> anyhow::Result<bool> {
+    /// `from` (`None`: oneself) deleted the message `id` for everyone: its
+    /// entry, if `from` wrote it, becomes a placeholder without text,
+    /// file, earlier texts or reactions, and the lines that edited it or
+    /// reacted to it go. When the message is not held (not arrived, or
+    /// removed), a `gone` line naming `from` is left so that a late
+    /// arrival of `from`'s counts for nothing. An entry someone else
+    /// wrote is left alone.
+    pub fn mark_deleted(
+        &self,
+        conversation: &Conversation,
+        id: &str,
+        from: Option<UserId>,
+    ) -> anyhow::Result<Deletion> {
         let name = conversation.file_name();
-        let mut found = false;
-        let mut lines: Vec<Result<HistoryLine, String>> = self
-            .read_history_lines(&name)?
+        let lines = self.read_history_lines(&name)?;
+        let held = lines.iter().find_map(|line| match line {
+            Ok(HistoryLine::Entry(entry)) if entry.id == id => Some(author_of(entry, conversation)),
+            _ => None,
+        });
+        if held.is_some_and(|author| author != from) {
+            return Ok(Deletion::Refused);
+        }
+        let mut lines: Vec<Result<HistoryLine, String>> = lines
             .into_iter()
             .filter_map(|line| match line {
                 Ok(HistoryLine::Entry(mut entry)) if entry.id == id => {
-                    found = true;
                     entry.text.clear();
                     entry.file = None;
                     entry.reply_to = None;
@@ -1537,13 +1593,18 @@ impl Store {
                 other => Some(other),
             })
             .collect();
-        if !found {
+        if held.is_none() {
             lines.push(Ok(HistoryLine::Gone(GoneLine {
                 gone: id.to_owned(),
+                from,
             })));
         }
         self.write_history_lines(&name, &lines)?;
-        Ok(found)
+        Ok(if held.is_some() {
+            Deletion::Applied
+        } else {
+            Deletion::Tombstoned
+        })
     }
 
     /// Every conversation that has a log, from the history directory's
@@ -1770,19 +1831,27 @@ mod tests {
         let peer = Identity::generate().user_id();
         let conv = Conversation::Contact(peer);
         let bob = Identity::generate().user_id();
-        // An edit and a reaction for a message that has not arrived yet.
+        // An edit and a reaction for a message that has not arrived yet,
+        // and an edit of it from someone who did not write it.
         store
-            .append_edit(&conv, "1", "early edit", "e0", 5)
+            .append_edit(&conv, "1", "forged", "f0", 4, Some(bob))
+            .unwrap();
+        store
+            .append_edit(&conv, "1", "early edit", "e0", 5, Some(peer))
             .unwrap();
         store.append_reaction(&conv, "1", Some(bob), "👍").unwrap();
         for i in 0..3 {
             store.append_history(&peer, &entry(i)).unwrap();
         }
         store
-            .append_edit(&conv, "0", "msg 0, again", "e1", 6)
+            .append_edit(&conv, "0", "msg 0, again", "e1", 6, None)
             .unwrap();
         store
-            .append_edit(&conv, "0", "msg 0, once more", "e2", 7)
+            .append_edit(&conv, "0", "msg 0, once more", "e2", 7, None)
+            .unwrap();
+        // The contact cannot edit what was sent to them.
+        store
+            .append_edit(&conv, "2", "forged too", "f1", 8, Some(peer))
             .unwrap();
         store.append_reaction(&conv, "0", None, "❤️").unwrap();
         store.append_reaction(&conv, "0", Some(bob), "👍").unwrap();
@@ -1805,8 +1874,10 @@ mod tests {
             "one per person, the last winning, an empty one withdrawing"
         );
         assert_eq!(history[1].text, "early edit", "applied before its entry");
-        assert_eq!(history[1].previous, vec!["msg 1"]);
+        assert_eq!(history[1].previous, vec!["msg 1"], "the forgery did not");
         assert_eq!(history[1].reactions.len(), 1);
+        assert_eq!(history[2].text, "msg 2", "not the contact's to edit");
+        assert!(!history[2].edited);
         assert_eq!(history[1].read_at_ms, Some(100), "the first showing counts");
         assert_eq!(history[2].read_at_ms, None);
         assert_eq!(store.load_conversation(&conv).unwrap().len(), 3);
@@ -1823,7 +1894,9 @@ mod tests {
         store
             .append_receipt(&peer, ReceiptKind::Read, &["0".into(), "2".into()], 10)
             .unwrap();
-        store.append_edit(&conv, "2", "edited", "e", 11).unwrap();
+        store
+            .append_edit(&conv, "2", "edited", "e", 11, None)
+            .unwrap();
         store.append_reaction(&conv, "2", None, "👍").unwrap();
         let removed = store
             .remove_messages(&conv, &["2".into(), "9".into()])
@@ -1840,7 +1913,9 @@ mod tests {
         // its entry again, counts for nothing.
         let raw = fs::read_to_string(store.root.join(history_name(&peer))).unwrap();
         assert!(!raw.contains("edited") && !raw.contains("msg 2"), "{raw}");
-        store.append_edit(&conv, "2", "back?", "e2", 12).unwrap();
+        store
+            .append_edit(&conv, "2", "back?", "e2", 12, None)
+            .unwrap();
         store.append_history(&peer, &entry(2)).unwrap();
         assert_eq!(store.load_history(&peer).unwrap().len(), 3);
         // Removing from a conversation that has no file does nothing.
@@ -1862,9 +1937,21 @@ mod tests {
         for i in 0..2 {
             store.append_history(&peer, &entry(i)).unwrap();
         }
-        store.append_edit(&conv, "1", "edited", "e", 5).unwrap();
+        store
+            .append_edit(&conv, "1", "edited", "e", 5, Some(peer))
+            .unwrap();
         store.append_reaction(&conv, "1", None, "👍").unwrap();
-        assert!(store.mark_deleted(&conv, "1").unwrap());
+        // Only the author deletes: the contact cannot delete what was
+        // sent to them, and what they wrote goes at their word.
+        assert_eq!(
+            store.mark_deleted(&conv, "0", Some(peer)).unwrap(),
+            Deletion::Refused
+        );
+        assert_eq!(store.load_history(&peer).unwrap()[0].text, "msg 0");
+        assert_eq!(
+            store.mark_deleted(&conv, "1", Some(peer)).unwrap(),
+            Deletion::Applied
+        );
         let history = store.load_history(&peer).unwrap();
         assert_eq!(history.len(), 2);
         let gone = &history[1];
@@ -1874,15 +1961,28 @@ mod tests {
         let raw = fs::read_to_string(store.root.join(history_name(&peer))).unwrap();
         assert!(!raw.contains("edited") && !raw.contains("msg 1"), "{raw}");
         // Later edits and reactions leave the placeholder alone.
-        store.append_edit(&conv, "1", "again", "e2", 6).unwrap();
+        store
+            .append_edit(&conv, "1", "again", "e2", 6, Some(peer))
+            .unwrap();
         store.append_reaction(&conv, "1", None, "❤️").unwrap();
         let history = store.load_history(&peer).unwrap();
         assert!(history[1].text.is_empty() && history[1].reactions.is_empty());
         // A deletion for a message not held: a tombstone, so that the
-        // message arriving later shows nothing.
-        assert!(!store.mark_deleted(&conv, "7").unwrap());
+        // message arriving later from its author shows nothing; one from
+        // someone else does not touch the author's message when it comes.
+        assert_eq!(
+            store.mark_deleted(&conv, "7", Some(peer)).unwrap(),
+            Deletion::Tombstoned
+        );
         store.append_history(&peer, &entry(7)).unwrap();
         assert_eq!(store.load_history(&peer).unwrap().len(), 2);
+        let bob = Identity::generate().user_id();
+        assert_eq!(
+            store.mark_deleted(&conv, "9", Some(bob)).unwrap(),
+            Deletion::Tombstoned
+        );
+        store.append_history(&peer, &entry(9)).unwrap();
+        assert_eq!(store.load_history(&peer).unwrap().len(), 3);
     }
 
     #[test]
@@ -1905,7 +2005,9 @@ mod tests {
         let mut store = store;
         store.protect_with_keystore().unwrap();
         let conv = Conversation::Group(group);
-        store.append_edit(&conv, "1", "edited", "e", 2).unwrap();
+        store
+            .append_edit(&conv, "1", "edited", "e", 2, None)
+            .unwrap();
         store.remove_messages(&conv, &["nothing".into()]).unwrap();
         let raw = fs::read_to_string(store.root.join(conv.file_name())).unwrap();
         assert!(raw.lines().all(|l| l.starts_with(LINE_PREFIX)), "{raw}");

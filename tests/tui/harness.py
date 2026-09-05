@@ -49,9 +49,11 @@ class Glyphs:
         if ascii:
             self.pending, self.accepted, self.delivered, self.failed = "..", "v", "vv", "x"
             self.verified, self.connected, self.arrow, self.more = "v", "*", "->", "v"
+            self.reply, self.timer = ">", "~"
         else:
             self.pending, self.accepted, self.delivered, self.failed = "⋯", "✓", "✓✓", "✗"
             self.verified, self.connected, self.arrow, self.more = "✓", "●", "→", "↓"
+            self.reply, self.timer = "↳", "⧖"
 
 
 G = Glyphs(TERM_NAME == "linux")

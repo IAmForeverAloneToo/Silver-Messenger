@@ -675,9 +675,20 @@ impl App {
 
     pub(super) fn on_sync(&mut self, device: UserId, sync: Sync) {
         match sync {
-            // A sibling's "delete for me" is applied where deletions are
-            // (docs/design/everyday.md); nothing here does yet.
-            Sync::Remove { .. } => {}
+            // A sibling's "delete for me": the same here, and nothing to
+            // the other side.
+            Sync::Remove { peer, group, ids } => {
+                let conversation = match (peer, group) {
+                    (Some(peer), _) => Conversation::Contact(peer),
+                    (None, Some(group)) => Conversation::Group(group),
+                    (None, None) => return,
+                };
+                if let Err(e) = self.store.remove_messages(&conversation, &ids) {
+                    self.toast(format!("Could not remove a message a device removed: {e}"));
+                    return;
+                }
+                self.remove_lines(&conversation, &ids);
+            }
             Sync::Sent {
                 peer,
                 id,
@@ -687,24 +698,32 @@ impl App {
                 if self.known_ids.contains(&id) || self.contact_index(&peer).is_none() {
                     return;
                 }
+                let conversation = Conversation::Contact(peer);
+                // An edit, a deletion, a reaction or a timer made on a
+                // sibling is applied here as if made here.
+                if silver_client::everyday::needs_capability(&content).is_some() {
+                    self.known_ids.insert(id.clone());
+                    self.apply_everyday(
+                        conversation,
+                        None,
+                        &id,
+                        claimed_time(sent_at_ms),
+                        *content,
+                    );
+                    return;
+                }
                 let Some(text) = line_text(&content) else {
                     return;
                 };
-                self.record(
-                    peer,
+                let line = self.timed(
+                    &conversation,
                     ChatLine {
-                        id,
-                        direction: Direction::Sent,
-                        timestamp_ms: claimed_time(sent_at_ms),
-                        text,
                         delivered: true,
-                        failed: false,
-                        receipt: None,
-                        file: None,
-                        pending: None,
-                        sender: None,
+                        reply_to: content.reply_to().map(str::to_owned),
+                        ..ChatLine::new(id, Direction::Sent, claimed_time(sent_at_ms), text)
                     },
                 );
+                self.record(peer, line);
                 if self.selected_contact().map(|c| c.user_id) == Some(peer) {
                     self.scroll = 0;
                 }
@@ -726,6 +745,11 @@ impl App {
                 let Some(text) = line_text(&content) else {
                     return;
                 };
+                let conversation = Conversation::Contact(from);
+                if self.arrived_deleted(&conversation, &id, Some(from)) {
+                    self.known_ids.insert(id);
+                    return;
+                }
                 let (text, pending) = match FileInfo::from_content(&content) {
                     Some(info) => match info.check() {
                         Ok(()) if self.contacts[index].auto_files => (text, Some(info)),
@@ -735,33 +759,43 @@ impl App {
                     None => (text, None),
                 };
                 let name = self.contact_name(&from);
-                self.record(
-                    from,
+                let line = self.timed(
+                    &conversation,
                     ChatLine {
-                        id: id.clone(),
-                        direction: Direction::Received,
-                        timestamp_ms: claimed_time(sent_at_ms),
-                        text,
                         delivered: true,
-                        failed: false,
-                        receipt: None,
-                        file: None,
                         pending,
-                        sender: None,
+                        reply_to: content.reply_to().map(str::to_owned),
+                        ..ChatLine::new(
+                            id.clone(),
+                            Direction::Received,
+                            claimed_time(sent_at_ms),
+                            text,
+                        )
                     },
                 );
+                self.record(from, line);
+                self.apply_late(&conversation, &id);
                 // The primary sends the receipts; here it is shown or not.
                 let shown =
                     self.selected_contact().map(|c| c.user_id) == Some(from) && self.focused;
-                if !shown {
+                if shown {
+                    self.note_read(&conversation, std::slice::from_ref(&id), now_ms());
+                } else {
                     self.notifier.announce(&format!("New message from {name}"));
                     self.unread.entry(from).or_default().push(id);
                 }
             }
-            Sync::Read { peer, ids, .. } => {
+            Sync::Read { peer, ids, at_ms } => {
                 if let Some(unread) = self.unread.get_mut(&peer) {
                     unread.retain(|i| !ids.contains(i));
                 }
+                // A timer runs from the moment the sibling showed it (or,
+                // from an older sibling, from now).
+                self.note_read(
+                    &Conversation::Contact(peer),
+                    &ids,
+                    at_ms.unwrap_or_else(now_ms),
+                );
             }
             Sync::Contact { action } => self.apply_contact_action(action),
             Sync::Devices { devices, .. } => {

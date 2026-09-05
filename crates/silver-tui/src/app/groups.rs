@@ -441,7 +441,7 @@ impl App {
                     group,
                     "you left; an admin's next change takes you out of the tree",
                 );
-                self.fan_out(group, outgoing, None, None);
+                self.fan_out(group, outgoing, None, None, None);
                 self.toast(format!(
                     "Left {name}. /group forget removes it from the list."
                 ));
@@ -603,7 +603,7 @@ impl App {
             .join_request(&link, (link.via, bundle.dh_public), now_ms())
         {
             Ok(outgoing) => {
-                self.fan_out(link.group, outgoing, None, None);
+                self.fan_out(link.group, outgoing, None, None, None);
                 self.system(
                     Level::Info,
                     format!(
@@ -691,7 +691,7 @@ impl App {
         match self.groups.rejoin_request(&group, now_ms()) {
             Ok(outgoing) => {
                 self.note_in_group(group, "asked the admins to remove and re-add you");
-                self.fan_out(group, outgoing, None, None);
+                self.fan_out(group, outgoing, None, None, None);
             }
             Err(e) => self.toast(format!("Could not ask to rejoin: {e}")),
         }
@@ -799,12 +799,13 @@ impl App {
 
     /// Upload what needs uploading, then queue every envelope; the outcome
     /// comes back as [`Internal::GroupSent`].
-    fn fan_out(
+    pub(super) fn fan_out(
         &mut self,
         group: GroupId,
         outgoing: Outgoing,
         id: Option<String>,
         text: Option<String>,
+        reply_to: Option<String>,
     ) {
         let envelope_ids: Vec<String> = outgoing.envelopes.iter().map(|e| e.id.clone()).collect();
         if let Some(message) = &id {
@@ -838,6 +839,7 @@ impl App {
                     group,
                     id,
                     text,
+                    reply_to,
                     result: result.map_err(|e| e.to_string()),
                 })
                 .await;
@@ -903,7 +905,13 @@ impl App {
                     if let Purpose::LinkReset = purpose {
                         self.group_invite_after_reset(group);
                     }
-                    self.fan_out(group, outgoing, None, None);
+                    self.fan_out(group, outgoing, None, None, None);
+                    if matches!(
+                        purpose,
+                        Purpose::Add(_) | Purpose::Join(_) | Purpose::Rejoin(_)
+                    ) {
+                        self.tell_newcomers_the_timer(group);
+                    }
                 }
                 Err(e) => self.toast(format!("Could not apply the change to {name}: {e}")),
             },
@@ -935,6 +943,29 @@ impl App {
         }
     }
 
+    /// A member added now was not there when the timer was set: the
+    /// group's current one goes out right after the Welcome, if any is
+    /// set, and the others take the repeat silently.
+    fn tell_newcomers_the_timer(&mut self, group: GroupId) {
+        let seconds = self.groups.get(&group).map_or(0, |r| r.expire_after_s);
+        if seconds == 0 {
+            return;
+        }
+        let head = self.client.gossip_head();
+        match self
+            .groups
+            .send(&group, Content::Timer { seconds }, head, now_ms())
+        {
+            Ok(outgoing) => {
+                let id = outgoing.id.clone();
+                self.fan_out(group, outgoing, id, None, None);
+            }
+            Err(e) => self.toast(format!(
+                "The group's timer could not be sent to the new member: {e}"
+            )),
+        }
+    }
+
     fn group_invite_after_reset(&mut self, group: GroupId) {
         if let Ok(link) = self
             .groups
@@ -957,27 +988,22 @@ impl App {
         group: GroupId,
         id: Option<String>,
         text: Option<String>,
+        reply_to: Option<String>,
         result: Result<(), String>,
     ) {
         match result {
             Ok(()) => {
                 if let (Some(id), Some(text)) = (id, text) {
                     let delivered = self.group_outstanding.get(&id).is_none_or(|n| *n == 0);
-                    self.record_group(
-                        group,
+                    let line = self.timed(
+                        &Conversation::Group(group),
                         ChatLine {
-                            id,
-                            direction: Direction::Sent,
-                            timestamp_ms: now_ms(),
-                            text,
                             delivered,
-                            failed: false,
-                            receipt: None,
-                            file: None,
-                            pending: None,
-                            sender: None,
+                            reply_to,
+                            ..ChatLine::new(id, Direction::Sent, now_ms(), text)
                         },
                     );
+                    self.record_group(group, line);
                     self.scroll = 0;
                 }
             }
@@ -1023,13 +1049,14 @@ impl App {
         self.send_group_content(group, Content::text(text.clone()), text);
     }
 
-    fn send_group_content(&mut self, group: GroupId, content: Content, shown: String) {
+    pub(super) fn send_group_content(&mut self, group: GroupId, content: Content, shown: String) {
         let head = self.client.gossip_head();
+        let reply_to = content.reply_to().map(str::to_owned);
         match self.groups.send(&group, content, head, now_ms()) {
             Ok(outgoing) => {
                 let id = outgoing.id.clone();
                 self.group_new_marker = None;
-                self.fan_out(group, outgoing, id, Some(shown));
+                self.fan_out(group, outgoing, id, Some(shown), reply_to);
             }
             Err(e) => {
                 let name = self.group_name(&group);
@@ -1257,39 +1284,67 @@ impl App {
                     if !self.group_list.contains(&group) {
                         continue; // an invitation not accepted yet
                     }
-                    let (text, pending) = match content {
-                        Content::Text { body, .. } => (body, None),
+                    let conversation = Conversation::Group(group);
+                    let (text, pending, reply_to) = match content {
+                        Content::Text { body, reply_to } => (body, None, reply_to),
                         Content::File { .. } => {
                             let info = FileInfo::from_content(&content).expect("file content");
+                            let reply_to = content.reply_to().map(str::to_owned);
                             match info.check() {
                                 Ok(()) => (
                                     format!("[file] {} · /get to fetch", info.label()),
                                     Some(info),
+                                    reply_to,
                                 ),
-                                Err(e) => (format!("[file] {} · refused: {e}", info.label()), None),
+                                Err(e) => (
+                                    format!("[file] {} · refused: {e}", info.label()),
+                                    None,
+                                    reply_to,
+                                ),
                             }
+                        }
+                        // The sender's word on a message: applied by the
+                        // rules of section 13.3, no line of its own.
+                        Content::Edit { .. }
+                        | Content::Delete { .. }
+                        | Content::Reaction { .. } => {
+                            self.apply_everyday(
+                                conversation,
+                                Some(from),
+                                &id,
+                                claimed_time(sent_at_ms),
+                                content,
+                            );
+                            continue;
                         }
                         _ => continue,
                     };
+                    if self.arrived_deleted(&conversation, &id, Some(from)) {
+                        continue;
+                    }
                     let name = self.member_name(&from);
                     let group_name = self.group_name(&group);
                     let shown = self.selected_group() == Some(group) && self.focused;
-                    self.record_group(
-                        group,
+                    let line = self.timed(
+                        &conversation,
                         ChatLine {
-                            id: id.clone(),
-                            direction: Direction::Received,
-                            timestamp_ms: claimed_time(sent_at_ms),
-                            text,
                             delivered: true,
-                            failed: false,
-                            receipt: None,
-                            file: None,
                             pending,
                             sender: Some(from),
+                            reply_to,
+                            ..ChatLine::new(
+                                id.clone(),
+                                Direction::Received,
+                                claimed_time(sent_at_ms),
+                                text,
+                            )
                         },
                     );
-                    if !shown {
+                    self.record_group(group, line);
+                    self.apply_late(&conversation, &id);
+                    if shown {
+                        self.note_read(&conversation, std::slice::from_ref(&id), now_ms());
+                    } else {
                         self.notifier
                             .announce(&format!("New message from {name} in {group_name}"));
                         self.group_unread.entry(group).or_default().push(id);
@@ -1405,15 +1460,7 @@ impl App {
                         continue;
                     }
                     let who = self.member_name(&by);
-                    let note = if seconds == 0 {
-                        format!("{who} turned disappearing messages off")
-                    } else {
-                        format!(
-                            "{who} set messages to disappear after {}",
-                            silver_client::everyday::describe_timer(seconds)
-                        )
-                    };
-                    self.note_in_group(group, &note);
+                    self.note_in_group(group, &super::everyday::timer_note(&who, seconds));
                 }
                 GroupEvent::LeaveProposed { group, member } => {
                     // An admin takes the leaver out at once; the commit
@@ -1453,7 +1500,7 @@ impl App {
                         "out of sync: a change was missed; asking the admins to re-add you",
                     );
                     match self.groups.rejoin_request(&group, now_ms()) {
-                        Ok(outgoing) => self.fan_out(group, outgoing, None, None),
+                        Ok(outgoing) => self.fan_out(group, outgoing, None, None, None),
                         Err(e) => self.toast(format!("Could not ask to rejoin: {e}")),
                     }
                 }
@@ -1479,20 +1526,17 @@ impl App {
     }
 
     /// A note in a group's conversation about the group itself.
-    fn note_in_group(&mut self, group: GroupId, text: &str) {
+    pub(super) fn note_in_group(&mut self, group: GroupId, text: &str) {
         self.record_group(
             group,
             ChatLine {
-                id: uuid::Uuid::new_v4().to_string(),
-                direction: Direction::Received,
-                timestamp_ms: now_ms(),
-                text: format!("· {text}"),
                 delivered: true,
-                failed: false,
-                receipt: None,
-                file: None,
-                pending: None,
-                sender: None,
+                ..ChatLine::new(
+                    uuid::Uuid::new_v4().to_string(),
+                    Direction::Received,
+                    now_ms(),
+                    format!("· {text}"),
+                )
             },
         );
     }
@@ -1501,6 +1545,8 @@ impl App {
         let entry = HistoryEntry {
             file: line.pending.clone(),
             from: line.sender,
+            reply_to: line.reply_to.clone(),
+            expire_after_s: line.expire_after_s,
             ..HistoryEntry::new(
                 line.id.clone(),
                 line.direction,
@@ -1510,6 +1556,9 @@ impl App {
         };
         if let Err(e) = self.store.append_group_history(&group, &entry) {
             self.toast(format!("Could not save history: {e}"));
+        }
+        if line.expire_after_s > 0 {
+            self.expiry_dirty = true;
         }
         self.known_ids.insert(line.id.clone());
         self.group_threads.entry(group).or_default().push(line);

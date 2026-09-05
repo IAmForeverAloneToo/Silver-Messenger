@@ -28,7 +28,7 @@ def main():
         a.key(PGDN)
         pages += 1
     assert a.has("/send <path>") and pages >= 1, "PgDn scrolls"
-    while not a.has("Ctrl-Q quits") and pages < 12:
+    while not a.has("Ctrl-Q quits") and pages < 16:
         a.key(PGDN)
         pages += 1
     assert a.has("Ctrl-Q quits") and a.has("Keys"), "end of help"

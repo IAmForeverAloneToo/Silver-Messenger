@@ -439,7 +439,14 @@ fn thread_rows(app: &App, peer: &UserId, width: usize) -> Vec<Row> {
         .as_ref()
         .filter(|(p, _)| p == peer)
         .map(|(_, id)| id.as_str());
-    lines_rows(app, lines, &|_| peer_name.clone(), marker, width)
+    lines_rows(
+        app,
+        lines,
+        &|_| peer_name.clone(),
+        &|_| peer_name.clone(),
+        marker,
+        width,
+    )
 }
 
 fn group_rows(app: &App, group: &silver_protocol::group::GroupId, width: usize) -> Vec<Row> {
@@ -458,24 +465,29 @@ fn group_rows(app: &App, group: &silver_protocol::group::GroupId, width: usize) 
             Some(sender) => app.member_name(&sender),
             None => String::new(),
         },
+        &|user: &UserId| app.member_name(user),
         marker,
         width,
     )
 }
 
 /// The rows of a conversation: date rules, the "new messages" rule, and
-/// each line with its clock, name, mark and text. `name_of` names the
-/// writer of a received line; an empty name is a note about the chat.
+/// each line with its clock, name, mark and text, the quote of what it
+/// answers above it and the reactions to it below. `name_of` names the
+/// writer of a received line (an empty name is a note about the chat);
+/// `who` names whoever reacted.
 fn lines_rows(
     app: &App,
     lines: &[ChatLine],
     name_of: &dyn Fn(&ChatLine) -> String,
+    who: &dyn Fn(&UserId) -> String,
     marker: Option<&str>,
     width: usize,
 ) -> Vec<Row> {
     let mut rows: Vec<Row> = Vec::new();
     let mut last_day: Option<NaiveDate> = None;
     let today = Local::now().date_naive();
+    let g = app.glyphs;
     for (i, line) in lines.iter().enumerate() {
         // A separator whenever the calendar day changes.
         let day = Local
@@ -499,10 +511,52 @@ fn lines_rows(
             Direction::Sent => ("you".to_owned(), app.theme.you),
             Direction::Received => (name_of(line), app.theme.peer),
         };
+        let stamp = format!("{} ", clock(line.timestamp_ms));
+        let indent = " ".repeat(stamp.width().min(width / 2));
+        // Deleted for everyone by its author: a placeholder, dim.
+        if line.deleted {
+            let text = format!("· {name} deleted a message");
+            rows.extend(
+                wrap_message(
+                    vec![Span::styled(stamp, app.theme.dim)],
+                    &text,
+                    app.theme.dim,
+                    width,
+                )
+                .into_iter()
+                .map(|l| (l, Some(i))),
+            );
+            continue;
+        }
+        // The message answered, quoted from this side's own copy of it.
+        if let Some(target) = &line.reply_to {
+            let quote = match lines.iter().find(|l| l.id == *target) {
+                Some(t) if t.deleted => "a deleted message".to_owned(),
+                Some(t) => {
+                    let author = match t.direction {
+                        Direction::Sent => "you".to_owned(),
+                        Direction::Received => name_of(t),
+                    };
+                    let first = t.text.lines().next().unwrap_or_default();
+                    format!("{author}: {first}")
+                }
+                None => "a message you do not have".to_owned(),
+            };
+            let room = width.saturating_sub(indent.width()).max(1);
+            rows.push((
+                Line::from(vec![
+                    Span::raw(indent.clone()),
+                    Span::styled(
+                        truncate(&format!("{} {quote}", g.reply), room),
+                        app.theme.dim,
+                    ),
+                ]),
+                Some(i),
+            ));
+        }
         // ⋯ waiting for the relay, ✓ accepted by the relay, ✓✓ delivered to
         // their device, ✓✓ in colour read, ✗ refused for good (or their
         // ASCII stand-ins).
-        let g = app.glyphs;
         let (mark, mark_style) = match line.direction {
             Direction::Sent if line.failed => (g.failed, app.theme.error),
             Direction::Sent if !line.delivered => (g.pending, app.theme.dim),
@@ -518,16 +572,21 @@ fn lines_rows(
         } else {
             format!(" {mark}")
         };
+        // A line with a timer carries the hourglass, so what will go is
+        // told from what stays.
+        let timer = if line.expire_after_s > 0 {
+            format!(" {}", g.timer)
+        } else {
+            String::new()
+        };
         let prefix = if name.is_empty() {
-            vec![Span::styled(
-                format!("{} ", clock(line.timestamp_ms)),
-                app.theme.dim,
-            )]
+            vec![Span::styled(stamp, app.theme.dim)]
         } else {
             vec![
-                Span::styled(format!("{} ", clock(line.timestamp_ms)), app.theme.dim),
+                Span::styled(stamp, app.theme.dim),
                 Span::styled(name, name_style.add_modifier(Modifier::BOLD)),
                 Span::styled(mark, mark_style),
+                Span::styled(timer, app.theme.dim),
                 Span::raw(": "),
             ]
         };
@@ -536,11 +595,43 @@ fn lines_rows(
         } else {
             Style::default()
         };
+        let text = if line.edited {
+            format!("{} (edited)", line.text)
+        } else {
+            line.text.clone()
+        };
         rows.extend(
-            wrap_message(prefix, &line.text, style, width)
+            wrap_message(prefix, &text, style, width)
                 .into_iter()
                 .map(|l| (l, Some(i))),
         );
+        // The reactions, by reaction, with the names of those who gave it.
+        if !line.reactions.is_empty() {
+            let mut given: Vec<(&str, Vec<String>)> = Vec::new();
+            for reaction in &line.reactions {
+                let name = match reaction.from {
+                    None => "you".to_owned(),
+                    Some(user) => who(&user),
+                };
+                match given.iter_mut().find(|(e, _)| *e == reaction.emoji) {
+                    Some((_, names)) => names.push(name),
+                    None => given.push((reaction.emoji.as_str(), vec![name])),
+                }
+            }
+            let text = given
+                .iter()
+                .map(|(emoji, names)| format!("{emoji} {}", names.join(", ")))
+                .collect::<Vec<_>>()
+                .join(" · ");
+            let room = width.saturating_sub(indent.width()).max(1);
+            rows.push((
+                Line::from(vec![
+                    Span::raw(indent.clone()),
+                    Span::styled(truncate(&text, room), app.theme.dim),
+                ]),
+                Some(i),
+            ));
+        }
     }
     rows
 }
@@ -947,41 +1038,25 @@ mod tests {
             bob,
             vec![
                 ChatLine {
-                    id: "1".into(),
-                    direction: Direction::Sent,
-                    timestamp_ms: at,
-                    text: "hello bob".into(),
                     delivered: true,
-                    failed: false,
                     receipt: Some(ReceiptKind::Read),
-                    file: None,
-                    pending: None,
-                    sender: None,
+                    ..ChatLine::new("1", Direction::Sent, at, "hello bob")
                 },
                 ChatLine {
-                    id: "2".into(),
-                    direction: Direction::Received,
-                    timestamp_ms: at + 60_000,
-                    text: "hi alice, this is a longer message that has to wrap onto a second row so the hanging indent shows".into(),
                     delivered: true,
-                    failed: false,
-                    receipt: None,
-                    file: None,
-                    pending: None,
-                    sender: None,
+                    ..ChatLine::new(
+                        "2",
+                        Direction::Received,
+                        at + 60_000,
+                        "hi alice, this is a longer message that has to wrap onto a second row so the hanging indent shows",
+                    )
                 },
-                ChatLine {
-                    id: "3".into(),
-                    direction: Direction::Sent,
-                    timestamp_ms: at + 120_000,
-                    text: "[file] photo.jpg (1.2 MiB)".into(),
-                    delivered: false,
-                    failed: false,
-                    receipt: None,
-                    file: None,
-                    pending: None,
-                    sender: None,
-                },
+                ChatLine::new(
+                    "3",
+                    Direction::Sent,
+                    at + 120_000,
+                    "[file] photo.jpg (1.2 MiB)",
+                ),
             ],
         );
         app.unread.insert(carol, vec!["9".into()]);
@@ -1093,16 +1168,8 @@ mod tests {
         app.threads.insert(
             peer,
             vec![ChatLine {
-                id: "1".into(),
-                direction: Direction::Received,
-                timestamp_ms: 1_735_732_800_000,
-                text: NASTY.to_owned(),
                 delivered: true,
-                failed: false,
-                receipt: None,
-                file: None,
-                pending: None,
-                sender: None,
+                ..ChatLine::new("1", Direction::Received, 1_735_732_800_000, NASTY)
             }],
         );
         app.requests.push(ContactRequest {

@@ -53,6 +53,10 @@ pub struct Glyphs {
     pub more_below: &'static str,
     /// Where a received file was saved.
     pub arrow: &'static str,
+    /// The quote of the message a reply answers.
+    pub reply: &'static str,
+    /// A message with a disappearing-message timer.
+    pub timer: &'static str,
 }
 
 pub const UNICODE: Glyphs = Glyphs {
@@ -67,6 +71,8 @@ pub const UNICODE: Glyphs = Glyphs {
     disconnected: "○",
     more_below: "↓",
     arrow: "→",
+    reply: "↳",
+    timer: "⧖",
 };
 
 pub const ASCII: Glyphs = Glyphs {
@@ -81,6 +87,8 @@ pub const ASCII: Glyphs = Glyphs {
     disconnected: "o",
     more_below: "v",
     arrow: "->",
+    reply: ">",
+    timer: "~",
 };
 
 impl Glyphs {

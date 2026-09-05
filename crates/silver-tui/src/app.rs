@@ -1,6 +1,7 @@
 //! Application state, key handling and command dispatch.
 
 mod devices;
+mod everyday;
 mod groups;
 
 use std::collections::{HashMap, HashSet};
@@ -15,8 +16,8 @@ use ratatui::crossterm::event::{
 use ratatui::layout::Rect;
 use silver_client::sequence::{self, SequenceCheck};
 use silver_client::{
-    Client, ClientError, ClientEvent, Contact, ContactRequest, Delivery, Direction, FileInfo,
-    HeldMessage, HistoryEntry, InviteLink, Progress, ReceiptQueue, Store,
+    Client, ClientError, ClientEvent, Contact, ContactRequest, Conversation, Delivery, Direction,
+    FileInfo, HeldMessage, HistoryEntry, InviteLink, Progress, Reaction, ReceiptQueue, Store,
 };
 use silver_protocol::envelope::{ReceiptKind, capability};
 use silver_protocol::{Content, KeyBundle, Message, UserId, now_ms};
@@ -71,6 +72,100 @@ pub struct ChatLine {
     /// In a group: who wrote it (`None` for our own lines and for notes
     /// about the group).
     pub sender: Option<UserId>,
+    /// The message this one answers, if it is a reply.
+    pub reply_to: Option<String>,
+    /// The text was replaced by an edit.
+    pub edited: bool,
+    /// Its author deleted it for everyone; a placeholder shows.
+    pub deleted: bool,
+    /// The reactions to it, one per person (`from` `None`: one's own).
+    pub reactions: Vec<Reaction>,
+    /// The conversation's disappearing-message timer when it was sent or
+    /// received, in seconds; 0 for none.
+    pub expire_after_s: u64,
+    /// When a received message was first shown, from which its timer
+    /// runs.
+    pub read_at_ms: Option<u64>,
+}
+
+impl ChatLine {
+    /// A line with the essentials only: not delivered yet, no receipt, no
+    /// file, no sender, nothing of section 4.7 about it.
+    pub fn new(
+        id: impl Into<String>,
+        direction: Direction,
+        timestamp_ms: u64,
+        text: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            direction,
+            timestamp_ms,
+            text: text.into(),
+            delivered: false,
+            failed: false,
+            receipt: None,
+            file: None,
+            pending: None,
+            sender: None,
+            reply_to: None,
+            edited: false,
+            deleted: false,
+            reactions: Vec::new(),
+            expire_after_s: 0,
+            read_at_ms: None,
+        }
+    }
+
+    /// A line as the history keeps it.
+    fn from_history(h: HistoryEntry, delivered: bool) -> Self {
+        let file = match h.direction {
+            Direction::Received => saved_file_path(&h.text),
+            Direction::Sent => None,
+        };
+        // A file still waits until its line says where it went.
+        let pending = h.file.filter(|_| file.is_none());
+        Self {
+            id: h.id,
+            direction: h.direction,
+            timestamp_ms: h.timestamp_ms,
+            text: h.text,
+            delivered,
+            failed: false,
+            receipt: h.receipt,
+            file,
+            pending,
+            sender: h.from,
+            reply_to: h.reply_to,
+            edited: h.edited,
+            deleted: h.deleted,
+            reactions: h.reactions,
+            expire_after_s: h.expire_after_s,
+            read_at_ms: h.read_at_ms,
+        }
+    }
+
+    /// When this message goes, if it has a timer and its clock runs.
+    pub fn expires_at_ms(&self) -> Option<u64> {
+        silver_client::everyday::expires_at(
+            self.direction,
+            self.timestamp_ms,
+            self.read_at_ms,
+            self.expire_after_s,
+        )
+    }
+
+    /// A note about the conversation rather than a message in it.
+    pub fn is_note(&self) -> bool {
+        self.direction == Direction::Received
+            && self.sender.is_none()
+            && self.text.starts_with("· ")
+    }
+
+    /// A file, fetched or waiting.
+    pub fn is_file(&self) -> bool {
+        self.file.is_some() || self.pending.is_some() || self.text.starts_with("[file] ")
+    }
 }
 
 /// The saved location a file line names, if it does: `[file] name (size)
@@ -257,6 +352,8 @@ enum Internal {
         group: silver_protocol::group::GroupId,
         id: Option<String>,
         text: Option<String>,
+        /// The message the text answers, for the line it makes.
+        reply_to: Option<String>,
         result: Result<(), String>,
     },
     /// A parked group message was fetched from the blob store.
@@ -447,6 +544,14 @@ pub struct App {
     /// as the old one, so no further identity change is taken until a
     /// restart: `/revoke` would retire the new key, not the old.
     rotated: bool,
+    /// The earliest moment a message on screen goes, once known; the
+    /// sweeper reads nothing from disk before then.
+    next_expiry: Option<u64>,
+    /// A line with a timer came, went or was read: `next_expiry` is to be
+    /// worked out again.
+    expiry_dirty: bool,
+    /// Edits, reactions and deletions for messages not held yet.
+    late: Vec<everyday::LateUpdate>,
 }
 
 /// What stands between the data directory and whoever copies it, as the
@@ -510,6 +615,11 @@ impl App {
         {
             known_ids.insert(id.clone());
         }
+        // What ran out while the client was not running goes before
+        // anything is shown.
+        if let Err(e) = silver_client::everyday::sweep_expired(&store, now_ms()) {
+            tracing::warn!("could not remove messages whose time ran out: {e:#}");
+        }
         for contact in &contacts {
             let lines: Vec<ChatLine> = store
                 .load_history(&contact.user_id)?
@@ -517,24 +627,7 @@ impl App {
                 .map(|h| {
                     known_ids.insert(h.id.clone());
                     let delivered = !pending.contains(&h.id);
-                    let file = match h.direction {
-                        Direction::Received => saved_file_path(&h.text),
-                        Direction::Sent => None,
-                    };
-                    // A file still waits until its line says where it went.
-                    let pending = h.file.filter(|_| file.is_none());
-                    ChatLine {
-                        id: h.id,
-                        direction: h.direction,
-                        timestamp_ms: h.timestamp_ms,
-                        text: h.text,
-                        delivered,
-                        failed: false,
-                        receipt: h.receipt,
-                        file,
-                        pending,
-                        sender: None,
-                    }
+                    ChatLine::from_history(h, delivered)
                 })
                 .collect();
             threads.insert(contact.user_id, lines);
@@ -547,23 +640,7 @@ impl App {
                 .into_iter()
                 .map(|h| {
                     known_ids.insert(h.id.clone());
-                    let file = match h.direction {
-                        Direction::Received => saved_file_path(&h.text),
-                        Direction::Sent => None,
-                    };
-                    let pending = h.file.filter(|_| file.is_none());
-                    ChatLine {
-                        id: h.id,
-                        direction: h.direction,
-                        timestamp_ms: h.timestamp_ms,
-                        text: h.text,
-                        delivered: true,
-                        failed: false,
-                        receipt: None,
-                        file,
-                        pending,
-                        sender: h.from,
-                    }
+                    ChatLine::from_history(h, true)
                 })
                 .collect();
             group_threads.insert(*id, lines);
@@ -639,6 +716,9 @@ impl App {
             last_activity: Instant::now(),
             lock_requested: false,
             rotated: false,
+            next_expiry: None,
+            expiry_dirty: true,
+            late: Vec::new(),
         };
         app.refresh_group_list();
         app.system(Level::Info, "Welcome to Silver Messenger.");
@@ -736,6 +816,8 @@ impl App {
                     self.flush_cover();
                     self.maintain_groups();
                     self.tick_leave();
+                    self.sweep_if_due();
+                    self.prune_late();
                     if let Some(after) = self.lock_after {
                         if self.can_lock() && self.last_activity.elapsed() >= after {
                             self.lock_requested = true;
@@ -1610,13 +1692,16 @@ impl App {
         if let Some(id) = self.selected_contact().map(|c| c.user_id) {
             let shown = self.unread.remove(&id).unwrap_or_default();
             if !shown.is_empty() {
+                let now = now_ms();
                 // This identity's other devices need not send read
-                // receipts for what was read here.
+                // receipts for what was read here, and a timer runs from
+                // the same moment on each of them.
                 self.sync(silver_protocol::device::Sync::Read {
                     peer: id,
                     ids: shown.clone(),
-                    at_ms: Some(silver_protocol::now_ms()),
+                    at_ms: Some(now),
                 });
+                self.note_read(&Conversation::Contact(id), &shown, now);
             }
             if self.read_receipts && self.contact_supports(&id, capability::RECEIPTS) {
                 for message_id in shown {
@@ -1624,8 +1709,10 @@ impl App {
                 }
             }
         }
-        if let Some(group) = self.selected_group() {
-            self.group_unread.remove(&group);
+        if let Some(group) = self.selected_group()
+            && let Some(shown) = self.group_unread.remove(&group)
+        {
+            self.note_read(&Conversation::Group(group), &shown, now_ms());
         }
     }
 
@@ -1693,6 +1780,11 @@ impl App {
             "unblock" => self.cmd_unblock(&rest),
             "blocked" => self.cmd_blocked(),
             "send" | "file" | "attach" => self.cmd_send(&rest),
+            "timer" => self.cmd_timer(&rest),
+            "delete" | "del" => self.cmd_delete(&rest),
+            "edit" => self.cmd_edit(&rest),
+            "reply" => self.cmd_reply(&rest),
+            "react" => self.cmd_react(&rest),
             "get" | "fetch" => self.cmd_get(&rest),
             "files" => self.cmd_files(&rest),
             "open" => self.cmd_open(),
@@ -1794,6 +1886,28 @@ impl App {
             return format!("Tab cycles: {out}");
         }
         if self.selection.is_some() {
+            if let Some((conversation, index)) =
+                self.selected_conversation().zip(self.selected_source())
+                && let Some(line) = self.lines_of(&conversation).get(index)
+                && !line.is_note()
+            {
+                let mut hint = match self.author_of(&conversation, line) {
+                    None => format!("Your message of {}", ui::clock(line.timestamp_ms)),
+                    Some(who) => format!(
+                        "{}'s message of {}",
+                        self.member_name(&who),
+                        ui::clock(line.timestamp_ms)
+                    ),
+                };
+                if let Some(at) = line.expires_at_ms() {
+                    hint.push_str(&format!(
+                        " · {}",
+                        silver_client::everyday::time_left(at, now_ms())
+                    ));
+                }
+                hint.push_str(" · /reply, /react, /edit and /delete act on it · Esc clears");
+                return hint;
+            }
             return "Ctrl-C copies the selection · Esc clears it".to_owned();
         }
         if let Some(body) = self.input.strip_prefix('/') {
@@ -2743,21 +2857,15 @@ impl App {
                         // handled; a line born delivered shows no pending mark.
                         let id = delivery.envelope.id;
                         let delivered = !self.client.pending_ids().contains(&id);
-                        self.record(
-                            peer,
+                        let line = self.timed(
+                            &Conversation::Contact(peer),
                             ChatLine {
-                                id,
-                                direction: Direction::Sent,
-                                timestamp_ms: now_ms(),
-                                text,
                                 delivered,
-                                failed: false,
-                                receipt: None,
-                                file: None,
-                                pending: None,
-                                sender: None,
+                                reply_to: content.reply_to().map(str::to_owned),
+                                ..ChatLine::new(id, Direction::Sent, now_ms(), text)
                             },
                         );
+                        self.record(peer, line);
                         self.scroll = 0;
                     }
                 }
@@ -2796,8 +2904,9 @@ impl App {
                 group,
                 id,
                 text,
+                reply_to,
                 result,
-            } => self.on_group_sent(group, id, text, result),
+            } => self.on_group_sent(group, id, text, reply_to, result),
             Internal::GroupParked { from, body, chunks } => {
                 self.on_group_parked(from, body, chunks)
             }
@@ -2975,11 +3084,13 @@ impl App {
                     self.persist_contacts();
                 }
 
-                let (text, file) = match message.content {
-                    Content::Text { body, .. } => (body, None),
+                let conversation = Conversation::Contact(from);
+                let (text, file, reply_to) = match message.content {
+                    Content::Text { body, reply_to } => (body, None, reply_to),
                     Content::File { .. } => {
                         let info = FileInfo::from_content(&message.content).expect("file content");
-                        (format!("[file] {}", info.label()), Some(info))
+                        let reply_to = message.content.reply_to().map(str::to_owned);
+                        (format!("[file] {}", info.label()), Some(info), reply_to)
                     }
                     Content::Receipt { kind, ids } => {
                         self.known_ids.insert(message.id);
@@ -3009,16 +3120,28 @@ impl App {
                         return;
                     }
                     // An edit, a deletion, a reaction or a timer changes
-                    // what other lines show; nothing here applies them yet
-                    // (docs/design/everyday.md), so none is a line.
+                    // what other lines show and is no line itself.
                     Content::Edit { .. }
                     | Content::Delete { .. }
                     | Content::Reaction { .. }
                     | Content::Timer { .. } => {
-                        self.known_ids.insert(message.id);
+                        self.known_ids.insert(message.id.clone());
+                        self.apply_everyday(
+                            conversation,
+                            Some(from),
+                            &message.id,
+                            claimed_time(message.sent_at_ms),
+                            message.content,
+                        );
                         return;
                     }
                 };
+                // Deleted for everyone by its author before it came: it
+                // shows nothing.
+                if self.arrived_deleted(&conversation, &message.id, Some(from)) {
+                    self.known_ids.insert(message.id);
+                    return;
+                }
                 // A file is fetched now only for a contact on /files auto;
                 // otherwise it waits for /get. What the sender claims about
                 // it is checked before either.
@@ -3031,26 +3154,29 @@ impl App {
                     },
                 };
                 let id = message.id.clone();
-                self.record(
-                    from,
+                let line = self.timed(
+                    &conversation,
                     ChatLine {
-                        id: message.id,
-                        direction: Direction::Received,
-                        timestamp_ms: claimed_time(message.sent_at_ms),
-                        text,
                         delivered: true,
-                        failed: false,
-                        receipt: None,
-                        file: None,
                         pending,
-                        sender: None,
+                        reply_to,
+                        ..ChatLine::new(
+                            message.id,
+                            Direction::Received,
+                            claimed_time(message.sent_at_ms),
+                            text,
+                        )
                     },
                 );
+                self.record(from, line);
+                self.apply_late(&conversation, &id);
                 // Shown means in the selected chat of a window that has focus;
                 // a chat open on an unattended screen has not been read.
                 let shown =
                     self.selected_contact().map(|c| c.user_id) == Some(from) && self.focused;
-                if !shown {
+                if shown {
+                    self.note_read(&conversation, std::slice::from_ref(&id), now_ms());
+                } else {
                     self.notifier.announce(&format!("New message from {name}"));
                 }
                 let wants = self.contacts[index].supports(capability::RECEIPTS);
@@ -3798,16 +3924,9 @@ impl App {
             self.record(
                 from,
                 ChatLine {
-                    id: held.id,
-                    direction: Direction::Received,
-                    timestamp_ms: held.timestamp_ms,
-                    text,
                     delivered: true,
-                    failed: false,
-                    receipt: None,
-                    file: None,
                     pending,
-                    sender: None,
+                    ..ChatLine::new(held.id, Direction::Received, held.timestamp_ms, text)
                 },
             );
         }
@@ -3901,6 +4020,8 @@ impl App {
     fn record(&mut self, peer: UserId, line: ChatLine) {
         let entry = HistoryEntry {
             file: line.pending.clone(),
+            reply_to: line.reply_to.clone(),
+            expire_after_s: line.expire_after_s,
             ..HistoryEntry::new(
                 line.id.clone(),
                 line.direction,
@@ -3910,6 +4031,9 @@ impl App {
         };
         if let Err(e) = self.store.append_history(&peer, &entry) {
             self.toast(format!("Could not save history: {e}"));
+        }
+        if line.expire_after_s > 0 {
+            self.expiry_dirty = true;
         }
         self.known_ids.insert(line.id.clone());
         self.threads.entry(peer).or_default().push(line);
@@ -4134,16 +4258,8 @@ mod tests {
             .entry(old.user_id())
             .or_default()
             .push(ChatLine {
-                id: "1".into(),
-                direction: Direction::Sent,
-                timestamp_ms: 1,
-                text: "before".into(),
                 delivered: true,
-                failed: false,
-                receipt: None,
-                file: None,
-                pending: None,
-                sender: None,
+                ..ChatLine::new("1", Direction::Sent, 1, "before")
             });
 
         app.handle_client_event(ClientEvent::PeerSucceeded {
@@ -4417,7 +4533,7 @@ mod tests {
         app.group_envelopes
             .insert("e2".into(), (group, "m1".into()));
         app.group_outstanding.insert("m1".into(), 2);
-        app.on_group_sent(group, Some("m1".into()), Some("hello".into()), Ok(()));
+        app.on_group_sent(group, Some("m1".into()), Some("hello".into()), None, Ok(()));
         let line = app.group_line_mut(&group, "m1").unwrap();
         assert_eq!(line.direction, Direction::Sent);
         assert!(!line.delivered);
@@ -4434,6 +4550,7 @@ mod tests {
             group,
             Some("m2".into()),
             Some("lost".into()),
+            None,
             Err("gone".into()),
         );
         assert!(app.group_line_mut(&group, "m2").is_none());

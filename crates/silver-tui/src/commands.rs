@@ -142,6 +142,36 @@ pub const COMMANDS: &[CommandInfo] = &[
         path_arg: true,
     },
     cmd(
+        "reply",
+        &[],
+        "<text>",
+        "answer the selected message (or the last one received), quoting it",
+    ),
+    cmd(
+        "react",
+        &[],
+        "<emoji|none>",
+        "react to the selected message (or the last one received); none takes yours back",
+    ),
+    cmd(
+        "edit",
+        &[],
+        "<text>",
+        "replace the text of the selected message of yours (or your last one) within a day of sending",
+    ),
+    cmd(
+        "delete",
+        &["del"],
+        "[me]",
+        "delete the selected message of yours (or your last one) for everyone within a day of sending; /delete me removes any message from your devices only",
+    ),
+    cmd(
+        "timer",
+        &[],
+        "[30s|5m|1h|8h|1d|1w|off]",
+        "make messages in this chat disappear that long after you send them or they read them (in a group: admins only); no argument shows the setting",
+    ),
+    cmd(
         "get",
         &["fetch"],
         "[all]",
@@ -211,6 +241,7 @@ pub const KEY_HELP: &[&str] = &[
     "Enter sends · Alt-Enter new line · Up / Down recall earlier lines · Tab completes /commands and paths",
     "PgUp / PgDn or the mouse wheel scroll · Ctrl-Home / Ctrl-End jump · drag the scrollbar or the divider",
     "Drag to select text, double click a word, triple click a message, Shift-Up / Shift-Down for messages",
+    "With one message selected, /reply, /react, /edit and /delete act on it",
     "Ctrl-C copies the selection (twice with nothing selected: quit) · Ctrl-V, Shift-Insert or right click paste",
     "Esc clears the selection, then the input · F1 opens and closes this help · Ctrl-Q quits",
 ];
