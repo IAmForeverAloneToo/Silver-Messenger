@@ -1,0 +1,33 @@
+# Maintainer: IAmForeverAloneToo <16734439+IAmForeverAloneToo@users.noreply.github.com>
+# The release archives by checksum. packaging/update.sh writes this file
+# and .SRCINFO for a release; edit it there.
+pkgname=silver-messenger-bin
+pkgver=0.9.0
+pkgrel=1
+pkgdesc="End-to-end encrypted messaging in your terminal: the client and the relay"
+arch=('x86_64' 'aarch64')
+url="https://github.com/IAmForeverAloneToo/Silver-Messenger"
+license=('AGPL-3.0-only')
+provides=('silver-messenger')
+conflicts=('silver-messenger')
+# The release binaries are stripped and reproducible; their bytes stay.
+options=('!strip')
+source=("silver-relay-$pkgver.service::$url/raw/v$pkgver/deploy/silver-relay.service"
+        'silver-messenger.sysusers')
+source_x86_64=("$url/releases/download/v$pkgver/silver-messenger-v$pkgver-x86_64-unknown-linux-musl.tar.gz")
+source_aarch64=("$url/releases/download/v$pkgver/silver-messenger-v$pkgver-aarch64-unknown-linux-musl.tar.gz")
+sha256sums=('18d9f4e33ac689a634e0d33ad56af3373934d366f52164a7f16f57211257dd90'
+            '8bb8f2bbe65eac4a8fbb88d287e2933057044773c0ee2dd47d0255f01f2c84f8')
+sha256sums_x86_64=('091951b1defb2d6eef155ad3417b8fcd9ebc5b31ee9083fd74a80f8a3ec100a3')
+sha256sums_aarch64=('d71d0cae5a7116460cadf520ec7b6468e41085356560be1c22a3102ffdec96ca')
+
+package() {
+  cd "silver-messenger-v$pkgver-$CARCH-unknown-linux-musl"
+  install -Dm755 silver "$pkgdir/usr/bin/silver"
+  install -Dm755 silver-relay "$pkgdir/usr/bin/silver-relay"
+  install -Dm644 README.md CHANGELOG.md -t "$pkgdir/usr/share/doc/silver-messenger"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  sed 's|/usr/local/bin/silver-relay|/usr/bin/silver-relay|' "$srcdir/silver-relay-$pkgver.service" |
+    install -Dm644 /dev/stdin "$pkgdir/usr/lib/systemd/system/silver-relay.service"
+  install -Dm644 "$srcdir/silver-messenger.sysusers" "$pkgdir/usr/lib/sysusers.d/silver-messenger.conf"
+}

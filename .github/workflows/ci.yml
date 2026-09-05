@@ -100,6 +100,73 @@ jobs:
       - run: cargo build --workspace --locked
       - run: TERM=xterm-256color python3 tests/tui/soak.py --minutes ${{ inputs.soak_minutes || 3 }}
 
+  packaging:
+    # The packages, each checked the way its platform does
+    # (docs/design/distribution.md, section 5): the Debian package built
+    # from the debug binaries and installed in a container, the PKGBUILD
+    # and its .SRCINFO in an Arch container, the winget manifests against
+    # their schemas. The formula has its own job on macOS.
+    name: packages (Debian, Arch, winget)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # Static binaries, as the release's are, so lintian sees the same
+      # shape of package; a debug build is not stripped, so that is done
+      # here (the release profile strips).
+      - name: Static binaries for the package
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools lintian
+          CC_x86_64_unknown_linux_musl=musl-gcc cargo build --workspace --locked --target x86_64-unknown-linux-musl
+          mkdir -p bins
+          cp target/x86_64-unknown-linux-musl/debug/silver target/x86_64-unknown-linux-musl/debug/silver-relay bins/
+          strip bins/silver bins/silver-relay
+      - name: Debian package, linted and installed in a container
+        run: |
+          packaging/deb/build.sh "0.0.0~dev.${GITHUB_SHA::7}" amd64 bins out
+          lintian --fail-on error --tag-display-limit 0 out/*.deb
+          docker run --rm -v "$PWD/out:/pkg:ro" debian:stable-slim sh -ec '
+            apt-get update -qq >/dev/null
+            apt-get install -y -qq /pkg/*.deb >/dev/null
+            silver --version
+            silver-relay --version
+            test -f /lib/systemd/system/silver-relay.service
+            getent passwd silver
+            apt-get remove -y -qq silver-messenger >/dev/null
+            test ! -e /usr/bin/silver'
+      - name: Arch package, its .SRCINFO current and namcap clean of errors
+        run: |
+          docker run --rm -v "$PWD/packaging/aur:/aur:ro" archlinux:base-devel sh -ec '
+            pacman -Sy --noconfirm --needed namcap >/dev/null
+            cp -r /aur /build && chown -R nobody /build && cd /build
+            su nobody -s /bin/sh -c "makepkg --printsrcinfo" | diff -u .SRCINFO -
+            namcap PKGBUILD | tee namcap.txt
+            ! grep -q " E: " namcap.txt'
+      - name: winget manifests against their schemas
+        run: |
+          pip install pyyaml jsonschema || pip install --break-system-packages pyyaml jsonschema
+          python3 packaging/winget/validate.py
+
+  homebrew:
+    # This checkout tapped as it would be by a person, then the formula
+    # audited, styled, installed from the release it names, and tested.
+    name: Homebrew formula
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Tap, audit, install and test
+        run: |
+          brew tap iamforeveralonetoo/silver "$PWD"
+          brew audit --strict iamforeveralonetoo/silver/silver-messenger
+          brew style iamforeveralonetoo/silver
+          brew install --formula iamforeveralonetoo/silver/silver-messenger
+          brew test iamforeveralonetoo/silver/silver-messenger
+          silver --version
+
   reproducible:
     # The release binaries are built with these exact flags; two clean
     # builds of the same commit must be byte for byte the same, or a

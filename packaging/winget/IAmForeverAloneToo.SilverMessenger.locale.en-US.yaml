@@ -1,0 +1,20 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+PackageIdentifier: IAmForeverAloneToo.SilverMessenger
+PackageVersion: 0.9.0
+PackageLocale: en-US
+Publisher: IAmForeverAloneToo
+PublisherUrl: https://github.com/IAmForeverAloneToo
+PublisherSupportUrl: https://github.com/IAmForeverAloneToo/Silver-Messenger/issues
+PackageName: Silver Messenger
+PackageUrl: https://github.com/IAmForeverAloneToo/Silver-Messenger
+License: AGPL-3.0-only
+LicenseUrl: https://github.com/IAmForeverAloneToo/Silver-Messenger/blob/main/LICENSE
+ShortDescription: End-to-end encrypted messaging in your terminal
+Description: The client (silver) and the relay (silver-relay) of Silver Messenger, a terminal messenger with forward-secret, post-quantum encryption, groups on MLS and several devices per identity.
+Tags:
+  - encryption
+  - messenger
+  - terminal
+ReleaseNotesUrl: https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/tag/v0.9.0
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

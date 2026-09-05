@@ -1,0 +1,21 @@
+pkgbase = silver-messenger-bin
+	pkgdesc = End-to-end encrypted messaging in your terminal: the client and the relay
+	pkgver = 0.9.0
+	pkgrel = 1
+	url = https://github.com/IAmForeverAloneToo/Silver-Messenger
+	arch = x86_64
+	arch = aarch64
+	license = AGPL-3.0-only
+	provides = silver-messenger
+	conflicts = silver-messenger
+	options = !strip
+	source = silver-relay-0.9.0.service::https://github.com/IAmForeverAloneToo/Silver-Messenger/raw/v0.9.0/deploy/silver-relay.service
+	source = silver-messenger.sysusers
+	sha256sums = 18d9f4e33ac689a634e0d33ad56af3373934d366f52164a7f16f57211257dd90
+	sha256sums = 8bb8f2bbe65eac4a8fbb88d287e2933057044773c0ee2dd47d0255f01f2c84f8
+	source_x86_64 = https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/download/v0.9.0/silver-messenger-v0.9.0-x86_64-unknown-linux-musl.tar.gz
+	sha256sums_x86_64 = 091951b1defb2d6eef155ad3417b8fcd9ebc5b31ee9083fd74a80f8a3ec100a3
+	source_aarch64 = https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/download/v0.9.0/silver-messenger-v0.9.0-aarch64-unknown-linux-musl.tar.gz
+	sha256sums_aarch64 = d71d0cae5a7116460cadf520ec7b6468e41085356560be1c22a3102ffdec96ca
+
+pkgname = silver-messenger-bin

@@ -160,17 +160,53 @@ jobs:
           sparse-checkout: |
             CHANGELOG.md
             minisign.pub
+            packaging
+            deploy/silver-relay.service
           sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
           merge-multiple: true
 
+      # The Debian packages wrap the Linux archives' binaries, so they
+      # carry the same bytes and are listed, signed and attested with the
+      # rest (docs/design/distribution.md, section 4).
+      - name: Debian packages from the Linux archives
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          for pair in amd64:x86_64 arm64:aarch64; do
+            arch="${pair%%:*}"
+            name="silver-messenger-${TAG}-${pair##*:}-unknown-linux-musl"
+            mkdir -p "unpacked/$arch"
+            tar xzf "dist/$name.tar.gz" -C "unpacked/$arch" --strip-components=1
+            packaging/deb/build.sh "$TAG" "$arch" "unpacked/$arch" dist
+          done
+          rm -r unpacked
+
       - name: Checksums
         run: |
           cd dist
           sha256sum * > SHA256SUMS
           cat SHA256SUMS
+
+      # The formula, the PKGBUILD and its .SRCINFO, and the winget
+      # manifests for this release, from the checksums above, as one
+      # archive: what the packaging commit that follows a release copies
+      # in. Its own checksum joins the list before the list is signed.
+      - name: Packaging files for this release
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          packaging/update.sh "$TAG" dist/SHA256SUMS
+          tar czf "dist/silver-messenger-${TAG}-packaging.tar.gz" \
+            --sort=name --owner=0 --group=0 --numeric-owner \
+            --mtime="@$(git log -1 --format=%ct)" \
+            HomebrewFormula packaging/aur packaging/winget
+          cd dist
+          sha256sum "silver-messenger-${TAG}-packaging.tar.gz" >> SHA256SUMS
+          tail -1 SHA256SUMS
 
       - name: Sign the checksums
         env:

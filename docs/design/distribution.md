@@ -17,7 +17,7 @@ and the code later disagree, the code wins and this note is corrected.
 | Arch | `packaging/aur/PKGBUILD` and `.SRCINFO` for `silver-messenger-bin`: the release archive for `x86_64` and `aarch64` by checksum, both binaries, the documents, the licence, and the relay's unit with its path rewritten. Publishing is a push to the AUR under the maintainer's account; the note records the version last pushed. A source package (`silver-messenger`, building with `cargo` from the tag) would not install the same bytes and is not made. |
 | Debian and Ubuntu | A `.deb` per architecture (`amd64`, `arm64`) built in the release workflow from the Linux archives with `dpkg-deb`, attached to the release beside the archives, in `SHA256SUMS` and attested like everything else. It installs `/usr/bin/silver`, `/usr/bin/silver-relay`, the relay's unit in `/lib/systemd/system/` with its path rewritten (installed, not enabled), the documents and the copyright file; its `postinst` creates the relay's system user and runs `systemctl daemon-reload` where systemd is present; `prerm` stops and disables the unit. The package depends on nothing: the binaries are static. No repository is run; the file is installed with `apt install ./silver-messenger_<version>_<arch>.deb`, which resolves nothing and checks nothing beyond the file, so the checksum and the attestation are the person's check, as for the archives. |
 | Keeping the packaging current | The checksums change with every release, so `packaging/update.sh <version>` reads the release's `SHA256SUMS` and rewrites the formula, the PKGBUILD, the `.SRCINFO` and the winget manifests; the result is committed after the release, by hand, as the packaging commit for that version. Nothing in the workflows commits to the repository. |
-| Checking the packaging in CI | The Debian build script runs on every push against the debug binaries, and the package is installed in a Debian container and both binaries run; the formula is checked with `brew audit --strict` and `brew style` on the macOS runner where Homebrew is present, against a copy of the formula that points at the artefacts of that run, so the audit sees a real download; the PKGBUILD is checked with `namcap` in an Arch container, and `makepkg --printsrcinfo` must reproduce the committed `.SRCINFO`; the winget manifests are checked against their schema with `winget validate` on the Windows runner. The signing and notarising steps cannot be checked without the secrets and are marked unchecked until the first signed release. |
+| Checking the packaging in CI | The Debian build script runs on every push against a static debug build (the musl target, stripped, so lintian sees the shape the release has), the package is linted with errors fatal and installed in a Debian container where both binaries run; the formula is checked with `brew audit --strict` and `brew style` on the macOS runner, with this checkout tapped as a person would tap it, then installed from the release it names and tested; the PKGBUILD is checked with `namcap` in an Arch container, and `makepkg --printsrcinfo` must reproduce the committed `.SRCINFO`; the winget manifests are checked against Microsoft's schemas by a small script, since the Windows runners do not carry `winget` reliably. The signing and notarising steps cannot be checked without the secrets and are marked unchecked until the first signed release. (Corrected when the code landed: the formula is checked against the release, not against the run's artefacts, and the manifests by schema rather than by `winget validate`.) |
 
 ## 2. Goals and non-goals
 
@@ -76,6 +76,14 @@ installed), the unit with `/usr/bin/silver-relay`, and builds with
 file's mtime clamped to it, so the same input gives the same package. The
 release job runs it for both architectures on the archives it has just
 downloaded; CI runs it on the debug build and installs the result.
+
+Lintian shaped it further when the code landed: a Debian changelog
+(one entry, the release, pointing at CHANGELOG.md), `Depends: adduser`
+for the `postinst`, `deb-systemd-invoke` rather than `systemctl` to stop
+a running relay in `prerm`, an override for `statically-linked-binary`,
+which is the point of the musl builds, and a copyright notice with a
+year. The two binaries have no manual pages, which lintian notes as a
+warning; the `--help` of each is the reference for now.
 
 ## 5. Tests
 
