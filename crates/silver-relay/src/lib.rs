@@ -865,9 +865,24 @@ impl RelayState {
     /// dead. Verified by its own signature, so no connection auth is needed
     /// (the key may be lost). A revoked identity that is online is
     /// disconnected and cannot publish again.
-    pub fn apply_revocation(&self, revocation: Revocation) -> Result<(), Rejection> {
+    ///
+    /// Only an identity registered here can be revoked here, so the store
+    /// holds at most one statement per identity it already knows and nobody
+    /// can fill it with revocations of throwaway keys; and each statement
+    /// costs `addr` one of its hourly registrations, since a statement that
+    /// authenticates itself is otherwise free to send.
+    pub fn apply_revocation(&self, revocation: Revocation, addr: IpAddr) -> Result<(), Rejection> {
+        if !self.registration_allowed(addr) {
+            return Err((
+                ErrorCode::RateLimited,
+                "this address has made its share of identity changes for the hour",
+            ));
+        }
         if revocation.verify().is_err() {
             return Err((ErrorCode::BadSignature, "revocation signature is invalid"));
+        }
+        if self.bundle(&revocation.identity).is_none() {
+            return Err((ErrorCode::Forbidden, "no such identity on this relay"));
         }
         self.store.set_revocation(&revocation).map_err(|e| {
             error!("storing revocation: {e:#}");
@@ -877,10 +892,31 @@ impl RelayState {
         Ok(())
     }
 
-    /// Store a cross-signed succession, keyed by the old identity.
-    pub fn apply_succession(&self, succession: Succession) -> Result<(), Rejection> {
+    /// Store a cross-signed succession, keyed by the old identity. The old
+    /// identity must be registered here and not revoked: a dead key cannot
+    /// hand over, so a succession cannot undo a revocation. The successor
+    /// must not be a revoked key either.
+    pub fn apply_succession(&self, succession: Succession, addr: IpAddr) -> Result<(), Rejection> {
+        if !self.registration_allowed(addr) {
+            return Err((
+                ErrorCode::RateLimited,
+                "this address has made its share of identity changes for the hour",
+            ));
+        }
         if succession.verify().is_err() {
             return Err((ErrorCode::BadSignature, "succession signature is invalid"));
+        }
+        if self.bundle(&succession.old).is_none() {
+            return Err((ErrorCode::Forbidden, "no such identity on this relay"));
+        }
+        if self.is_revoked(&succession.old) {
+            return Err((
+                ErrorCode::Forbidden,
+                "that identity has been revoked and cannot hand over",
+            ));
+        }
+        if self.is_revoked(&succession.new) {
+            return Err((ErrorCode::Forbidden, "the successor has been revoked"));
         }
         self.store.set_succession(&succession).map_err(|e| {
             error!("storing succession: {e:#}");
@@ -889,13 +925,24 @@ impl RelayState {
         Ok(())
     }
 
+    fn is_revoked(&self, user: &UserId) -> bool {
+        self.store.is_revoked(user).unwrap_or_else(|e| {
+            error!("reading revocation: {e:#}");
+            false
+        })
+    }
+
     /// The lifecycle statements the relay holds for `user`, to attach to a
-    /// lookup result.
+    /// lookup result. A revocation is final: once one is held, no succession
+    /// is served for the identity, whichever came first.
     pub fn lifecycle(&self, user: &UserId) -> (Option<Revocation>, Option<Succession>) {
         let revocation = self.store.revocation(user).unwrap_or_else(|e| {
             error!("reading revocation: {e:#}");
             None
         });
+        if revocation.is_some() {
+            return (revocation, None);
+        }
         let succession = self.store.succession(user).unwrap_or_else(|e| {
             error!("reading succession: {e:#}");
             None
@@ -1442,7 +1489,7 @@ async fn handle_socket(
         // takes it without a login: a revoked key may be lost and unable to
         // log in. It is a one-shot; the connection then closes.
         Ok(Some(Ok(ClientFrame::Revoke { revocation }))) => {
-            let reply = match state.apply_revocation(revocation) {
+            let reply = match state.apply_revocation(revocation, addr) {
                 Ok(()) => ServerFrame::Published,
                 Err((code, message)) => ServerFrame::error(code, message),
             };
@@ -1450,7 +1497,7 @@ async fn handle_socket(
             return;
         }
         Ok(Some(Ok(ClientFrame::Succeed { succession }))) => {
-            let reply = match state.apply_succession(succession) {
+            let reply = match state.apply_succession(succession, addr) {
                 Ok(()) => ServerFrame::Published,
                 Err((code, message)) => ServerFrame::error(code, message),
             };
@@ -1657,14 +1704,16 @@ fn handle_frame(
                 succession,
             }]
         }
-        ClientFrame::Revoke { revocation } => match state.apply_revocation(revocation) {
+        ClientFrame::Revoke { revocation } => match state.apply_revocation(revocation, conn.addr) {
             Ok(()) => vec![ServerFrame::Published],
             Err((code, message)) => vec![ServerFrame::error(code, message)],
         },
-        ClientFrame::Succeed { succession } => match state.apply_succession(succession) {
-            Ok(()) => vec![ServerFrame::Published],
-            Err((code, message)) => vec![ServerFrame::error(code, message)],
-        },
+        ClientFrame::Succeed { succession } => {
+            match state.apply_succession(succession, conn.addr) {
+                Ok(()) => vec![ServerFrame::Published],
+                Err((code, message)) => vec![ServerFrame::error(code, message)],
+            }
+        }
         ClientFrame::Send { envelope } => vec![state.submit(envelope, &mut conn.sends, Some(me))],
         ClientFrame::Ack { id } => {
             state.ack(me, &id);
@@ -1709,5 +1758,106 @@ async fn next_frame(stream: &mut Stream) -> Option<Result<ClientFrame, String>> 
             warn!("malformed client frame: {e}");
             format!("malformed frame: {e}")
         }));
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use silver_protocol::Identity;
+
+    fn addr(n: u8) -> IpAddr {
+        IpAddr::from([203, 0, 113, n])
+    }
+
+    #[test]
+    fn lifecycle_statements_are_kept_for_registered_identities_only() {
+        let state = RelayState::new();
+        let alice = Identity::generate();
+        let here = addr(1);
+        // Nobody the relay knows: refused, and nothing is stored, so the
+        // store cannot be filled with statements about throwaway keys.
+        let (code, _) = state
+            .apply_revocation(alice.revocation(1), here)
+            .unwrap_err();
+        assert!(matches!(code, ErrorCode::Forbidden));
+        assert!(state.lifecycle(&alice.user_id()).0.is_none());
+        let successor = Identity::generate();
+        let (code, _) = state
+            .apply_succession(alice.succeed_to(&successor, 1), here)
+            .unwrap_err();
+        assert!(matches!(code, ErrorCode::Forbidden));
+        assert!(state.lifecycle(&alice.user_id()).1.is_none());
+
+        // Once registered, both are taken.
+        state.store.put_bundle(&alice.key_bundle()).unwrap();
+        state
+            .apply_succession(alice.succeed_to(&successor, 2), here)
+            .unwrap();
+        assert!(state.lifecycle(&alice.user_id()).1.is_some());
+        state.apply_revocation(alice.revocation(3), here).unwrap();
+        assert!(state.lifecycle(&alice.user_id()).0.is_some());
+        // A bad signature is refused whoever the identity is.
+        let mut forged = alice.revocation(4);
+        forged.identity = Identity::generate().user_id();
+        let (code, _) = state.apply_revocation(forged, here).unwrap_err();
+        assert!(matches!(code, ErrorCode::BadSignature));
+    }
+
+    #[test]
+    fn a_revocation_is_final_on_the_relay() {
+        let state = RelayState::new();
+        let old = Identity::generate();
+        let new = Identity::generate();
+        let here = addr(2);
+        state.store.put_bundle(&old.key_bundle()).unwrap();
+
+        // Succession first, then revocation: the succession is no longer
+        // served, whichever came first.
+        state
+            .apply_succession(old.succeed_to(&new, 1), here)
+            .unwrap();
+        assert!(state.lifecycle(&old.user_id()).1.is_some());
+        state.apply_revocation(old.revocation(2), here).unwrap();
+        let (revocation, succession) = state.lifecycle(&old.user_id());
+        assert!(revocation.is_some());
+        assert!(
+            succession.is_none(),
+            "a dead key's succession is not served"
+        );
+
+        // A dead key cannot hand over, so a compromised key that was
+        // revoked cannot name its holder's own successor afterwards.
+        let (code, _) = state
+            .apply_succession(old.succeed_to(&Identity::generate(), 3), here)
+            .unwrap_err();
+        assert!(matches!(code, ErrorCode::Forbidden));
+        // Nor can anyone hand over *to* a revoked key.
+        let other = Identity::generate();
+        state.store.put_bundle(&other.key_bundle()).unwrap();
+        let (code, _) = state
+            .apply_succession(other.succeed_to(&old, 4), here)
+            .unwrap_err();
+        assert!(matches!(code, ErrorCode::Forbidden));
+        assert!(state.lifecycle(&other.user_id()).1.is_none());
+    }
+
+    #[test]
+    fn lifecycle_statements_draw_on_the_address_registration_budget() {
+        let state = RelayState::new();
+        let here = addr(3);
+        let alice = Identity::generate();
+        state.store.put_bundle(&alice.key_bundle()).unwrap();
+        for _ in 0..state.policy.registrations_per_hour {
+            state.apply_revocation(alice.revocation(1), here).unwrap();
+        }
+        let (code, _) = state
+            .apply_revocation(alice.revocation(1), here)
+            .unwrap_err();
+        assert!(matches!(code, ErrorCode::RateLimited));
+        // Another address has its own budget.
+        state
+            .apply_revocation(alice.revocation(1), addr(4))
+            .unwrap();
     }
 }

@@ -735,6 +735,14 @@ not lift it, so a revoked key can never be re-registered. A contact that
 sees a valid revocation for a pinned key retires that contact, drops its
 sessions, and stops sending to it.
 
+The relay keeps a statement only for an identity registered with it (one
+that has published a bundle), so it holds at most one revocation and one
+succession per identity it already knows and cannot be filled with
+statements about throwaway keys; a statement for an unknown identity is
+refused (`forbidden`). Each accepted or refused statement also costs the
+sending address one of its hourly new-identity registrations (section
+7.4), since a self-authenticating frame is otherwise free to send.
+
 ### 10.2 Succession
 
 A **succession** names a successor identity for a planned rotation, while
@@ -762,6 +770,22 @@ the conversation across, clears the pinned bundle and the verified mark,
 starts message numbering afresh, and looks the new key up. The safety
 number changes, so the two should compare it again, but no out-of-band step
 is required to keep talking.
+
+**A revocation is final.** A dead key cannot hand over: the relay refuses
+a `succeed` whose `old` (or `new`) is revoked, and once it holds a
+revocation for an identity it serves no succession for it, whichever
+arrived first. A contact applies the same rule and ignores a succession
+for a key it has marked revoked. Without this, whoever held a compromised
+key could name their own successor and keep the victim's contacts even
+after the victim revoked it. The cost falls on the owner who rotates and
+then also revokes the old key: the succession already retires it, and a
+contact that sees the revocation before the succession retires the
+contact instead of re-pinning and needs the new id by hand. So: rotate a
+key you still control, revoke a key you have lost, and do not do both.
+A succession already applied is not undone by a later revocation of the
+old key (the contact no longer has that key pinned); the two cases are
+indistinguishable from the statements alone, and the threat model records
+the race.
 
 ### 10.3 What it does not do
 

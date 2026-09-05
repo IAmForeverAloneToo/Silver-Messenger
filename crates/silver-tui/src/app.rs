@@ -324,6 +324,11 @@ pub struct App {
     last_activity: Instant,
     /// `/lock` was asked for, or the idle time ran out.
     lock_requested: bool,
+    /// `/rotate` handed over to a new identity this session. The data
+    /// directory already holds the new key while this session still runs
+    /// as the old one, so no further identity change is taken until a
+    /// restart: `/revoke` would retire the new key, not the old.
+    rotated: bool,
 }
 
 /// What stands between the data directory and whoever copies it, as the
@@ -455,6 +460,7 @@ impl App {
             lock_after,
             last_activity: Instant::now(),
             lock_requested: false,
+            rotated: false,
         };
         app.system(Level::Info, "Welcome to Silver Messenger.");
         match &app.at_rest {
@@ -2040,6 +2046,14 @@ impl App {
     /// the relay and, best-effort, to every contact that understands lifecycle
     /// statements. Needs `/revoke confirm`, because it cannot be undone.
     fn cmd_revoke(&mut self, args: &[&str]) {
+        if self.rotated {
+            self.system(
+                Level::Warn,
+                "You handed over to a new identity this session, so nothing more is changed until you restart: a revocation now would retire the new key, not the old. The old key needs no revoking; the handover already retires it.",
+            );
+            self.toast("Restart first: a rotation is pending.");
+            return;
+        }
         let confirmed = matches!(
             args.first().map(|a| a.to_ascii_lowercase()).as_deref(),
             Some("confirm") | Some("yes")
@@ -2090,6 +2104,14 @@ impl App {
     /// Move to a fresh identity with a cross-signed succession, so contacts
     /// re-pin to the new key on their own. Needs `/rotate confirm`.
     fn cmd_rotate(&mut self, args: &[&str]) {
+        if self.rotated {
+            self.system(
+                Level::Warn,
+                "You already handed over to a new identity this session. Restart to run as it before rotating again; a second handover now would be signed by a key your contacts have not pinned yet.",
+            );
+            self.toast("Restart first: a rotation is pending.");
+            return;
+        }
         let confirmed = matches!(
             args.first().map(|a| a.to_ascii_lowercase()).as_deref(),
             Some("confirm") | Some("yes")
@@ -2149,10 +2171,11 @@ impl App {
                 format!("New identity saved, but old sessions could not be cleared: {e}"),
             );
         }
+        self.rotated = true;
         self.system(
             Level::Info,
             format!(
-                "Handed over to a new identity ({new_id}). Contacts have been told and will re-pin to it. Restart Silver to run as the new identity; until you do, this session still uses the old one."
+                "Handed over to a new identity ({new_id}). Contacts have been told and will re-pin to it. Restart Silver to run as the new identity; until you do, this session still uses the old one, and no further identity change is taken."
             ),
         );
         self.toast("Rotation announced. Restart to use the new identity.");
@@ -2623,6 +2646,20 @@ impl App {
         let Some(index) = self.contact_index(&succession.old) else {
             return; // the old key is not one of ours
         };
+        // A revocation is final: a dead key cannot hand over, so a
+        // succession never lifts a revoked mark. Otherwise whoever holds a
+        // compromised key could name their own successor after the owner
+        // revoked it.
+        if self.contacts[index].revoked {
+            let name = self.contact_name(&succession.old);
+            self.system(
+                Level::Warn,
+                format!(
+                    "Ignored a handover from {name}'s revoked identity: a revoked key cannot name a successor."
+                ),
+            );
+            return;
+        }
         // Nothing to do if we already moved to (or past) this successor.
         if self.contact_index(&succession.new).is_some() {
             return;
@@ -3209,4 +3246,134 @@ fn spawn_input_thread() -> mpsc::Receiver<Event> {
         }
     });
     rx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use silver_client::{Client, ConnectOptions, Contact, Store};
+    use silver_protocol::Identity;
+    use std::sync::Arc;
+
+    /// An app over a fresh store, with a client that never reaches a relay.
+    fn app() -> (App, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let (identity, _) = store.load_or_create_identity().unwrap();
+        let url = "ws://127.0.0.1:1/ws".to_owned();
+        let (client, _events) =
+            Client::spawn(url.clone(), Arc::new(identity), ConnectOptions::default()).unwrap();
+        let app = App::new(
+            store,
+            client,
+            url,
+            false,
+            1,
+            crate::glyphs::UNICODE,
+            crate::theme::Theme::dark(),
+            AtRest::Passphrase,
+        )
+        .unwrap();
+        (app, dir)
+    }
+
+    #[tokio::test]
+    async fn a_revoked_contact_never_hands_over() {
+        let (mut app, _dir) = app();
+        let old = Identity::generate();
+        let new = Identity::generate();
+        app.contacts.push(Contact::new(old.user_id()));
+
+        // The order one lookup delivers them in: the revocation, then the
+        // succession. The succession must not lift the revoked mark.
+        app.handle_client_event(ClientEvent::PeerRevoked {
+            revocation: old.revocation(1),
+        });
+        assert!(app.contacts[0].revoked);
+        app.handle_client_event(ClientEvent::PeerSucceeded {
+            succession: old.succeed_to(&new, 2),
+        });
+        assert_eq!(
+            app.contacts[0].user_id,
+            old.user_id(),
+            "still the revoked key, not the would-be successor"
+        );
+        assert!(app.contacts[0].revoked);
+        assert!(app.contact_index(&new.user_id()).is_none());
+        // Once revoked, it stays so.
+        app.handle_client_event(ClientEvent::PeerRevoked {
+            revocation: old.revocation(3),
+        });
+        assert!(app.contacts[0].revoked);
+    }
+
+    #[tokio::test]
+    async fn a_live_contact_is_re_pinned_by_a_succession() {
+        let (mut app, _dir) = app();
+        let old = Identity::generate();
+        let new = Identity::generate();
+        let mut contact = Contact::new(old.user_id());
+        contact.verified = true;
+        contact.sent_seq = 5;
+        contact.bundle = Some(old.key_bundle());
+        app.contacts.push(contact);
+        app.threads
+            .entry(old.user_id())
+            .or_default()
+            .push(ChatLine {
+                id: "1".into(),
+                direction: Direction::Sent,
+                timestamp_ms: 1,
+                text: "before".into(),
+                delivered: true,
+                failed: false,
+                receipt: None,
+                file: None,
+                pending: None,
+            });
+
+        app.handle_client_event(ClientEvent::PeerSucceeded {
+            succession: old.succeed_to(&new, 1),
+        });
+        let contact = &app.contacts[0];
+        assert_eq!(contact.user_id, new.user_id());
+        assert!(!contact.verified, "the safety number changed");
+        assert!(!contact.revoked);
+        assert!(contact.bundle.is_none(), "re-pinned on the next lookup");
+        assert_eq!(contact.sent_seq, 0);
+        assert_eq!(
+            app.threads.get(&new.user_id()).map(Vec::len),
+            Some(1),
+            "the conversation moved with the contact"
+        );
+        assert!(!app.threads.contains_key(&old.user_id()));
+
+        // A later revocation of the old key names nobody still pinned.
+        app.handle_client_event(ClientEvent::PeerRevoked {
+            revocation: old.revocation(2),
+        });
+        assert!(!app.contacts[0].revoked);
+        // Statements about strangers are ignored, not added.
+        let stranger = Identity::generate();
+        app.handle_client_event(ClientEvent::PeerRevoked {
+            revocation: stranger.revocation(3),
+        });
+        app.handle_client_event(ClientEvent::PeerSucceeded {
+            succession: stranger.succeed_to(&Identity::generate(), 4),
+        });
+        assert_eq!(app.contacts.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn no_identity_change_is_taken_after_a_rotation_until_restart() {
+        let (mut app, _dir) = app();
+        let before = app.system.len();
+        app.rotated = true;
+        app.cmd_revoke(&["confirm"]);
+        app.cmd_rotate(&["confirm"]);
+        // Both refused with an explanation, and the stored identity is the
+        // one the rotation left, untouched.
+        assert_eq!(app.system.len(), before + 2);
+        assert!(app.store.revocation().unwrap().is_none());
+    }
 }

@@ -240,10 +240,16 @@ victim are dropped, but cannot tell a compromise from a legitimate reinstall
 without comparing safety numbers out of band. The victim recovers by
 retiring the key: `/revoke` declares it dead so contacts stop trusting it,
 and `/rotate` hands over to a fresh identity with a cross-signed succession
-so contacts re-pin to the new key on their own (protocol section 10). This
-races the attacker — whoever's statement a contact sees first wins until the
-next lookup — and does not undo what was already read, but it ends the
-attacker's ability to be taken for the victim going forward.
+so contacts re-pin to the new key on their own (protocol section 10). A
+revocation is final: the relay serves no succession for a revoked key and
+a contact ignores one, so the attacker cannot answer the revocation by
+naming their own successor. What remains is a race on the succession
+alone — an attacker's succession that a contact applied before the
+victim's revocation is not undone by it, since the contact no longer has
+the old key pinned — and nothing here undoes what was already read. It
+does end the attacker's ability to be taken for the victim going forward,
+and the pre-signed certificate lets the victim revoke even when the
+attacker took the only copy of the key.
 
 ### Future quantum adversary with a recording
 

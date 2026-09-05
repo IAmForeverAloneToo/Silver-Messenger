@@ -33,11 +33,14 @@ means behaviour or the wire protocol changed in a way worth reading about.
   contacts re-pin to the new key on their own without comparing safety
   numbers from scratch. Contacts learn from a copy pushed inside a message
   and from the relay, which serves the statements on lookup and refuses to
-  publish a revoked identity ever again. A revoked contact is marked as such
-  and cannot be messaged; a succeeded contact is re-pinned and its
-  conversation carried across. Needs a relay on 0.8.0 (the `lifecycle`
-  feature); older relays still carry the pushed copies. See protocol
-  section 10.
+  publish a revoked identity ever again. A revocation is final: a revoked
+  key cannot hand over, on the relay or in a contact's eyes. A revoked
+  contact is marked as such and cannot be messaged; a succeeded contact is
+  re-pinned and its conversation carried across. The relay keeps
+  statements only for identities registered with it and counts each
+  against the address's hourly registrations. Needs a relay on 0.8.0 (the
+  `lifecycle` feature); older relays still carry the pushed copies. See
+  protocol section 10.
 
 ## 0.7.0 - 2026-09-04
 
