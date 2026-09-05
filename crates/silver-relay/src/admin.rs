@@ -326,6 +326,7 @@ async fn connect(socket: &Path) -> anyhow::Result<tokio::net::UnixStream> {
 }
 
 /// The status code in an HTTP response head.
+#[cfg(unix)]
 fn status_of(head: &[u8]) -> anyhow::Result<u16> {
     use anyhow::Context as _;
     String::from_utf8_lossy(head)
