@@ -1,8 +1,8 @@
 # Threat model
 
 What Silver Messenger protects, against whom, and where it falls short.
-Every claim here is about the code on `main` at the end of Phase 9 (the
-0.9.0 line). The "Gaps" section at the end points at the roadmap item that
+Every claim here is about the code on `main` at the end of Phase 10 (the
+0.10.0 line). The "Gaps" section at the end points at the roadmap item that
 closes each one, or says that nothing is planned. Keep this document honest
 before adding features. The wire format is specified in
 [PROTOCOL.md](PROTOCOL.md); how the code measures up control by control is
@@ -596,6 +596,18 @@ protection above. What is done about that, from 0.6.0:
 - **Updates are never automatic.** `silver --check-release` asks the
   releases page once, on request, and prints the answer; nothing is
   downloaded or run.
+- **Packages add convenience, not trust** (0.10.0 on). The Debian
+  package is built by the release workflow from the Linux archives, so
+  it carries the same bytes, and it is listed in `SHA256SUMS`, signed
+  and attested with them; the Homebrew tap, the Arch package and the
+  winget manifests install the release archives by their checksums and
+  nothing else. A code signature on the Windows or macOS executable,
+  when the maintainer's certificate or Apple membership is in the
+  repository's secrets, says the platform's own checker can name the
+  signer; it adds no bytes the attestation does not cover, and a signed
+  download compares with a rebuild once the signature is stripped
+  (README, "Verifying a release"). Without the secrets the workflow
+  says so and the platform goes out unsigned, as before.
 
 Not addressed: a compromised Rust toolchain or GitHub-hosted runner (the
 attestation would then be honestly issued for a dishonest build; the

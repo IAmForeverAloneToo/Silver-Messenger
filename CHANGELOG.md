@@ -4,11 +4,17 @@ Notable changes to Silver Messenger. Versions follow [semantic
 versioning](https://semver.org); while the major version is 0, a minor bump
 means behaviour or the wire protocol changed in a way worth reading about.
 
-## Unreleased
+## 0.10.0 - 2026-09-05
 
-Phase 10 of the roadmap begins with the everyday features: what people
-expect of a messenger in daily use, without a single new thing for the
-relay to see.
+Phase 10 of the roadmap: what people expect of a messenger in daily use,
+without a single new thing for the relay to see (replies, reactions,
+edits, deletions, disappearing messages, encrypted downloads, a history
+export); a reader mode for screen readers, a high-contrast palette and
+every action without the mouse; a client that leaves the terminal
+usable after a panic, a store that survives a kill, memory that stays
+flat, and a soak test; packages for Debian, Homebrew, Arch and winget
+built from the same release; and a contributor guide and a FAQ. Nothing
+changes for a relay; see UPGRADING.md.
 
 ### Added
 
