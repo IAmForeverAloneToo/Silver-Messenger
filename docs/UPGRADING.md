@@ -134,6 +134,13 @@ routine step.
   accepted and served; a relay before 0.8.0 drops them, so clients behind
   one learn of a revoked or rotated key only from copies pushed inside
   messages.
+* **Clients.** Two clients on 0.8.0 speak protocol v4 to each other (the
+  post-quantum ratchet, deniable messages) once each has published a
+  bundle through a relay on 0.8.0, and v2 to older peers or through an
+  older relay; `/session` says which. `/cover on` is new and off by
+  default. Nothing in a client's data directory changes shape; a client
+  from 0.7.0 reads and writes the same files, so a downgrade needs no
+  restore.
 
 ### 0.7.0
 

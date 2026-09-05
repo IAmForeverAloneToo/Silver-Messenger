@@ -1,8 +1,8 @@
 # Threat model
 
 What Silver Messenger protects, against whom, and where it falls short.
-Every claim here is about the code on `main` at the end of Phase 7 (the
-0.7.0 line). The "Gaps" section at the end points at the roadmap item that
+Every claim here is about the code on `main` at the end of Phase 8 (the
+0.8.0 line). The "Gaps" section at the end points at the roadmap item that
 closes each one, or says that nothing is planned. Keep this document honest
 before adding features. The wire format is specified in
 [PROTOCOL.md](PROTOCOL.md); how the code measures up control by control is

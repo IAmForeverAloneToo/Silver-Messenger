@@ -4,7 +4,15 @@ Notable changes to Silver Messenger. Versions follow [semantic
 versioning](https://semver.org); while the major version is 0, a minor bump
 means behaviour or the wire protocol changed in a way worth reading about.
 
-## Unreleased
+## 0.8.0 - 2026-09-05
+
+Phase 8 of the roadmap: finishing the protocol. Every ratchet step is
+post-quantum and every v4 message deniable, an identity can be revoked or
+handed over, the relay keeps a transparency log that clients replay and
+compare heads of inside their messages, the handshake and the ratchet are
+modelled in Verifpal with published vectors and a harness that replays
+them, and cover traffic is there for those who want it. The relay's
+schema moves to 2; see UPGRADING.md before upgrading a relay.
 
 ### Added
 

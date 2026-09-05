@@ -2,7 +2,7 @@
 
 A walk through the [OWASP Application Security Verification Standard
 4.0.3](https://owasp.org/www-project-application-security-verification-standard/),
-Level 2, applied to the code on `main` at the end of Phase 7 (the 0.7.0
+Level 2, applied to the code on `main` at the end of Phase 8 (the 0.8.0
 line). ASVS is written for web applications; Silver Messenger is a terminal
 client and a relay that speak WebSocket, so a number of controls do not
 apply and say so. Every other control gets a verdict:
