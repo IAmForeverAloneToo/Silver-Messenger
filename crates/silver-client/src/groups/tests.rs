@@ -271,7 +271,13 @@ fn members_are_removed_and_leave_and_cannot_read_on() {
     let out = bob.groups.leave(&group).unwrap();
     assert_eq!(bob.groups.get(&group).unwrap().state, GroupState::Left);
     deliver(out, &mut [&mut alice], &mut blobs);
-    assert!(alice.drain(&blobs).is_empty(), "a proposal is silent");
+    assert_eq!(
+        alice.drain(&blobs),
+        vec![GroupEvent::LeaveProposed {
+            group,
+            member: bob.id()
+        }]
+    );
     let staged = alice.groups.stage_self_update(&group).unwrap();
     assert_eq!(seq.commit(staged), Ok(3));
     let out = alice.groups.commit_staged(&group, now_ms()).unwrap();
@@ -283,8 +289,8 @@ fn members_are_removed_and_leave_and_cannot_read_on() {
     assert_eq!(alice.groups.get(&group).unwrap().members.len(), 1);
     deliver(out, &mut [&mut bob], &mut blobs);
     assert!(
-        matches!(bob.drain(&blobs).as_slice(), [GroupEvent::Refused { .. }]),
-        "a group he left"
+        bob.drain(&blobs).is_empty(),
+        "the commit reaches a group he left, and says nothing"
     );
     // The last admin cannot leave a group with members; alone, she can.
     assert!(alice.groups.leave(&group).is_ok());

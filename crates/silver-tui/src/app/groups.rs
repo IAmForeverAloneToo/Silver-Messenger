@@ -24,6 +24,8 @@ pub(super) enum Purpose {
     /// An add for someone who presented a valid invite link.
     Join(UserId),
     Remove(Vec<UserId>),
+    /// A commit taking a member who left out of the tree.
+    Leave(UserId),
     Rename(String),
     Admin {
         user: UserId,
@@ -833,6 +835,7 @@ impl App {
                         Purpose::Add(users) => format!("you added {}", self.names(users)),
                         Purpose::Join(user) => format!("{} joined by link", self.member_name(user)),
                         Purpose::Remove(users) => format!("you removed {}", self.names(users)),
+                        Purpose::Leave(user) => format!("{} left", self.member_name(user)),
                         Purpose::Rename(new) => format!("you renamed the group to {new}"),
                         Purpose::Admin { user, admin: true } => {
                             format!("you made {} an admin", self.member_name(user))
@@ -860,7 +863,9 @@ impl App {
             (purpose, answer) => {
                 let _ = self.groups.discard_staged(&group);
                 let what = match &purpose {
-                    Purpose::Refresh => return, // quiet; tried again later
+                    // Quiet: a self-update is tried again later, and a
+                    // leaver is taken out by whichever admin's commit won.
+                    Purpose::Refresh | Purpose::Leave(_) => return,
                     Purpose::Join(user) | Purpose::Rejoin(user) => {
                         format!("adding {}", self.member_name(user))
                     }
@@ -1332,6 +1337,22 @@ impl App {
                         Err(e) => {
                             self.toast(format!("Could not add {}: {e}", self.member_name(&joiner)))
                         }
+                    }
+                }
+                GroupEvent::LeaveProposed { group, member } => {
+                    // An admin takes the leaver out at once; the commit
+                    // carries the pending proposal. Others hear of it
+                    // from that commit.
+                    let admin = self
+                        .groups
+                        .get(&group)
+                        .is_some_and(|r| r.is_admin(&self.me));
+                    if !admin || self.groups.has_staged(&group) {
+                        continue;
+                    }
+                    match self.groups.stage_self_update(&group) {
+                        Ok(staged) => self.run_staged(staged, Purpose::Leave(member)),
+                        Err(e) => tracing::warn!("committing a leave: {e}"),
                     }
                 }
                 GroupEvent::RejoinRequest {

@@ -256,6 +256,10 @@ pub enum GroupEvent {
         joiner: UserId,
         key_package: Vec<u8>,
     },
+    /// A member proposed its own removal (it left); an admin's next commit
+    /// takes it out of the tree, and an admin's client makes one at once
+    /// with [`Groups::stage_self_update`].
+    LeaveProposed { group: GroupId, member: UserId },
     /// A member fell out of sync and asks to be removed and re-added.
     RejoinRequest {
         group: GroupId,
@@ -1503,12 +1507,11 @@ impl Groups {
     ) -> Result<Vec<GroupEvent>> {
         match self.record(&group)?.state {
             GroupState::Active | GroupState::Invited { .. } | GroupState::OutOfSync { .. } => {}
-            _ => {
-                return Ok(vec![GroupEvent::Refused {
-                    group,
-                    reason: "a message to a group we are not in".into(),
-                }]);
-            }
+            // Left, removed or broken: what was in flight when that
+            // happened (the commit taking a leaver out, a message sent
+            // before the removal reached its sender) is expected and says
+            // nothing new.
+            _ => return Ok(Vec::new()),
         }
         let mut events = self.process_one(group, from, mls, now_ms)?;
         // Held messages may be readable now.
@@ -1648,7 +1651,10 @@ impl Groups {
                 handle
                     .store_pending_proposal(self.provider.storage(), *proposal)
                     .map_err(mls_err)?;
-                Ok(Vec::new())
+                Ok(vec![GroupEvent::LeaveProposed {
+                    group,
+                    member: sender,
+                }])
             }
             ProcessedMessageContent::ExternalJoinProposalMessage(_) => {
                 Ok(vec![GroupEvent::Refused {

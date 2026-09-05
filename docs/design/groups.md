@@ -414,11 +414,11 @@ prints the new link.
 
 * `/group leave`: the member sends a Remove proposal for its own leaf, marks
   the group left locally, stops reading it, and deletes its state. An
-  admin's client commits pending proposals as soon as it sees them; until
-  one does, the leaver is still in the tree and could still decrypt, which
-  is what the `(leaving)` mark on the member means. The last admin cannot
-  leave without appointing another; the last member leaving deletes the
-  group.
+  admin's client commits the proposal as soon as it sees it (a self-update
+  commit that carries it); until one does, the leaver is still in the
+  tree and, had it kept a copy of its state, could still decrypt. The
+  last admin cannot leave without appointing another; the last member
+  leaving deletes the group.
 * `/group remove <member>` by an admin: a commit with the Remove. The
   removed member gets the commit, sees it was removed, keeps its history
   and deletes its MLS state.

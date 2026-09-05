@@ -2,8 +2,8 @@
 message to everyone with the writer's name and a mark once the relay has
 every copy, a stranger's invitation waiting in Requests until /accept, a
 join by invite link taken without a second yes, a rename seen by all, a
-removal that ends what the removed member reads, and what survives a
-restart."""
+removal that ends what the removed member reads, a leave committed by the
+admin's client, and what survives a restart."""
 
 from harness import *
 
@@ -107,6 +107,13 @@ def main():
     b.type("too late\r")
     assert b.wait("Not sent to crew"), "bob cannot write either"
 
+    # Carol leaves: the admin's client takes her out at once, and the
+    # others hear of it from that commit.
+    c.type("/group leave\r")
+    assert c.wait("# crew (left)"), "carol's row says so"
+    assert a.wait("· carol left"), "alice committed the leave"
+    assert d.wait("left") and d.has("2 members"), "dave sees her go"
+
     # Everything is there after a restart of alice.
     a.quit()
     a = Term(pair.a_dir, pair.relay.url, cols=140)
@@ -115,10 +122,10 @@ def main():
     a.key(TAB)
     a.key(TAB)
     a.key(TAB)
-    assert a.wait("3 members"), "the membership survived"
+    assert a.wait("2 members"), "the membership survived"
     assert a.has("hello everyone") and a.has("without bob"), "and the history"
     a.type("still here\r")
-    assert c.wait("still here"), "and the keys"
+    assert d.wait("still here"), "and the keys"
     pair.stop()
 
 
