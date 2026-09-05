@@ -141,7 +141,7 @@ V6 and the threat model.
 | 6.2.1 Cryptographic modules fail securely | Met | Every failure is a `Result`; a failed decryption leaves session state untouched (trial decrypt on a clone). |
 | 6.2.2 Approved algorithms | Met | Ed25519, X25519, ML-KEM-768 (FIPS 203), XChaCha20-Poly1305, HKDF-SHA256, HMAC-SHA256, SHA-256, Argon2id; all from RustCrypto or dalek crates. |
 | 6.2.3 No insecure modes or padding | Met | AEAD only; message padding is JSON whitespace under the AEAD, not a cryptographic padding scheme. |
-| 6.2.4 Algorithms replaceable | Partly | Versioned domain strings and body versions (v1, v2, v3) let the handshake and body formats change; the envelope layer is v1 only. |
+| 6.2.4 Algorithms replaceable | Partly | Versioned domain strings and body versions (v1, v2, and the v4 post-quantum, deniable ratchet) let the handshake and body formats change; signed bundle capabilities negotiate them without a downgrade a relay could force. The envelope layer is v1 only. |
 | 6.2.6 Nonces never reused | Met | Random 24-byte nonces for envelopes and files; ratchet message nonces are derived from single-use message keys. |
 | 6.2.7 Encrypted data authenticated | Met | Everything encrypted is AEAD with associated data binding its context (recipient, ephemeral key, blob id and chunk position, session id and header). |
 | 6.2.8 Constant-time operations | Met | dalek and RustCrypto primitives; the invite token compares with `subtle`. |

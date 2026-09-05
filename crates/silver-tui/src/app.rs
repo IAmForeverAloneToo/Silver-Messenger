@@ -1879,8 +1879,10 @@ impl App {
                 } else {
                     ""
                 },
-                if info.post_quantum {
-                    "Its handshake also used ML-KEM-768, so a recording of it stays closed even to a quantum computer."
+                if info.pq_ratchet {
+                    "Its handshake and every ratchet step use ML-KEM-768, so it heals after a compromise even against a quantum computer; and its messages are deniable, since nothing in them proves to a third party who wrote them."
+                } else if info.post_quantum {
+                    "Its handshake used ML-KEM-768, so a recording of it stays closed even to a quantum computer; the ratchet after it is X25519 only. It becomes a fully post-quantum ratchet by itself when the next session starts, once both clients are on 0.8.0."
                 } else {
                     "Its handshake was classical (X25519 only): their client or the relay predates the post-quantum handshake of 0.6.0. It becomes post-quantum by itself when the next session starts after they update."
                 }
@@ -2400,20 +2402,21 @@ impl App {
                 initiated_by_us,
             } => {
                 let name = self.contact_name(&peer);
-                let post_quantum = self
-                    .client
-                    .session_info(&peer)
-                    .is_some_and(|s| s.post_quantum);
+                let info = self.client.session_info(&peer);
+                let note = match info {
+                    Some(s) if s.pq_ratchet => {
+                        " Its handshake and every ratchet step use ML-KEM-768, so it is post-quantum throughout, and its messages are deniable."
+                    }
+                    Some(s) if s.post_quantum => {
+                        " The handshake also used ML-KEM-768, so it is post-quantum."
+                    }
+                    _ => "",
+                };
                 self.system(
                     Level::Info,
                     format!(
-                        "Forward-secret session with {name} started by {}. From here each message is encrypted under a key that is used once and then discarded.{}",
+                        "Forward-secret session with {name} started by {}. From here each message is encrypted under a key that is used once and then discarded.{note}",
                         if initiated_by_us { "you" } else { "them" },
-                        if post_quantum {
-                            " The handshake also used ML-KEM-768, so it is post-quantum."
-                        } else {
-                            ""
-                        }
                     ),
                 );
             }

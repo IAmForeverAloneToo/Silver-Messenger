@@ -3,11 +3,23 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ProtocolError;
-use crate::encoding::b64_array;
-use crate::identity::{DhPublic, UserId};
+use crate::encoding::{b64_array, b64_opt_array};
+use crate::identity::{DhPublic, Identity, UserId};
 use crate::prekey::Prekeys;
 
 pub const BUNDLE_DOMAIN: &[u8] = b"silver-messenger/v1/key-bundle";
+/// Domain for the signature over a bundle's capability list.
+pub const BUNDLE_CAPS_DOMAIN: &[u8] = b"silver-messenger/v4/bundle-caps";
+
+/// Capabilities a client advertises in its published bundle, so a peer
+/// knows what protocol features it will accept before the first message.
+/// Unlike the in-body [`capability`](crate::envelope::capability) list,
+/// these are signed, so the relay cannot add or strip one undetected.
+pub mod capability {
+    /// The client reads protocol-v4 ratchet bodies: the post-quantum
+    /// ratchet, and the deniable body without the inner signature.
+    pub const PQ_RATCHET: &str = "pq_ratchet";
+}
 
 /// A user's X25519 public key, signed by their identity key, plus (for
 /// clients that speak protocol v2) their prekeys.
@@ -23,16 +35,45 @@ pub struct KeyBundle {
     pub signature: [u8; 64],
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prekeys: Option<Prekeys>,
+    /// Signed protocol capabilities (protocol v4); empty on clients before
+    /// 0.8.0.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub caps: Vec<String>,
+    /// The identity key's signature over `caps`; present whenever `caps` is.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "b64_opt_array"
+    )]
+    pub caps_signature: Option<[u8; 64]>,
 }
 
 impl KeyBundle {
-    /// Check that `dh_public` (and the signed prekey, if any) were really
-    /// signed by `user_id`.
+    /// The bytes an identity signs to vouch for a capability list: the
+    /// owner's Diffie–Hellman key (to bind the caps to this bundle) and the
+    /// capabilities in order, newline-separated.
+    pub(crate) fn caps_signed_bytes(dh_public: &DhPublic, caps: &[String]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&dh_public.0);
+        v.extend_from_slice(caps.join("\n").as_bytes());
+        v
+    }
+
+    /// Check that `dh_public`, the signed prekey (if any) and the
+    /// capabilities (if any) were really signed by `user_id`.
     pub fn verify(&self) -> Result<(), ProtocolError> {
         self.user_id
             .verify(BUNDLE_DOMAIN, &self.dh_public.0, &self.signature)?;
         if let Some(prekeys) = &self.prekeys {
             prekeys.verify(&self.user_id)?;
+        }
+        if !self.caps.is_empty() {
+            let signature = self.caps_signature.ok_or(ProtocolError::InvalidSignature)?;
+            self.user_id.verify(
+                BUNDLE_CAPS_DOMAIN,
+                &Self::caps_signed_bytes(&self.dh_public, &self.caps),
+                &signature,
+            )?;
         }
         Ok(())
     }
@@ -49,12 +90,39 @@ impl KeyBundle {
             .is_some_and(Prekeys::supports_post_quantum)
     }
 
+    /// Whether the owner advertises capability `cap`.
+    pub fn advertises(&self, cap: &str) -> bool {
+        self.caps.iter().any(|c| c == cap)
+    }
+
+    /// Whether a session started from this bundle can run the post-quantum
+    /// ratchet (protocol v4): the owner has published ML-KEM keys and
+    /// advertises the capability.
+    pub fn supports_pq_ratchet(&self) -> bool {
+        self.supports_post_quantum() && self.advertises(capability::PQ_RATCHET)
+    }
+
     /// The same bundle without its prekeys.
     pub fn without_prekeys(&self) -> Self {
         Self {
             prekeys: None,
             ..self.clone()
         }
+    }
+
+    /// Add a signed capability list to this bundle. `identity` must own it.
+    pub fn with_caps(mut self, identity: &Identity, caps: Vec<String>) -> Self {
+        if caps.is_empty() {
+            self.caps = Vec::new();
+            self.caps_signature = None;
+            return self;
+        }
+        self.caps_signature = Some(identity.sign(
+            BUNDLE_CAPS_DOMAIN,
+            &Self::caps_signed_bytes(&self.dh_public, &caps),
+        ));
+        self.caps = caps;
+        self
     }
 }
 

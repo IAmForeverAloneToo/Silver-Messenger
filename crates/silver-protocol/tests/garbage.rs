@@ -115,7 +115,7 @@ fn damaged_ratchet_messages_do_not_disturb_the_session() {
     let bundle = bob.key_bundle_with(Prekeys::classical(signed.signed_by(&bob), Vec::new()));
     let (mut alice_session, init) = Session::initiate(&alice, &bundle).unwrap();
     let mut bob_session =
-        Session::respond(&bob, &alice.user_id(), &signed, None, None, &init).unwrap();
+        Session::respond(&bob, &alice.user_id(), &signed, None, None, &init, false).unwrap();
     let mut rng = Rng(0x2545_F491_4F6C_DD1D);
     for round in 0..300u32 {
         let text = format!("message {round}");

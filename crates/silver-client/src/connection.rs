@@ -19,7 +19,7 @@ use crate::submitter::{SubmitEvent, Submitter};
 use crate::tls::{ConnectOptions, Connectors, Observed, connectors, observing_connector};
 use silver_protocol::{
     Body, Content, Envelope, Identity, KeyBundle, Message, ProtocolError, Sequence, UserId, now_ms,
-    open_bytes, seal_bytes,
+    open_bytes, seal_bytes, seal_bytes_unsigned,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -390,6 +390,10 @@ impl Client {
         sequence: Sequence,
     ) -> Result<Envelope, ClientError> {
         let plain = Body::plain_with_caps(content, now_ms(), sequence, CAPABILITIES).encode()?;
+        // Whether the body carries its own signature at the sealed layer.
+        // A protocol-v4 ratchet body does not (it is deniable); every other
+        // body is signed by our identity key.
+        let mut deniable = false;
         let body = match &self.sessions {
             Some(sessions) if to.supports_sessions() => {
                 let result = sessions.lock().unwrap_or_else(|e| e.into_inner()).encrypt(
@@ -409,6 +413,7 @@ impl Client {
                                 })
                                 .await;
                         }
+                        deniable = ratchet.v == 4;
                         Body::Ratchet(ratchet).encode()?
                     }
                     // Their prekey on the relay is one they will have thrown
@@ -428,9 +433,25 @@ impl Client {
                     Err(e) => return Err(e.into()),
                 }
             }
-            _ => plain,
+            _ => {
+                // A peer without prekeys gets a plain, signed v1 body: not
+                // forward secret and not deniable. The v1 body is on its way
+                // out (PROTOCOL.md section 9); until then this is the only
+                // way to reach a client that predates prekeys.
+                if !to.supports_sessions() {
+                    debug!(
+                        "{}… publishes no prekeys; sending a plain v1 body (no forward secrecy, not deniable)",
+                        to.user_id.short()
+                    );
+                }
+                plain
+            }
         };
-        let envelope = seal_bytes(&self.identity, to, &body)?;
+        let envelope = if deniable {
+            seal_bytes_unsigned(&self.identity, to, &body)?
+        } else {
+            seal_bytes(&self.identity, to, &body)?
+        };
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(Command::Send {
@@ -1021,7 +1042,20 @@ fn publish_frame(setup: &Setup) -> anyhow::Result<ClientFrame> {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .prekeys_for_publish(&setup.identity, now_ms())?;
-            setup.identity.key_bundle_with(prekeys)
+            // Advertise the protocol-v4 ratchet, but only when we actually
+            // publish ML-KEM keys, since v4 needs the post-quantum handshake.
+            let bundle = setup.identity.key_bundle_with(prekeys);
+            if bundle.supports_post_quantum() {
+                bundle.with_caps(
+                    &setup.identity,
+                    crate::BUNDLE_CAPABILITIES
+                        .iter()
+                        .map(|c| (*c).to_owned())
+                        .collect(),
+                )
+            } else {
+                bundle
+            }
         }
         None => setup.identity.key_bundle(),
     };
@@ -1306,6 +1340,7 @@ async fn deliver(setup: &Setup, envelope: Envelope, ev_tx: &mpsc::Sender<ClientE
                     sequence,
                     content,
                     forward_secret: false,
+                    signed: opened.signed,
                     caps,
                 })))
                 .await;
@@ -1381,6 +1416,7 @@ async fn deliver(setup: &Setup, envelope: Envelope, ev_tx: &mpsc::Sender<ClientE
                     sequence,
                     content,
                     forward_secret,
+                    signed: opened.signed,
                     caps,
                 })))
                 .await;

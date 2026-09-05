@@ -87,6 +87,20 @@ What a relay stores for a user and serves on lookup:
 * A relay without the `pq_prekeys` feature (7.3) drops `pq_signed` and
   `pq_one_time` when it re-serialises the bundle, so sessions through it
   are v2. Clients show which handshake a session got.
+* From 0.8.0 a bundle may also carry a signed capability list:
+  ```json
+  "caps": ["pq_ratchet"],
+  "caps_signature": "<b64 64 bytes>"
+  ```
+  with `caps_signature = sign("silver-messenger/v4/bundle-caps", dh_public
+  (32) || caps.join("\n"))`. `pq_ratchet` says the client reads v4 bodies
+  (section 4.2). The signature lets a peer trust the advertisement even
+  though the relay serves it; a relay that drops the fields only downgrades
+  the session to v3, which the clients show, and one that adds them cannot
+  forge the signature. A client publishes `pq_ratchet` only when it also
+  publishes ML-KEM keys, since v4 needs the post-quantum handshake. A relay
+  older than 0.8.0 drops the two fields when it re-serialises the bundle,
+  so the post-quantum ratchet needs a relay that keeps them.
 
 ## 3. Envelope (the sealed-sender layer)
 
@@ -124,7 +138,10 @@ a WebSocket frame at most 131 072 bytes.
 ## 4. Body
 
 The body is JSON. Its version is the integer field `v`, absent (0) or 1 for
-a plain body, 2 for a ratchet body. Other values are rejected.
+a plain body, 2 for a ratchet body, and 4 for a ratchet body that runs the
+post-quantum ratchet and is deniable (no sealed-layer signature). Other
+values are rejected. (There is no v3 body: the post-quantum *handshake* of
+0.6.0 kept `v: 2`, since it changes only what goes into `init`.)
 
 **Padding.** An encoded body is padded with trailing ASCII spaces (0x20)
 to a multiple of 160 bytes (clients from 0.6.0). JSON ignores trailing
@@ -151,15 +168,18 @@ is described in 4.3. `content.type` is one of `text`, `receipt` (4.4) and
 `file` (4.5); unknown types are rejected by this implementation, which is
 why a sender only uses the latter two towards peers that advertised them.
 
-### 4.2 Ratchet body (v2)
+### 4.2 Ratchet body (v2 and v4)
 
 ```json
 { "v": 2,
   "session": "<b64 16 bytes>",
   "init": { "identity_dh": "<b64 IKdh_A>", "ephemeral": "<b64 EK_A>",
             "signed_prekey_id": 123, "one_time_prekey_id": 456,
-            "pq_prekey_id": 1011, "kem_ciphertext": "<b64 1088 bytes>" },   // optional; the pq_ pair is v3
-  "message": { "header": { "dh": "<b64>", "pn": 0, "n": 3 },
+            "pq_prekey_id": 1011, "kem_ciphertext": "<b64 1088 bytes>",     // optional; the pq_ pair is the v3 handshake
+            "identity_dh_signature": "<b64 64 bytes>" },                    // v4 only (§4.2.1)
+  "message": { "header": { "dh": "<b64>", "pn": 0, "n": 3,
+                           "kem": "<b64 1184 bytes>",                       // v4 only (§6.1)
+                           "kem_ct": "<b64 1088 bytes>" },                  // v4 only, and not on the first chain of a direction
                "ciphertext": "<b64>" } }
 ```
 
@@ -168,9 +188,36 @@ why a sender only uses the latter two towards peers that advertised them.
 carried unchanged one layer deeper. `init` is present on every message the
 initiator sends until it has received a message on the session; a responder
 that already has the session ignores it. `pq_prekey_id` and
-`kem_ciphertext` are present together or not at all; `v` stays 2, since a
-v2 responder can never be asked to answer a v3 handshake (it publishes no
-ML-KEM keys) and everything else about the body is the same.
+`kem_ciphertext` are present together or not at all.
+
+A **v2** body is signed at the sealed layer (section 3) like a plain body,
+carries no `kem`/`kem_ct`/`identity_dh_signature`, and its handshake is
+X3DH or PQXDH. It stays `v: 2` for the post-quantum handshake, since a v2
+responder can never be asked to answer one anyway (it publishes no ML-KEM
+keys) and nothing else about the body changes.
+
+A **v4** body runs the post-quantum ratchet (section 6.1) and is **not**
+signed at the sealed layer (the sealed-sender signature is 64 zero bytes),
+which makes it deniable (section 9). Two things make up for the missing
+signature: the session's own AEAD, which only the two endpoints can
+produce, and `init.identity_dh_signature` (§4.2.1). A client sends v4 only
+to a peer whose bundle both publishes ML-KEM keys and advertises the
+`pq_ratchet` capability (section 8); otherwise it sends v2 (or v1 to a peer
+with no prekeys).
+
+#### 4.2.1 Handshake key-binding (v4)
+
+Because a v4 body is not signed, nothing at the sealed layer ties the
+initiator's `identity_dh` to the identity id it claims to be from. So the
+v4 `init` carries `identity_dh_signature`: the initiator's identity-key
+signature over `identity_dh` under the domain `silver-messenger/v1/key-bundle`
+— the very signature its key bundle (section 2) carries. The responder
+verifies it against the sender id (the id inside the sealed layer) before
+deriving the session, and refuses the handshake if it is missing or wrong.
+This is deniable: the signature is over the sender's own public key, is
+published in every bundle, and says nothing about who was talked to. It
+prevents a third party from substituting its own `identity_dh` (and so its
+own DH1) to impersonate the sender while claiming their id.
 
 ### 4.3 Capabilities
 
@@ -297,10 +344,14 @@ implicitly), so the first message fails to decrypt and `B` keeps nothing.
 Why hybrid: `SK` depends on the X25519 values *and* on `SS`, so breaking
 either scheme alone opens nothing. A recording of today's traffic cannot
 be read by a future quantum computer, which breaks X25519 but not ML-KEM;
-a flaw found in ML-KEM leaves the session as strong as v2. What v3 does
-not do yet is refresh the post-quantum secret after the handshake: the
-Double Ratchet's steps are X25519 only, so an attacker who breaks X25519
-*and* learns `SK` later is in the same place as against v2.
+a flaw found in ML-KEM leaves the session as strong as v2. The PQXDH
+handshake protects the session's *start*; whether the ratchet after it is
+also post-quantum depends on the body version: a v2 body's ratchet is
+X25519 only, so an attacker who breaks X25519 *and* learns `SK` later can
+follow it, while a v4 body refreshes an ML-KEM secret at every ratchet
+step (section 6.1), so it heals against such an attacker within a round
+trip. A v4 body also adds `init.identity_dh_signature` (4.2.1), since its
+sealed layer is unsigned.
 
 ## 6. Double Ratchet
 
@@ -338,6 +389,58 @@ a chain are stored under `(dh, n)`; a message may be at most 1000 ahead of
 the last one received in its chain, and at most 2000 skipped keys are kept
 (oldest dropped). A message that fails to authenticate leaves the state
 exactly as it was.
+
+### 6.1 Post-quantum ratchet (v4)
+
+The Double Ratchet above heals a compromise against a classical adversary,
+because each direction change mixes a fresh X25519 output into the root
+key. Against an adversary who can break X25519 it does not: such an
+adversary who also learns the root key can follow the ratchet forward. The
+post-quantum ratchet closes that by doing an **ML-KEM-768 step beside every
+Diffie–Hellman step**, so the root key depends on a fresh ML-KEM secret at
+each turn as well, and healing is post-quantum too.
+
+Each side keeps, in addition to its DH ratchet key pair, an ML-KEM ratchet
+key pair (`kem_self`) and the peer's latest ML-KEM public key
+(`kem_remote`). The root KDF gains the ML-KEM secret:
+
+```
+KDF_RK_PQ(rk, dh_out, ss) = HKDF-SHA256(salt = rk, ikm = dh_out || ss,
+                              info = "silver-messenger/v4/ratchet-root")  -> rk' (32) || ck (32)
+```
+
+with `ss` the 32-byte ML-KEM shared secret; a step with no ML-KEM secret
+(the two bootstrap chains below) omits `ss` from the ikm and uses the same
+`info`. Every v4 message header carries the sender's current ML-KEM public
+key as `header.kem` (1184 bytes) and, on every chain but the first of a
+direction, the ciphertext `header.kem_ct` (1088 bytes) encapsulated to the
+peer's `kem_remote`; both are covered by the message's associated data, so
+the relay cannot swap them undetected.
+
+A DH+KEM ratchet step, on receiving a header with a new `dh`:
+
+1. **Receiving chain.** If `header.kem_ct` is present, decapsulate it with
+   `kem_self` to get `ss_r`; `(RK, CKr) = KDF_RK_PQ(RK, DH(DHs, header.dh), ss_r)`.
+   Set `kem_remote = header.kem`, `DHr = header.dh`.
+2. **Sending chain.** Fresh `DHs`, fresh `kem_self`; encapsulate to
+   `kem_remote` to get `(ct_s, ss_s)`; `(RK, CKs) = KDF_RK_PQ(RK, DH(DHs, DHr), ss_s)`;
+   attach `ct_s` to every message of this chain as `header.kem_ct`.
+
+**Bootstrap.** The initiator's first sending chain and the responder's
+first receiving chain have no peer ML-KEM key to encapsulate to yet, so
+they are Diffie–Hellman-only (`ss` omitted) — exactly as the handshake
+already bootstraps the DH ratchet against the signed prekey. The
+handshake's own PQXDH secret covers that first exchange; from the first
+reply on, every chain is ML-KEM-ratcheted, so a compromise heals within one
+round trip against a quantum adversary too. A tampered `kem` or `kem_ct`
+yields a different secret (or fails to parse) and the message does not
+decrypt, leaving the session untouched, like any other tampering.
+
+A v4 message is about 2.3 KB larger than a v2 one (the two ML-KEM fields).
+This is the *dense* variant, one ML-KEM step per DH step; a *sparse*
+variant that ratchets less often would shrink that, and can be adopted
+later without a format change, since the fields are already per-message
+optional. The reference is Signal's Sparse Post-Quantum Ratchet.
 
 ## 7. Relay wire protocol
 
@@ -483,12 +586,22 @@ without the key from the same message.
 
 ## 8. Client behaviour that affects interoperability
 
-* **Choosing v1, v2 or v3.** A client with a session store sends a ratchet
-  body when the recipient's bundle carries prekeys, and a plain body
-  otherwise; the handshake is v3 when the bundle carries `pq_signed`
-  (section 5) and v2 otherwise. It must accept every kind from anyone, and
-  a responder must answer both handshakes, since an initiator behind an
-  older relay sees no ML-KEM keys.
+* **Choosing the body version.** A client with a session store sends a
+  ratchet body when the recipient's bundle carries prekeys, and a plain v1
+  body otherwise. Among ratchet bodies it sends **v4** when the bundle both
+  carries `pq_signed` and advertises the `pq_ratchet` capability (section
+  2); otherwise **v2**, whose handshake is still PQXDH when the bundle
+  carries `pq_signed`. It must accept every kind from anyone, and a
+  responder must answer a v2 or a v4 body (an initiator behind an older
+  relay, or talking to an older peer, sends the older kind). An existing
+  session keeps its version for its lifetime.
+* **Retiring v1.** The plain v1 body has no forward secrecy and is signed
+  (not deniable); it survives only to reach clients from before prekeys.
+  It is scheduled to go: 0.8.0 and 0.9.0 still send it to a peer with no
+  prekeys and log that it is neither forward secret nor deniable, and
+  0.10.0 refuses to send it (a peer without prekeys is then unreachable
+  until it updates). Receiving a v1 body stays supported longer, for
+  stored history.
 * **Starting a session.** A fresh lookup precedes the first message of a
   session, so the handshake uses a current signed prekey and a one-time key
   that has not been handed out before. A pinned bundle is used only when
@@ -551,20 +664,25 @@ without the key from the same message.
 
 ## 9. What the protocol does not do
 
-**Deniability: decided against, for now.** Every body is signed by the
-sender's identity key inside the sealed envelope (section 3), so a
-recipient can prove to a third party who wrote what. Inside a session the
-Double Ratchet's AEAD already authenticates the sender to the recipient,
-since only the two of them hold the keys, and the handshake itself is
-deniable (X3DH, and PQXDH the same way: either party could have computed
-every value in it). The inner signature is therefore redundant for
-authentication in v2/v3 and could go, which would make session messages
-deniable the way Signal's are. It stays because v1 bodies have nothing else
-authenticating them, because stored history and receipts are keyed on the
-verified sender, and because dropping it is a body-format change better
-made once the v1 fallback can be retired. The intended path is a v4 ratchet
-body without the inner signature at that point; until then the threat
-model says "not deniable" and means it.
+**Deniability: done for v4 sessions.** A v4 ratchet body (4.2) carries no
+signature at the sealed layer, so a recipient cannot prove to a third party
+who wrote it. Nothing is lost by dropping the signature: the Double
+Ratchet's AEAD already authenticates the sender to the recipient, since
+only the two of them hold the keys; the handshake is deniable (X3DH, and
+PQXDH the same way: either party could have computed every value in it);
+and the one remaining signature, `init.identity_dh_signature` (4.2.1), is
+over the sender's own public key, published in every bundle and reusable,
+so it says nothing about who was talked to. Either party could therefore
+have produced a whole v4 transcript, which is what deniability means, the
+way Signal's messages are deniable.
+
+Two things still carry a signature. A **v1 body** has nothing else to
+authenticate it, so it stays signed; it is being retired (section 8), and
+a message to a peer with no prekeys is the only place it is still sent. A
+**v2 body** (a session with a peer or relay that predates v4) keeps the
+sealed-layer signature too; those sessions are not deniable, and a client
+shows which a session is (`/session`). As v1 goes and v4 becomes the norm,
+signed session messages disappear.
 
 Sizes are padded to steps
 (160 bytes for messages, 64 KiB for files between clients that support

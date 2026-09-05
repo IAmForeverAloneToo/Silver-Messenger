@@ -323,21 +323,23 @@ deniable. An identity cannot be rotated or revoked. A relay that shows one
 person a substitute key is caught only when two people compare safety
 numbers by hand. Nothing has been formally modelled.
 
-41. [ ] **Post-quantum ratchet** (L). An ML-KEM ratchet next to the
+41. [x] **Post-quantum ratchet** (L). An ML-KEM ratchet next to the
         Diffie–Hellman one, so healing after a compromise is post-quantum
         too, not only the handshake. Signal's Sparse Post-Quantum Ratchet
         is the reference design; a simpler step every fixed number of
         messages is the fallback if its cost does not fit. Settled
-        together with item 47: if one-to-one conversations move to
-        two-member MLS groups, the ratchet here is MLS's and this item
-        becomes choosing a post-quantum ciphersuite.
-42. [ ] **Deniability** (M). The v4 ratchet body drops the inner
-        signature, as `docs/PROTOCOL.md` section 9 already plans; the
-        AEAD authenticates and either party could have produced the
-        transcript. This needs the v1 fallback retired, so the item sets
-        the schedule: two minor versions in which v1 bodies are still
-        sent to peers without prekeys but warned about, then v1 is
-        refused.
+        together with item 47: one-to-one conversations stay on the Double
+        Ratchet (so item 42's deniability holds; MLS application messages
+        are signed by the sender's leaf), and groups go on MLS, so this is
+        the dense one-step-per-turn ML-KEM-768 ratchet of protocol v4, with
+        the sparse variant left for later since the fields are already
+        per-message optional.
+42. [x] **Deniability** (M). The v4 ratchet body drops the inner
+        signature; the AEAD authenticates and either party could have
+        produced the transcript, and the handshake's one remaining
+        signature is over a public key, not the transcript. The v1 fallback
+        is put on a retirement schedule: 0.8.0 and 0.9.0 still send v1 to
+        peers without prekeys and warn, 0.10.0 refuses.
 43. [ ] **Identity lifecycle** (M). A revocation statement pre-signed when
         an identity is created and kept in the backup, so a key that is
         lost can still be declared dead; a signed successor statement for

@@ -151,6 +151,10 @@ pub struct SessionInfo {
     /// The handshake mixed in an ML-KEM secret, so a quantum computer that
     /// breaks X25519 still cannot open a recording of this session.
     pub post_quantum: bool,
+    /// The ratchet itself is post-quantum (protocol v4): every step does an
+    /// ML-KEM step, so healing after a compromise resists a quantum
+    /// adversary too, not only the handshake.
+    pub pq_ratchet: bool,
 }
 
 pub struct SessionStore {
@@ -348,6 +352,7 @@ impl SessionStore {
             initiated_by_us: s.initiator == self.me,
             awaiting_reply: s.pending_init.is_some(),
             post_quantum: s.session.is_post_quantum(),
+            pq_ratchet: s.session.is_pq_ratchet(),
         })
     }
 
@@ -377,7 +382,7 @@ impl SessionStore {
             let message = current.session.encrypt(plaintext)?;
             current.last_used_ms = now_ms;
             let body = RatchetBody {
-                v: 2,
+                v: current.session.body_version(),
                 session: *current.session.id(),
                 init: current.pending_init.clone(),
                 message,
@@ -402,7 +407,7 @@ impl SessionStore {
         let (mut session, init) = Session::initiate(identity, peer)?;
         let message = session.encrypt(plaintext)?;
         let body = RatchetBody {
-            v: 2,
+            v: session.body_version(),
             session: *session.id(),
             init: Some(init.clone()),
             message,
@@ -484,6 +489,7 @@ impl SessionStore {
             one_time.as_ref(),
             pq.as_ref(),
             init,
+            body.v == 4,
         )?;
         if *session.id() != body.session {
             return Err(SessionError::SessionMismatch);
@@ -669,6 +675,16 @@ mod tests {
             self.identity.key_bundle_with(one)
         }
 
+        /// A bundle that also advertises the v4 ratchet, as the connection
+        /// task does when it publishes ML-KEM keys.
+        fn bundle_pq(&mut self, now: u64) -> KeyBundle {
+            let bundle = self.bundle(now);
+            bundle.with_caps(
+                &self.identity,
+                vec![silver_protocol::bundle::capability::PQ_RATCHET.to_owned()],
+            )
+        }
+
         fn send(&mut self, to: &KeyBundle, text: &str, now: u64) -> RatchetBody {
             self.sessions
                 .encrypt(&self.identity, to, &plain(text), now)
@@ -833,6 +849,49 @@ mod tests {
                 .decrypt(&stranger.identity, alice.identity.user_id(), &m1, 9),
             Err(SessionError::UnknownPrekey(_))
         ));
+    }
+
+    #[test]
+    fn the_post_quantum_ratchet_is_used_when_both_clients_advertise_it() {
+        let mut alice = Party::new();
+        let mut bob = Party::new();
+        let bob_bundle = bob.bundle_pq(0);
+        assert!(bob_bundle.supports_pq_ratchet());
+        let pq = |p: &Party, peer: &Party| {
+            p.sessions
+                .session_info(&peer.identity.user_id())
+                .unwrap()
+                .pq_ratchet
+        };
+
+        // The first message negotiates v4 and both sides run the ratchet.
+        let m1 = alice.send(&bob_bundle, "hello", 1);
+        assert_eq!(m1.v, 4);
+        assert!(pq(&alice, &bob));
+        assert_eq!(bob.recv(&alice, &m1, 2), ("hello".into(), true));
+        assert!(pq(&bob, &alice));
+
+        // Both directions keep working across several ratchet steps.
+        let r = bob.send(&alice.bundle_pq(3), "hi", 3);
+        assert_eq!(r.v, 4);
+        assert_eq!(alice.recv(&bob, &r, 4), ("hi".into(), false));
+        for i in 0..4u8 {
+            let m = alice.send(&bob_bundle, &format!("a{i}"), 5);
+            assert_eq!(bob.recv(&alice, &m, 6).0, format!("a{i}"));
+            let rr = bob.send(&alice.bundle_pq(7), &format!("b{i}"), 7);
+            assert_eq!(alice.recv(&bob, &rr, 8).0, format!("b{i}"));
+        }
+
+        // A peer with ML-KEM keys but no capability (an older client) stays
+        // on the v2 body, and the session is not a post-quantum ratchet.
+        let mut carol = Party::new();
+        let carol_bundle = carol.bundle(0);
+        assert!(carol_bundle.supports_post_quantum() && !carol_bundle.supports_pq_ratchet());
+        let m = alice.send(&carol_bundle, "older", 9);
+        assert_eq!(m.v, 2);
+        assert!(!pq(&alice, &carol));
+        assert_eq!(carol.recv(&alice, &m, 10), ("older".into(), true));
+        assert!(!pq(&carol, &alice));
     }
 
     #[test]

@@ -457,12 +457,19 @@ it does not, is in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
   publishes ML-KEM-768 keys (FIPS 203), the sender encapsulates a secret
   to one of them, and the session key depends on the Diffie–Hellman values
   *and* that secret, so a recording of today's traffic stays closed to a
-  future quantum computer. The chat title says `forward secret` once a
-  session exists, `forward secret, post-quantum` when the handshake was
-  hybrid; `/session` explains the state. A recipient without prekeys (a
-  client older than 0.3.0, or anyone behind an older relay) is sent the
-  plain v1 body instead, and one without ML-KEM keys gets the classical
-  handshake, so everyone keeps talking during the upgrade.
+  future quantum computer. From 0.8.0 the ratchet after the handshake is
+  post-quantum too (protocol v4): every step does an ML-KEM step beside the
+  Diffie–Hellman one, so a compromise heals against a quantum adversary
+  within a round trip, and the message carries no signature at that layer,
+  which makes it deniable (nothing lets the recipient prove to a third
+  party who wrote it). The chat title says `forward secret` once a session
+  exists, `forward secret, post-quantum` when ML-KEM is in play; `/session`
+  explains the state, including whether the ratchet is post-quantum and
+  whether the messages are deniable. A recipient without prekeys (a client
+  older than 0.3.0, or anyone behind an older relay) is sent the plain v1
+  body instead (signed, not deniable, and on its way out); one without
+  ML-KEM keys gets the classical handshake; and one whose relay predates
+  0.8.0 gets the v2 ratchet, so everyone keeps talking during the upgrade.
 * **Anonymous submission**: a relay from 0.3.0 on accepts messages on
   connections that never authenticate, and the client uses one such
   connection (with TLS session resumption off) for everything it sends. The

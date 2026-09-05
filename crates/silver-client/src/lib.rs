@@ -41,6 +41,12 @@ pub const CAPABILITIES: &[&str] = &[
     silver_protocol::envelope::capability::FILES,
     silver_protocol::envelope::capability::PADDED_FILES,
 ];
+
+/// Signed protocol capabilities this client advertises in its published key
+/// bundle, so peers know before the first message that it reads the
+/// protocol-v4 (post-quantum, deniable) ratchet; see
+/// [`silver_protocol::bundle::capability`].
+pub const BUNDLE_CAPABILITIES: &[&str] = &[silver_protocol::bundle::capability::PQ_RATCHET];
 pub use silver_protocol as protocol;
 pub use store::{
     Config, Contact, ContactRequest, Direction, HeldMessage, HistoryEntry, Protection, Store,

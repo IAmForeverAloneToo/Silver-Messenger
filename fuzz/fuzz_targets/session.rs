@@ -25,7 +25,7 @@ fn sessions() -> &'static (Session, Session) {
         let bundle = bob.key_bundle_with(Prekeys::classical(signed.signed_by(&bob), Vec::new()));
         let (alice_session, init) = Session::initiate(&alice, &bundle).unwrap();
         let bob_session =
-            Session::respond(&bob, &alice.user_id(), &signed, None, None, &init).unwrap();
+            Session::respond(&bob, &alice.user_id(), &signed, None, None, &init, false).unwrap();
         (alice_session, bob_session)
     })
 }

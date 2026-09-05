@@ -49,6 +49,37 @@ pub mod b64_opt {
     }
 }
 
+/// `#[serde(default, with = "encoding::b64_opt_array")]` for
+/// `Option<[u8; N]>` fields.
+pub mod b64_opt_array {
+    use super::STANDARD;
+    use base64::Engine as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer, const N: usize>(
+        bytes: &Option<[u8; N]>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        match bytes {
+            Some(bytes) => s.serialize_some(&STANDARD.encode(bytes)),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>, const N: usize>(
+        d: D,
+    ) -> Result<Option<[u8; N]>, D::Error> {
+        let Some(s) = Option::<String>::deserialize(d)? else {
+            return Ok(None);
+        };
+        let v = STANDARD.decode(s).map_err(serde::de::Error::custom)?;
+        let bytes: [u8; N] = v.as_slice().try_into().map_err(|_| {
+            serde::de::Error::custom(format!("expected {N} bytes, got {}", v.len()))
+        })?;
+        Ok(Some(bytes))
+    }
+}
+
 /// `#[serde(with = "encoding::b64_array")]` for `[u8; N]` fields.
 pub mod b64_array {
     use super::STANDARD;

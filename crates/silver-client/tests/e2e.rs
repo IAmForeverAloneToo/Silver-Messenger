@@ -709,10 +709,13 @@ async fn clients_with_prekeys_talk_over_forward_secret_sessions() {
     );
     assert_eq!(m.sequence, Sequence { epoch: 1, seq: 1 });
     assert!(m.forward_secret);
+    // Both clients advertise the v4 ratchet, so the session runs it and the
+    // message is deniable: it carried no sealed-layer signature.
+    assert!(!m.signed, "a v4 body is deniable");
     assert!(
         bob_c
             .session_info(&alice.user_id())
-            .is_some_and(|s| !s.initiated_by_us && s.post_quantum)
+            .is_some_and(|s| !s.initiated_by_us && s.post_quantum && s.pq_ratchet)
     );
 
     // Bob answers on the same session.
@@ -727,11 +730,15 @@ async fn clients_with_prekeys_talk_over_forward_secret_sessions() {
         .unwrap();
     assert!(reply.forward_secret);
     let got = wait_for(&mut alice_ev, "alice's message", |e| message(e).is_some()).await;
-    assert!(message(&got).unwrap().forward_secret);
+    let reply_msg = message(&got).unwrap();
+    assert!(reply_msg.forward_secret && !reply_msg.signed);
     assert!(
         alice_c
             .session_info(&bob.user_id())
-            .is_some_and(|s| s.initiated_by_us && !s.awaiting_reply && s.post_quantum)
+            .is_some_and(|s| s.initiated_by_us
+                && !s.awaiting_reply
+                && s.post_quantum
+                && s.pq_ratchet)
     );
 
     // Both envelopes went in on connections that never authenticated.

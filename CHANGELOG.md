@@ -4,6 +4,28 @@ Notable changes to Silver Messenger. Versions follow [semantic
 versioning](https://semver.org); while the major version is 0, a minor bump
 means behaviour or the wire protocol changed in a way worth reading about.
 
+## Unreleased
+
+### Added
+
+- **Post-quantum ratchet (protocol v4).** When both clients advertise it
+  (a signed `pq_ratchet` capability in the key bundle) and publish ML-KEM
+  keys, a forward-secret session does an ML-KEM-768 step beside every
+  Diffie–Hellman ratchet step, so healing after a compromise is
+  post-quantum too, not only the handshake. The ratchet becomes
+  post-quantum by itself once both peers are on 0.8.0 and the relay keeps
+  the capability; otherwise the v2 ratchet is used, and `/session` says
+  which. A relay older than 0.8.0 drops the capability, so the v4 ratchet
+  needs a relay that keeps it.
+- **Deniable messages (protocol v4).** A v4 session message carries no
+  signature at the sealed-sender layer, so the recipient cannot prove to a
+  third party who wrote it; the session's own authentication and the
+  handshake's key-binding stand in for the signature. `/session` says
+  whether a conversation's messages are deniable. The plain v1 body (sent
+  only to peers with no prekeys) and v2 sessions stay signed; v1 is now
+  scheduled for retirement: 0.8.0 and 0.9.0 still send it and warn, 0.10.0
+  will refuse to.
+
 ## 0.7.0 - 2026-09-04
 
 Phase 7 of the roadmap: running a relay well. The relay terminates TLS

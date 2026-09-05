@@ -5,10 +5,12 @@
 //! `sender id || signature || body`. The relay sees only the recipient.
 //!
 //! The body inside is one of two things ([`Body`]): a plain v1 body (the
-//! message itself), or a v2 ratchet body carrying a message encrypted once
-//! more under a forward-secret [`Session`](crate::session::Session). The
-//! sealed layer is the same for both, so relays and v1 clients cannot tell
-//! them apart from the outside.
+//! message itself), or a ratchet body (v2, or the post-quantum and deniable
+//! v4) carrying a message encrypted once more under a forward-secret
+//! [`Session`](crate::session::Session). The sealed layer is the same for
+//! all of them, so relays and v1 clients cannot tell them apart from the
+//! outside; a v4 body alone omits the sealed-layer signature, which the
+//! relay cannot see either.
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
@@ -136,10 +138,11 @@ struct PlainBody {
     caps: Vec<String>,
 }
 
-/// The v2 body: a plain body encrypted again under a session.
+/// A ratchet body: a plain body encrypted again under a session.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RatchetBody {
-    /// Always 2; absent from v1 bodies.
+    /// 2 for the classical ratchet, 4 for the post-quantum, deniable one
+    /// (section 4.2 of `docs/PROTOCOL.md`); absent from v1 bodies.
     pub v: u32,
     #[serde(with = "b64_array")]
     pub session: SessionId,
@@ -228,7 +231,7 @@ impl Body {
                     caps: body.caps,
                 })
             }
-            2 => Ok(Self::Ratchet(
+            2 | 4 => Ok(Self::Ratchet(
                 serde_json::from_slice(bytes).map_err(malformed)?,
             )),
             other => Err(ProtocolError::Malformed(format!(
@@ -250,6 +253,11 @@ pub struct Message {
     /// Encrypted under a forward-secret session (protocol v2) rather than
     /// only the recipient's long-term key.
     pub forward_secret: bool,
+    /// The sealed layer carried the sender's identity-key signature over the
+    /// message. True for v1/v2/v3; false for a deniable v4 body, which the
+    /// session's own authentication and handshake key-binding cover instead,
+    /// so no third party can be shown who wrote it.
+    pub signed: bool,
     /// Capabilities the sender advertised; see [`capability`].
     pub caps: Vec<String>,
 }
@@ -260,6 +268,9 @@ pub struct Opened {
     pub from: UserId,
     pub to: UserId,
     pub body: Zeroizing<Vec<u8>>,
+    /// Whether the sealed layer carried a valid signature by `from` (v1/v2/v3)
+    /// or was a deniable v4 body (false). See [`Message::signed`].
+    pub signed: bool,
 }
 
 /// Encrypt and sign `content` from `sender` to `recipient`, without a
@@ -286,11 +297,34 @@ pub fn seal_with(
     seal_bytes(sender, recipient, &body)
 }
 
-/// Seal an already encoded [`Body`] for `recipient`.
+/// Seal an already encoded [`Body`] for `recipient`, signed by `sender` at
+/// the sealed layer (v1/v2/v3).
 pub fn seal_bytes(
     sender: &Identity,
     recipient: &KeyBundle,
     body: &[u8],
+) -> Result<Envelope, ProtocolError> {
+    seal_bytes_inner(sender, recipient, body, true)
+}
+
+/// Seal an already encoded [`Body`] for `recipient` *without* a sealed-layer
+/// signature (protocol v4, deniable). The sender's id still travels inside
+/// the ciphertext for routing; the session's AEAD and the handshake's
+/// key-binding are what authenticate it, and neither lets the recipient
+/// prove to anyone else who wrote it.
+pub fn seal_bytes_unsigned(
+    sender: &Identity,
+    recipient: &KeyBundle,
+    body: &[u8],
+) -> Result<Envelope, ProtocolError> {
+    seal_bytes_inner(sender, recipient, body, false)
+}
+
+fn seal_bytes_inner(
+    sender: &Identity,
+    recipient: &KeyBundle,
+    body: &[u8],
+    sign: bool,
 ) -> Result<Envelope, ProtocolError> {
     if body.len() > MAX_BODY_BYTES {
         return Err(ProtocolError::TooLarge(body.len()));
@@ -307,10 +341,17 @@ pub fn seal_bytes(
     let mut nonce = [0u8; 24];
     OsRng.fill_bytes(&mut nonce);
 
-    let signature = sender.sign(
-        ENVELOPE_DOMAIN,
-        &signed_bytes(&recipient.user_id, &ephemeral_public, &nonce, body),
-    );
+    // A deniable body carries a zero signature: the 96-byte prefix layout
+    // (id, signature, body) is unchanged, so the message is the same size on
+    // the wire and indistinguishable to the relay.
+    let signature = if sign {
+        sender.sign(
+            ENVELOPE_DOMAIN,
+            &signed_bytes(&recipient.user_id, &ephemeral_public, &nonce, body),
+        )
+    } else {
+        [0u8; 64]
+    };
 
     let mut plaintext = Zeroizing::new(Vec::with_capacity(96 + body.len()));
     plaintext.extend_from_slice(sender.user_id().as_bytes());
@@ -356,6 +397,7 @@ pub fn open(recipient: &Identity, envelope: &Envelope) -> Result<Message, Protoc
             sequence,
             content,
             forward_secret: false,
+            signed: opened.signed,
             caps,
         }),
         Body::Ratchet(_) => Err(ProtocolError::Malformed(
@@ -407,22 +449,34 @@ pub fn open_bytes(recipient: &Identity, envelope: &Envelope) -> Result<Opened, P
     let signature: [u8; 64] = plaintext[32..96].try_into().expect("length checked");
     let body = &plaintext[96..];
 
-    from.verify(
-        ENVELOPE_DOMAIN,
-        &signed_bytes(
-            &envelope.to,
-            &envelope.ephemeral_public.0,
-            &envelope.nonce,
-            body,
-        ),
-        &signature,
-    )?;
+    // A v4 body is deniable: it carries no sealed-layer signature, and is
+    // authenticated by the session it decrypts under instead. Every other
+    // version is signed by the sender's identity key, and that signature is
+    // required. The version is a field of the body, which is inside the
+    // ciphertext the AEAD authenticates, so a relay cannot flip a signed
+    // body to "deniable" to strip the check without breaking decryption.
+    let version: Version =
+        serde_json::from_slice(body).map_err(|e| ProtocolError::Malformed(e.to_string()))?;
+    let signed = version.v != 4;
+    if signed {
+        from.verify(
+            ENVELOPE_DOMAIN,
+            &signed_bytes(
+                &envelope.to,
+                &envelope.ephemeral_public.0,
+                &envelope.nonce,
+                body,
+            ),
+            &signature,
+        )?;
+    }
 
     Ok(Opened {
         id: envelope.id.clone(),
         from,
         to: envelope.to,
         body: Zeroizing::new(body.to_vec()),
+        signed,
     })
 }
 
@@ -622,6 +676,83 @@ mod tests {
     }
 
     #[test]
+    fn a_v4_body_is_deniable_yet_still_names_its_sender() {
+        use crate::bundle::capability::PQ_RATCHET;
+        use crate::pq::PqPrekeySecret;
+        let alice = Identity::generate();
+        let bob = Identity::generate();
+        let signed = PrekeySecret::generate(1, 0);
+        let pq = PqPrekeySecret::generate(2, 0);
+        let bob_bundle = bob
+            .key_bundle_with(Prekeys {
+                signed: signed.signed_by(&bob),
+                one_time: Vec::new(),
+                pq_signed: Some(pq.signed_by(&bob)),
+                pq_one_time: Vec::new(),
+            })
+            .with_caps(&bob, vec![PQ_RATCHET.to_owned()]);
+        assert!(bob_bundle.verify().is_ok() && bob_bundle.supports_pq_ratchet());
+
+        let (mut alice_session, init) = Session::initiate(&alice, &bob_bundle).unwrap();
+        assert_eq!(alice_session.body_version(), 4);
+        let inner = Body::plain(text("deniable"), 9, Sequence::default())
+            .encode()
+            .unwrap();
+        let message = alice_session.encrypt(&inner).unwrap();
+        let body = Body::Ratchet(RatchetBody {
+            v: 4,
+            session: *alice_session.id(),
+            init: Some(init.clone()),
+            message,
+        });
+        // A v4 body is sealed without a sealed-layer signature.
+        let env = seal_bytes_unsigned(&alice, &bob_bundle, &body.encode().unwrap()).unwrap();
+
+        let opened = open_bytes(&bob, &env).unwrap();
+        assert!(!opened.signed, "a v4 body is deniable");
+        assert_eq!(
+            opened.from,
+            alice.user_id(),
+            "but still routed to its sender"
+        );
+        // The session it decrypts under is what authenticates the sender.
+        let Body::Ratchet(ratchet) = Body::decode(&opened.body).unwrap() else {
+            panic!("expected a ratchet body");
+        };
+        assert_eq!(ratchet.v, 4);
+        let mut bob_session = Session::respond(
+            &bob,
+            &alice.user_id(),
+            &signed,
+            None,
+            Some(&pq),
+            &init,
+            true,
+        )
+        .unwrap();
+        let inner_plain = bob_session.decrypt(&ratchet.message).unwrap();
+        let Body::Plain { content, .. } = Body::decode(&inner_plain).unwrap() else {
+            panic!("expected a plain body inside");
+        };
+        assert_eq!(content, text("deniable"));
+
+        // A plain (v1) body may not be sent unsigned: it has nothing else to
+        // authenticate it, so open_bytes rejects the zero signature.
+        let plain = seal_bytes_unsigned(
+            &alice,
+            &bob.key_bundle(),
+            &Body::plain(text("x"), 0, Sequence::default())
+                .encode()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            open_bytes(&bob, &plain).err(),
+            Some(ProtocolError::InvalidSignature)
+        );
+    }
+
+    #[test]
     fn ratchet_bodies_ride_inside_the_sealed_layer() {
         let alice = Identity::generate();
         let bob = Identity::generate();
@@ -650,7 +781,7 @@ mod tests {
         };
         assert_eq!(ratchet.init, Some(init.clone()));
         let mut bob_session =
-            Session::respond(&bob, &alice.user_id(), &signed, None, None, &init).unwrap();
+            Session::respond(&bob, &alice.user_id(), &signed, None, None, &init, false).unwrap();
         let plain = bob_session.decrypt(&ratchet.message).unwrap();
         let Body::Plain {
             content, sequence, ..

@@ -176,6 +176,8 @@ impl Identity {
             dh_public,
             signature: self.sign(BUNDLE_DOMAIN, &dh_public.0),
             prekeys: None,
+            caps: Vec::new(),
+            caps_signature: None,
         }
     }
 

@@ -34,9 +34,17 @@
 //!   initiator encapsulates a secret to one of them and mixes it into the
 //!   session key next to the Diffie–Hellman outputs, so a recording of the
 //!   traffic stays closed even to a quantum computer that breaks X25519.
+//! * **Post-quantum ratchet and deniability** (v4) – when the recipient's
+//!   bundle also advertises the [`bundle::capability::PQ_RATCHET`]
+//!   capability, the session runs an ML-KEM step beside every
+//!   Diffie–Hellman ratchet step, so healing after a compromise is
+//!   post-quantum too, and its body carries no sealed-layer signature, so
+//!   it is deniable: the session's own AEAD and the handshake's key-binding
+//!   ([`seal_bytes_unsigned`]) authenticate it without letting the
+//!   recipient prove to anyone else who wrote it.
 //!
-//! What is deliberately not provided: deniability (messages are signed)
-//! and cover traffic.
+//! What is deliberately not provided: cover traffic. Deniability applies to
+//! v4 sessions; v1 and v2 bodies are still signed.
 
 pub mod blob;
 pub mod bundle;
@@ -54,11 +62,11 @@ pub use blob::BlobKey;
 pub use bundle::KeyBundle;
 pub use envelope::{
     Body, Content, Envelope, MAX_BODY_BYTES, MAX_CIPHERTEXT_BYTES, Message, Opened, RatchetBody,
-    Sequence, open, open_bytes, seal, seal_bytes, seal_with,
+    Sequence, open, open_bytes, seal, seal_bytes, seal_bytes_unsigned, seal_with,
 };
 pub use error::ProtocolError;
 pub use identity::{DhPublic, Identity, IdentitySecrets, UserId};
-pub use pq::{KemPublic, PqPrekeySecret, SignedPqPrekey};
+pub use pq::{KemPublic, KemRatchetKey, PqPrekeySecret, SignedPqPrekey};
 pub use prekey::{OneTimePrekey, PrekeySecret, Prekeys, SignedPrekey};
 pub use session::{InitHeader, RatchetHeader, RatchetMessage, Session, SessionId};
 pub use verify::safety_number;

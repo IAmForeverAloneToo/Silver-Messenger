@@ -87,10 +87,13 @@ Can:
   so, rather than start a session its peer could never read.
 - Strip the ML-KEM keys from a bundle (a relay older than 0.6.0 does this
   without meaning to), so that the session starts with the classical
-  handshake instead of the post-quantum one. It cannot substitute an
-  ML-KEM key, one-time ones included: all of them are signed. The client
-  shows which handshake a session got (`forward secret` against `forward
-  secret, post-quantum`) and `/session` says why.
+  handshake instead of the post-quantum one; or strip the signed
+  `pq_ratchet` capability (a relay older than 0.8.0 does this without
+  meaning to), so the ratchet is X25519 only rather than the post-quantum
+  v4 ratchet. It cannot substitute an ML-KEM key, one-time ones included,
+  nor forge the capability signature: all are signed. Either downgrade
+  only removes protection the session would have added; the client shows
+  which handshake and ratchet a session got, and `/session` says why.
 - See that a file was sent and roughly how big it is (to the nearest
   64 KiB between clients that pad, exactly otherwise): the encrypted
   chunks are put and fetched on anonymous connections, but a blob of a
@@ -238,11 +241,14 @@ layer of every envelope (so: who sent what to whom, and the content of v1
 messages) and the classical session handshakes, and so every session
 started before 0.6.0 or against a peer or relay without ML-KEM support.
 Sessions started with the post-quantum handshake stay closed: their key
-also depends on an ML-KEM-768 secret the recording does not contain. The
-ratchet steps after the handshake are X25519 only, so what such an
-adversary gains against a post-quantum session is nothing unless it also
-obtains the session key another way. Signatures (Ed25519) would let it
-forge messages *from the moment it has the power*, not retroactively.
+also depends on an ML-KEM-768 secret the recording does not contain. In a
+v2 session the ratchet steps after the handshake are X25519 only, so such
+an adversary who also obtains the session key another way can follow the
+ratchet forward from that point; a v4 session (0.8.0, both clients on it)
+refreshes an ML-KEM secret at every step, so even an adversary who obtains
+the session key heals out of it within a round trip. Signatures (Ed25519)
+would let it forge messages *from the moment it has the power*, not
+retroactively.
 
 ### Supply-chain attacker
 
@@ -280,8 +286,19 @@ independent rebuild is the answer to that.
   an ML-KEM-768 secret encapsulated to a signed key the recipient
   published (PQXDH-style), so a recording of today's traffic cannot be
   opened by a future quantum computer that breaks X25519, and a flaw in
-  ML-KEM alone leaves the session as strong as before. The ratchet steps
-  after the handshake are still X25519 only.
+  ML-KEM alone leaves the session as strong as before.
+- **Post-quantum ratchet** (0.8.0 on, protocol v4): every ratchet step
+  does an ML-KEM-768 step beside the X25519 one, so the session heals
+  against a quantum adversary too, not only at the start. It runs when
+  both clients advertise it (a signed `pq_ratchet` capability in the
+  bundle) and the relay keeps the capability; otherwise the ratchet is
+  X25519 only, which the client shows.
+- **Deniability** (0.8.0 on, protocol v4): a v4 session message carries no
+  signature at the sealed layer, so the recipient cannot prove to anyone
+  else who wrote it. The session's AEAD authenticates it to the recipient,
+  and the handshake is deniable. A v1 body (no prekeys) and a v2 session
+  (an older peer or relay) are still signed; the client shows which a
+  session is.
 - **Relay auth**: the relay sends a 32-byte random nonce; the client signs it
   together with the relay's host name under a domain-separated prefix. Only
   the holder of an identity key can read that identity's mailbox.
@@ -304,9 +321,9 @@ independent rebuild is the answer to that.
   by a passphrase through Argon2id; every file under it is
   XChaCha20-Poly1305.
 
-Deliberately absent: deniability (messages are signed; the decision and
-the path away from it are recorded in `PROTOCOL.md` section 9) and cover
-traffic.
+Deliberately absent: cover traffic (roadmap item 46). Deniability is
+provided for v4 sessions (above); v1 and v2 messages are still signed
+until v1 is retired and every peer is on v4.
 
 ## Trust decisions a user makes
 
@@ -384,9 +401,9 @@ maintainer's account plus signing key both being taken.
 
 | Gap | Status |
 | --- | --- |
-| Deniability: a recipient can prove who wrote what | Decided against for now; reasoning and the path (a body format without the inner signature once v1 fallback can go) in `PROTOCOL.md` section 9. |
-| Cover traffic: the relay and the network see when messages travel and roughly how big they are | Not planned. Padding steps and receipt delays (0.6.0) are as far as this goes without a traffic-shaping design. |
-| Post-quantum ratchet steps: after the hybrid handshake the ratchet is X25519 only | Roadmap item 41; the handshake already protects recordings. |
+| Deniability: a recipient can prove who wrote what | Closed for v4 sessions (0.8.0): a v4 body carries no sealed-layer signature (`PROTOCOL.md` section 9). Still open for v1 bodies (no prekeys) and v2 sessions (older peer or relay), which stay signed until v1 is retired. |
+| Cover traffic: the relay and the network see when messages travel and roughly how big they are | Roadmap item 46 (opt-in). Padding steps and receipt delays (0.6.0) are as far as this goes until then. |
+| Post-quantum ratchet steps: after the hybrid handshake the ratchet is X25519 only | Closed for v4 sessions (0.8.0, roadmap item 41): every ratchet step does an ML-KEM step. A v2 session (older peer or relay) is still X25519-only after the handshake. |
 | Identity revocation | Not planned; the remedy is a new identity and word of mouth. |
 | Certificate revocation checking | Not planned; key pins are the mitigation. |
 | Received files stored unencrypted in `downloads/` | By design, so other programs can open them; a "keep encrypted" option could follow if asked for. |

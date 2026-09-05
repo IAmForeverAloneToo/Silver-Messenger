@@ -36,7 +36,7 @@ pub const KEM_SECRET_LEN: usize = 32;
 
 /// An ML-KEM-768 encapsulation key. Anyone can use it to make a secret
 /// that only the holder of the matching seed can recover.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Zeroize)]
 pub struct KemPublic(#[serde(with = "b64")] pub Vec<u8>);
 
 impl KemPublic {
@@ -178,6 +178,62 @@ impl std::fmt::Debug for PqPrekeySecret {
             .field("id", &self.id)
             .field("created_at_ms", &self.created_at_ms)
             .finish_non_exhaustive()
+    }
+}
+
+/// An ephemeral ML-KEM-768 key pair for one turn of the post-quantum
+/// ratchet (protocol v4). Unlike a prekey it carries no id and is never
+/// signed: the ratchet's own AEAD authenticates it, so the relay cannot
+/// substitute it undetected, and each is used for a single ratchet step and
+/// then replaced. Stored as its 64-byte seed, like a prekey.
+#[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+pub struct KemRatchetKey {
+    #[serde(with = "b64_array")]
+    seed: [u8; 64],
+}
+
+impl KemRatchetKey {
+    pub fn generate() -> Self {
+        let mut seed = [0u8; 64];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+        Self { seed }
+    }
+
+    fn decapsulation_key(&self) -> DecapsulationKey<MlKem768> {
+        DecapsulationKey::from_seed(Seed::from(self.seed))
+    }
+
+    /// The public half, to hand to the peer so it can encapsulate to us.
+    pub fn public(&self) -> KemPublic {
+        KemPublic(
+            self.decapsulation_key()
+                .encapsulation_key()
+                .to_bytes()
+                .to_vec(),
+        )
+    }
+
+    /// Recover the secret from a ciphertext a peer encapsulated to us.
+    pub fn decapsulate(
+        &self,
+        ciphertext: &[u8],
+    ) -> Result<Zeroizing<[u8; KEM_SECRET_LEN]>, ProtocolError> {
+        let mut shared = self
+            .decapsulation_key()
+            .decapsulate_slice(ciphertext)
+            .map_err(|_| {
+                ProtocolError::Malformed(format!("ML-KEM ciphertext of {} bytes", ciphertext.len()))
+            })?;
+        let mut secret = Zeroizing::new([0u8; KEM_SECRET_LEN]);
+        secret.copy_from_slice(shared.as_slice());
+        shared.as_mut_slice().zeroize();
+        Ok(secret)
+    }
+}
+
+impl std::fmt::Debug for KemRatchetKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("KemRatchetKey(…)")
     }
 }
 

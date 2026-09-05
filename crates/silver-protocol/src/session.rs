@@ -32,7 +32,7 @@ use crate::ProtocolError;
 use crate::bundle::KeyBundle;
 use crate::encoding::{b64, b64_array, b64_opt};
 use crate::identity::{DhPublic, Identity, UserId};
-use crate::pq::{KEM_SECRET_LEN, PqPrekeySecret};
+use crate::pq::{KEM_SECRET_LEN, KemPublic, KemRatchetKey, PqPrekeySecret};
 use crate::prekey::PrekeySecret;
 
 const X3DH_INFO: &[u8] = b"silver-messenger/v2/x3dh";
@@ -40,6 +40,10 @@ const X3DH_INFO: &[u8] = b"silver-messenger/v2/x3dh";
 const PQXDH_INFO: &[u8] = b"silver-messenger/v3/pqxdh";
 const SESSION_ID_DOMAIN: &[u8] = b"silver-messenger/v2/session-id";
 const ROOT_INFO: &[u8] = b"silver-messenger/v2/ratchet-root";
+/// Root KDF for the post-quantum ratchet (protocol v4): the same as
+/// [`ROOT_INFO`] but for the chain where an ML-KEM secret is mixed in
+/// beside the Diffie–Hellman output.
+const ROOT_INFO_V4: &[u8] = b"silver-messenger/v4/ratchet-root";
 const MESSAGE_INFO: &[u8] = b"silver-messenger/v2/ratchet-message";
 
 /// How far ahead in a receiving chain a message may be. Keys for the
@@ -70,6 +74,18 @@ pub struct InitHeader {
     /// the post-quantum secret.
     #[serde(default, skip_serializing_if = "Option::is_none", with = "b64_opt")]
     pub kem_ciphertext: Option<Vec<u8>>,
+    /// The initiator's identity-key signature over `identity_dh` (the same
+    /// signature its key bundle carries). A protocol-v4 body is not signed
+    /// at the sealed-sender layer, so this is what ties `identity_dh` to the
+    /// sender's identity; without it a third party could substitute its own
+    /// key and impersonate the sender. Absent from v2/v3 handshakes, whose
+    /// envelope signature does the same job.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::encoding::b64_opt_array"
+    )]
+    pub identity_dh_signature: Option<[u8; 64]>,
 }
 
 impl InitHeader {
@@ -88,14 +104,33 @@ pub struct RatchetHeader {
     pub pn: u32,
     /// Position in the current sending chain.
     pub n: u32,
+    /// The sender's current ML-KEM ratchet key (protocol v4); present on
+    /// every message of a post-quantum-ratchet session, absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kem: Option<KemPublic>,
+    /// The ML-KEM ciphertext for the current sending chain, encapsulated to
+    /// the peer's last ratchet key. Absent on the first chain of each
+    /// direction (which has no peer key to encapsulate to yet) and on
+    /// classical sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "b64_opt")]
+    pub kem_ct: Option<Vec<u8>>,
 }
 
 impl RatchetHeader {
-    fn bytes(&self) -> [u8; 40] {
-        let mut out = [0u8; 40];
-        out[..32].copy_from_slice(&self.dh.0);
-        out[32..36].copy_from_slice(&self.pn.to_be_bytes());
-        out[36..].copy_from_slice(&self.n.to_be_bytes());
+    /// The header as associated data: the fixed 40 bytes, then the ML-KEM
+    /// public key and ciphertext when present, so both are bound into the
+    /// message's AEAD and cannot be swapped by the relay.
+    fn bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(40);
+        out.extend_from_slice(&self.dh.0);
+        out.extend_from_slice(&self.pn.to_be_bytes());
+        out.extend_from_slice(&self.n.to_be_bytes());
+        if let Some(kem) = &self.kem {
+            out.extend_from_slice(&kem.0);
+        }
+        if let Some(ct) = &self.kem_ct {
+            out.extend_from_slice(ct);
+        }
         out
     }
 }
@@ -143,6 +178,26 @@ pub struct Session {
     /// The handshake mixed in an ML-KEM secret.
     #[serde(default)]
     post_quantum: bool,
+    /// The session runs the post-quantum ratchet (protocol v4): every DH
+    /// ratchet step also does an ML-KEM step, so healing after a compromise
+    /// is post-quantum too. False for v2/v3 sessions.
+    #[serde(default)]
+    pq_ratchet: bool,
+    /// Our current ML-KEM ratchet key, for decapsulating the peer's next
+    /// ciphertext. `None` on a classical session and until the first step.
+    #[serde(default)]
+    kem_self: Option<KemRatchetKey>,
+    /// `kem_self`'s public half, cached so it need not be recomputed for
+    /// every message header.
+    #[serde(default)]
+    kem_self_public: Option<KemPublic>,
+    /// The peer's current ML-KEM ratchet key, to encapsulate to.
+    #[serde(default)]
+    kem_remote: Option<KemPublic>,
+    /// The ciphertext attached to every message of the current sending
+    /// chain, so the peer can rebuild the chain from any of them.
+    #[serde(default, with = "b64_opt")]
+    kem_ct_send: Option<Vec<u8>>,
 }
 
 impl Session {
@@ -184,14 +239,28 @@ impl Session {
         );
         let id = session_id(&ephemeral_public, &prekeys.signed.public);
 
-        // First ratchet step, against the peer's signed prekey.
+        // The post-quantum ratchet runs when the handshake is post-quantum
+        // and the peer advertises that it reads v4 bodies.
+        let pq_ratchet = kem.is_some() && peer.supports_pq_ratchet();
+        let (kem_self, kem_self_public) = if pq_ratchet {
+            let key = KemRatchetKey::generate();
+            let public = key.public();
+            (Some(key), Some(public))
+        } else {
+            (None, None)
+        };
+
+        // First ratchet step, against the peer's signed prekey. Our first
+        // sending chain has no ML-KEM step: the handshake secret is already
+        // post-quantum, and there is no peer ratchet key to encapsulate to
+        // yet. The ratchet becomes post-quantum on the next round trip.
         let ratchet = StaticSecret::random_from_rng(OsRng);
         let ratchet_public = PublicKey::from(&ratchet).to_bytes();
         let shared = ratchet.diffie_hellman(&spk);
         if !shared.was_contributory() {
             return Err(ProtocolError::WeakKey);
         }
-        let (root_key, chain_send) = kdf_root(&secret, shared.as_bytes());
+        let (root_key, chain_send) = kdf_root(&secret, shared.as_bytes(), None, pq_ratchet);
 
         let session = Self {
             id,
@@ -207,11 +276,21 @@ impl Session {
             pn: 0,
             skipped: Vec::new(),
             post_quantum: kem.is_some(),
+            pq_ratchet,
+            kem_self,
+            kem_self_public,
+            kem_remote: None,
+            kem_ct_send: None,
         };
         let (pq_prekey_id, kem_ciphertext) = match kem {
             Some((id, ciphertext, _)) => (Some(id), Some(ciphertext)),
             None => (None, None),
         };
+        // On a v4 handshake the sealed layer is unsigned, so the initiator
+        // vouches for its Diffie–Hellman key here, with the same signature
+        // its bundle carries; the responder checks it against the sender.
+        let identity_dh_signature =
+            pq_ratchet.then(|| me.sign(crate::bundle::BUNDLE_DOMAIN, &me.dh_public().0));
         let header = InitHeader {
             identity_dh: me.dh_public(),
             ephemeral: ephemeral_public,
@@ -219,6 +298,7 @@ impl Session {
             one_time_prekey_id: opk.map(|o| o.id),
             pq_prekey_id,
             kem_ciphertext,
+            identity_dh_signature,
         };
         Ok((session, header))
     }
@@ -234,11 +314,30 @@ impl Session {
         one_time: Option<&PrekeySecret>,
         pq: Option<&PqPrekeySecret>,
         init: &InitHeader,
+        pq_ratchet: bool,
     ) -> Result<Self, ProtocolError> {
         if init.one_time_prekey_id.is_some() != one_time.is_some() {
             return Err(ProtocolError::Malformed(
                 "one-time prekey given does not match the header".into(),
             ));
+        }
+        if pq_ratchet && init.kem_ciphertext.is_none() {
+            return Err(ProtocolError::Malformed(
+                "the post-quantum ratchet needs a post-quantum handshake".into(),
+            ));
+        }
+        // A v4 handshake is not signed at the sealed layer, so the
+        // initiator's key-binding signature is what proves `identity_dh`
+        // belongs to the claimed sender. Require and check it.
+        if pq_ratchet {
+            let signature = init.identity_dh_signature.ok_or_else(|| {
+                ProtocolError::Malformed("a v4 handshake carries no key-binding signature".into())
+            })?;
+            initiator.verify(
+                crate::bundle::BUNDLE_DOMAIN,
+                &init.identity_dh.0,
+                &signature,
+            )?;
         }
         let kem = match (&init.kem_ciphertext, init.pq_prekey_id, pq) {
             (None, None, None) => None,
@@ -275,6 +374,13 @@ impl Session {
             pn: 0,
             skipped: Vec::new(),
             post_quantum: kem.is_some(),
+            pq_ratchet,
+            // The responder makes its ratchet key on its first step, once it
+            // knows the initiator's from that first message's header.
+            kem_self: None,
+            kem_self_public: None,
+            kem_remote: None,
+            kem_ct_send: None,
         })
     }
 
@@ -286,6 +392,19 @@ impl Session {
     /// X25519 alone does not open the session.
     pub fn is_post_quantum(&self) -> bool {
         self.post_quantum
+    }
+
+    /// Whether the ratchet, and not only the handshake, is post-quantum
+    /// (protocol v4): every ratchet step also does an ML-KEM step, so a
+    /// compromise heals against a quantum adversary too.
+    pub fn is_pq_ratchet(&self) -> bool {
+        self.pq_ratchet
+    }
+
+    /// The body version this session's messages are: 4 for the post-quantum
+    /// (and deniable) ratchet, 2 otherwise.
+    pub fn body_version(&self) -> u32 {
+        if self.pq_ratchet { 4 } else { 2 }
     }
 
     /// Whether this side can send yet. A responder cannot until it has
@@ -309,6 +428,8 @@ impl Session {
             dh: DhPublic(self.dh_self_public),
             pn: self.pn,
             n: self.n_send,
+            kem: self.kem_self_public.clone(),
+            kem_ct: self.kem_ct_send.clone(),
         };
         let ciphertext = aead_encrypt(&message_key, plaintext, &self.aad(&header))?;
         self.chain_send = Some(next);
@@ -402,7 +523,10 @@ impl Session {
     }
 
     /// The peer moved to a new ratchet key: derive our receiving chain for
-    /// it, then a fresh key pair and sending chain of our own.
+    /// it, then a fresh key pair and sending chain of our own. On a
+    /// post-quantum-ratchet session each half also does an ML-KEM step: the
+    /// receiving chain mixes in the secret from the peer's ciphertext, the
+    /// sending chain a fresh secret we encapsulate to the peer's key.
     fn dh_ratchet(&mut self, header: &RatchetHeader) -> Result<(), ProtocolError> {
         self.pn = self.n_send;
         self.n_send = 0;
@@ -410,21 +534,71 @@ impl Session {
         self.dh_remote = Some(header.dh);
         let remote = header.dh.as_x25519();
 
+        // Receiving chain: our current keys against the peer's new ones.
         let ours = StaticSecret::from(self.dh_self.0);
         let shared = ours.diffie_hellman(&remote);
         if !shared.was_contributory() {
             return Err(ProtocolError::WeakKey);
         }
-        let (root, chain_recv) = kdf_root(&self.root_key, shared.as_bytes());
+        let recv_ss = if self.pq_ratchet {
+            match (&header.kem_ct, &self.kem_self) {
+                (Some(ct), Some(key)) => Some(key.decapsulate(ct)?),
+                // The peer had no ratchet key of ours to encapsulate to yet
+                // (its first chain): a Diffie–Hellman-only step, as ours was.
+                (None, _) => None,
+                (Some(_), None) => {
+                    return Err(ProtocolError::Malformed(
+                        "a post-quantum ratchet message arrived before we have a ratchet key"
+                            .into(),
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+        let (root, chain_recv) = kdf_root(
+            &self.root_key,
+            shared.as_bytes(),
+            recv_ss.as_deref(),
+            self.pq_ratchet,
+        );
         self.root_key = root;
         self.chain_recv = Some(chain_recv);
+        if self.pq_ratchet {
+            self.kem_remote = header.kem.clone();
+        }
 
+        // Sending chain: a fresh key pair, and a fresh ML-KEM secret
+        // encapsulated to the peer's latest ratchet key.
         let fresh = StaticSecret::random_from_rng(OsRng);
         let shared = fresh.diffie_hellman(&remote);
         if !shared.was_contributory() {
             return Err(ProtocolError::WeakKey);
         }
-        let (root, chain_send) = kdf_root(&self.root_key, shared.as_bytes());
+        let send_ss = if self.pq_ratchet {
+            let key = KemRatchetKey::generate();
+            self.kem_self_public = Some(key.public());
+            self.kem_self = Some(key);
+            match &self.kem_remote {
+                Some(peer) => {
+                    let (ciphertext, secret) = peer.encapsulate()?;
+                    self.kem_ct_send = Some(ciphertext);
+                    Some(secret)
+                }
+                None => {
+                    self.kem_ct_send = None;
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let (root, chain_send) = kdf_root(
+            &self.root_key,
+            shared.as_bytes(),
+            send_ss.as_deref(),
+            self.pq_ratchet,
+        );
         self.dh_self_public = PublicKey::from(&fresh).to_bytes();
         self.dh_self = Key32(fresh.to_bytes());
         self.root_key = root;
@@ -510,12 +684,20 @@ fn x3dh_ad(
     v
 }
 
-/// Root KDF: a new root key and a chain key from the current root key and a
-/// Diffie–Hellman output.
-fn kdf_root(root: &Key32, dh_out: &[u8; 32]) -> (Key32, Key32) {
-    let hk = Hkdf::<Sha256>::new(Some(&root.0), dh_out);
+/// Root KDF: a new root key and a chain key from the current root key, a
+/// Diffie–Hellman output, and (on the post-quantum ratchet) an ML-KEM
+/// secret. Without `kem` and with `pq` false this is exactly the v2
+/// derivation, so classical sessions are byte-for-byte unchanged.
+fn kdf_root(root: &Key32, dh_out: &[u8; 32], kem: Option<&[u8; 32]>, pq: bool) -> (Key32, Key32) {
+    let mut ikm = Zeroizing::new(Vec::with_capacity(64));
+    ikm.extend_from_slice(dh_out);
+    if let Some(kem) = kem {
+        ikm.extend_from_slice(kem);
+    }
+    let info = if pq { ROOT_INFO_V4 } else { ROOT_INFO };
+    let hk = Hkdf::<Sha256>::new(Some(&root.0), &ikm);
     let mut out = Zeroizing::new([0u8; 64]);
-    hk.expand(ROOT_INFO, out.as_mut_slice())
+    hk.expand(info, out.as_mut_slice())
         .expect("64 bytes is a valid HKDF-SHA256 output length");
     let mut new_root = Key32([0u8; 32]);
     let mut chain = Key32([0u8; 32]);
@@ -638,16 +820,38 @@ mod tests {
             self.identity.key_bundle_with(prekeys)
         }
 
+        /// A post-quantum bundle that also advertises the v4 ratchet.
+        fn bundle_pq_ratchet(&self, with_one_time: bool) -> KeyBundle {
+            let keys = if with_one_time {
+                Keys::PqOneTime
+            } else {
+                Keys::PqSigned
+            };
+            self.bundle_with(with_one_time, keys).with_caps(
+                &self.identity,
+                vec![crate::bundle::capability::PQ_RATCHET.to_owned()],
+            )
+        }
+
         fn pq_secret(&self, id: u32) -> Option<&PqPrekeySecret> {
             [&self.pq_signed, &self.pq_one_time]
                 .into_iter()
                 .find(|k| k.id == id)
         }
 
-        fn respond(&self, initiator: &UserId, init: &InitHeader) -> Session {
+        fn respond(&self, initiator: &UserId, init: &InitHeader, pq_ratchet: bool) -> Session {
             let one_time = init.one_time_prekey_id.map(|_| &self.one_time);
             let pq = init.pq_prekey_id.and_then(|id| self.pq_secret(id));
-            Session::respond(&self.identity, initiator, &self.signed, one_time, pq, init).unwrap()
+            Session::respond(
+                &self.identity,
+                initiator,
+                &self.signed,
+                one_time,
+                pq,
+                init,
+                pq_ratchet,
+            )
+            .unwrap()
         }
     }
 
@@ -660,8 +864,18 @@ mod tests {
         let bob = Peer::new();
         let (alice_session, init) =
             Session::initiate(&alice, &bob.bundle_with(with_one_time, keys)).unwrap();
-        let bob_session = bob.respond(&alice.user_id(), &init);
+        let bob_session = bob.respond(&alice.user_id(), &init, false);
         (alice_session, bob_session, init)
+    }
+
+    /// A handshake where both sides run the post-quantum ratchet.
+    fn handshake_pq_ratchet(with_one_time: bool) -> (Session, Session) {
+        let alice = Identity::generate();
+        let bob = Peer::new();
+        let (alice_session, init) =
+            Session::initiate(&alice, &bob.bundle_pq_ratchet(with_one_time)).unwrap();
+        let bob_session = bob.respond(&alice.user_id(), &init, true);
+        (alice_session, bob_session)
     }
 
     #[test]
@@ -709,7 +923,7 @@ mod tests {
         // handshake completes but nothing decrypts.
         let mut damaged = init.clone();
         damaged.kem_ciphertext.as_mut().unwrap()[10] ^= 0x01;
-        let mut b = bob.respond(&alice.user_id(), &damaged);
+        let mut b = bob.respond(&alice.user_id(), &damaged, false);
         assert_eq!(b.decrypt(&m), Err(ProtocolError::DecryptFailed));
         // The wrong ML-KEM key, likewise.
         let mut wrong = Session::respond(
@@ -719,6 +933,7 @@ mod tests {
             Some(&bob.one_time),
             Some(&PqPrekeySecret::generate(300, 0)),
             &init,
+            false,
         )
         .unwrap();
         assert_eq!(wrong.decrypt(&m), Err(ProtocolError::DecryptFailed));
@@ -731,6 +946,7 @@ mod tests {
                 Some(&bob.one_time),
                 pq,
                 init,
+                false,
             )
             .is_err()
         };
@@ -750,6 +966,139 @@ mod tests {
             PqPrekeySecret::generate(300, 0).signed_by(&Identity::generate());
         assert_eq!(
             Session::initiate(&alice, &forged).err(),
+            Some(ProtocolError::InvalidSignature)
+        );
+    }
+
+    #[test]
+    fn the_post_quantum_ratchet_heals_every_step_and_stays_post_quantum() {
+        for with_one_time in [true, false] {
+            let (mut a, mut b) = handshake_pq_ratchet(with_one_time);
+            assert_eq!(a.id(), b.id());
+            assert!(a.is_pq_ratchet() && b.is_pq_ratchet());
+            assert_eq!(a.body_version(), 4);
+            assert!(a.is_post_quantum() && b.is_post_quantum());
+
+            // The initiator's first message carries its ratchet key but no
+            // ciphertext (no peer key to encapsulate to yet).
+            let m1 = a.encrypt(b"hello").unwrap();
+            assert!(m1.header.kem.is_some() && m1.header.kem_ct.is_none());
+            assert_eq!(b.decrypt(&m1).unwrap().as_slice(), b"hello");
+
+            // Every message the responder sends does a full ML-KEM step.
+            let r1 = b.encrypt(b"hi").unwrap();
+            assert!(r1.header.kem.is_some() && r1.header.kem_ct.is_some());
+            assert_eq!(a.decrypt(&r1).unwrap().as_slice(), b"hi");
+
+            // And from the next chain on, the initiator does too.
+            let m2 = a.encrypt(b"again").unwrap();
+            assert!(m2.header.kem.is_some() && m2.header.kem_ct.is_some());
+            assert_eq!(b.decrypt(&m2).unwrap().as_slice(), b"again");
+
+            // Several turns of back-and-forth keep working.
+            for i in 0..5u8 {
+                let ma = a.encrypt(&[i]).unwrap();
+                assert!(ma.header.kem_ct.is_some());
+                assert_eq!(b.decrypt(&ma).unwrap().as_slice(), &[i]);
+                let mb = b.encrypt(&[i, i]).unwrap();
+                assert!(mb.header.kem_ct.is_some());
+                assert_eq!(a.decrypt(&mb).unwrap().as_slice(), &[i, i]);
+            }
+        }
+    }
+
+    #[test]
+    fn a_post_quantum_ratchet_message_authenticates_its_ml_kem_fields() {
+        let (mut a, mut b) = handshake_pq_ratchet(true);
+        let m1 = a.encrypt(b"hi").unwrap();
+        b.decrypt(&m1).unwrap();
+        let r = b.encrypt(b"reply").unwrap();
+
+        // Tampering with the ML-KEM public key or ciphertext in the header
+        // makes the message fail: the ciphertext decapsulates to a different
+        // secret (or is rejected), the public key is bound into the AEAD, and
+        // a flip that stops either parsing is refused outright. Whichever
+        // way, the message does not read and the session is left untouched.
+        let mut bad_kem = r.clone();
+        bad_kem.header.kem.as_mut().unwrap().0[10] ^= 0x01;
+        assert!(a.clone().decrypt(&bad_kem).is_err());
+        let mut bad_ct = r.clone();
+        bad_ct.header.kem_ct.as_mut().unwrap()[10] ^= 0x01;
+        assert!(a.clone().decrypt(&bad_ct).is_err());
+        // The real one still reads, on the untouched session.
+        assert_eq!(a.decrypt(&r).unwrap().as_slice(), b"reply");
+    }
+
+    #[test]
+    fn a_v4_session_survives_serialization_mid_conversation() {
+        let (mut a, mut b) = handshake_pq_ratchet(true);
+        let m = a.encrypt(b"before").unwrap();
+        b.decrypt(&m).unwrap();
+        let r = b.encrypt(b"reply").unwrap();
+        let a_json = serde_json::to_string(&a).unwrap();
+        let b_json = serde_json::to_string(&b).unwrap();
+        let mut a2: Session = serde_json::from_str(&a_json).unwrap();
+        let mut b2: Session = serde_json::from_str(&b_json).unwrap();
+        assert!(a2.is_pq_ratchet());
+        assert_eq!(a2.decrypt(&r).unwrap().as_slice(), b"reply");
+        let m2 = a2.encrypt(b"after a reload").unwrap();
+        assert!(m2.header.kem_ct.is_some());
+        assert_eq!(b2.decrypt(&m2).unwrap().as_slice(), b"after a reload");
+    }
+
+    #[test]
+    fn the_ratchet_is_classical_when_the_peer_does_not_advertise_v4() {
+        // Post-quantum keys but no capability: the handshake is post-quantum,
+        // the ratchet is not, and the header carries no ML-KEM fields for an
+        // older peer to trip over.
+        let (a, b, _) = handshake_with(true, Keys::PqOneTime);
+        assert!(a.is_post_quantum() && !a.is_pq_ratchet());
+        assert_eq!(a.body_version(), 2);
+        let mut a = a;
+        let m = a.encrypt(b"x").unwrap();
+        assert!(m.header.kem.is_none() && m.header.kem_ct.is_none());
+        let _ = b;
+    }
+
+    #[test]
+    fn a_v4_handshake_without_its_key_binding_signature_is_refused() {
+        let alice = Identity::generate();
+        let bob = Peer::new();
+        let (_, init) = Session::initiate(&alice, &bob.bundle_pq_ratchet(true)).unwrap();
+        assert!(init.identity_dh_signature.is_some());
+        // Missing the signature.
+        let mut no_sig = init.clone();
+        no_sig.identity_dh_signature = None;
+        assert!(matches!(
+            Session::respond(
+                &bob.identity,
+                &alice.user_id(),
+                &bob.signed,
+                Some(&bob.one_time),
+                bob.pq_secret(init.pq_prekey_id.unwrap()),
+                &no_sig,
+                true,
+            ),
+            Err(ProtocolError::Malformed(_))
+        ));
+        // A signature that is not the sender's (an impersonator supplying
+        // its own key and its own signature) is refused.
+        let mallory = Identity::generate();
+        let mut forged = init.clone();
+        forged.identity_dh = mallory.dh_public();
+        forged.identity_dh_signature =
+            Some(mallory.sign(crate::bundle::BUNDLE_DOMAIN, &mallory.dh_public().0));
+        assert_eq!(
+            Session::respond(
+                &bob.identity,
+                &alice.user_id(),
+                &bob.signed,
+                Some(&bob.one_time),
+                bob.pq_secret(init.pq_prekey_id.unwrap()),
+                &forged,
+                true,
+            )
+            .err(),
             Some(ProtocolError::InvalidSignature)
         );
     }
@@ -849,7 +1198,8 @@ mod tests {
                 &bob.signed,
                 None,
                 None,
-                &init
+                &init,
+                false
             )
             .is_err()
         );
@@ -862,6 +1212,7 @@ mod tests {
             Some(&other),
             None,
             &init,
+            false,
         )
         .unwrap();
         let (mut a, _) = Session::initiate(&alice, &bob.bundle(true)).unwrap();
