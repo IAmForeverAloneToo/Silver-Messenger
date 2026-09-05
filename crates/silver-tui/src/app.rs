@@ -3,6 +3,7 @@
 mod devices;
 mod everyday;
 mod groups;
+mod journal;
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -567,6 +568,20 @@ pub struct App {
     expiry_dirty: bool,
     /// Edits, reactions and deletions for messages not held yet.
     late: Vec<everyday::LateUpdate>,
+    /// Reader mode: the journal is printed line by line instead of the
+    /// screen being drawn (`docs/design/accessibility.md`).
+    reader: bool,
+    journal: Vec<String>,
+    /// In reader mode, the selected message as an index into the open
+    /// chat's lines (the screen's selection has no rows to refer to).
+    reader_cursor: Option<usize>,
+}
+
+/// What the app draws on: the terminal as a screen, or a line at a time
+/// for a screen reader.
+pub enum Surface {
+    Screen(DefaultTerminal),
+    Reader(crate::reader::Reader),
 }
 
 /// What stands between the data directory and whoever copies it, as the
@@ -735,6 +750,9 @@ impl App {
             next_expiry: None,
             expiry_dirty: true,
             late: Vec::new(),
+            reader: false,
+            journal: Vec::new(),
+            reader_cursor: None,
         };
         app.refresh_group_list();
         app.system(Level::Info, "Welcome to Silver Messenger.");
@@ -807,7 +825,7 @@ impl App {
 
     pub async fn run(
         mut self,
-        mut terminal: DefaultTerminal,
+        mut surface: Surface,
         mut events: mpsc::Receiver<ClientEvent>,
     ) -> anyhow::Result<Exit> {
         let mut keys = spawn_input_thread();
@@ -816,7 +834,12 @@ impl App {
         self.notifier.push_title();
 
         let exit = loop {
-            terminal.draw(|frame| ui::draw(frame, &mut self))?;
+            match &mut surface {
+                Surface::Screen(terminal) => {
+                    terminal.draw(|frame| ui::draw(frame, &mut self))?;
+                }
+                Surface::Reader(reader) => reader.flush(&mut self)?,
+            }
             let unread: usize = self.unread.values().map(Vec::len).sum::<usize>()
                 + self.group_unread.values().map(Vec::len).sum::<usize>()
                 + self.held_message_count();
@@ -855,6 +878,9 @@ impl App {
         };
         self.notifier.pop_title();
         self.remove_open_copies();
+        if let Surface::Reader(reader) = &mut surface {
+            reader.finish(&mut self, matches!(exit, Exit::Quit))?;
+        }
         self.client.shutdown().await;
         Ok(exit)
     }
@@ -974,15 +1000,21 @@ impl App {
     // --- notices -----------------------------------------------------------
 
     fn system(&mut self, level: Level, text: impl Into<String>) {
+        let text = text.into();
+        if self.reader && level != Level::Code {
+            self.say(journal::system_sentence(level, &text));
+        }
         self.system.push(SystemLine {
             timestamp_ms: now_ms(),
             level,
-            text: text.into(),
+            text,
         });
     }
 
     fn toast(&mut self, text: impl Into<String>) {
-        self.toast = Some((text.into(), Instant::now()));
+        let text = text.into();
+        self.say(text.clone());
+        self.toast = Some((text, Instant::now()));
     }
 
     fn expire_toast(&mut self) {
@@ -1404,7 +1436,7 @@ impl App {
             self.completion = None;
         }
         match key.code {
-            KeyCode::F(1) => self.help_open = true,
+            KeyCode::F(1) => self.print_help(),
             KeyCode::Char('q') if ctrl => self.should_quit = true,
             KeyCode::Char('c') if ctrl => self.copy_or_quit(),
             KeyCode::Char('v') if ctrl => self.paste_from_clipboard(),
@@ -1419,6 +1451,8 @@ impl App {
             KeyCode::BackTab => self.select_prev(),
             KeyCode::Down if alt => self.select_next(),
             KeyCode::Up if alt => self.select_prev(),
+            KeyCode::Up if shift && self.reader => self.reader_select(true),
+            KeyCode::Down if shift && self.reader => self.reader_select(false),
             KeyCode::Up if shift => self.select_rows_by_key(true),
             KeyCode::Down if shift => self.select_rows_by_key(false),
             KeyCode::Up => self.input_up(),
@@ -1447,7 +1481,9 @@ impl App {
             }
             KeyCode::PageUp => self.scroll = (self.scroll + SCROLL_STEP).min(self.max_scroll),
             KeyCode::PageDown => self.scroll = self.scroll.saturating_sub(SCROLL_STEP),
-            KeyCode::Esc if self.selection.is_some() => self.selection = None,
+            KeyCode::Esc if self.selection.is_some() || self.reader_cursor.is_some() => {
+                self.clear_selection()
+            }
             KeyCode::Esc => self.clear_input(),
             KeyCode::Enter => self.submit(),
             KeyCode::Char(c) if !ctrl && !alt => {
@@ -1759,6 +1795,9 @@ impl App {
         self.selected = index.min(self.pane_count() - 1);
         self.scroll = 0;
         self.selection = None;
+        self.reader_cursor = None;
+        // Said before the unread marks go, so the reader hears what waited.
+        self.say_chat();
         // A rule above what arrived while this chat was not open.
         self.new_marker = self.selected_contact().map(|c| c.user_id).and_then(|id| {
             self.unread
@@ -1868,6 +1907,9 @@ impl App {
             "theme" | "colors" | "colours" => self.cmd_theme(&rest),
             "go" | "chat" => self.cmd_go(&rest),
             "sidebar" | "list" => self.cmd_sidebar(&rest),
+            "history" => self.cmd_history(&rest),
+            "unread" => self.cmd_unread(),
+            "reader" => self.cmd_reader(&rest),
             "search" | "find" => self.cmd_search(&rest),
             "accept" => self.cmd_accept(&rest),
             "block" => self.cmd_block(&rest),
@@ -2057,7 +2099,25 @@ impl App {
     }
 
     fn print_help(&mut self) {
-        self.help_open = true;
+        if !self.reader {
+            self.help_open = true;
+            return;
+        }
+        // The overlay's text as lines, for the reader.
+        self.say("Commands:");
+        for c in commands::COMMANDS {
+            let head = if c.args.is_empty() {
+                format!("/{}", c.name)
+            } else {
+                format!("/{} {}", c.name, c.args)
+            };
+            self.say(format!("{head}: {}", c.help));
+        }
+        self.say("Keys:");
+        for k in commands::KEY_HELP {
+            self.say(*k);
+        }
+        self.say("(end of help)");
     }
 
     fn invite_link(&self) -> InviteLink {
@@ -4149,10 +4209,11 @@ impl App {
 
     /// Accept the request at `index`: its sender becomes a contact (or
     /// was made one already) and its messages move into the chat. Whose,
-    /// and how many.
+    /// and how many. The selection is left where it was: the caller
+    /// opens the chat, or settles the Requests pane.
     fn take_request(&mut self, index: usize) -> (UserId, usize) {
         let request = self.requests.remove(index);
-        self.persist_requests();
+        self.save_requests();
         let from = request.from;
         if self.contact_index(&from).is_none() {
             let mut contact = Contact::new(from);
@@ -4259,9 +4320,19 @@ impl App {
     }
 
     fn persist_requests(&mut self) {
+        self.save_requests();
+        self.settle_requests_pane();
+    }
+
+    fn save_requests(&mut self) {
         if let Err(e) = self.store.save_requests(&self.requests) {
             self.toast(format!("Could not save requests: {e}"));
         }
+    }
+
+    /// The Requests pane goes with the last request; a selection on it
+    /// lands on System.
+    fn settle_requests_pane(&mut self) {
         if self.requests.is_empty() && self.selected >= self.pane_count() {
             self.select(0);
         }
@@ -4292,6 +4363,7 @@ impl App {
         if line.expire_after_s > 0 {
             self.expiry_dirty = true;
         }
+        self.say_line(&Conversation::Contact(peer), &line);
         self.known_ids.insert(line.id.clone());
         self.threads.entry(peer).or_default().push(line);
     }

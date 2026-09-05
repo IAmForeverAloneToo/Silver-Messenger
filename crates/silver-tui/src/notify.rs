@@ -48,6 +48,9 @@ pub struct Notifier {
     mode: NotifyMode,
     last: Option<Instant>,
     title_unread: Option<usize>,
+    /// Leave the window title alone (reader mode: a screen reader would
+    /// announce every change, and the unread count is said in lines).
+    quiet_titles: bool,
 }
 
 impl Notifier {
@@ -56,7 +59,13 @@ impl Notifier {
             mode,
             last: None,
             title_unread: None,
+            quiet_titles: false,
         }
+    }
+
+    /// Never touch the window title from now on.
+    pub fn quiet_titles(&mut self) {
+        self.quiet_titles = true;
     }
 
     pub fn mode(&self) -> NotifyMode {
@@ -92,7 +101,7 @@ impl Notifier {
 
     /// Put the unread count in the window title; a no-op when unchanged.
     pub fn set_unread(&mut self, unread: usize) {
-        if self.title_unread == Some(unread) {
+        if self.quiet_titles || self.title_unread == Some(unread) {
             return;
         }
         self.title_unread = Some(unread);
@@ -106,11 +115,15 @@ impl Notifier {
 
     /// Save the terminal's title so it can be put back on exit.
     pub fn push_title(&self) {
-        write_raw("\x1b[22;2t");
+        if !self.quiet_titles {
+            write_raw("\x1b[22;2t");
+        }
     }
 
     pub fn pop_title(&self) {
-        write_raw("\x1b[23;2t");
+        if !self.quiet_titles {
+            write_raw("\x1b[23;2t");
+        }
     }
 }
 

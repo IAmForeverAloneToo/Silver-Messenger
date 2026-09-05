@@ -123,6 +123,10 @@ pub struct Config {
     /// private temporary copy. Only where the directory is protected.
     #[serde(default)]
     pub encrypted_downloads: bool,
+    /// Start in reader mode: one line per event for a screen reader, no
+    /// box drawing, no alternate screen.
+    #[serde(default)]
+    pub reader: bool,
 }
 
 fn default_downloads_quota_mib() -> u64 {
@@ -202,6 +206,7 @@ impl Default for Config {
             os_keystore: true,
             lock_after_minutes: 0,
             encrypted_downloads: false,
+            reader: false,
         }
     }
 }

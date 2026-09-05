@@ -24,11 +24,11 @@ def main():
     # that PgDn brings the rest into view, page by page, down to the keys.
     assert not a.has("/send <path>"), "the first page ends before /send"
     pages = 0
-    while not a.has("/send <path>") and pages < 4:
+    while not a.has("/send <path>") and pages < 8:
         a.key(PGDN)
         pages += 1
     assert a.has("/send <path>") and pages >= 1, "PgDn scrolls"
-    while not a.has("Ctrl-Q quits") and pages < 16:
+    while not a.has("Ctrl-Q quits") and pages < 20:
         a.key(PGDN)
         pages += 1
     assert a.has("Ctrl-Q quits") and a.has("Keys"), "end of help"

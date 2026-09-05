@@ -133,6 +133,19 @@ pub const COMMANDS: &[CommandInfo] = &[
         "how many columns the chat list takes (dragging its edge does the same); remembered",
     ),
     cmd(
+        "reader",
+        &[],
+        "on|off",
+        "start in reader mode next time: one line per event for a screen reader, no box drawing (silver --reader does it once)",
+    ),
+    cmd(
+        "history",
+        &[],
+        "[n]",
+        "in reader mode, read the last n lines of this chat with their times (default 10)",
+    ),
+    cmd("unread", &[], "", "say what waits unread in every chat"),
+    cmd(
         "accept",
         &[],
         "<n|user-id>",

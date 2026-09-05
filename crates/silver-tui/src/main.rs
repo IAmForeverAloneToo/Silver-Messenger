@@ -8,6 +8,7 @@ mod glyphs;
 mod link;
 mod notify;
 mod qr;
+mod reader;
 mod theme;
 mod ui;
 
@@ -152,6 +153,13 @@ struct Args {
     /// text can be selected without holding Shift).
     #[arg(long, env = "SILVER_NO_MOUSE")]
     no_mouse: bool,
+
+    /// Reader mode, for a screen reader: one line per event at the bottom
+    /// of the terminal, no box drawing, no colours, no alternate screen,
+    /// no mouse; the same commands and keys. /reader on makes it the
+    /// default.
+    #[arg(long, env = "SILVER_READER")]
+    reader: bool,
 
     /// Draw marks in ASCII (v, vv, x, ..) for terminals whose fonts lack
     /// the Unicode ones, such as the classic Windows console. Chosen by
@@ -482,12 +490,24 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
         return link::run(store, identity, relay_url, options, args.device_name).await;
     }
 
+    // Reader mode for this run, or from the config for good.
+    let reader = args.reader || config.reader;
+    if reader {
+        // The full mode's panic hook (ratatui's) restores the screen; here
+        // raw mode is all there is to undo before the message prints.
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = ratatui::crossterm::terminal::disable_raw_mode();
+            hook(info);
+        }));
+    }
+
     // The client runs until it quits or locks; a lock drops everything that
     // holds keys and starts over from the passphrase.
     loop {
         let options = connect_options(&store, &identity)?;
         let (client, events) = Client::spawn(relay_url.clone(), Arc::new(identity), options)?;
-        let app = app::App::new(
+        let mut app = app::App::new(
             store,
             client,
             relay_url.clone(),
@@ -498,21 +518,36 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
             at_rest.clone(),
         )?;
 
-        let terminal = ratatui::init();
         let mut stdout = std::io::stdout();
-        // Best effort: a terminal that lacks one of these just ignores it.
-        let _ = execute!(stdout, EnableBracketedPaste, EnableFocusChange);
-        if !args.no_mouse {
-            let _ = execute!(stdout, EnableMouseCapture);
+        let surface = if reader {
+            // Raw mode for the keys and nothing else: the screen is the
+            // terminal's own scrollback.
+            app.enable_reader();
+            ratatui::crossterm::terminal::enable_raw_mode()?;
+            let _ = execute!(stdout, EnableBracketedPaste, EnableFocusChange);
+            app::Surface::Reader(reader::Reader::new())
+        } else {
+            let terminal = ratatui::init();
+            // Best effort: a terminal that lacks one of these just ignores it.
+            let _ = execute!(stdout, EnableBracketedPaste, EnableFocusChange);
+            if !args.no_mouse {
+                let _ = execute!(stdout, EnableMouseCapture);
+            }
+            app::Surface::Screen(terminal)
+        };
+        let result = app.run(surface, events).await;
+        if reader {
+            let _ = execute!(stdout, DisableFocusChange, DisableBracketedPaste);
+            let _ = ratatui::crossterm::terminal::disable_raw_mode();
+        } else {
+            let _ = execute!(
+                stdout,
+                DisableMouseCapture,
+                DisableFocusChange,
+                DisableBracketedPaste
+            );
+            ratatui::restore();
         }
-        let result = app.run(terminal, events).await;
-        let _ = execute!(
-            stdout,
-            DisableMouseCapture,
-            DisableFocusChange,
-            DisableBracketedPaste
-        );
-        ratatui::restore();
         match result? {
             Exit::Quit => return Ok(()),
             Exit::Wiped(word) => {

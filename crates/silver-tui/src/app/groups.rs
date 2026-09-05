@@ -1569,6 +1569,7 @@ impl App {
         if line.expire_after_s > 0 {
             self.expiry_dirty = true;
         }
+        self.say_line(&Conversation::Group(group), &line);
         self.known_ids.insert(line.id.clone());
         self.group_threads.entry(group).or_default().push(line);
     }

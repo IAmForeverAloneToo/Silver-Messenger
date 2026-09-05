@@ -145,6 +145,9 @@ impl App {
     /// selection covers exactly one (Shift-Up, a triple click, a drag
     /// within it).
     pub(super) fn selected_source(&self) -> Option<usize> {
+        if self.reader {
+            return self.reader_cursor;
+        }
         let selection = self.selection?;
         if !matches!(self.view.pane, Pane::Thread(_) | Pane::Group(_)) {
             return None;
@@ -167,7 +170,7 @@ impl App {
     /// is selected, otherwise the last one it makes sense for.
     fn target_line(&self, conversation: &Conversation, want: Want) -> Result<usize, String> {
         let lines = self.lines_of(conversation);
-        if self.selection.is_some() {
+        if self.selection.is_some() || self.reader_cursor.is_some() {
             let Some(index) = self.selected_source() else {
                 return Err("Select one message (Shift-Up selects the newest).".to_owned());
             };
@@ -394,7 +397,7 @@ impl App {
             }
         }
         self.delete_line(&conversation, &id, None);
-        self.selection = None;
+        self.clear_selection();
         self.toast("Deleted for everyone; their clients remove it when it reaches them.");
     }
 
@@ -463,7 +466,7 @@ impl App {
             }
         };
         self.apply_edit(&conversation, &id, text, &edit_id, now_ms(), None);
-        self.selection = None;
+        self.clear_selection();
         self.toast("Edited.");
     }
 
@@ -508,7 +511,7 @@ impl App {
             }
             Conversation::Group(group) => self.send_group_content(group, content, text),
         }
-        self.selection = None;
+        self.clear_selection();
     }
 
     /// `/react <emoji|none>`: a reaction to the selected message (or the
@@ -571,7 +574,7 @@ impl App {
             }
         }
         self.apply_reaction(&conversation, &id, None, emoji.clone());
-        self.selection = None;
+        self.clear_selection();
         self.toast(if emoji.is_empty() {
             "Reaction taken back.".to_owned()
         } else {
@@ -652,9 +655,13 @@ impl App {
                 {
                     self.toast(format!("Could not save the edit: {e}"));
                 }
+                let said = from.map(|_| (self.name_of(from), format!("edited: {body}")));
                 if let Some(line) = self.line_in_mut(conversation, id) {
                     line.text = body;
                     line.edited = true;
+                }
+                if let Some((who, what)) = said {
+                    self.say_update(conversation, &who, &what);
                 }
             }
             None => {
@@ -685,6 +692,7 @@ impl App {
     fn delete_line(&mut self, conversation: &Conversation, id: &str, from: Option<UserId>) {
         match self.store.mark_deleted(conversation, id, from) {
             Ok(Deletion::Applied) => {
+                let mut shown = false;
                 if let Some(line) = self.line_in_mut(conversation, id) {
                     line.text.clear();
                     line.file = None;
@@ -693,6 +701,11 @@ impl App {
                     line.edited = false;
                     line.reactions.clear();
                     line.deleted = true;
+                    shown = true;
+                }
+                if shown && from.is_some() {
+                    let who = self.name_of(from);
+                    self.say_update(conversation, &who, "deleted a message");
                 }
             }
             Ok(Deletion::Tombstoned) => self.late.push(LateUpdate {
@@ -726,11 +739,28 @@ impl App {
         if let Err(e) = self.store.append_reaction(conversation, id, from, &emoji) {
             self.toast(format!("Could not save the reaction: {e}"));
         }
+        let said = from.map(|_| {
+            let target = self
+                .lines_of(conversation)
+                .iter()
+                .find(|l| l.id == id)
+                .map(|l| journal::excerpt(&l.text))
+                .unwrap_or_default();
+            let what = if emoji.is_empty() {
+                format!("took back a reaction to: {target}")
+            } else {
+                format!("reacted {emoji} to: {target}")
+            };
+            (self.name_of(from), what)
+        });
         match self.line_in_mut(conversation, id) {
             Some(line) => {
                 line.reactions.retain(|r| r.from != from);
                 if !emoji.is_empty() {
                     line.reactions.push(Reaction { from, emoji });
+                }
+                if let Some((who, what)) = said {
+                    self.say_update(conversation, &who, &what);
                 }
             }
             None => self.late.push(LateUpdate {
@@ -850,7 +880,8 @@ impl App {
             }
         }
         if self.selected_conversation() == Some(*conversation) {
-            self.selection = None;
+            // The rows moved under a selection, so it goes.
+            self.clear_selection();
         }
         self.expiry_dirty = true;
     }

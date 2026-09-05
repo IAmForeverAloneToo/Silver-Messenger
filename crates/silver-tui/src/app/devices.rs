@@ -861,6 +861,7 @@ impl App {
                         // move into the chat as they did there.
                         if let Some(index) = self.requests.iter().position(|r| r.from == user) {
                             self.take_request(index);
+                            self.settle_requests_pane();
                         }
                         self.system(
                             Level::Info,
