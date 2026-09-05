@@ -66,7 +66,9 @@ async fn wait_for(
     what: &str,
     mut pred: impl FnMut(&ClientEvent) -> bool,
 ) -> ClientEvent {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    // Generous: the event comes within a second on an idle machine, but
+    // a CI runner shares its cores among every test of this binary.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
         let ev = tokio::time::timeout_at(deadline, rx.recv())
             .await
