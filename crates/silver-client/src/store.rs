@@ -81,6 +81,11 @@ pub struct Config {
     /// are always sent.
     #[serde(default = "default_true")]
     pub read_receipts: bool,
+    /// Send cover traffic to contacts who have it on too, so the relay
+    /// cannot tell when the two of you are really talking. Off by default:
+    /// it costs bandwidth on both sides. See [`crate::cover`].
+    #[serde(default)]
+    pub cover: bool,
     /// How to draw attention to new messages: `all`, `bell` or `off`.
     #[serde(default = "default_notify")]
     pub notify: String,
@@ -176,6 +181,7 @@ impl Default for Config {
             send_epoch: None,
             invite_token: None,
             read_receipts: true,
+            cover: false,
             notify: default_notify(),
             marks: default_marks(),
             theme: default_theme(),

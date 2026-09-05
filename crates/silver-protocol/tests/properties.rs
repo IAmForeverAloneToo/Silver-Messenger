@@ -84,6 +84,7 @@ fn content() -> impl Strategy<Value = Content> {
         ),
         any::<u64>().prop_map(move |at| Content::Revocation(alice.revocation(at))),
         any::<u64>().prop_map(move |at| Content::Succession(identity(1).succeed_to(&bob, at))),
+        text(500).prop_map(|pad| Content::Cover { pad }),
     ]
 }
 

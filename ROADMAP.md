@@ -324,7 +324,8 @@ rotated or revoked, and now can (43). A relay that showed one person a
 stale key or a different log was caught only when two people compared
 safety numbers by hand, and is now caught by their clients gossiping the
 log head (44). The handshake and the ratchet are modelled, with published
-vectors and a harness that replays them (45).
+vectors and a harness that replays them (45). Cover traffic is there for
+those who want to pay for it (46).
 
 41. [x] **Post-quantum ratchet** (L). An ML-KEM ratchet next to the
         Diffie–Hellman one, so healing after a compromise is post-quantum
@@ -371,7 +372,7 @@ vectors and a harness that replays them (45).
         handshake and the ratchet; a conformance harness a second
         implementation could run; property tests for seal and open. Done
         before the outside review so the reviewer starts from a model.
-46. [ ] **Cover traffic, opt-in** (S). Two clients that both advertise
+46. [x] **Cover traffic, opt-in** (S). Two clients that both advertise
         it send dummy padded messages at random intervals while online
         and discard them on receipt, so the relay's picture of who talks
         when blurs. It costs bandwidth, so it is off by default and the

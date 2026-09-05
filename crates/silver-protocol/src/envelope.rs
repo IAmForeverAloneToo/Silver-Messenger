@@ -82,6 +82,16 @@ pub enum Content {
     /// Cross-signed by both keys. Only sent to peers that advertised
     /// `lifecycle`.
     Succession(crate::lifecycle::Succession),
+    /// Cover traffic: a message that says nothing, sent at random moments
+    /// so the relay cannot tell when two people are really talking. The
+    /// recipient discards it without a trace (no history, no receipt, no
+    /// notification). `pad` is random letters whose length varies the
+    /// padded size the way real messages do. Only sent to peers that
+    /// advertised `cover`, which a client does only while its user has
+    /// cover traffic on, so both sides have agreed to the cost.
+    Cover {
+        pad: String,
+    },
 }
 
 /// How far a message got on the recipient's side. Ordered: read implies
@@ -109,6 +119,12 @@ pub mod capability {
     /// `Content::Succession`: identity-lifecycle statements pushed inside a
     /// message so a peer learns of a revoked or rotated key promptly.
     pub const LIFECYCLE: &str = "lifecycle";
+    /// The client understands `Content::Cover` and wants it: its user has
+    /// turned cover traffic on, so it sends cover to peers that advertise
+    /// this too and discards what it receives. Advertised only while the
+    /// setting is on, so cover flows only between two clients whose users
+    /// both agreed to it.
+    pub const COVER: &str = "cover";
 }
 
 /// Bodies are padded to a multiple of this many bytes, so a relay sees

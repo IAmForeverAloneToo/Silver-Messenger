@@ -10,6 +10,7 @@
 
 pub mod backup;
 pub mod connection;
+pub mod cover;
 pub mod files;
 pub mod invite;
 pub mod keystore;
@@ -31,6 +32,7 @@ pub use connection::{
     Client, ClientError, ClientEvent, DEFAULT_RELAY_URL, Delivery, Progress, TransparencyEvent,
     observe_relay,
 };
+pub use cover::CoverSchedule;
 pub use files::{FileInfo, human_size};
 pub use invite::InviteLink;
 pub use proxy::Proxy;
@@ -39,7 +41,9 @@ pub use sessions::{SessionError, SessionInfo, SessionStore, SharedSessions};
 pub use transparency::{Discrepancy, LogStore, SharedLog};
 
 /// What this client understands beyond plain text, advertised inside every
-/// body it sends; see [`silver_protocol::envelope::capability`].
+/// body it sends; see [`silver_protocol::envelope::capability`]. Cover
+/// traffic (`cover`) is advertised on top of these only while the user has
+/// it on ([`Client::set_cover`]).
 pub const CAPABILITIES: &[&str] = &[
     silver_protocol::envelope::capability::RECEIPTS,
     silver_protocol::envelope::capability::FILES,

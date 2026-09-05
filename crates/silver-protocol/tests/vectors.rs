@@ -1885,6 +1885,16 @@ fn body() {
                 ),
             ),
             (
+                "cover",
+                plain(
+                    Content::Cover {
+                        pad: "abcdefghijklmnopqrstuvwxyz".into(),
+                    },
+                    vec![capability::COVER],
+                    None,
+                ),
+            ),
+            (
                 "ratchet_v2_with_init",
                 BodyIn::Ratchet(RatchetBody {
                     v: 2,

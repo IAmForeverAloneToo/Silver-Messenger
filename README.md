@@ -564,8 +564,15 @@ it does not, is in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
   second implementation can check itself against; property tests cover
   what must hold for every input.
 
-What it does **not** do yet: cover traffic. The ordered plan is in
-[ROADMAP.md](ROADMAP.md).
+* **Cover traffic, opt-in**: `/cover on` sends meaningless messages at
+  random moments to contacts who have it on too, while you are both
+  around, so the relay cannot tell when you really talk. It shows that
+  you are in contact and does not hide bursts, long messages or files;
+  it costs bandwidth, so it is off by default, and the threat model says
+  exactly what it hides and what it does not.
+
+What it does **not** do yet: groups, and more than one device per
+identity. The ordered plan is in [ROADMAP.md](ROADMAP.md).
 
 ## Development
 

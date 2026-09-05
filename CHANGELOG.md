@@ -8,6 +8,18 @@ means behaviour or the wire protocol changed in a way worth reading about.
 
 ### Added
 
+- **Cover traffic, opt-in.** `/cover on` sends meaningless messages at
+  random moments (every 30 seconds to three minutes) to contacts who have
+  it on too, for ten minutes after each message from them, so two running
+  clients cover each other while both are around and the relay cannot
+  tell when they really talk or, for short and medium messages, which
+  message is real. Cover is discarded on receipt without a trace, never
+  queued while offline, and sent only to contacts whose last message
+  advertised the new `cover` capability, so both sides have agreed to the
+  cost (about 20 KB an hour per covered contact). It shows that the two
+  are in contact and does not hide bursts, long messages, files, or
+  connecting; it is off by default. Protocol section 4.6 and the threat
+  model have the details.
 - **Formal models and test vectors.** The handshake (v2 and v4) and the
   ratchet (v2 and v4) are modelled in Verifpal under `formal/`, against a
   classical, a quantum-capable and an active adversary and with a

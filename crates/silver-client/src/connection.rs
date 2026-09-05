@@ -2,10 +2,12 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
+use silver_protocol::envelope::capability;
 use silver_protocol::wire::{
     ClientFrame, ErrorCode, ServerFrame, auth_signature, auth_signature_bound, feature, url_host,
 };
@@ -288,6 +290,8 @@ pub struct Client {
     relay_features: Arc<Mutex<Vec<String>>>,
     /// The relay's transparency log as replayed, when one is kept.
     log: Option<SharedLog>,
+    /// Whether to advertise cover traffic (see [`crate::cover`]).
+    cover: Arc<AtomicBool>,
 }
 
 impl Client {
@@ -333,9 +337,27 @@ impl Client {
                 upgrade_checks: Arc::new(Mutex::new(HashMap::new())),
                 relay_features,
                 log: options.transparency,
+                cover: Arc::new(AtomicBool::new(false)),
             },
             ev_rx,
         ))
+    }
+
+    /// Advertise cover traffic in every body from now on (or stop). The
+    /// front end sets this from the user's setting; the sending of cover
+    /// itself is the front end's job (see [`crate::cover`]).
+    pub fn set_cover(&self, on: bool) {
+        self.cover.store(on, Ordering::Relaxed);
+    }
+
+    /// The capabilities every body advertises: [`CAPABILITIES`], plus
+    /// `cover` while cover traffic is on.
+    pub fn capabilities(&self) -> Vec<&'static str> {
+        let mut caps = CAPABILITIES.to_vec();
+        if self.cover.load(Ordering::Relaxed) {
+            caps.push(capability::COVER);
+        }
+        caps
     }
 
     /// Whether the relay advertised a feature (see
@@ -472,7 +494,7 @@ impl Client {
     }
 
     /// Seal any content for `to` and queue it. Every body advertises this
-    /// client's [`CAPABILITIES`].
+    /// client's [`Client::capabilities`].
     pub async fn send_content_sequenced(
         &self,
         to: &KeyBundle,
@@ -483,7 +505,7 @@ impl Client {
             content,
             now_ms(),
             sequence,
-            CAPABILITIES,
+            &self.capabilities(),
             self.gossip_head(),
         )
         .encode()?;

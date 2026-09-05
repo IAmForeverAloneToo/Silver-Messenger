@@ -132,6 +132,26 @@
       }
     },
     {
+      "name": "cover",
+      "inputs": {
+        "kind": "plain",
+        "content": {
+          "type": "cover",
+          "pad": "abcdefghijklmnopqrstuvwxyz"
+        },
+        "sent_at_ms": 1700000000000,
+        "epoch": 81985529216486895,
+        "seq": 42,
+        "caps": [
+          "cover"
+        ]
+      },
+      "outputs": {
+        "encoded": "{\"sent_at_ms\":1700000000000,\"epoch\":81985529216486895,\"seq\":42,\"content\":{\"type\":\"cover\",\"pad\":\"abcdefghijklmnopqrstuvwxyz\"},\"caps\":[\"cover\"]}                  ",
+        "encoded_len": 160
+      }
+    },
+    {
       "name": "ratchet_v2_with_init",
       "inputs": {
         "kind": "ratchet",

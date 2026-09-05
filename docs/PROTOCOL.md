@@ -239,6 +239,7 @@ the relay does not learn which clients have which features.
 | `files` | Understands `file` content and can fetch blobs (section 7.5). |
 | `padded_files` | Cuts a fetched file to its announced `size`, so the sender may pad the last chunk (4.5). |
 | `lifecycle` | Understands `revocation` and `succession` content: identity-lifecycle statements pushed inside a message (section 10). |
+| `cover` | Understands `cover` content and wants it: the client's user has cover traffic on (4.6). Advertised only while that is so. |
 
 ### 4.4 Receipts
 
@@ -297,6 +298,36 @@ one full chunk); `chunks` and `size` are unchanged, and the recipient
 cuts the decrypted bytes to `size` before checking `sha256`. The relay
 then sees file sizes in 64 KiB steps only. A recipient without the
 capability requires the decrypted length to equal `size` exactly.
+
+### 4.6 Cover traffic
+
+```json
+{ "type": "cover", "pad": "<random letters>" }
+```
+
+A message that says nothing, sent so that the relay sees traffic between
+two people whether or not they are talking. It is an ordinary body in
+every other way: numbered with `seq`, carried in a session when one
+exists, padded like the rest, so nothing on the wire tells it from a
+message. A recipient discards it after decrypting it: no history, no
+receipt, no notification; its id still counts for de-duplication and its
+`seq` for the sequence check. `pad` is random ASCII letters. This
+implementation draws its length so the padded body takes the steps short
+and medium messages do: seven in ten add no block to the framing, two in
+ten add one, one in ten adds two, each plus a random remainder of a
+block.
+
+Cover is opt-in and mutual. A client advertises `cover` only while its
+user has it on, and sends cover only to contacts whose last message
+advertised it, so both users have agreed to the cost before a single
+cover message flows, and a client that does not know the content type is
+never sent it. This implementation covers a contact for ten minutes after
+each message from them (cover included), at intervals drawn uniformly
+from 30 seconds to three minutes, and only while connected, never from
+the outbox. Two running clients therefore keep each other covered until
+one of them stops, and the other falls silent within ten minutes, so at
+most a handful of cover messages ever wait in an offline contact's
+mailbox. `THREAT_MODEL.md` says what this hides and what it does not.
 
 ## 5. Session establishment (X3DH, and PQXDH from v3)
 
@@ -653,6 +684,10 @@ without the key from the same message.
   random delay (4.4); `read` only for messages shown while the window has
   focus, and only while the user allows it. Receipt bodies are not
   themselves acknowledged.
+* **Cover traffic.** Off unless the user turns it on; advertised as
+  `cover` only while on; sent (4.6) only to contacts whose last message
+  advertised it, only while connected, never queued for later; discarded
+  on receipt, with no receipt of its own.
 * **Files.** Sent only when the recipient advertised `files` and the relay
   advertises `blobs`; padded (4.5) when it advertised `padded_files` too.
   The upload finishes (every chunk acknowledged) before the `file` message
@@ -699,11 +734,13 @@ signed session messages disappear.
 
 Sizes are padded to steps
 (160 bytes for messages, 64 KiB for files between clients that support
-it) rather than to one size, and there is no cover traffic, so a relay or
-network observer still sees when messages and blobs travel and roughly
-how big they are, including that a blob is fetched some time after a
-message is delivered. Receipts are delayed at random rather than hidden.
-Group messaging is not defined yet.
+it) rather than to one size, and cover traffic (4.6) flows only between
+two contacts who both turned it on and only while both are around, so a
+relay or network observer still sees when blobs travel and roughly how
+big messages and blobs are, including that a blob is fetched some time
+after a message is delivered; between contacts without cover it sees
+when messages travel too. Receipts are delayed at random rather than
+hidden. Group messaging is not defined yet.
 
 ## 10. Identity lifecycle
 

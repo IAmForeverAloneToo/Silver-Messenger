@@ -80,6 +80,12 @@ pub const COMMANDS: &[CommandInfo] = &[
         "tell contacts when you have read their messages (default on)",
     ),
     cmd(
+        "cover",
+        &[],
+        "on|off",
+        "send meaningless messages at random moments to contacts who do the same, so the relay cannot tell when you really talk (default off; costs bandwidth)",
+    ),
+    cmd(
         "notify",
         &[],
         "all|bell|off",

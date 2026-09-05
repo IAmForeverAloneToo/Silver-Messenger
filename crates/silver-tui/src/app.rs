@@ -261,6 +261,10 @@ pub struct App {
     receipts: ReceiptQueue,
     /// Whether to tell contacts when their messages were shown.
     pub read_receipts: bool,
+    /// Whether to send cover traffic to contacts who do the same.
+    pub cover: bool,
+    /// Who is being covered and when the next cover message is due.
+    cover_schedule: silver_client::CoverSchedule,
     /// The symbols the interface draws with.
     pub glyphs: Glyphs,
     pub theme: Theme,
@@ -367,6 +371,8 @@ impl App {
         let blocked = store.load_blocked()?;
         let config = store.load_config()?;
         let read_receipts = config.read_receipts;
+        let cover = config.cover;
+        client.set_cover(cover);
         let lock_after = (config.lock_after_minutes > 0)
             .then(|| Duration::from_secs(config.lock_after_minutes.saturating_mul(60)));
         let notifier = Notifier::new(NotifyMode::parse(&config.notify).unwrap_or(NotifyMode::All));
@@ -423,6 +429,8 @@ impl App {
             requests_full_noted: false,
             receipts: ReceiptQueue::default(),
             read_receipts,
+            cover,
+            cover_schedule: silver_client::CoverSchedule::default(),
             glyphs,
             theme,
             narrow: false,
@@ -532,6 +540,7 @@ impl App {
                 _ = tick.tick() => {
                     self.expire_toast();
                     self.flush_receipts();
+                    self.flush_cover();
                     if let Some(after) = self.lock_after {
                         if self.can_lock() && self.last_activity.elapsed() >= after {
                             self.lock_requested = true;
@@ -1420,6 +1429,7 @@ impl App {
             "refresh" => self.cmd_refresh(),
             "session" => self.cmd_session(),
             "receipts" => self.cmd_receipts(&rest),
+            "cover" => self.cmd_cover(&rest),
             "notify" => self.cmd_notify(&rest),
             "marks" | "ascii" => self.cmd_marks(&rest),
             "theme" | "colors" | "colours" => self.cmd_theme(&rest),
@@ -1871,6 +1881,47 @@ impl App {
         self.system(Level::Info, line);
     }
 
+    /// `/cover on|off`: cover traffic to contacts who have it on too.
+    fn cmd_cover(&mut self, args: &[&str]) {
+        let on = match args.first().map(|s| s.to_ascii_lowercase()).as_deref() {
+            None => {
+                let state = if self.cover { "on" } else { "off" };
+                let covering = self.cover_schedule.len();
+                self.toast(format!(
+                    "Cover traffic is {state}{}. Usage: /cover on|off",
+                    if self.cover {
+                        format!(", covering {covering} contact(s) right now")
+                    } else {
+                        String::new()
+                    }
+                ));
+                return;
+            }
+            Some("on") => true,
+            Some("off") => false,
+            Some(_) => {
+                self.toast("Usage: /cover on|off");
+                return;
+            }
+        };
+        self.cover = on;
+        self.client.set_cover(on);
+        if !on {
+            self.cover_schedule.clear();
+        }
+        let mut config = self.store.load_config().unwrap_or_default();
+        config.cover = on;
+        if let Err(e) = self.store.save_config(&config) {
+            self.toast(format!("Could not save config: {e}"));
+        }
+        let line = if on {
+            "Cover traffic on: contacts who turn it on too get meaningless messages from you at random moments while you are both around, and you from them, so the relay cannot tell when you really talk. It shows that you are in contact, and long messages, files and bursts still stand out. It costs some bandwidth (about 20 KB an hour per contact)."
+        } else {
+            "Cover traffic off: the relay sees when you really send to and hear from each contact."
+        };
+        self.system(Level::Info, line);
+    }
+
     fn cmd_session(&mut self) {
         let Some(index) = self.selected_contact_index() else {
             self.toast("Select a contact first.");
@@ -2252,6 +2303,44 @@ impl App {
         }
     }
 
+    /// Send cover traffic to the contacts whose turn has come, while
+    /// connected. Nothing is queued for later: cover that cannot go now
+    /// is not worth sending later.
+    fn flush_cover(&mut self) {
+        if !self.cover || self.cover_schedule.is_empty() {
+            return;
+        }
+        if !matches!(self.connection, Connection::Connected) {
+            return;
+        }
+        for peer in self.cover_schedule.take_due(Instant::now()) {
+            // Only while they still advertise it: a contact who turned
+            // cover off stops receiving it with their next message, and a
+            // revoked one is dead.
+            if self.covers(&peer) {
+                self.send_content_to(peer, silver_client::cover::message());
+            } else {
+                self.cover_schedule.forget(&peer);
+            }
+        }
+    }
+
+    /// A contact sent something: if both sides have cover on, keep
+    /// covering them.
+    fn note_heard(&mut self, peer: UserId) {
+        if self.cover && self.covers(&peer) {
+            self.cover_schedule.heard(peer, Instant::now());
+        }
+    }
+
+    /// Whether `peer` is a live contact whose last message asked for cover.
+    fn covers(&self, peer: &UserId) -> bool {
+        self.contact_index(peer).is_some_and(|i| {
+            let contact = &self.contacts[i];
+            !contact.revoked && contact.supports(capability::COVER)
+        })
+    }
+
     fn handle_internal(&mut self, ev: Internal) {
         match ev {
             Internal::LookupDone {
@@ -2322,11 +2411,13 @@ impl App {
                         Content::Text { body } => Some(body.clone()),
                         Content::File { .. } => FileInfo::from_content(&content)
                             .map(|i| format!("[file] {}", i.label())),
-                        // Receipts and lifecycle statements are not shown in
-                        // the conversation as messages of their own.
+                        // Receipts, lifecycle statements and cover traffic
+                        // are not shown in the conversation as messages of
+                        // their own.
                         Content::Receipt { .. }
                         | Content::Revocation(_)
-                        | Content::Succession(_) => None,
+                        | Content::Succession(_)
+                        | Content::Cover { .. } => None,
                     };
                     if let Some(text) = text {
                         // The relay may have answered before this event was
@@ -2351,8 +2442,8 @@ impl App {
                     }
                 }
                 Err(e) => {
-                    if matches!(content, Content::Receipt { .. }) {
-                        tracing::debug!("receipt to {peer} not sent: {e}");
+                    if matches!(content, Content::Receipt { .. } | Content::Cover { .. }) {
+                        tracing::debug!("receipt or cover to {peer} not sent: {e}");
                     } else {
                         self.toast(format!("Not sent: {e}"));
                         self.system(
@@ -2475,6 +2566,7 @@ impl App {
                     self.contacts[index].caps = message.caps.clone();
                     self.persist_contacts();
                 }
+                self.note_heard(from);
 
                 // Sequence numbers: drop replays, mention gaps and resets.
                 let name = self.contact_name(&from);
@@ -2518,6 +2610,13 @@ impl App {
                     // verifying the signatures; they never reach here as a
                     // plain message.
                     Content::Revocation(_) | Content::Succession(_) => {
+                        self.known_ids.insert(message.id);
+                        return;
+                    }
+                    // Cover traffic says nothing and leaves no trace: no
+                    // line, no receipt, no notification, no unread mark. It
+                    // counted as hearing from them above, which is its job.
+                    Content::Cover { .. } => {
                         self.known_ids.insert(message.id);
                         return;
                     }
@@ -3118,7 +3217,10 @@ impl App {
                     Err(e) => format!("[file] {} · refused: {e}", info.label()),
                 }
             }
-            Content::Receipt { .. } | Content::Revocation(_) | Content::Succession(_) => return,
+            Content::Receipt { .. }
+            | Content::Revocation(_)
+            | Content::Succession(_)
+            | Content::Cover { .. } => return,
         };
         // Strangers get bounded room: so many senders, so much per sender.
         let mut text: String = text.chars().take(MAX_HELD_CHARS).collect();
@@ -3421,6 +3523,115 @@ mod tests {
         )
         .unwrap();
         (app, dir)
+    }
+
+    fn message_from(
+        id: &str,
+        from: &Identity,
+        to: UserId,
+        content: silver_protocol::Content,
+    ) -> Message {
+        Message {
+            id: id.to_owned(),
+            from: from.user_id(),
+            to,
+            sent_at_ms: 1,
+            sequence: silver_protocol::Sequence::default(),
+            content,
+            forward_secret: true,
+            signed: false,
+            caps: vec![capability::COVER.to_owned()],
+            head: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn cover_is_off_by_default_and_the_setting_is_advertised_and_kept() {
+        let (mut app, _dir) = app();
+        assert!(!app.cover);
+        assert!(!app.client.capabilities().contains(&capability::COVER));
+        app.cmd_cover(&["on"]);
+        assert!(app.cover);
+        assert!(app.client.capabilities().contains(&capability::COVER));
+        assert!(app.store.load_config().unwrap().cover);
+        app.cmd_cover(&["off"]);
+        assert!(!app.cover);
+        assert!(!app.client.capabilities().contains(&capability::COVER));
+        assert!(!app.store.load_config().unwrap().cover);
+    }
+
+    #[tokio::test]
+    async fn a_cover_message_leaves_no_trace_and_keeps_its_sender_covered() {
+        let (mut app, _dir) = app();
+        let me = app.me;
+        let peer = Identity::generate();
+        let mut contact = Contact::new(peer.user_id());
+        contact.bundle = Some(peer.key_bundle());
+        app.contacts.push(contact);
+
+        // With cover off, a cover message is discarded and nobody is covered.
+        let message = message_from(
+            "c1",
+            &peer,
+            me,
+            silver_protocol::Content::Cover { pad: "x".into() },
+        );
+        let id = message.id.clone();
+        app.handle_client_event(ClientEvent::Message(Box::new(message)));
+        assert!(
+            app.threads
+                .get(&peer.user_id())
+                .is_none_or(|t| t.is_empty())
+        );
+        assert!(app.unread.get(&peer.user_id()).is_none_or(|u| u.is_empty()));
+        assert!(app.receipts.is_empty(), "no receipt for cover");
+        assert!(app.known_ids.contains(&id));
+        assert!(app.cover_schedule.is_empty());
+
+        // With cover on, hearing from a contact who advertises it starts
+        // covering them; a real message counts the same, and is shown.
+        app.cmd_cover(&["on"]);
+        let message = message_from(
+            "c2",
+            &peer,
+            me,
+            silver_protocol::Content::Cover { pad: "y".into() },
+        );
+        app.handle_client_event(ClientEvent::Message(Box::new(message)));
+        assert_eq!(app.cover_schedule.len(), 1);
+        assert!(
+            app.threads
+                .get(&peer.user_id())
+                .is_none_or(|t| t.is_empty())
+        );
+        let message = message_from(
+            "t1",
+            &peer,
+            me,
+            silver_protocol::Content::Text {
+                body: "hello".into(),
+            },
+        );
+        app.handle_client_event(ClientEvent::Message(Box::new(message)));
+        assert_eq!(app.threads[&peer.user_id()].len(), 1);
+        assert_eq!(app.cover_schedule.len(), 1);
+
+        // A contact who does not advertise cover is never covered.
+        let other = Identity::generate();
+        app.contacts.push(Contact::new(other.user_id()));
+        let mut message = message_from(
+            "t2",
+            &other,
+            me,
+            silver_protocol::Content::Text { body: "hi".into() },
+        );
+        message.caps = Vec::new();
+        app.handle_client_event(ClientEvent::Message(Box::new(message)));
+        assert_eq!(app.cover_schedule.len(), 1);
+
+        // Turning cover off stops it at once.
+        app.cmd_cover(&["off"]);
+        assert!(app.cover_schedule.is_empty());
     }
 
     #[tokio::test]

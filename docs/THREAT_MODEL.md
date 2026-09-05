@@ -60,7 +60,15 @@ Can:
 - See every recipient id, the timing of every send and delivery, and
   every envelope's size to the nearest 160 bytes (bodies are padded in
   steps, so a receipt, a short and a medium message look alike; a long
-  message is still visibly long).
+  message is still visibly long). Between two contacts who both turned
+  cover traffic on (`/cover on`, protocol section 4.6), the timing says
+  less while both clients run: meaningless messages go between them at
+  random moments whether or not they are talking, so a real message is
+  not told from cover by when it went or, for short and medium messages,
+  by its size. The relay still sees that the two are in contact, sees
+  bursts and long messages stand out, sees files, and sees each client
+  connect and disconnect; nothing covers contacts who did not turn it on
+  or are not around.
 - See the network address and timing of the connection that submitted each
   envelope. Envelopes arrive on connections that never authenticate, so
   the relay is not told which identity sent them; it can still guess from
@@ -340,13 +348,18 @@ independent rebuild is the answer to that.
   only the message reveals.
 - **Sizes and timing**: bodies are padded with spaces to 160-byte steps
   and, between clients that support it, the last file chunk to a whole
-  64 KiB; receipts leave after a random delay. Both connections can go
-  through a SOCKS5 proxy such as Tor, one circuit per connection.
+  64 KiB; receipts leave after a random delay. Cover traffic, opt-in and
+  mutual (`/cover on`), sends meaningless messages at random intervals
+  (30 seconds to three minutes) to contacts who do the same, for ten
+  minutes after each message from them, so two running clients cover
+  each other while both are around. Both connections can go through a
+  SOCKS5 proxy such as Tor, one circuit per connection.
 - **At rest**: a per-installation data key, wrapped by the OS key store or
   by a passphrase through Argon2id; every file under it is
   XChaCha20-Poly1305.
 
-Deliberately absent: cover traffic (roadmap item 46). Deniability is
+Deliberately off by default: cover traffic (`/cover on`, roadmap item
+46), which costs bandwidth on both sides and the relay. Deniability is
 provided for v4 sessions (above); v1 and v2 messages are still signed
 until v1 is retired and every peer is on v4.
 
@@ -451,7 +464,7 @@ maintainer's account plus signing key both being taken.
 | Gap | Status |
 | --- | --- |
 | Deniability: a recipient can prove who wrote what | Closed for v4 sessions (0.8.0): a v4 body carries no sealed-layer signature (`PROTOCOL.md` section 9). Still open for v1 bodies (no prekeys) and v2 sessions (older peer or relay), which stay signed until v1 is retired. |
-| Cover traffic: the relay and the network see when messages travel and roughly how big they are | Roadmap item 46 (opt-in). Padding steps and receipt delays (0.6.0) are as far as this goes until then. |
+| Cover traffic: the relay and the network see when messages travel and roughly how big they are | Closed as far as it goes (0.8.0, roadmap item 46, opt-in): two contacts who both turn it on send meaningless messages to each other at random moments while both clients run, so the relay cannot tell when they really talk or, for short and medium messages, which message is real. What remains: it shows the two are in contact, bursts and long messages stand out, files are visible, connecting and disconnecting are visible, and nothing covers contacts who did not opt in or are not around. It is off by default because it costs bandwidth. |
 | Post-quantum ratchet steps: after the hybrid handshake the ratchet is X25519 only | Closed for v4 sessions (0.8.0, roadmap item 41): every ratchet step does an ML-KEM step. A v2 session (older peer or relay) is still X25519-only after the handshake. |
 | Identity revocation | Closed (0.8.0, roadmap item 43): a pre-signed revocation certificate kept in the data directory and the backup, and a cross-signed succession for a planned rotation, served by the relay and verified by contacts (`PROTOCOL.md` section 10). A revocation is final. What remains is the race on a succession an attacker holding a compromised key issued before its owner revoked it. |
 | A relay that serves one person a stale key, hides a revocation or handover from them, or tells two people two different stories | Closed (0.8.0, roadmap item 44): the relay keeps a hash-chained log of every key change and statement, clients replay it, refuse what it does not bear out, and compare log heads inside every message, so a fork is reported by the next message between two people it treated differently (`PROTOCOL.md` section 11). Substitution of an identity was never possible, the id being the key. What remains: two contacts who never message each other never compare heads, and a relay that forks for one client and everyone that client talks to is caught only through someone on the other side. |
