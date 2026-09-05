@@ -20,7 +20,8 @@ optional sequences.
 | Paste | The OS clipboard on `Ctrl-V`, `Shift-Insert`, right click | The terminal's own paste (usually `Ctrl-Shift-V`, `Cmd-V`, or the menu), which arrives as bracketed paste |
 | Desktop notification | OSC 777, OSC 9, OSC 99, written together; the terminal takes the one it knows | Bell and the unread count in the window title still work |
 | Window title | OSC 2, pushed at start and restored on exit | Ignored |
-| Colour | 16 colours; `--theme mono` and `NO_COLOR` use bold, dim and reverse video only | Use mono |
+| Colour | 16 colours; `--theme mono` and `NO_COLOR` use bold, dim and reverse video only; `--theme contrast` is bright bold text on black | Use mono |
+| Reader mode (`--reader`) | Raw mode, bracketed paste and focus events only: no alternate screen, no mouse, no title, no attributes; lines end in `\r\n`, the compose line is erased with `\r ESC[K` and the cursor moved within it with `ESC[nD` | Any terminal has these |
 
 ## Known terminals
 
@@ -63,6 +64,51 @@ driven inside tmux. `cargo test -p silver-tui` also draws the main screen
 into a test backend and compares it with `crates/silver-tui/tests/snapshots/main.txt`;
 after a deliberate layout change, look at the new screen and accept it
 with `UPDATE_SNAPSHOTS=1 cargo test -p silver-tui`.
+
+## Screen readers
+
+Reader mode (`silver --reader`; README, "Reader mode") is what a screen
+reader is meant to read: whole lines arriving at the bottom of the
+terminal, in order, with nothing decorative in them. What can be checked
+without a screen reader is checked in CI: `tests/tui/test_reader.py` runs
+a reader-mode client beside an ordinary one and asserts that the bytes it
+writes carry no cursor addressing, no alternate screen, no attributes, no
+window title, no mouse capture and no box drawing, that each event is one
+line, and that the compose line stays last. What needs a screen reader is
+the protocol below, run by hand. A row below is checked only once someone
+has run the protocol and says so, with the versions used; until then the
+client claims nothing.
+
+The protocol, in a terminal the screen reader supports, with the reader
+running:
+
+1. Start `silver --reader` against a relay (`silver-relay --ephemeral` on
+   the same machine will do) and an ordinary client for the other side.
+   The opening line (`Silver Messenger, reader mode. …`) and `Connected
+   to …` are read as they appear.
+2. From the other client, add this one and write to it. `Contact request
+   from …` is read; `Shift-Tab` reads the Requests pane; `/accept 1` reads
+   the chat and the message in it; reviewing the cursor line reads the
+   prompt as the chat's name.
+3. Type a message and press Enter: `you: …` is read once (the reader's
+   own echo of the typing is expected; the sent line must not be read
+   twice).
+4. Have the other side write while this chat is open (`alice: …`) and
+   while another is (`alice, in another chat: …`); then `/unread`,
+   `/go alice`, `Shift-Up`, `Esc`, `/history 3` and `F1`. Each is read as
+   lines; nothing is read by name as a box-drawing or control character.
+5. `Ctrl-Q`: `Bye.` and the shell prompt, with the terminal back in its
+   normal mode (typed text echoes).
+
+| Platform | Screen reader and terminal | Status |
+| --- | --- | --- |
+| Linux, GNOME | Orca with GNOME Terminal (VTE) | Unchecked |
+| Windows | NVDA with Windows Terminal | Unchecked |
+| Windows | Narrator with Windows Terminal | Unchecked |
+| macOS | VoiceOver with Terminal.app | Unchecked |
+
+A row becomes `Checked on <versions>` when the protocol has been run,
+with anything that had to be worked around noted under Quirks.
 
 ## Quirks worth knowing
 

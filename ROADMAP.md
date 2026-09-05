@@ -438,10 +438,14 @@ those who want to pay for it (46).
         `/reply`, `/react`, `/edit`, `/delete [me]`, `/timer`, `/files
         encrypt`, `--export-history`; protocol sections 4.7, 13.3 and
         14.5; the design note `docs/design/everyday.md`.
-51. [ ] **Accessibility in the terminal** (M). A screen-reader mode with
+51. [x] **Accessibility in the terminal** (M). A screen-reader mode with
         linear output and no box drawing, high-contrast palettes, and
         every action reachable without the mouse checked against a
-        screen reader on each platform.
+        screen reader on each platform. Shipped as `--reader` and
+        `/reader on`, the `contrast` palette, `/go` and `/sidebar`; what
+        the pty suite can check of reader mode it checks, and the
+        check against each platform's screen reader is a manual protocol
+        in docs/TERMINALS.md, unchecked until someone runs it.
 52. [ ] **Client robustness** (S). The terminal restored on a panic,
         atomic writes for every store file checked under a kill test,
         memory caps for history and the seen-id set, and a soak test

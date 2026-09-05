@@ -11,10 +11,10 @@ this note is corrected.
 | --- | --- |
 | What a screen reader needs | Text that arrives as whole lines at the bottom of a scrolling terminal, in the order things happen, with nothing decorative in it. A full-screen program that repaints panes gives a reader fragments of changed cells, box-drawing characters read out by name, and no order; that is the mode to avoid, not to patch. |
 | Reader mode | A second renderer, `silver --reader` (`/reader on` remembers it, `SILVER_READER=1` too): no alternate screen, no box drawing, no marks, no colours or attributes, no mouse capture, no cursor movement beyond the compose line. Every event is one line appended at the bottom; the compose line is the last line and its prompt names the open chat. The rest of the client (commands, keys, the store, the network) is the same code. |
-| What the lines say | Messages in the open chat as `alice: hello`, in another chat as `alice (team): hello`; sent lines as `you: hello` when the relay takes them, and `not delivered: …` when it does not; edits as `alice edited: …`, deletions as `alice deleted a message`, reactions as `alice reacted 👍 to: hello…`; system notices, toasts and timer notes as themselves. Clocks are left out of the lines (a reader would say every one); `/history` shows them. |
+| What the lines say | Messages in the open chat as `alice: hello`, in another chat as `alice, in team: hello` (for a contact, whose chat is named after them, `alice, in another chat: hello`); sent lines as `you: hello` when the client records them, which is before the relay answers, a refusal arriving after as the warning and the toast the full mode shows (`Not delivered: …`); edits as `alice edited: …`, deletions as `alice deleted a message`, reactions as `alice reacted 👍 to: hello…` and `alice took back a reaction to: hello…`, each with `, in team,` after the name when that chat is not open; system notices, toasts and timer notes as themselves. Clocks are left out of the lines (a reader would say every one); `/history` shows them. (Corrected when the code landed: the note first wrote `alice (team): hello` and had the sent line wait for the relay.) |
 | Where you are | Switching chats prints `Chat: bob, 3 unread` followed by the unread lines, or the last three when nothing is unread; the prompt reads `bob> `. Selecting a message with Shift-Up prints `Selected: alice: hello`, and the commands act on it as in the full mode. |
 | Scrolling | The terminal's own scrollback and the reader's review keys; `PgUp`/`PgDn` do nothing in reader mode. `/history [n]` prints the last `n` lines of the open chat with their clocks; `/unread` prints what waits where. |
-| High contrast | A fourth palette, `contrast` (`/theme contrast`, `--theme contrast`): bright bold text on a black background, reverse video for the selected entry and the badges, red on white for errors; every colour pair at contrast 7:1 or better on the terminal's default 16 colours. `mono` stays for no colour at all. |
+| High contrast | A fourth palette, `contrast` (`/theme contrast`, `--theme contrast`): bright bold text on a black background, black on bright yellow for the selected entry and the badges, white on red for errors; every colour pair above 5:1 and most above 10:1 on the usual 16-colour palettes (section 5 has the table). `mono` stays for no colour at all. (Corrected when the code landed: the note first said reverse video and red on white.) |
 | Every action without the mouse | The audit in section 4: two actions had no keyboard path, resizing the chat list and jumping to a chat by name; `/sidebar <columns>` and `/go <name>` close them. Character-level text selection stays mouse-only by design: `Shift-Up` selects whole messages and `/copy` copies the last one, which is what a reader user needs. |
 | Checking against screen readers | What can be checked in CI is checked in CI: a pty test drives the client in reader mode and asserts the raw output is linear (no cursor addressing outside the compose line, no box drawing, no attributes) and says the right things. What needs a screen reader is a manual protocol in docs/TERMINALS.md with a row per platform (Orca with GNOME Terminal, NVDA with Windows Terminal, VoiceOver with Terminal.app) and a status of `unchecked` until someone runs it; the client claims nothing it has not seen. |
 
@@ -57,8 +57,10 @@ Non-goals:
   it is in the text (`Left`/`Right`/`Home`/`End` as in the full mode). A
   newline inserted with `Alt-Enter` shows as ` / ` in the compose line
   and is sent as a newline.
-* Exit prints `Bye.` and leaves the cursor at the start of a fresh line
-  with raw mode off, so the shell prompt follows cleanly.
+* Quitting prints `Bye.`; a lock prints its own word, as in the full
+  mode. Either leaves the cursor at the start of a fresh line with raw
+  mode off, so the shell prompt follows cleanly; a panic turns raw mode
+  off before its message prints.
 
 ### 3.2 The journal
 
@@ -69,21 +71,26 @@ turn of the main loop and prints each line as 3.1 says. The rules for
 what is pushed:
 
 * A message received in the open chat: `name: text`; in another chat:
-  `name (chat): text`, where `chat` is the contact's or group's name.
-  Files: `alice sent a file: photo.jpg (1.2 MiB); /get fetches it`, and
-  once fetched `saved photo.jpg to <path>`.
-* A message sent: `you: text` once the relay accepts it; `not delivered:
-  reason` when it does not; nothing for a read receipt.
+  `name, in group: text`, or `name, in another chat: text` for a
+  contact, whose chat is named after them. Files: `alice sent a file:
+  photo.jpg (1.2 MiB); /get fetches it`, and once fetched the toast
+  `Saved <path>. …` as itself.
+* A message sent: `you: text` as the client records it, before the relay
+  answers; a refusal arrives after as `Warning: Relay refused a message:
+  …` and `Not delivered: …`; nothing for a receipt.
 * An edit, a deletion, a reaction, a timer note: as section 1 says.
 * A note about a group (`· alice added bob`): the note's text.
 * A system notice: its text, prefixed `Warning: ` at the warn level.
 * A toast: its text, once, when it would appear; the throttle that
   replaces a toast with the next one does not apply, every toast is a
   line.
-* A chat switch: `Chat: name, n unread` then the unread lines (or the
-  last three), then `(end of chat)`.
-* A selection change: `Selected: name: first line…`, `Selection
-  cleared`.
+* A chat switch: `Chat: name, n unread.` then the unread lines (or the
+  last three), then `(end of chat)`. Accepting a contact request opens
+  the chat and reads it at once; the request's removal used to pass the
+  selection through System first, invisible in the full mode and a
+  spurious `System pane.` in this one, so it no longer does.
+* A selection change: `Selected: ` and the line as it would be read,
+  `Selection cleared.`; `Shift-Down` past the newest clears it too.
 * Help: the command table and the keys as lines, the same text as the
   overlay.
 * Unread elsewhere: when a message arrives in a chat that is not open,

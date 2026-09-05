@@ -58,6 +58,29 @@ relay to see.
   timer starts from the same instant on every device, and a `remove`
   kind by which a device tells its siblings what it deleted for itself
   (protocol 14.5).
+- **Reader mode, for a screen reader.** `silver --reader` (`/reader on`
+  remembers it, `SILVER_READER=1` too) runs the client as a
+  line-at-a-time program: no alternate screen, no box drawing, no
+  colours or attributes, no mouse, no window title. Every event is one
+  line at the bottom of the terminal's own scrollback (`alice: hello`,
+  `alice, in team: hello` when that chat is not open, `you: …`, `alice
+  edited: …`, `alice deleted a message`, `alice reacted 👍 to: …`, a
+  note's text, every notice and toast), and the compose line stays last
+  with its prompt naming the open chat. Switching chats reads what is
+  unread there or the last three lines; `Shift-Up` and `Shift-Down`
+  select a message and say it; `/history [n]` reads the last lines back
+  with their times; `/unread` says what waits where; `F1` prints the
+  help as lines. Control characters in a message become spaces before a
+  line is printed. The pty suite runs a reader-mode client and checks
+  the bytes it writes. What needs a screen reader to check is a manual
+  protocol in TERMINALS.md, unchecked until someone runs it.
+- **Every action without the mouse, and a high-contrast palette.**
+  `/go <name>` opens a chat by name and `/sidebar <columns>` resizes the
+  chat list (remembered), the two things only the mouse could do;
+  `/theme contrast` (`--theme contrast`) is bright bold text on black
+  with every colour pair at high contrast, for low vision. Accepting a
+  contact request opens the chat straight away rather than passing
+  through System.
 
 ### Changed
 

@@ -177,7 +177,12 @@ refused. Received files are saved under their own name in
 | `/receipts on\|off`             | Tell contacts when you have read their messages (default on) |
 | `/notify all\|bell\|off`        | Bell and desktop notification, bell only, or nothing         |
 | `/marks ascii\|unicode\|auto`   | Draw the marks in ASCII if your terminal shows boxes for them |
-| `/theme dark\|light\|mono`      | Colours for a dark or a light background, or none at all     |
+| `/theme dark\|light\|mono\|contrast` | Colours for a dark or a light background, none at all, or bright bold text on black for high contrast |
+| `/go <name>`                    | Open the chat whose name (or id) starts with `name`          |
+| `/sidebar <12-60>`              | How many columns the chat list takes (dragging its edge does the same); remembered |
+| `/reader on\|off`               | Start in reader mode next time (see below); `silver --reader` does it once |
+| `/history [n]`                  | In reader mode, read the last `n` lines of this chat with their times (default 10) |
+| `/unread`                       | Say what waits unread in every chat                          |
 | `/accept <n>`                   | Accept a contact request from the Requests pane              |
 | `/group new <name>`             | Make a group (needs a relay on 0.9.0); its pane opens after the contacts |
 | `/group add <contact>` / `remove <member>` / `leave` | Membership, by an admin; anyone may leave |
@@ -220,7 +225,25 @@ raise a desktop notification where the terminal can (WezTerm, kitty, foot,
 iTerm2, rxvt and others; the notification never contains the message), and
 put the unread count in the window title; `/notify` adjusts that. If the
 terminal is narrower than 70 columns the list folds away and the chat title
-shows where you are.
+shows where you are. Everything the mouse does has a key or a command:
+`/go <name>` opens a chat by name and `/sidebar <columns>` resizes the
+list, so nothing needs the mouse.
+
+Reader mode, for a screen reader: `silver --reader` (or `/reader on`,
+which remembers it) runs the client as a line-at-a-time program with no
+panes, no box drawing, no colours and no mouse. Every event is one line
+at the bottom of the terminal's own scrollback (`alice: hello`, or `alice,
+in team: hello` when that chat is not open; `you: …` for what you send;
+`alice edited: …`, `alice deleted a message`, `alice reacted 👍 to: …`),
+and the last line is where you type, its prompt naming the open chat
+(`alice> `). Switching chats reads `Chat: alice, 2 unread.` and the unread
+lines (or the last three); `Shift-Up` and `Shift-Down` select a message
+and say it, `/history [n]` reads the last lines back with their times,
+`/unread` says what waits where, `F1` prints the help as lines. The
+commands and keys are the ones above. `--theme contrast` is a palette for
+low vision in the full mode: bright bold text on black, and every colour
+pair at high contrast. docs/TERMINALS.md says how each screen reader was
+checked, or that it has not been.
 
 ### Options
 
@@ -239,7 +262,8 @@ silver --link              make this (empty) data directory a device of an ident
 silver --device-name <N>   with --link: what your own devices call this one, up to 32 characters; the primary may name it instead (env SILVER_DEVICE_NAME)
 silver --no-mouse          leave the mouse to the terminal: no wheel scrolling, but text selects without Shift (env SILVER_NO_MOUSE)
 silver --ascii             draw marks in ASCII (v, vv, x, ..); chosen by itself in the classic Windows console (env SILVER_ASCII)
-silver --theme <NAME>      dark (default), light for a light background, or mono for no colour; NO_COLOR means mono (env SILVER_THEME)
+silver --theme <NAME>      dark (default), light for a light background, mono for no colour, or contrast for bright bold text on black; NO_COLOR means mono (env SILVER_THEME)
+silver --reader            reader mode for a screen reader: one line per event, no box drawing, no colours, no mouse; /reader on makes it the default (env SILVER_READER)
 silver --set-passphrase    encrypt keys, contacts and history under a passphrase (asked at every start)
 silver --remove-passphrase drop the passphrase; files stay encrypted under this computer's key store where there is one
 silver --no-keystore       keep the files unencrypted rather than under a key from this computer's key store; remembered
