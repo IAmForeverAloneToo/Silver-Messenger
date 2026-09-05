@@ -388,7 +388,8 @@ those who want to pay for it (46).
         relay still does not learn who wrote what. The design decides
         whether one-to-one conversations stay on the Double Ratchet or
         become two-member groups, and picks the ciphersuite, with a
-        post-quantum hybrid as soon as one is standardised.
+        post-quantum hybrid as soon as one is standardised. The design
+        note is docs/design/groups.md.
 48. [ ] **Multiple devices** (L). Each device has its own keys under the
         identity, listed in the bundle and signed by the identity key;
         linking by a QR code and a short-lived secret; every device is a
