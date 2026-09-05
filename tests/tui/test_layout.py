@@ -87,10 +87,12 @@ def main():
     assert a.fg_at(a.cols - 1, 0) != "default", "the chat border is accented with a selection"
     a.key(ESC)
     a.type("got them\r")
-    assert a.wait("got them"), "reply"
-    time.sleep(0.3)
-    Term.pump_all()
-    assert not a.has(" new messages "), "the rule goes once you answer"
+    # The echo in the input box shows "got them" before Enter is handled;
+    # the sent line has the colon, and the rule goes with the send.
+    assert a.wait(": got them"), "reply"
+    assert a.wait_for(lambda: not a.has(" new messages "), what="the rule gone"), (
+        "the rule goes once you answer"
+    )
     for t in list(TERMS):
         t.quit()
     relay.stop()
