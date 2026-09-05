@@ -47,12 +47,19 @@ enum Mode {
         target: LogHead,
         origin: Option<UserId>,
     },
-    /// Recomputing the chain from `cursor` up to `check.index`, to compare
-    /// with `check`, an old head a contact sent that we hold no hash for.
+    /// Recomputing the chain from `cursor` through `check.index` up to
+    /// `until`, a checkpoint we hold, to compare `check` (an old head a
+    /// contact sent that we hold no hash for) with the chain. The segment
+    /// must arrive at `until`'s hash for its hash at `check.index` to count:
+    /// otherwise the relay handed back a doctored segment, which is its
+    /// fork, not the contact's.
     Verify {
         cursor: LogHead,
         check: LogHead,
+        until: LogHead,
         peer: UserId,
+        /// Whether `check` matched, once the chain passed its index.
+        matched: Option<bool>,
     },
 }
 
@@ -76,11 +83,17 @@ pub(crate) struct Tail {
 
 impl Tail {
     pub fn new(log: Option<SharedLog>) -> Self {
+        // A reconnect that finds nothing new is not news: only a head that
+        // moved since the store last saw one is reported as synced.
+        let last_synced = log
+            .as_ref()
+            .map(|log| lock(log).head())
+            .filter(|head| head.index > 0);
         Self {
             log,
             mode: None,
             deferred: Vec::new(),
-            last_synced: None,
+            last_synced,
         }
     }
 
@@ -224,37 +237,67 @@ impl Tail {
             Some(Mode::Verify {
                 mut cursor,
                 check,
+                until,
                 peer,
+                mut matched,
             }) => {
-                let mut outcome = None;
+                // What the segment turned out to be, once it is complete.
+                enum Segment {
+                    /// Reached `until` with its hash: genuine.
+                    Genuine,
+                    /// Broke, or reached `until` with another hash: the
+                    /// relay's own story does not hold.
+                    Doctored { at: u64 },
+                    /// Not there yet.
+                    Incomplete,
+                }
+                let mut segment = Segment::Incomplete;
                 for entry in &entries {
                     if !entry.follows(&cursor) {
-                        outcome = Some(false);
+                        segment = Segment::Doctored {
+                            at: cursor.index + 1,
+                        };
                         break;
                     }
                     cursor = entry.head();
                     if cursor.index == check.index {
-                        outcome = Some(cursor.hash == check.hash);
+                        matched = Some(cursor.hash == check.hash);
+                    }
+                    if cursor.index == until.index {
+                        segment = if cursor.hash == until.hash {
+                            Segment::Genuine
+                        } else {
+                            Segment::Doctored { at: until.index }
+                        };
                         break;
                     }
                 }
-                match outcome {
-                    Some(true) => {}
-                    Some(false) => step.events.push(transparency(TransparencyEvent::Fork {
-                        peer: Some(peer),
-                        at: check.index,
-                    })),
-                    None if entries.is_empty() => {
+                match segment {
+                    Segment::Genuine => {
+                        if matched == Some(false) {
+                            step.events.push(transparency(TransparencyEvent::Fork {
+                                peer: Some(peer),
+                                at: check.index,
+                            }));
+                        }
+                    }
+                    Segment::Doctored { at } => {
+                        step.events
+                            .push(transparency(TransparencyEvent::Fork { peer: None, at }));
+                    }
+                    Segment::Incomplete if entries.is_empty() => {
                         step.events.push(transparency(TransparencyEvent::Withheld {
                             peer: Some(peer),
-                            index: check.index,
+                            index: until.index,
                         }));
                     }
-                    None => {
+                    Segment::Incomplete => {
                         self.mode = Some(Mode::Verify {
                             cursor,
                             check,
+                            until,
                             peer,
+                            matched,
                         });
                         step.send.push(ClientFrame::LogSince {
                             index: cursor.index,
@@ -307,11 +350,13 @@ impl Tail {
                 self.start_advance(head, Some(peer), step);
                 true
             }
-            HeadCheck::NeedEntries { from } => {
+            HeadCheck::NeedEntries { from, until } => {
                 self.mode = Some(Mode::Verify {
                     cursor: from,
                     check: head,
+                    until,
                     peer,
+                    matched: None,
                 });
                 step.send.push(ClientFrame::LogSince { index: from.index });
                 true
@@ -687,6 +732,96 @@ mod tests {
         let step = tail.on_peer_head(bob, wrong);
         let got = drive(&mut tail, &relay, step, 10);
         assert!(got.iter().any(|e| matches!(e, ClientEvent::Transparency(TransparencyEvent::Fork { peer: Some(p), at }) if *p == bob && *at == relay.head().index)));
+    }
+
+    #[test]
+    fn an_old_contact_head_is_checked_between_two_checkpoints() {
+        use crate::transparency::{DENSE, SPARSE};
+        let mut relay = Relay::new();
+        let alice = Identity::generate();
+        for i in 1..=(DENSE + 2 * SPARSE) {
+            relay.log(&alice.user_id(), EntryKind::Bundle, [(i % 251) as u8; 32]);
+        }
+        let log = LogStore::ephemeral().shared();
+        let mut tail = Tail::new(Some(log.clone()));
+        let step = tail.on_relay_head(relay.head());
+        drive(&mut tail, &relay, step, 300);
+        let bob = Identity::generate().user_id();
+        let at = SPARSE as usize + 4; // index SPARSE + 5, below the dense window
+
+        // A genuine old head we hold no hash for: fetched from the
+        // checkpoint below it and replayed through to the one above.
+        let old = relay.entries[at].head();
+        let step = tail.on_peer_head(bob, old);
+        assert!(
+            matches!(step.send.as_slice(), [ClientFrame::LogSince { index }] if *index == SPARSE)
+        );
+        assert!(drive(&mut tail, &relay, step, 300).is_empty());
+
+        // The same index with another hash, from an honest relay: the
+        // contact's fork.
+        let mut wrong = old;
+        wrong.hash[0] ^= 1;
+        let step = tail.on_peer_head(bob, wrong);
+        let got = drive(&mut tail, &relay, step, 300);
+        assert!(got.iter().any(|e| matches!(e, ClientEvent::Transparency(TransparencyEvent::Fork { peer: Some(p), at }) if *p == bob && *at == old.index)));
+
+        // A relay that doctors the segment so it ends in the contact's
+        // forged head: the segment no longer reaches our next checkpoint,
+        // and that is the relay's fork, not the contact's.
+        let mut doctored = Relay {
+            entries: relay.entries.clone(),
+        };
+        doctored.entries[at - 3].leaf[0] ^= 1;
+        for i in at - 2..=at {
+            doctored.entries[i].prev = doctored.entries[i - 1].hash();
+        }
+        let forged = doctored.entries[at].head();
+        assert_ne!(forged, old);
+        let step = tail.on_peer_head(bob, forged);
+        let got = drive(&mut tail, &doctored, step, 300);
+        assert!(got.iter().any(|e| matches!(
+            e,
+            ClientEvent::Transparency(TransparencyEvent::Fork { peer: None, .. })
+        )));
+        assert!(!got.iter().any(|e| matches!(
+            e,
+            ClientEvent::Transparency(TransparencyEvent::Fork { peer: Some(_), .. })
+        )));
+        // Our own state is untouched by any of it.
+        assert_eq!(lock(&log).head(), relay.head());
+    }
+
+    #[test]
+    fn a_reconnect_with_nothing_new_stays_quiet() {
+        let mut relay = Relay::new();
+        let alice = Identity::generate();
+        relay.log_bundle(&bundle_of(&alice, 1));
+        let log = LogStore::ephemeral().shared();
+        let mut first = Tail::new(Some(log.clone()));
+        let step = first.on_relay_head(relay.head());
+        let got = drive(&mut first, &relay, step, 10);
+        assert!(got.iter().any(|e| matches!(
+            e,
+            ClientEvent::Transparency(TransparencyEvent::Synced { .. })
+        )));
+        // A new connection over the same store, the relay unchanged.
+        let mut again = Tail::new(Some(log.clone()));
+        let step = again.on_relay_head(relay.head());
+        assert!(step.send.is_empty() && step.events.is_empty());
+        // Something new: reported once more.
+        relay.log_bundle(&bundle_of(&alice, 2));
+        let step = again.on_relay_head(relay.head());
+        let got = drive(&mut again, &relay, step, 10);
+        assert_eq!(
+            got.iter()
+                .filter(|e| matches!(
+                    e,
+                    ClientEvent::Transparency(TransparencyEvent::Synced { .. })
+                ))
+                .count(),
+            1
+        );
     }
 
     #[test]

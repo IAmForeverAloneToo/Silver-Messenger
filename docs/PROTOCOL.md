@@ -918,11 +918,14 @@ naming the problem, and nothing is sent with the key.
 
 **Gossip.** Every body carries the sender's verified head (4.1). On
 receipt: at the same index the hashes must match; at a lower index the
-hash must match the checkpoint, or the chain recomputed from the nearest
-checkpoint below it with entries fetched from the relay; at a higher
-index the client tails to it, and the chain it gets must pass through that
-head. A mismatch is a fork, reported with the contact's name: the relay
-showed the two of them different logs. A relay whose head is lower than
+hash must match the checkpoint the client holds for it, or, where it
+holds none, the chain recomputed from entries fetched from the relay
+between the checkpoints on either side, which must arrive at the upper
+checkpoint's hash before its hash at the contact's index means anything
+(a segment that does not is the relay's own doing and is reported as the
+relay's fork); at a higher index the client tails to it, and the chain it
+gets must pass through that head. A mismatch is a fork, reported with the
+contact's name: the relay showed the two of them different logs. A relay whose head is lower than
 the client's last verified head has been *rewound* (a restore of an older
 backup, or a replaced log); that is reported, and the client replays the
 log from the start.

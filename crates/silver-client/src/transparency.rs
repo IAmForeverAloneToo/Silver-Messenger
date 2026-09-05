@@ -37,10 +37,11 @@ use crate::vault::FileCipher;
 pub const LOG_NAME: &str = "transparency.json";
 
 /// Every hash of the last this many entries is kept as a checkpoint...
-const DENSE: u64 = 4096;
+pub(crate) const DENSE: u64 = 4096;
 /// ...and every this many-th before that, so an old head a contact sends
-/// can be checked by fetching from the nearest checkpoint below it.
-const SPARSE: u64 = 256;
+/// can be checked by fetching the entries between the checkpoints on
+/// either side of it.
+pub(crate) const SPARSE: u64 = 256;
 
 /// The hash the log had at an index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,8 +124,11 @@ pub enum HeadCheck {
     /// Same index, different hash: two logs.
     Fork { at: u64 },
     /// Below our head but not at a checkpoint we hold: fetch the entries
-    /// after `from` up to the head's index and compare.
-    NeedEntries { from: LogHead },
+    /// after `from` and replay them through the head's index up to
+    /// `until`, the next checkpoint we hold. The segment must reach
+    /// `until`'s hash, or the relay handed back a doctored one; only then
+    /// does the hash it gives at the head's index mean anything.
+    NeedEntries { from: LogHead, until: LogHead },
     /// Beyond our head: tail to it and compare.
     Ahead,
 }
@@ -253,6 +257,17 @@ impl LogStore {
             .unwrap_or(LogHead::EMPTY)
     }
 
+    /// The lowest checkpoint at or above `index`, or our head.
+    pub fn checkpoint_above(&self, index: u64) -> LogHead {
+        let at = self.state.checkpoints.partition_point(|c| c.index < index);
+        self.state
+            .checkpoints
+            .get(at)
+            .map(Checkpoint::head)
+            .filter(|c| c.index <= self.state.head.index)
+            .unwrap_or(self.state.head)
+    }
+
     /// How a contact's head compares with what we replayed.
     pub fn check_peer_head(&self, head: &LogHead) -> HeadCheck {
         if head.index > self.state.head.index {
@@ -263,6 +278,7 @@ impl LogStore {
             Some(_) => HeadCheck::Fork { at: head.index },
             None => HeadCheck::NeedEntries {
                 from: self.checkpoint_below(head.index),
+                until: self.checkpoint_above(head.index),
             },
         }
     }
@@ -661,7 +677,24 @@ mod tests {
         assert_eq!(
             ours.check_peer_head(&old),
             HeadCheck::NeedEntries {
-                from: relay.entries[(SPARSE - 1) as usize].head()
+                from: relay.entries[(SPARSE - 1) as usize].head(),
+                until: relay.entries[(2 * SPARSE - 1) as usize].head(),
+            }
+        );
+        // The last sparse checkpoint sits at the dense window's edge and is
+        // found directly; the entry just below it is bounded by the sparse
+        // checkpoints on either side.
+        let edge = n - DENSE; // a multiple of SPARSE
+        assert_eq!(
+            ours.check_peer_head(&relay.entries[edge as usize - 1].head()),
+            HeadCheck::Consistent
+        );
+        let below = relay.entries[edge as usize - 2].head();
+        assert_eq!(
+            ours.check_peer_head(&below),
+            HeadCheck::NeedEntries {
+                from: relay.entries[(edge - SPARSE) as usize - 1].head(),
+                until: relay.entries[edge as usize - 1].head(),
             }
         );
         assert_eq!(ours.checkpoint_below(3), LogHead::EMPTY);
