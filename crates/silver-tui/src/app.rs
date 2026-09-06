@@ -1968,13 +1968,14 @@ impl App {
     /// A terminal without bracketed paste — the Linux console, older
     /// Windows consoles, some multiplexer setups — hands a paste over as
     /// plain keystrokes, so a pasted `hello\r/revoke confirm\r` runs the
-    /// command with its confirmation on the same line. Fifteen
-    /// milliseconds a character is about four thousand words a minute:
-    /// far beyond typing, far under a paste, which arrives in one go.
-    /// Short lines are not judged, there being nothing to measure.
+    /// command with its confirmation on the same line. A paste arrives in
+    /// one read, microseconds a character; four milliseconds a character
+    /// is about three thousand words a minute, so the line between them
+    /// is wide in both directions. Short lines are not judged, there
+    /// being nothing to measure.
     fn looks_pasted(&self, line: &str) -> bool {
         let chars = line.chars().count() as u64;
-        chars >= 8 && self.line_started.elapsed() < Duration::from_millis(chars * 15)
+        chars >= 8 && self.line_started.elapsed() < Duration::from_millis(chars * 4)
     }
 
     /// Refuse a command that undoes an identity when the line it came on
@@ -3330,6 +3331,13 @@ impl App {
                         Level::Warn,
                         format!("{missing} earlier message(s) from {name} have not arrived (yet)."),
                     ),
+                    // One that was reported missing and has now turned up:
+                    // the relay hands a mailbox over in whatever order it
+                    // likes, and before 0.11.0 this was dropped as a replay.
+                    SequenceCheck::Late => self.system(
+                        Level::Info,
+                        format!("An earlier message from {name} arrived out of order."),
+                    ),
                     SequenceCheck::NewEpoch => self.system(
                         Level::Info,
                         format!("{name} is sending from a fresh installation."),
@@ -3816,10 +3824,15 @@ impl App {
         let selected = self
             .selected_contact()
             .map(|c| (c.user_id, c.display_name()));
-        let (head, verified_at, latest) = {
+        let (head, verified_at, latest, breaks) = {
             let log = log.lock().unwrap_or_else(|e| e.into_inner());
             let latest = selected.as_ref().map(|(id, _)| log.latest(id));
-            (log.head(), log.verified_at_ms(), latest)
+            (
+                log.head(),
+                log.verified_at_ms(),
+                latest,
+                log.breaks().to_vec(),
+            )
         };
         let checked = if verified_at == 0 {
             "not verified yet".to_owned()
@@ -3837,6 +3850,29 @@ impl App {
                 short_hash(&head.hash)
             ),
         );
+        // Every time the relay's chain contradicted this client's replay
+        // of it, with what disagreed. A relay that rewrites its log is
+        // caught exactly here, and before 0.11.0 the evidence was thrown
+        // away as the replay started over.
+        for evidence in &breaks {
+            self.system(
+                Level::Warn,
+                format!(
+                    "{}: this relay's log {} — it stood at {} entries, head {}, and the relay then showed {} entries, head {}. The replay started again from the relay's chain, so what you have been shown since rests on the relay's word alone. The head and the {} checkpoint(s) from before are kept here as the evidence; if the operator cannot account for it, the relay has rewritten its log and the keys it served are not to be trusted.",
+                    ui::stamp(evidence.at_ms),
+                    if evidence.rewound {
+                        "went backwards"
+                    } else {
+                        "showed a different chain at the same length"
+                    },
+                    evidence.ours.index,
+                    short_hash(&evidence.ours.hash),
+                    evidence.theirs.index,
+                    short_hash(&evidence.theirs.hash),
+                    evidence.checkpoints.len(),
+                ),
+            );
+        }
         if let (Some((_, name)), Some(latest)) = (selected, latest) {
             match latest {
                 Some(l) => {
@@ -4479,9 +4515,7 @@ impl App {
         if self.contact_index(&from).is_none() {
             let mut contact = Contact::new(from);
             if let Some(last) = request.messages.last() {
-                if last.sequence.seq != 0 {
-                    contact.received = Some(last.sequence);
-                }
+                contact.note_received(None, last.sequence);
                 // Remember what their client can do, so a file or receipt
                 // can go to them at once rather than waiting for their
                 // next message.

@@ -51,6 +51,26 @@ pub struct Checkpoint {
     pub hash: Hash,
 }
 
+/// The evidence of one time the relay's log did not match what this
+/// client had replayed from it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Break {
+    /// When it was noticed.
+    pub at_ms: u64,
+    /// Whether the relay's head went backwards or its chain differed at
+    /// the same position.
+    pub rewound: bool,
+    /// Where this client had replayed the log to.
+    pub ours: LogHead,
+    /// What the relay showed instead.
+    pub theirs: LogHead,
+    /// The checkpoints replayed on the way, which pin the old chain.
+    pub checkpoints: Vec<Checkpoint>,
+}
+
+/// Breaks kept before the oldest is dropped.
+pub const BREAKS_KEPT: usize = 8;
+
 impl Checkpoint {
     fn head(&self) -> LogHead {
         LogHead {
@@ -78,6 +98,18 @@ pub struct Latest {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct LogState {
     pub head: LogHead,
+    /// Every time the relay's log contradicted what this client had
+    /// replayed, with the evidence as it stood.
+    ///
+    /// A fork or a rewind used to clear the replayed state and start
+    /// again from whatever the relay now showed, which threw away the
+    /// only proof that anything had happened: the head and the
+    /// checkpoints that disagree with the relay's chain are what a person
+    /// takes to the operator, or to another member of the relay, to show
+    /// that the log was rewritten. They are kept now, oldest first, up to
+    /// [`BREAKS_KEPT`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub breaks: Vec<Break>,
     /// Sorted by index.
     #[serde(default)]
     pub checkpoints: Vec<Checkpoint>,
@@ -229,9 +261,37 @@ impl LogStore {
     /// Forget everything, to replay the relay's log from the start: after
     /// the relay's log went backwards or contradicted ours, which is
     /// reported loudly before this is called.
-    pub fn reset(&mut self) {
-        self.state = LogState::default();
+    /// Start the replay again because the relay's chain no longer agrees
+    /// with it, keeping what disagreed.
+    ///
+    /// The new state is empty, since nothing replayed against the old
+    /// chain says anything about the new one; the old head and its
+    /// checkpoints stay in [`LogState::breaks`], because they are the
+    /// evidence and there is nowhere else it exists.
+    pub fn reset(&mut self, rewound: bool, theirs: LogHead, now_ms: u64) {
+        let evidence = Break {
+            at_ms: now_ms,
+            rewound,
+            ours: self.state.head,
+            theirs,
+            checkpoints: std::mem::take(&mut self.state.checkpoints),
+        };
+        let mut breaks = std::mem::take(&mut self.state.breaks);
+        breaks.push(evidence);
+        while breaks.len() > BREAKS_KEPT {
+            breaks.remove(0);
+        }
+        self.state = LogState {
+            breaks,
+            ..LogState::default()
+        };
         self.persist();
+    }
+
+    /// Every time the relay's log contradicted this client's replay of it,
+    /// oldest first. Empty in the ordinary case.
+    pub fn breaks(&self) -> &[Break] {
+        &self.state.breaks
     }
 
     /// The hash we hold for `index`: our head's, or a checkpoint's.

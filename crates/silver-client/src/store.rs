@@ -38,6 +38,7 @@ use silver_protocol::{Identity, IdentitySecrets, KeyBundle, Revocation, Sequence
 
 use crate::devices::{DevicesFile, Linked};
 use crate::files::FileInfo;
+use crate::sequence::Seen;
 use crate::sessions::{PrekeyFile, SessionsFile};
 use crate::vault::{FileCipher, Kdf, LINE_PREFIX, VaultError, VaultFile};
 
@@ -297,9 +298,11 @@ pub struct Contact {
     /// Sequence number of the last message we sent them.
     #[serde(default)]
     pub sent_seq: u64,
-    /// Sequence of the last message accepted from them.
+    /// What has been accepted from them: the highest sequence, which
+    /// messages below it have arrived, and where their previous numbering
+    /// ended ([`crate::sequence`]).
     #[serde(default)]
-    pub received: Option<Sequence>,
+    pub received: Option<Seen>,
     /// The user compared safety numbers with this contact out of band.
     #[serde(default)]
     pub verified: bool,
@@ -320,7 +323,7 @@ pub struct Contact {
     /// number their own streams (`docs/PROTOCOL.md` section 14); the
     /// primary's is `received`.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub device_received: HashMap<UserId, Sequence>,
+    pub device_received: HashMap<UserId, Seen>,
     /// The conversation's disappearing-message timer, in seconds; 0 for
     /// none (`docs/design/everyday.md`). Set by either side, applied to
     /// messages sent and received from then on.
@@ -345,8 +348,8 @@ impl Contact {
         }
     }
 
-    /// The last sequence accepted from `device` (`None`: their primary).
-    pub fn received_from(&self, device: Option<&UserId>) -> Option<Sequence> {
+    /// What has been accepted from `device` (`None`: their primary).
+    pub fn received_from(&self, device: Option<&UserId>) -> Option<Seen> {
         match device {
             None => self.received,
             Some(device) => self.device_received.get(device).copied(),
@@ -356,9 +359,13 @@ impl Contact {
     /// Note the sequence just accepted from `device` (`None`: their primary).
     pub fn note_received(&mut self, device: Option<&UserId>, sequence: Sequence) {
         match device {
-            None => self.received = Some(sequence),
+            None => crate::sequence::note(&mut self.received, sequence),
             Some(device) => {
-                self.device_received.insert(*device, sequence);
+                let mut seen = self.device_received.get(device).copied();
+                crate::sequence::note(&mut seen, sequence);
+                if let Some(seen) = seen {
+                    self.device_received.insert(*device, seen);
+                }
             }
         }
     }
@@ -1796,19 +1803,62 @@ impl Store {
         id: &str,
         from: Option<UserId>,
     ) -> anyhow::Result<Deletion> {
+        Ok(self.mark_all_deleted(conversation, &[id.to_owned()], from)?[0])
+    }
+
+    /// [`Store::mark_deleted`] for a whole `delete` body at once.
+    ///
+    /// One body carries up to 64 ids and each used to read, filter and
+    /// rewrite the whole file, so a member could make a victim rewrite
+    /// its history sixty-four times per message. It is one pass now.
+    ///
+    /// An id the history does not hold leaves nothing behind on disk. A
+    /// tombstone used to be appended for it, so that a message arriving
+    /// later would still be removed — and an id nobody has ever seen is
+    /// free to invent, which made a permanent line per invented id. The
+    /// front end holds such deletions in its own bounded list instead,
+    /// for the ten minutes in which the message might still turn up; a
+    /// deletion that arrives before its message *and* is followed by a
+    /// restart no longer catches it, which is the narrow case the DoS
+    /// cost more than it was worth.
+    pub fn mark_all_deleted(
+        &self,
+        conversation: &Conversation,
+        ids: &[String],
+        from: Option<UserId>,
+    ) -> anyhow::Result<Vec<Deletion>> {
         let name = conversation.file_name();
         let lines = self.read_history_lines(&name)?;
-        let held = lines.iter().find_map(|line| match line {
-            Ok(HistoryLine::Entry(entry)) if entry.id == id => Some(author_of(entry, conversation)),
-            _ => None,
-        });
-        if held.is_some_and(|author| author != from) {
-            return Ok(Deletion::Refused);
+        let authors: HashMap<&str, Option<UserId>> = lines
+            .iter()
+            .filter_map(|line| match line {
+                Ok(HistoryLine::Entry(entry)) if ids.contains(&entry.id) => {
+                    Some((entry.id.as_str(), author_of(entry, conversation)))
+                }
+                _ => None,
+            })
+            .collect();
+        let outcome: Vec<Deletion> = ids
+            .iter()
+            .map(|id| match authors.get(id.as_str()) {
+                Some(author) if *author != from => Deletion::Refused,
+                Some(_) => Deletion::Applied,
+                None => Deletion::Tombstoned,
+            })
+            .collect();
+        let going: Vec<&str> = ids
+            .iter()
+            .zip(&outcome)
+            .filter(|(_, out)| **out == Deletion::Applied)
+            .map(|(id, _)| id.as_str())
+            .collect();
+        if going.is_empty() {
+            return Ok(outcome);
         }
-        let mut lines: Vec<Result<HistoryLine, String>> = lines
+        let lines: Vec<Result<HistoryLine, String>> = lines
             .into_iter()
             .filter_map(|line| match line {
-                Ok(HistoryLine::Entry(mut entry)) if entry.id == id => {
+                Ok(HistoryLine::Entry(mut entry)) if going.contains(&entry.id.as_str()) => {
                     entry.text.clear();
                     entry.file = None;
                     entry.saved = None;
@@ -1819,24 +1869,14 @@ impl Store {
                     entry.deleted = true;
                     Some(Ok(HistoryLine::Entry(entry)))
                 }
-                Ok(HistoryLine::Edit(e)) if e.edit == id => None,
-                Ok(HistoryLine::React(r)) if r.react == id => None,
-                Ok(HistoryLine::Text(t)) if t.update == id => None,
+                Ok(HistoryLine::Edit(e)) if going.contains(&e.edit.as_str()) => None,
+                Ok(HistoryLine::React(r)) if going.contains(&r.react.as_str()) => None,
+                Ok(HistoryLine::Text(t)) if going.contains(&t.update.as_str()) => None,
                 other => Some(other),
             })
             .collect();
-        if held.is_none() {
-            lines.push(Ok(HistoryLine::Gone(GoneLine {
-                gone: id.to_owned(),
-                from,
-            })));
-        }
         self.write_history_lines(&name, &lines)?;
-        Ok(if held.is_some() {
-            Deletion::Applied
-        } else {
-            Deletion::Tombstoned
-        })
+        Ok(outcome)
     }
 
     /// Every conversation that has a log, from the history directory's
@@ -2374,22 +2414,43 @@ mod tests {
         store.append_reaction(&conv, "1", None, "❤️").unwrap();
         let history = store.load_history(&peer).unwrap();
         assert!(history[1].text.is_empty() && history[1].reactions.is_empty());
-        // A deletion for a message not held: a tombstone, so that the
-        // message arriving later from its author shows nothing; one from
-        // someone else does not touch the author's message when it comes.
+        // A deletion for a message not held is said to be tombstoned but
+        // leaves nothing on disk: the front end holds it for the few
+        // minutes in which the message might still turn up, and an id
+        // nobody has seen is free to invent, so a line per invented id is
+        // a file anyone in the conversation could grow without end
+        // (SM-C-19).
+        let before = fs::read_to_string(store.root.join(history_name(&peer))).unwrap();
         assert_eq!(
             store.mark_deleted(&conv, "7", Some(peer)).unwrap(),
             Deletion::Tombstoned
         );
-        store.append_history(&peer, &entry(7)).unwrap();
-        assert_eq!(store.load_history(&peer).unwrap().len(), 2);
-        let bob = Identity::generate().user_id();
         assert_eq!(
-            store.mark_deleted(&conv, "9", Some(bob)).unwrap(),
-            Deletion::Tombstoned
+            fs::read_to_string(store.root.join(history_name(&peer))).unwrap(),
+            before,
+            "an id the history does not hold leaves nothing behind"
         );
-        store.append_history(&peer, &entry(9)).unwrap();
+        store.append_history(&peer, &entry(7)).unwrap();
         assert_eq!(store.load_history(&peer).unwrap().len(), 3);
+
+        // A whole body's worth of ids goes through the file once, and
+        // each is answered for itself: the author's message becomes a
+        // placeholder, somebody else's is refused, an unheld one is not
+        // written down.
+        let bob = Identity::generate().user_id();
+        store.append_history(&peer, &entry(9)).unwrap();
+        let ids = ["7".to_owned(), "9".to_owned(), "11".to_owned()];
+        assert_eq!(
+            store.mark_all_deleted(&conv, &ids, Some(bob)).unwrap(),
+            vec![Deletion::Refused, Deletion::Refused, Deletion::Tombstoned]
+        );
+        assert_eq!(
+            store.mark_all_deleted(&conv, &ids, Some(peer)).unwrap(),
+            vec![Deletion::Applied, Deletion::Applied, Deletion::Tombstoned]
+        );
+        let history = store.load_history(&peer).unwrap();
+        assert_eq!(history.len(), 4);
+        assert!(history.iter().filter(|e| e.deleted).count() == 3);
     }
 
     #[test]
@@ -2523,11 +2584,13 @@ mod tests {
         store.save_contacts(std::slice::from_ref(&contact)).unwrap();
         let loaded = store.load_contacts().unwrap().remove(0);
         assert_eq!(
-            loaded.received_from(None),
+            loaded.received_from(None).map(|s| s.last),
             Some(Sequence { epoch: 1, seq: 3 })
         );
         assert_eq!(
-            loaded.received_from(Some(&laptop.user_id())),
+            loaded
+                .received_from(Some(&laptop.user_id()))
+                .map(|s| s.last),
             Some(Sequence { epoch: 2, seq: 1 })
         );
         assert_eq!(loaded.received_from(Some(&phone.user_id())), None);
