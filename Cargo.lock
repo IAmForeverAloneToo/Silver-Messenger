@@ -4736,6 +4736,7 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "futures-util",
+ "hyper-util",
  "instant-acme",
  "rand 0.8.8",
  "rcgen",

@@ -730,11 +730,18 @@ its absence as "not kept here" rather than "none left".
 
 ### 7.4 Limits and abuse controls
 
-Per authenticated connection: 60 `send`, 30 `lookup` and 600 blob chunks
-(`blob_put` or chunks answered to `blob_get`) per minute (token buckets of
-that burst size). Per anonymous connection: 30 `send` and 600 chunks per
-minute. Per recipient: 1000 queued envelopes or 32 MiB, whichever first;
-unacknowledged envelopes expire after 30 days. Blobs: at most 16 MiB of
+Per authenticated connection: 60 `send`, 30 `lookup`, 600 blob chunks
+(`blob_put` or chunks answered to `blob_get`), 6 `publish` and 4000 `ack`
+per minute (token buckets of that burst size). Per anonymous connection:
+30 `send` and 600 chunks per minute. A connection has ten seconds to
+finish its HTTP request before the WebSocket upgrade, as it has ten
+seconds to log in after it. Per recipient: 1000 queued envelopes or
+32 MiB, whichever first; 4 GiB of queued envelopes over every mailbox
+together, answered `storage_full`; unacknowledged envelopes expire after
+30 days. An envelope to an identity the relay holds no bundle for is
+refused `not_found`: everyone a client seals to has published one, and
+without the rule a stranger could fill the disk with mail for keys
+nobody holds. Blobs: at most 16 MiB of
 plaintext each (the relay allows 16 MiB plus the 256 chunk tags of
 ciphertext), 1 GiB in total, and each expires 30 days after its first
 chunk arrived, on the same schedule as messages. Per client address (the

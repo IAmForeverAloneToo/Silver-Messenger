@@ -59,6 +59,34 @@ the response note, section 5.
   is started with `--allow-unbound-login`. Only relays from before 0.6.0
   ask for it.
 
+- **The relay's bounds cover the frames and the connections they
+  missed** (findings SM-R-03 to SM-R-06). Four gaps, all of them ways to
+  make a relay work for nothing:
+
+  A connection was counted, timed and rate-limited only from the
+  WebSocket upgrade on. Before that it was an HTTP request with no
+  timeout at all, because the server builders install no timer and the
+  library then discards its own default, so a connection that sent half a
+  request line held a socket and a task until the process ran out of file
+  descriptors, below every limit the relay counts. Both listeners now set
+  a timer and give a request ten seconds to arrive.
+
+  An envelope was stored for any recipient id, whether or not anyone had
+  ever registered it, and there was no cap on queued mail across
+  mailboxes. One anonymous connection could therefore write to the disk
+  until it was full, with nothing to acknowledge the mail and nothing to
+  free it before the message lifetime ran out. An envelope to an
+  identity the relay holds no bundle for is now refused `not_found`, and
+  `--mailbox-storage-mib` (4 GiB by default) caps what every mailbox
+  holds together.
+
+  `publish` and `ack` had no rate limit. A publish verifies a bundle's
+  worth of signatures, makes three durable writes and appends a
+  transparency-log entry that is never pruned; an ack was a durable write
+  even for an id the relay had never heard of. Both have a budget now,
+  sized well above what a client does, and an ack for somebody else's
+  mail is answered from a read.
+
 - **Protecting a data directory moves every file, and writes the key
   first** (findings SM-C-02, High, and SM-C-08, Medium). The
   re-encryption walked a list of ten file names that had not kept up with

@@ -426,11 +426,11 @@ async fn messages_written_while_offline_go_out_on_reconnect() {
 
     // The relay returns; the outbox drains and Bob (who reconnects too) gets it.
     let listener = rebind(addr).await;
-    tokio::spawn(silver_relay::serve(
-        listener,
-        RelayState::new(),
-        std::future::pending(),
-    ));
+    // Bob is registered here: a relay holds no mail for a key it has
+    // never seen, so an envelope to one is refused rather than queued.
+    let state = RelayState::new();
+    state.store().put_bundle(&bob.key_bundle()).unwrap();
+    tokio::spawn(silver_relay::serve(listener, state, std::future::pending()));
     wait_for(
         &mut alice_ev,
         "queued message sent",
@@ -475,11 +475,10 @@ async fn outbox_survives_a_client_restart() {
     let (alice_c, mut alice_ev) = Client::spawn(url.clone(), alice.clone(), options()).unwrap();
     assert_eq!(alice_c.pending_ids(), vec![env.id.clone()]);
     let listener = rebind(addr).await;
-    tokio::spawn(silver_relay::serve(
-        listener,
-        RelayState::new(),
-        std::future::pending(),
-    ));
+    // As above: the relay holds no mail for a key it has never seen.
+    let state = RelayState::new();
+    state.store().put_bundle(&bob.key_bundle()).unwrap();
+    tokio::spawn(silver_relay::serve(listener, state, std::future::pending()));
     wait_for(
         &mut alice_ev,
         "sent after restart",
@@ -502,6 +501,7 @@ async fn rejected_envelopes_leave_the_outbox() {
         Limits {
             max_messages: 1,
             max_bytes: u64::MAX,
+            ..Limits::default()
         },
     );
     tokio::spawn(silver_relay::serve(listener, state, std::future::pending()));

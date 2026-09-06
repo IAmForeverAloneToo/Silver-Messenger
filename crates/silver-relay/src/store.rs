@@ -77,6 +77,10 @@ pub(crate) const BLOB_CHUNKS: TableDefinition<(&str, u32), &[u8]> =
     TableDefinition::new("blob_chunks");
 /// Bytes of chunks stored in total, for the storage cap.
 const BLOB_BYTES: &str = "blob_bytes";
+/// Bytes queued in every mailbox together, kept as a counter so the cap
+/// costs nothing to check; seeded from `USAGE` the first time a store is
+/// opened after 0.10.1.
+const MAILBOX_BYTES: &str = "mailbox_bytes";
 /// `(owner, deposit sequence) -> KeyPackageDeposit JSON`: key packages not
 /// yet handed out, in the order they were deposited (`docs/PROTOCOL.md`
 /// section 13). The relay never parses them.
@@ -282,6 +286,11 @@ fn log_bundle_in(
 pub struct Limits {
     pub max_messages: u64,
     pub max_bytes: u64,
+    /// Bytes the relay will hold in every mailbox together; 0 for no cap.
+    /// Without it a stranger could queue envelopes for made-up recipients
+    /// until the disk was full, since nobody is there to acknowledge them
+    /// and they only expire after the message lifetime.
+    pub max_total_bytes: u64,
 }
 
 impl Default for Limits {
@@ -289,6 +298,7 @@ impl Default for Limits {
         Self {
             max_messages: 1000,
             max_bytes: 32 * 1024 * 1024,
+            max_total_bytes: 4 * 1024 * 1024 * 1024,
         }
     }
 }
@@ -300,6 +310,8 @@ pub enum Enqueue {
     /// An envelope with this id is already queued; nothing changed.
     Duplicate,
     MailboxFull,
+    /// The relay holds as much queued mail as it will.
+    StorageFull,
 }
 
 /// A ban on an address or an identity, as the administrator set it.
@@ -486,6 +498,16 @@ impl Store {
         }
         if stamped != Some(SCHEMA_VERSION) {
             txn.open_table(META)?.insert(SCHEMA, SCHEMA_VERSION)?;
+        }
+        // The mailbox total is a counter kept as mail comes and goes. A
+        // database written before there was one is counted up here, once;
+        // no layout changes, so this is not a migration.
+        if txn.open_table(META)?.get(MAILBOX_BYTES)?.is_none() {
+            let mut held = 0u64;
+            for item in txn.open_table(USAGE)?.iter()? {
+                held += item?.1.value().1;
+            }
+            txn.open_table(META)?.insert(MAILBOX_BYTES, held)?;
         }
         txn.commit()?;
         if from < SCHEMA_VERSION {
@@ -855,12 +877,15 @@ fn remove_user_data(
             Ok((k.value().1, envelope.id, v.value().len() as u64))
         })
         .collect::<anyhow::Result<Vec<(u64, String, u64)>>>()?;
+    let mut freed = 0;
     for (seq, id, size) in entries {
         mailbox.remove((key, seq))?;
         by_id.remove(id.as_str())?;
         removed.messages += 1;
         removed.bytes += size;
+        freed += size;
     }
+    take_from(&mut txn.open_table(META)?, MAILBOX_BYTES, freed)?;
     txn.open_table(USAGE)?.remove(key)?;
     for (deposit, used) in [(ONE_TIME, ONE_TIME_USED), (PQ_ONE_TIME, PQ_ONE_TIME_USED)] {
         let mut table = txn.open_table(deposit)?;
@@ -1573,12 +1598,16 @@ impl Store {
             } else {
                 let mut usage = txn.open_table(USAGE)?;
                 let (count, bytes) = usage.get(user)?.map(|g| g.value()).unwrap_or((0, 0));
+                let mut meta = txn.open_table(META)?;
+                let total = meta.get(MAILBOX_BYTES)?.map(|g| g.value()).unwrap_or(0);
                 if count >= limits.max_messages || bytes + size > limits.max_bytes {
                     Enqueue::MailboxFull
+                } else if limits.max_total_bytes > 0 && total + size > limits.max_total_bytes {
+                    Enqueue::StorageFull
                 } else {
-                    let mut meta = txn.open_table(META)?;
                     let seq = meta.get(NEXT_SEQ)?.map(|g| g.value()).unwrap_or(0);
                     meta.insert(NEXT_SEQ, seq + 1)?;
+                    meta.insert(MAILBOX_BYTES, total + size)?;
                     txn.open_table(MAILBOX)?
                         .insert((user, seq), value.as_slice())?;
                     by_id.insert(envelope.id.as_str(), (user, seq))?;
@@ -1615,6 +1644,19 @@ impl Store {
 
     /// Drop an envelope from `user`'s mailbox. Returns whether it was there.
     pub fn ack(&self, user: &UserId, id: &str) -> anyhow::Result<bool> {
+        // A read first: an id that is not this user's mail changes
+        // nothing, and a write transaction commits durably (an fsync, with
+        // the single writer held meanwhile) whether or not it wrote.
+        {
+            let txn = self.db.begin_read()?;
+            let mine = txn
+                .open_table(BY_ID)?
+                .get(id)?
+                .is_some_and(|g| g.value().0 == user.as_bytes());
+            if !mine {
+                return Ok(false);
+            }
+        }
         let txn = self.db.begin_write()?;
         let removed = {
             let mut by_id = txn.open_table(BY_ID)?;
@@ -1632,6 +1674,7 @@ impl Store {
                         .unwrap_or(0);
                     let mut usage = txn.open_table(USAGE)?;
                     adjust_usage(&mut usage, &owner, 1, size)?;
+                    take_from(&mut txn.open_table(META)?, MAILBOX_BYTES, size)?;
                     true
                 }
                 _ => false,
@@ -1665,10 +1708,12 @@ impl Store {
             let mut mailbox = txn.open_table(MAILBOX)?;
             let mut by_id = txn.open_table(BY_ID)?;
             let mut usage = txn.open_table(USAGE)?;
+            let mut meta = txn.open_table(META)?;
             for (owner, seq, id, size) in &victims {
                 mailbox.remove((owner.as_slice(), *seq))?;
                 by_id.remove(id.as_str())?;
                 adjust_usage(&mut usage, owner, 1, *size)?;
+                take_from(&mut meta, MAILBOX_BYTES, *size)?;
             }
         }
         txn.commit()?;
@@ -1767,6 +1812,13 @@ fn adjust_count(meta: &mut redb::Table<'_, &str, u64>, key: &str, by: i64) -> an
         count.saturating_add(by as u64)
     };
     meta.insert(key, next)?;
+    Ok(())
+}
+
+/// Subtract from a counter in `META`, never below zero.
+fn take_from(meta: &mut redb::Table<'_, &str, u64>, key: &str, amount: u64) -> anyhow::Result<()> {
+    let held = meta.get(key)?.map(|g| g.value()).unwrap_or(0);
+    meta.insert(key, held.saturating_sub(amount))?;
     Ok(())
 }
 
@@ -2674,6 +2726,7 @@ mod tests {
         let two = Limits {
             max_messages: 2,
             max_bytes: u64::MAX,
+            ..Limits::default()
         };
         assert_eq!(
             store.enqueue(&envelope(&alice, &bob, "a"), 0, two).unwrap(),
@@ -2691,6 +2744,7 @@ mod tests {
         let tiny = Limits {
             max_messages: u64::MAX,
             max_bytes: 10,
+            ..Limits::default()
         };
         let store = Store::in_memory().unwrap();
         assert_eq!(
@@ -2698,6 +2752,40 @@ mod tests {
                 .enqueue(&envelope(&alice, &bob, "a"), 0, tiny)
                 .unwrap(),
             Enqueue::MailboxFull
+        );
+
+        // The relay-wide cap counts every mailbox together, and frees as
+        // mail is acknowledged: without it a stranger fills the disk with
+        // envelopes for recipients that will never read them.
+        let store = Store::in_memory().unwrap();
+        let small = Limits {
+            max_total_bytes: 900,
+            ..Limits::default()
+        };
+        let mut stored = Vec::new();
+        for i in 0..100 {
+            let envelope = envelope(&alice, &bob, &format!("m{i}"));
+            match store.enqueue(&envelope, 0, small).unwrap() {
+                Enqueue::Stored => stored.push(envelope),
+                Enqueue::StorageFull => break,
+                other => panic!("{other:?}"),
+            }
+        }
+        assert!(!stored.is_empty(), "the first ones fit");
+        assert!(stored.len() < 100, "the cap bites");
+        assert_eq!(
+            store
+                .enqueue(&envelope(&alice, &bob, "over"), 0, small)
+                .unwrap(),
+            Enqueue::StorageFull
+        );
+        store.ack(&bob.user_id(), &stored[0].id).unwrap();
+        assert_eq!(
+            store
+                .enqueue(&envelope(&alice, &bob, "after"), 0, small)
+                .unwrap(),
+            Enqueue::Stored,
+            "acknowledged mail gives the room back"
         );
     }
 

@@ -333,7 +333,9 @@ pub async fn serve_tls(
         shutdown.await;
         stop.graceful_shutdown(Some(Duration::from_secs(5)));
     });
-    axum_server::from_tcp_rustls(listener, RustlsConfig::from_config(config))?
+    let mut server = axum_server::from_tcp_rustls(listener, RustlsConfig::from_config(config))?;
+    crate::set_http_timeouts(server.http_builder());
+    server
         .handle(handle)
         .serve(crate::router(state).into_make_service_with_connect_info::<SocketAddr>())
         .await?;

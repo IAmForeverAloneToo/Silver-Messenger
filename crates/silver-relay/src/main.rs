@@ -43,6 +43,12 @@ struct Args {
     #[arg(long, env = "SILVER_RELAY_MAX_MIB", default_value_t = Limits::default().max_bytes / (1024 * 1024))]
     max_mailbox_mib: u64,
 
+    /// Queued message bytes to hold in total, in MiB; 0 for no cap.
+    /// Mailboxes are freed as recipients acknowledge their mail and by
+    /// --message-ttl-days.
+    #[arg(long, env = "SILVER_RELAY_MAILBOX_STORAGE_MIB", default_value_t = Limits::default().max_total_bytes / (1024 * 1024))]
+    mailbox_storage_mib: u64,
+
     /// Messages one connection may submit per minute.
     #[arg(long, env = "SILVER_RELAY_SENDS_PER_MINUTE", default_value_t = Policy::default().sends_per_minute)]
     sends_per_minute: u32,
@@ -682,6 +688,7 @@ async fn main() -> anyhow::Result<()> {
     let limits = Limits {
         max_messages: args.max_mailbox_messages,
         max_bytes: args.max_mailbox_mib * 1024 * 1024,
+        max_total_bytes: args.mailbox_storage_mib.saturating_mul(1024 * 1024),
     };
     // Before the policy: the transport says which names this relay
     // answers to, which the bound login is checked against.

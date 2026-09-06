@@ -126,6 +126,7 @@ capitals with `SILVER_RELAY_` in front: `--max-connections` is
 | `--message-ttl-days` | 30 | How long an unacknowledged message is kept | A stricter retention policy (shorter), or long-absent users (longer) |
 | `--max-blob-mib` | 16 | Largest file; 0 turns file transfer off | Your users share bigger files, or none |
 | `--blob-storage-mib` | 1024 | Files on deposit in total | Disk |
+| `--mailbox-storage-mib` | 4096 | Queued messages in every mailbox together; 0 for no cap | Disk. Mail is freed as recipients acknowledge it and by `--message-ttl-days`; past the cap a send is answered `storage_full` |
 | `--blob-mib-per-address-per-hour` | 256 | Uploads from one address | Abuse, or a shared address |
 | `--max-groups` | 100000 | Groups with an epoch sequencer entry (one counter and one hash each; idle ones go after 180 days); 0 for no cap | A small relay, with room: a group costs the relay almost nothing, so this is a guard against a loop making entries, not a sizing knob |
 | `--trusted-proxy` | loopback | Whose `X-Forwarded-For` names the client | A TLS front on another host |
