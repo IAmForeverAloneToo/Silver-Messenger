@@ -646,7 +646,7 @@ first.
 | `log_entries` | `entries`, `head` | In answer to `log_since`: up to 256 entries in order (section 11), and the head the relay stands at. `entries` is empty when the index asked for was the head already. |
 | `sent` | `id` | The envelope is queued for delivery. |
 | `rejected` | `id`, `code`, `message` | The envelope was not queued. `rate_limited` means try again later; any other code is final. |
-| `deliver` | `envelope` | Delivered in mailbox order; acknowledge with `ack`. |
+| `deliver` | `envelope` | Delivered in mailbox order, up to 16 unacknowledged at a time; acknowledge every one with `ack` (7.1). |
 | `blob_ack` | `blob`, `index`, `complete` | The chunk is stored (or was already); `complete` once every chunk is. |
 | `blob_rejected` | `blob`, `code`, `message` | A `blob_put` or `blob_get` for this blob failed. `rate_limited` means try again later; `not_found` on a `blob_get` means the blob is unknown, incomplete or expired. |
 | `blob_chunk` | `blob`, `index`, `total`, `data` (b64) | One chunk in answer to `blob_get`; `total` says how many to expect. |
@@ -664,9 +664,22 @@ Error codes: `unauthenticated`, `bad_signature`, `malformed`, `too_large`,
 ### 7.1 Authenticated connection
 
 `challenge` → `auth` → `auth_ok`, then `publish` → `published`
-[→ `prekey_status`]. The relay replays every queued `deliver` for the user
-as soon as `auth` succeeds, so they may arrive before `published`. A newer
-connection for the same user replaces the older one, which is closed.
+[→ `prekey_status`]. The relay starts replaying the user's queued
+`deliver` frames as soon as `auth` succeeds, so they may arrive before
+`published`. A newer connection for the same user replaces the older
+one, which is closed.
+
+The replay is paged rather than sent all at once: the relay keeps at
+most 16 envelopes delivered and not yet acknowledged on one connection,
+and sends the next as each `ack` comes back, in mailbox order. So a
+client must acknowledge what it is given to be given the rest — the
+reference client acknowledges every `deliver` it receives, whether or
+not it could make sense of the body, and a client that does not will
+stop receiving after 16. The window is the relay's, not the protocol's:
+it bounds what one connection can make the relay hold in memory, and a
+relay may choose another size. A frame that has not reached the client
+within 30 seconds ends the connection, so a peer that opens a socket and
+stops reading does not pin a queue.
 
 With the bound login the relay checks, before verifying the signature,
 that `host` is one of the names it answers to, and it takes those names
@@ -1468,7 +1481,7 @@ commits built on the same epoch would fork the group. The relay orders
 them with one entry per group it knows nothing else about:
 
 ```text
-group id (32 bytes) -> { epoch (u64), next (32 bytes), created_at_ms, updated_at_ms }
+group id (32 bytes) -> { epoch (u64), next (32 bytes), created_at_ms, updated_at_ms, retired_at_ms? }
 ```
 
 `next` is the SHA-256 of a token that only members of the group's
@@ -1485,14 +1498,38 @@ while it is up, so the relay does not learn which identity committed):
 
 | `type` | Fields | Notes |
 | --- | --- | --- |
-| `group_create` | `group`, `epoch`, `next` (b64, 32 bytes) | Create the entry if there is none: answered `group_state` with `epoch`. Idempotent for the same three values; an entry with other values answers `exists` with its epoch. Counts as a `send` and against the address's registrations for the hour (7.4). |
+| `group_create` | `group`, `epoch`, `next` (b64, 32 bytes) | Create the entry if there is none: answered `group_state` with `epoch`. Idempotent for the same three values, and the same three values raise a retired entry; an entry with other values answers `exists` with its epoch. Counts as a `send` and against the address's registrations for the hour (7.4). |
 | `group_commit` | `group`, `epoch`, `token`, `next` (b64, 32 bytes each) | If the entry stands at `epoch` and `SHA-256(token)` is what it holds: the entry moves to `epoch + 1` holding `next`, answered `group_state` with the new epoch. Otherwise `group_rejected`: `stale` with the epoch the entry stands at when it is not `epoch`; `forbidden` when the token does not hash to what it holds; `not_found` when there is no entry. Counts as a `send`. |
 
 Answers: `group_state { group, epoch }` and `group_rejected { group,
 code, epoch? }`, with `rate_limited` when a budget is spent and
 `forbidden` from `group_create` when the relay's cap on entries (100 000
-by default) is reached. An entry no commit has moved for 180 days is
-dropped; a live group refreshes its entry with every commit.
+by default) is reached. A live group refreshes its entry with every
+commit.
+
+An entry no commit has moved for 180 days is **retired**, not dropped:
+`retired_at_ms` is set and it becomes a headstone, keeping the epoch and
+the `next` it died at and nothing else. A headstone holds the group id
+against everyone but the group. It is raised, and the entry with it, by
+either of the two things only a member of the group at that epoch has:
+
+- a `group_create` for exactly the epoch and `next` on the headstone,
+  which is what `token(e)` of the group's own current epoch hashes to; or
+- a `group_commit` that passes the usual checks — that is, one carrying
+  `token(e)` itself.
+
+Anything else is answered `exists` with the headstone's epoch, as a live
+entry would be. So a member who was removed cannot wait for a group to
+go quiet and then squat its id with values of its own, which would leave
+the real members' commits refused for as long as it kept it up: the
+removed member does not have the exporter of the epoch the group ended
+at. A headstone nobody raises within a further 180 days is dropped, and
+the id is free again — as free as an id nobody has ever used. Retired
+entries do not count against the relay's cap.
+
+A relay that has never retired an entry behaves exactly as before, and
+so does a client: the values `group_create` already sends after a
+`not_found` are the values a headstone asks for.
 
 How a client commits: it builds and stages the commit, reads
 `token(e)` of its current epoch and `token(e + 1)` from the staged
@@ -1500,9 +1537,10 @@ commit's exporter (OpenMLS exposes the staged commit's secrets before
 the merge), sends `group_commit`, and only on `group_state` merges the
 commit and fans it out (13.6). On `stale` it discards the staged commit,
 takes the winning commit from its mailbox, and rebuilds on top; the
-losing side of a race is never sent. On `not_found` (the entry expired,
-or the relay was restored from a backup that predates the group) any
-member re-creates the entry with `group_create` for its current epoch.
+losing side of a race is never sent. On `not_found` (the headstone's
+grace period ran out, or the relay was restored from a backup that
+predates the group) any member re-creates the entry with `group_create`
+for its current epoch.
 On `stale` with a *lower* epoch than its own (a restored relay), the
 client replays the tokens it kept (the last 64 epochs) from that epoch
 forward, one accepted `group_commit` per step, until the entry catches

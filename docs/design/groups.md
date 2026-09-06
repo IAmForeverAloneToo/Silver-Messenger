@@ -243,7 +243,10 @@ Properties:
 * Creation: the creator sends `group_create` with epoch 0 and the hash of
   `token(0)` right after `MlsGroup::new`. Ids are 32 random bytes, so
   nobody creates someone else's group first. Entries idle for 180 days
-  expire; a live group refreshes its entry with every commit.
+  expire; a live group refreshes its entry with every commit. (From
+  0.11.0 an idle entry is retired rather than dropped, and only a member
+  of the group at the epoch it died at can raise it or take the id;
+  `docs/PROTOCOL.md` section 13.5 has the rule as it now stands.)
 
 The sequencer frames go on any connection, authenticated or anonymous;
 clients use the anonymous one while it is up, so the relay does not learn

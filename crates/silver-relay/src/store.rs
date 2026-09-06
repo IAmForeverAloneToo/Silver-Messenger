@@ -346,15 +346,28 @@ pub struct Stats {
     /// Key packages on deposit, last-resort ones not counted.
     #[serde(default)]
     pub key_packages: u64,
-    /// Groups with a sequencer entry.
+    /// Groups with a live sequencer entry.
     #[serde(default)]
     pub groups: u64,
+    /// Sequencer entries retired for sitting still, kept as headstones so
+    /// the group ids cannot be taken over while the grace period runs.
+    #[serde(default)]
+    pub retired_groups: u64,
     /// Linked devices: bundles that carry a device certificate.
     #[serde(default)]
     pub devices: u64,
     /// Device revocations held, which nothing removes.
     #[serde(default)]
     pub device_revocations: u64,
+}
+
+/// What one pass over the group sequencer's entries changed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GroupSweep {
+    /// Live entries that had sat still long enough to be retired.
+    pub retired: usize,
+    /// Headstones past their grace period, dropped; their ids are free.
+    pub dropped: usize,
 }
 
 /// What the epoch sequencer says to a create or a commit.
@@ -381,6 +394,15 @@ struct GroupEntry {
     next: [u8; 32],
     created_at_ms: u64,
     updated_at_ms: u64,
+    /// When the entry was retired for sitting still: it is a headstone
+    /// from then on, keeping the epoch and the token hash it died at and
+    /// nothing else. A member can raise it — by re-creating it at exactly
+    /// those values, or by committing from that epoch, neither of which
+    /// anyone outside the group at that epoch can do — and a headstone
+    /// nobody raises is dropped once the grace period is up, after which
+    /// the id is free again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retired_at_ms: Option<u64>,
 }
 
 /// Caps on encrypted file storage.
@@ -1463,6 +1485,13 @@ impl Store {
 
     /// Create the sequencer entry for `group` at `epoch`, `next` being the
     /// hash of the token that moves it on. Idempotent for the same values.
+    ///
+    /// A retired entry is raised by the same values it died at, and only
+    /// by them: the epoch and the hash of that epoch's token, which every
+    /// member of the group at that epoch can work out from its own key
+    /// schedule and nobody else can. So an id that has been used cannot be
+    /// taken over by whoever asks for it first — a member who left, above
+    /// all — for as long as the headstone stands.
     pub fn group_create(
         &self,
         group: &GroupId,
@@ -1477,9 +1506,15 @@ impl Store {
             let existing = table.get(key)?.map(|g| g.value().to_vec());
             match existing {
                 Some(json) => {
-                    let entry: GroupEntry = serde_json::from_slice(&json)
+                    let mut entry: GroupEntry = serde_json::from_slice(&json)
                         .context("stored group entry is unreadable")?;
-                    if entry.epoch == epoch && entry.next == next {
+                    let same = entry.epoch == epoch && bool::from(entry.next.ct_eq(&next));
+                    if same && entry.retired_at_ms.is_some() {
+                        entry.retired_at_ms = None;
+                        entry.updated_at_ms = now_ms;
+                        table.insert(key, serde_json::to_vec(&entry)?.as_slice())?;
+                        Sequenced::Stands(epoch)
+                    } else if same {
                         Sequenced::Stands(epoch)
                     } else {
                         Sequenced::Exists(entry.epoch)
@@ -1491,6 +1526,7 @@ impl Store {
                         next,
                         created_at_ms: now_ms,
                         updated_at_ms: now_ms,
+                        retired_at_ms: None,
                     };
                     table.insert(key, serde_json::to_vec(&entry)?.as_slice())?;
                     Sequenced::Stands(epoch)
@@ -1503,7 +1539,9 @@ impl Store {
 
     /// Move `group` from `epoch` to `epoch + 1` if it stands at `epoch` and
     /// `token` hashes to what the entry holds; `next` is the hash of the
-    /// token for the epoch after.
+    /// token for the epoch after. A commit that passes those checks raises
+    /// a retired entry as well as moving it: holding the epoch's token is
+    /// the strongest claim to a group there is.
     pub fn group_commit(
         &self,
         group: &GroupId,
@@ -1538,6 +1576,7 @@ impl Store {
                         entry.epoch += 1;
                         entry.next = next;
                         entry.updated_at_ms = now_ms;
+                        entry.retired_at_ms = None;
                         table.insert(key, serde_json::to_vec(&entry)?.as_slice())?;
                         Sequenced::Stands(entry.epoch)
                     }
@@ -1561,35 +1600,67 @@ impl Store {
             .transpose()
     }
 
-    /// How many groups have a sequencer entry.
+    /// How many groups have a live sequencer entry. Retired ones are not
+    /// counted: a group that died is not one the relay is still carrying,
+    /// and its headstone must not hold a place under the operator's cap.
     pub fn group_count(&self) -> anyhow::Result<u64> {
-        Ok(self.db.begin_read()?.open_table(GROUPS)?.len()?)
+        let txn = self.db.begin_read()?;
+        let mut live = 0;
+        for item in txn.open_table(GROUPS)?.iter()? {
+            let (_, value) = item?;
+            let entry: GroupEntry = serde_json::from_slice(value.value())
+                .context("stored group entry is unreadable")?;
+            if entry.retired_at_ms.is_none() {
+                live += 1;
+            }
+        }
+        Ok(live)
     }
 
-    /// Drop sequencer entries not moved since `cutoff_ms`. Returns how many.
-    pub fn expire_groups(&self, cutoff_ms: u64) -> anyhow::Result<usize> {
+    /// Retire sequencer entries not moved since `idle_cutoff_ms`, and drop
+    /// the headstones of those retired before `grace_cutoff_ms`. Returns
+    /// how many of each.
+    pub fn expire_groups(
+        &self,
+        now_ms: u64,
+        idle_cutoff_ms: u64,
+        grace_cutoff_ms: u64,
+    ) -> anyhow::Result<GroupSweep> {
         let txn = self.db.begin_write()?;
-        let victims = {
+        let (retiring, dropping) = {
             let table = txn.open_table(GROUPS)?;
-            let mut victims = Vec::new();
+            let mut retiring = Vec::new();
+            let mut dropping = Vec::new();
             for item in table.iter()? {
                 let (key, value) = item?;
                 let entry: GroupEntry = serde_json::from_slice(value.value())
                     .context("stored group entry is unreadable")?;
-                if entry.updated_at_ms < cutoff_ms {
-                    victims.push(key.value().to_vec());
+                match entry.retired_at_ms {
+                    None if entry.updated_at_ms < idle_cutoff_ms => {
+                        retiring.push((key.value().to_vec(), entry));
+                    }
+                    Some(at) if at < grace_cutoff_ms => dropping.push(key.value().to_vec()),
+                    _ => {}
                 }
             }
-            victims
+            (retiring, dropping)
+        };
+        let sweep = GroupSweep {
+            retired: retiring.len(),
+            dropped: dropping.len(),
         };
         {
             let mut table = txn.open_table(GROUPS)?;
-            for group in &victims {
+            for (group, mut entry) in retiring {
+                entry.retired_at_ms = Some(now_ms);
+                table.insert(group.as_slice(), serde_json::to_vec(&entry)?.as_slice())?;
+            }
+            for group in dropping {
                 table.remove(group.as_slice())?;
             }
         }
         txn.commit()?;
-        Ok(victims.len())
+        Ok(sweep)
     }
 
     /// Queue an envelope for its recipient.
@@ -1636,13 +1707,36 @@ impl Store {
 
     /// Everything waiting for `user`, oldest first.
     pub fn queued(&self, user: &UserId) -> anyhow::Result<Vec<Envelope>> {
+        Ok(self
+            .queued_from(user, 0, usize::MAX)?
+            .into_iter()
+            .map(|(_, envelope)| envelope)
+            .collect())
+    }
+
+    /// At most `limit` envelopes waiting for `user` from mailbox position
+    /// `from` on, oldest first, each with the position it sits at. The
+    /// position rises with every envelope stored for a user and is never
+    /// reused, so a reader that remembers the last one it took can ask for
+    /// what came after without seeing anything twice. This is how a
+    /// connection is fed: a page at a time, as the client acknowledges
+    /// what it already has, rather than the whole mailbox at once.
+    pub fn queued_from(
+        &self,
+        user: &UserId,
+        from: u64,
+        limit: usize,
+    ) -> anyhow::Result<Vec<(u64, Envelope)>> {
         let txn = self.db.begin_read()?;
         let table = txn.open_table(MAILBOX)?;
         let user = user.as_bytes().as_slice();
         let mut out = Vec::new();
-        for item in table.range((user, 0u64)..=(user, u64::MAX))? {
-            let (_, value) = item?;
-            out.push(decode_entry(value.value())?.1);
+        for item in table.range((user, from)..=(user, u64::MAX))? {
+            if out.len() >= limit {
+                break;
+            }
+            let (key, value) = item?;
+            out.push((key.value().1, decode_entry(value.value())?.1));
         }
         Ok(out)
     }
@@ -1745,7 +1839,17 @@ impl Store {
             .unwrap_or(0);
         let usage = txn.open_table(USAGE)?;
         let key_packages = txn.open_table(KEY_PACKAGES)?.len()?;
-        let groups = txn.open_table(GROUPS)?.len()?;
+        let (mut groups, mut retired_groups) = (0, 0);
+        for item in txn.open_table(GROUPS)?.iter()? {
+            let (_, value) = item?;
+            let entry: GroupEntry = serde_json::from_slice(value.value())
+                .context("stored group entry is unreadable")?;
+            if entry.retired_at_ms.is_some() {
+                retired_groups += 1;
+            } else {
+                groups += 1;
+            }
+        }
         let devices = txn
             .open_table(META)?
             .get(DEVICES)?
@@ -1758,6 +1862,7 @@ impl Store {
             blob_bytes,
             key_packages,
             groups,
+            retired_groups,
             devices,
             device_revocations,
             ..Stats::default()
@@ -2044,17 +2149,80 @@ mod tests {
         );
         assert_eq!(store.group_count().unwrap(), 1);
         assert_eq!(store.stats().unwrap().groups, 1);
-        // Entries expire by their last move; a member re-creates one.
-        assert_eq!(store.expire_groups(4).unwrap(), 0);
-        assert_eq!(store.expire_groups(5).unwrap(), 1);
-        assert_eq!(store.group_epoch(&group).unwrap(), None);
+        // An entry that has sat still is retired by its last move. It is
+        // not gone: the epoch and the token hash it died at stay behind.
+        assert_eq!(store.expire_groups(5, 4, 0).unwrap(), GroupSweep::default());
         assert_eq!(
-            store.group_commit(&group, 2, &t2, [0; 32], 6).unwrap(),
-            Sequenced::NotFound
+            store.expire_groups(5, 5, 0).unwrap(),
+            GroupSweep {
+                retired: 1,
+                dropped: 0
+            }
         );
+        assert_eq!(store.group_epoch(&group).unwrap(), Some(2));
+        assert_eq!(store.group_count().unwrap(), 0);
+        assert_eq!(store.stats().unwrap().groups, 0);
+        assert_eq!(store.stats().unwrap().retired_groups, 1);
+        // Nobody outside the group at that epoch can raise it: not with
+        // another epoch, and not with another token's hash.
+        assert_eq!(
+            store.group_create(&group, 3, token_hash(&t2), 6).unwrap(),
+            Sequenced::Exists(2)
+        );
+        assert_eq!(
+            store.group_create(&group, 2, token_hash(&t1), 6).unwrap(),
+            Sequenced::Exists(2)
+        );
+        assert_eq!(
+            store
+                .group_commit(&group, 2, &t1, token_hash(&t0), 6)
+                .unwrap(),
+            Sequenced::Forbidden
+        );
+        // A member has both, and either one raises it.
         assert_eq!(
             store.group_create(&group, 2, token_hash(&t2), 6).unwrap(),
             Sequenced::Stands(2)
+        );
+        assert_eq!(store.group_count().unwrap(), 1);
+        assert_eq!(
+            store.expire_groups(7, 7, 0).unwrap(),
+            GroupSweep {
+                retired: 1,
+                dropped: 0
+            }
+        );
+        assert_eq!(
+            store
+                .group_commit(&group, 2, &t2, token_hash(&t0), 8)
+                .unwrap(),
+            Sequenced::Stands(3)
+        );
+        assert_eq!(store.group_count().unwrap(), 1);
+        // A headstone nobody raises goes once the grace period is up, and
+        // the id is anyone's again.
+        assert_eq!(
+            store.expire_groups(9, 9, 0).unwrap(),
+            GroupSweep {
+                retired: 1,
+                dropped: 0
+            }
+        );
+        assert_eq!(
+            store.expire_groups(10, 0, 10).unwrap(),
+            GroupSweep {
+                retired: 0,
+                dropped: 1
+            }
+        );
+        assert_eq!(store.group_epoch(&group).unwrap(), None);
+        assert_eq!(
+            store.group_commit(&group, 3, &t0, [0; 32], 11).unwrap(),
+            Sequenced::NotFound
+        );
+        assert_eq!(
+            store.group_create(&group, 9, token_hash(&t1), 11).unwrap(),
+            Sequenced::Stands(9)
         );
     }
 

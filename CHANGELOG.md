@@ -69,6 +69,41 @@ Section 13.1 went out in 0.10.1; this is section 13.2.
   differ from any name that verifies, so the signature fails and no leaf
   is quietly wrong.
 
+- **A mailbox is delivered a page at a time** (finding SM-R-07, Medium).
+  A connection's outbound queue was unbounded, and logging in pushed
+  every waiting envelope into it at once, so a client with a full
+  mailbox made the relay hold the whole of it — up to the 32 MiB per
+  mailbox — in memory; a client that opened a socket, logged in and
+  then stopped reading held that memory for as long as it liked, since
+  the idle timeout watches for silence and a blocked connection is not
+  silent. Now the relay hands one connection at most sixteen envelopes
+  at a time and sends the next as each acknowledgement comes back,
+  reading from the mailbox in order each time, and gives up on a
+  connection whose write has not gone in thirty seconds
+  (`silver_relay_slow_closed_total` counts those). The relay's own copy
+  of a session is the only one that can write to it, so evicting a
+  client ends its connection whether or not the notice fits in the
+  queue. A client must acknowledge what it is handed to be handed the
+  rest, which this project's client has always done, poison envelope or
+  not; `docs/PROTOCOL.md` section 7.1 says so now.
+
+- **A group id nobody has used lately is still its group's** (finding
+  SM-R-08, Medium). A sequencer entry that no commit had moved for 180
+  days was deleted, and a group id with no entry belongs to whoever asks
+  for it first: a member the group had removed could wait for the group
+  to go quiet, create the entry at an epoch and a token hash of its own,
+  and leave the real members' commits refused for as long as it kept
+  re-creating it. An idle entry is now *retired* rather than dropped —
+  a headstone keeping the epoch and the token hash the group died at —
+  and only two things raise it, both of which need the group's exporter
+  at that epoch: a creation for exactly those values, or a commit
+  carrying the token itself. Anything else is refused as it would be
+  against a live entry. A headstone nobody raises for a further 180 days
+  goes, and the id is free again. Retired entries do not count against
+  `--max-groups`, and `silver_relay_retired_groups` reports them. No
+  wire change: the values a client already sends to re-create an entry
+  the relay lost are the values a headstone asks for.
+
 - **Smaller relay hardening** (findings SM-R-09 to SM-R-13). Each is
   minor on its own:
 
