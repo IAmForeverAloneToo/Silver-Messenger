@@ -124,7 +124,7 @@ impl Tail {
                 from: ours.index,
                 to: head.index,
             }));
-            lock(&log).reset();
+            lock(&log).reset(true, head, silver_protocol::now_ms());
             self.mode = None;
             self.last_synced = None;
             self.start_advance(head, None, &mut step);
@@ -133,7 +133,7 @@ impl Tail {
                 peer: None,
                 at: head.index,
             }));
-            lock(&log).reset();
+            lock(&log).reset(false, head, silver_protocol::now_ms());
             self.mode = None;
             self.last_synced = None;
             self.start_advance(head, None, &mut step);

@@ -69,6 +69,62 @@ Section 13.1 went out in 0.10.1; this is section 13.2.
   differ from any name that verifies, so the signature fails and no leaf
   is quietly wrong.
 
+- **A message that overtakes its neighbours is still a message** (finding
+  SM-C-15, Low). Only the last `(epoch, seq)` from each sender was
+  remembered, so anything below it was a replay: a message reported
+  missing and then delivered — which a relay can arrange simply by
+  handing a mailbox over in another order — was dropped rather than
+  shown. A sixty-four-message window of what has arrived is kept
+  alongside the highest, so a late message is shown once and only once.
+  The same state closes a second hole: any different epoch counted as
+  "a fresh installation", so a relay could hand a whole old conversation
+  back under fresh envelope ids and have it accepted, the envelope id
+  being outside every AEAD. Where the sender's previous numbering ended
+  is remembered too, and numbering that goes back into it is a replay.
+  A `contacts.json` written before this reads as "the highest, nothing
+  else known" and its JSON is unchanged when there is nothing more to
+  say.
+
+- **The session store is bounded, and so is what a relay can make the
+  client generate** (findings SM-C-14 and SM-C-15, Low). Sessions were
+  capped at five per peer and nothing capped the peers, so anybody who
+  knows an id could grow `sessions.json` without limit — twenty new
+  identities an hour per address, five far-ahead handshakes each, a few
+  kilobytes of ML-KEM state and up to two thousand skipped keys apiece,
+  and the Requests cap dropping the *message* only after the session was
+  stored. There is a cap on peers now (256), and beyond it the least
+  useful goes: a stranger this client has only ever heard from before
+  anybody it has written back to, and the longest unused before the
+  rest; a peer no session with has been used for six months goes on its
+  own. Separately, how many one-time keys are left and which were handed
+  out is the relay's word: it can claim the deposit is empty on every
+  connection while dropping the socket in between, which made the client
+  generate a fresh deposit each time and keep every old private half for
+  a month. Fresh keys are made at most six times an hour, and at most
+  four deposits' worth of handed-out halves are kept.
+
+- **The evidence of a forked log is kept** (finding SM-C-18, Low). When
+  the relay's log went backwards, or showed a different chain at the
+  same length, the client reset its replayed state and started again
+  from whatever the relay now showed — throwing away the head and the
+  checkpoints that disagree, which are the only proof that anything
+  happened and the only thing to take to the operator. They are kept
+  now, up to eight breaks, and `/log` shows each one: when, what this
+  client had replayed to, what the relay showed instead, and how many
+  checkpoints pin the old chain.
+
+- **A deletion for a message nobody has seen leaves nothing behind**
+  (finding SM-C-19, Low). Each of up to 64 ids in a `delete` body read,
+  filtered and rewrote the whole history file, and an id the history did
+  not hold appended a permanent tombstone — and an id nobody has ever
+  seen is free to invent, so a contact or a group member could make a
+  conversation's file grow without end and be rewritten sixty-four times
+  per message. A body's ids go through the file in one pass now, and an
+  unheld id is held only in the bounded in-memory list that already
+  waits ten minutes for the message to turn up. What this costs: a
+  deletion that arrives before its message *and* is followed by a
+  restart no longer catches it.
+
 - **Peer text is filtered on the way out, not only on the way in**
   (finding SM-C-20, Low). The screen filters what it draws, cell by
   cell; four paths left the screen and did not. The plain-text export

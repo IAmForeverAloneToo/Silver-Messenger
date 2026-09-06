@@ -604,11 +604,9 @@ impl App {
             Content::Edit { id, body } => {
                 self.apply_edit(&conversation, &id, body, update_id, at_ms, from)
             }
-            Content::Delete { ids } => {
-                for id in ids {
-                    self.delete_line(&conversation, &id, from);
-                }
-            }
+            // One body carries up to 64 ids; they go through the history
+            // file in one pass rather than rewriting it per id.
+            Content::Delete { ids } => self.delete_lines(&conversation, &ids, from),
             Content::Reaction { id, emoji } => self.apply_reaction(&conversation, &id, from, emoji),
             _ => {}
         }
@@ -693,9 +691,37 @@ impl App {
 
     /// `from` deleted the message `id` for everyone: a placeholder, if
     /// `from` wrote it; a tombstone if it has not arrived.
+    fn delete_lines(&mut self, conversation: &Conversation, ids: &[String], from: Option<UserId>) {
+        let outcome = match self.store.mark_all_deleted(conversation, ids, from) {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                self.toast(format!("Could not apply the deletion: {e}"));
+                return;
+            }
+        };
+        for (id, out) in ids.iter().zip(outcome) {
+            self.apply_deletion(conversation, id, from, out);
+        }
+    }
+
     fn delete_line(&mut self, conversation: &Conversation, id: &str, from: Option<UserId>) {
         match self.store.mark_deleted(conversation, id, from) {
-            Ok(Deletion::Applied) => {
+            Ok(out) => self.apply_deletion(conversation, id, from, out),
+            Err(e) => self.toast(format!("Could not save the deletion: {e}")),
+        }
+    }
+
+    /// What the history file said about one deleted id, applied to what
+    /// is on screen.
+    fn apply_deletion(
+        &mut self,
+        conversation: &Conversation,
+        id: &str,
+        from: Option<UserId>,
+        outcome: Deletion,
+    ) {
+        match outcome {
+            Deletion::Applied => {
                 let mut shown = false;
                 if let Some(line) = self.line_in_mut(conversation, id) {
                     line.text.clear();
@@ -712,15 +738,18 @@ impl App {
                     self.say_update(conversation, &who, "deleted a message");
                 }
             }
-            Ok(Deletion::Tombstoned) => self.push_late(LateUpdate {
+            // The message has not arrived. Held here, and here only, for
+            // the few minutes in which it still might: an id nobody has
+            // seen is free to invent, and a line on disk per invented id
+            // is a conversation anyone in it can make grow without end.
+            Deletion::Tombstoned => self.push_late(LateUpdate {
                 conversation: *conversation,
                 id: id.to_owned(),
                 from,
                 kind: Late::Deleted,
                 at_ms: now_ms(),
             }),
-            Ok(Deletion::Refused) => {}
-            Err(e) => self.toast(format!("Could not save the deletion: {e}")),
+            Deletion::Refused => {}
         }
     }
 

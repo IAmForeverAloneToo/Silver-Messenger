@@ -60,6 +60,31 @@ pub const ONE_TIME_RETENTION: Duration = Duration::from_secs(30 * 24 * 3600);
 pub const CROSSING_WINDOW: Duration = Duration::from_secs(10 * 60);
 /// Sessions kept per peer for receiving; the least recently used go first.
 pub const MAX_SESSIONS_PER_PEER: usize = 5;
+/// Peers this client keeps session state for at all.
+///
+/// The per-peer cap bounded nothing on its own: anybody who knows an id
+/// can start a session with it, and registering identities costs an
+/// attacker twenty an hour per address, so a stranger could grow
+/// `sessions.json` without limit — a post-quantum session carries a few
+/// kilobytes of ML-KEM state and up to two thousand skipped message
+/// keys. Beyond this many peers the least useful is dropped: a stranger
+/// who only ever wrote to us before somebody the user has written back
+/// to, and the least recently used before the rest.
+pub const MAX_SESSION_PEERS: usize = 256;
+/// Deposits of fresh one-time keys made in an hour. An honest relay asks
+/// for one when a conversation or two has started; more than this is a
+/// relay asking, not a need.
+pub const TOP_UPS_PER_HOUR: usize = 6;
+/// Private halves of handed-out one-time keys kept at once, per kind.
+///
+/// Which keys the relay handed out is the relay's word, and it can claim
+/// the whole deposit on every publish; four deposits' worth is more than
+/// an honest relay ever has outstanding.
+pub const MAX_HANDED_OUT_KEPT: usize = 4 * ONE_TIME_TARGET;
+/// A peer none of whose sessions has been used for this long is dropped.
+/// Their next message starts a fresh session, which is what happens
+/// anyway when either side reinstalls.
+pub const SESSION_RETENTION: Duration = Duration::from_secs(180 * 24 * 3600);
 
 /// A session store shared between the connection task and the front end.
 pub type SharedSessions = Arc<Mutex<SessionStore>>;
@@ -181,6 +206,11 @@ pub struct SessionStore {
     me: UserId,
     prekeys: PrekeyFile,
     peers: HashMap<UserId, PeerSessions>,
+    /// When fresh one-time keys were last made, for the last hour. Kept
+    /// in memory only: a relay that drops the connection to make the
+    /// client start over gets a fresh process, and the work of one
+    /// deposit at start-up is what any client does anyway.
+    top_ups: Vec<u64>,
 }
 
 impl SessionStore {
@@ -191,6 +221,7 @@ impl SessionStore {
             peers: store.load_sessions()?.peers,
             store: Some(store.clone()),
             me,
+            top_ups: Vec::new(),
         })
     }
 
@@ -201,6 +232,7 @@ impl SessionStore {
             me,
             prekeys: PrekeyFile::default(),
             peers: HashMap::new(),
+            top_ups: Vec::new(),
         }
     }
 
@@ -262,8 +294,14 @@ impl SessionStore {
                 changed = true;
             }
         }
-        let republish = one_time_remaining < ONE_TIME_MIN
-            || pq_one_time_remaining.is_some_and(|left| left < PQ_ONE_TIME_MIN);
+        // How many keys are left is the relay's word too, and it costs it
+        // nothing to say "none" on every connection while dropping the
+        // socket in between. Generating a deposit is work — twenty
+        // X25519 keys and ten ML-KEM ones — so it happens at most a few
+        // times an hour whatever the relay claims.
+        let republish = (one_time_remaining < ONE_TIME_MIN
+            || pq_one_time_remaining.is_some_and(|left| left < PQ_ONE_TIME_MIN))
+            && self.may_top_up(now_ms);
         if republish {
             self.top_up_one_time(now_ms);
             self.top_up_pq_one_time(now_ms);
@@ -273,6 +311,22 @@ impl SessionStore {
             self.persist_prekeys()?;
         }
         Ok(republish)
+    }
+
+    /// Whether a deposit may be made now: at most
+    /// [`TOP_UPS_PER_HOUR`] in the last hour.
+    fn may_top_up(&mut self, now_ms: u64) -> bool {
+        let hour = 3_600_000;
+        self.top_ups
+            .retain(|at| now_ms.saturating_sub(*at) < hour && *at <= now_ms);
+        if self.top_ups.len() >= TOP_UPS_PER_HOUR {
+            tracing::warn!(
+                "the relay says the one-time key deposit is empty again; not making more this hour"
+            );
+            return false;
+        }
+        self.top_ups.push(now_ms);
+        true
     }
 
     fn top_up_one_time(&mut self, now_ms: u64) {
@@ -392,6 +446,7 @@ impl SessionStore {
         plaintext: &[u8],
         now_ms: u64,
     ) -> Result<RatchetBody, SessionError> {
+        self.make_room(&peer.user_id, now_ms);
         let entry = self.peers.entry(peer.user_id).or_default();
         if let Some(current) = entry
             .sessions
@@ -529,6 +584,7 @@ impl SessionStore {
             self.persist_prekeys()?;
         }
         let me = self.me;
+        self.make_room(&from, now_ms);
         let entry = self.peers.entry(from).or_default();
         let window = CROSSING_WINDOW.as_millis() as u64;
         let ours_wins = entry.sessions.iter().any(|s| {
@@ -569,6 +625,40 @@ impl SessionStore {
             self.persist_sessions()?;
         }
         Ok(())
+    }
+
+    /// Make room for a session with `peer`: drop peers whose sessions
+    /// have all gone unused past [`SESSION_RETENTION`], and, if there are
+    /// still [`MAX_SESSION_PEERS`] of them, the least useful one.
+    ///
+    /// Least useful first: a peer we have only ever heard from, never
+    /// written to — which is what a stranger's handshake leaves behind —
+    /// and among those, and then among the rest, the one whose newest
+    /// session has sat longest. A dropped peer loses nothing that cannot
+    /// be rebuilt: their next message starts a session anew.
+    fn make_room(&mut self, peer: &UserId, now_ms: u64) {
+        if self.peers.contains_key(peer) {
+            return;
+        }
+        let cutoff = now_ms.saturating_sub(SESSION_RETENTION.as_millis() as u64);
+        self.peers
+            .retain(|_, entry| entry.sessions.iter().any(|s| s.last_used_ms >= cutoff));
+        while self.peers.len() >= MAX_SESSION_PEERS {
+            let Some(victim) = self
+                .peers
+                .iter()
+                .map(|(id, entry)| {
+                    let ours = entry.sessions.iter().any(|s| s.initiator == self.me);
+                    let newest = entry.sessions.iter().map(|s| s.last_used_ms).max();
+                    (*id, (ours, newest.unwrap_or(0)))
+                })
+                .min_by_key(|(_, key)| *key)
+                .map(|(id, _)| id)
+            else {
+                break;
+            };
+            self.peers.remove(&victim);
+        }
     }
 
     fn prune(entry: &mut PeerSessions) {
@@ -620,13 +710,28 @@ fn rotate<K>(
 }
 
 /// Drop one-time keys the relay handed out [`ONE_TIME_RETENTION`] ago
-/// without a session following.
+/// without a session following, and keep no more than
+/// [`MAX_HANDED_OUT_KEPT`] of the rest.
+///
+/// The private half of a handed-out key is kept for a month because the
+/// message it was handed out for may still be in the recipient's mailbox.
+/// Which keys were handed out is the relay's word, though, and it can say
+/// "all of them" as often as it likes: without a cap the deposit is
+/// refilled every time and the old halves pile up (an ML-KEM key is 1.2
+/// KB). The oldest go first; a session started against one of them is
+/// then unreadable, which is the same as a key that expired.
 fn forget_stale<K>(deposit: &mut Vec<Deposited<K>>, now_ms: u64) {
     let retention = ONE_TIME_RETENTION.as_millis() as u64;
     deposit.retain(|o| {
         o.handed_out_at_ms
             .is_none_or(|at| now_ms.saturating_sub(at) < retention)
     });
+    let mut handed_out: Vec<u64> = deposit.iter().filter_map(|o| o.handed_out_at_ms).collect();
+    if handed_out.len() > MAX_HANDED_OUT_KEPT {
+        handed_out.sort_unstable();
+        let cutoff = handed_out[handed_out.len() - MAX_HANDED_OUT_KEPT];
+        deposit.retain(|o| o.handed_out_at_ms.is_none_or(|at| at >= cutoff));
+    }
 }
 
 impl SessionStore {
