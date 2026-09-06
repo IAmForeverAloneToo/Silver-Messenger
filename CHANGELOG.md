@@ -464,6 +464,138 @@ Section 13.1 went out in 0.10.1; this is section 13.2.
   model and the assessment say what the dependency costs and what the
   intended replacement is.
 
+- **A group is not wedged by a leave, a refresh, or a commit that will
+  not stage** (finding SM-G-03, Medium). Three ways one honest client
+  broke a group and another honest client took the blame. A member's own
+  Remove — the way one leaves — was refused in anyone else's commit, but
+  OpenMLS's builder consumes the stored proposal queue by default, so a
+  leaver's proposal rode along in whichever member self-updated next and
+  every reader saw a non-admin removing a member. A member's own Remove
+  is now accepted from any committer, and a non-admin's refresh leaves
+  the queue alone: committing a leave is an admin's job. An admin that
+  left was still named in the extension until an admin's commit took it
+  out, while the rule "every admin is a member" was checked on every
+  commit between — so the co-admin's next refresh broke the group;
+  an admin whose every leaf left by its own proposal is now exempt. And a
+  handshake at or above this client's epoch that will not stage means the
+  group has moved on without it: it marks itself out of sync and starts
+  the recovery that already exists, instead of refusing the message,
+  saying nothing, and staying behind for good.
+
+- **A commit is answered for by whoever made it** (finding SM-G-04,
+  Medium). The committer's own new leaf — the one in the update path —
+  went through none of the checks an added leaf goes through, so a member
+  could self-update to a leaf with no sealing key or to a credential
+  naming another identity it holds. The first wedged the group: every
+  later read of the tree failed, and since that failure surfaced when the
+  *next* commit was processed, the client that broke it was not the one
+  named. Both the update-path leaf and any an Update proposal carries are
+  now verified as an added leaf is, and must still name the account and
+  device they named before; a tree that cannot be read after a merge
+  marks the group broken by the committer of that commit.
+
+- **An invitation costs what it costs and no more** (finding SM-G-05,
+  Medium). A Welcome needs no permission from the person it invites and
+  the last-resort key package is reusable, so a stranger could send as
+  many as it liked for group ids it invented, each a full MLS tree on
+  disk. At most twenty invitations now wait for an answer at once.
+  Beyond `into_group`, where OpenMLS has already written the tree, any
+  failure deletes that storage rather than leaving entries behind with no
+  record naming them.
+
+- **An admin by someone else's word does no admin's work by itself**
+  (finding SM-G-06, Medium). A Welcome's group extension is written by
+  whoever built the Welcome, so "you are an admin here" is the inviter's
+  claim, not the group's. A hostile contact could hand somebody a group
+  in which they were an admin and then drive their client: every join
+  request answered with a commit and a Welcome sealed to every member,
+  every "I am out of sync" answered the same way. In such a group the
+  client now does an admin's automatic work only when the user asks for
+  it; and everywhere, a member that stays out of sync is answered at most
+  four times an hour.
+
+- **A device is told whose account it is about to join** (finding
+  SM-G-07, Medium). The link a new device prints carries a key and a
+  device id but not an account, so whoever saw the QR code within its ten
+  minutes could answer it with an account of their own: the certificate
+  is signed by their key, every check passes, and the device joins them —
+  every message typed on it going to their account, while the real
+  primary is told the device belongs to an account already. Only the
+  person holding both machines can tell the two apart, so the device now
+  shows the account offered and asks before taking it. `silver --link
+  --account <id>` answers in advance for a run nobody is sitting at, and
+  with no terminal to ask the answer is no; a refusal leaves the link
+  standing until it expires.
+
+- **A member cannot fill the tree with devices** (finding SM-G-08,
+  Medium). A group was capped at 256 members, counted as identities, and
+  a member could certify devices of its own at will — so one member could
+  add leaves until every message cost every other member hundreds of
+  sealed envelopes. A commit is now refused if it leaves any identity
+  with more than the nine leaves an account may link, or the tree with
+  more than 256 × 9 in all.
+
+- **The two ways back from a lost sequencer entry are wired to the
+  client** (finding SM-G-09, Low). The engine could re-create an entry
+  the relay had lost and could catch up an entry restored behind the
+  group, and nothing called either: the answer to both was "the group
+  moved on, try again", for ever. `not_found` now puts the entry back at
+  the group's own epoch, and `stale` with an epoch behind the group
+  replays the tokens the client kept until the entry catches up.
+
+- **A Welcome is read before anything is given up** (finding SM-G-10,
+  Low). A body that was not a Welcome at all was enough to drop an
+  out-of-sync member's group state — which might still have recovered
+  from held messages — and a group id is known to anyone who was ever in
+  the group or held an invite link. The Welcome is parsed first, so
+  nonsense costs nothing.
+
+- **A rejoin does not eventually stop the deposit** (finding SM-G-11,
+  Low). Join and rejoin requests each make a key package of their own and
+  added it to the same list the client deposits, and the relay refuses an
+  oversized deposit whole — so a member who drove a victim out of sync a
+  dozen times left it depositing nothing at all until the surplus expired,
+  up to ninety days later. The list is trimmed to what a deposit may
+  hold before every deposit, oldest first, their secrets deleted with
+  them.
+
+- **Group state is written whatever happened** (finding SM-G-12, Low). A
+  commit merged or a message key consumed, and then something after it
+  failing, left the MLS state advanced in memory and not on disk: a crash
+  then restored a state before the commit, or one in which a ciphertext
+  already read would decrypt again. Everything received is persisted on
+  the way out, success or failure.
+
+- **Smaller group and device items** (finding SM-G-13, Informational).
+  The sender ratchet was left at OpenMLS's default tolerance of five
+  generations while the design note said 64, so messages from one sender
+  that overtook each other by more than five were reported unreadable —
+  a mailbox drains in whatever order it was filled. It is 64, on the
+  groups this client makes and the ones it is invited to alike.
+
+  A linked device could pin a contact's keys and mark them verified on
+  its siblings through `sync contact`, and that stood after the device
+  was unlinked. Both are trust the user placed in the device as much as
+  in the contact, so each is now remembered against the device that sent
+  it and undone when that device is unlinked: the pin dropped, so the
+  next lookup pins afresh and any change is reported, and the verified
+  mark cleared, so the safety numbers want comparing again. What each
+  device pinned and verified itself is untouched.
+
+  An invite link's "not already a member" was checked per device rather
+  than per identity, though a member's further devices are put in the
+  group by their own primary; and one link had no use bound, so it could
+  add up to 256 identities, each costing the admin a commit and a Welcome
+  to everyone. The check is per identity, as the specification always
+  said, and an admin answers at most 32 asks for one invite key before
+  saying the link wants resetting.
+
+  A gossiped transparency log head was taken from any group message,
+  including one in an invitation nobody had accepted and one from a
+  blocked member — and comparing a head can tell the user their relay is
+  showing two views of the log. A head now counts only from a group the
+  user is actually in and a sender they have not blocked.
+
 ## 0.10.1 - 2026-09-06
 
 An independent security review of the 0.10.0 line reported 76 findings.

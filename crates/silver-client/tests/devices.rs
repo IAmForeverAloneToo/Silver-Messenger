@@ -664,7 +664,7 @@ async fn a_device_links_by_its_link_and_takes_the_snapshot() {
         .unwrap();
     let deadline = tokio::time::Instant::now() + LINK_LIFETIME;
     let (taken, certificate) = tokio::join!(
-        take_link(&laptop_c, &mut laptop_ev, &link, deadline),
+        take_link(&laptop_c, &mut laptop_ev, &link, deadline, &|_| true),
         alice_c.link_device(
             &handed,
             handed.name.as_deref().unwrap_or("device"),

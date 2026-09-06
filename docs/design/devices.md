@@ -280,6 +280,18 @@ certified for one's own account and is never sent to anyone else; a
 client that receives one from a contact ignores it. Group messages need
 no sync: every leaf gets its own copy.
 
+Two of the contact actions are trust, not bookkeeping: the `bundle` of
+an `add`, which pins a contact's keys where none were pinned, and
+`verify`, the owner's word that safety numbers were compared out of
+band. Both are the sending device's word as much as the contact's, so
+each is remembered against the device that sent it and undone when that
+device is unlinked (7.2, 7.3) — the pin dropped so the next lookup pins
+afresh and any change is reported, the verified mark cleared so the
+numbers want comparing again. Unlinking is the answer to a device
+stolen or compromised, and what such a device said about whose keys are
+whose should not outlive it. What each device pinned and verified itself
+is untouched.
+
 Receipts go to every device of the sender's account, so each device
 marks its copy; `read` receipts leave from the device that showed the
 message, and its siblings learn through `sync read` that they need not.
@@ -437,12 +449,23 @@ every group it can (6.3), and syncs the new list to its other devices.
 
 The new device decrypts the provisioning message with the secret,
 verifies the certificate against the account id it names and the
-account against the sender, keeps the certificate and the list,
+account against the sender, shows the account and asks whoever is at
+the keyboard whether it is theirs, keeps the certificate and the list,
 republishes its bundle with `device_of`, and is linked; then it fetches
 the snapshot and takes the contacts, the blocked ids, the groups and
 the history. If the primary sends something under the wrong secret (a
 stranger who saw the device id) the device sees a message it cannot
 open from an unknown peer and ignores it, as it ignores any such thing.
+The asking matters because the link carries a key and a device id but
+not an account: whoever sees the QR code within its ten minutes can
+answer it with an account of their own, signed by their own key, and
+every check above passes — the device would join their account, every
+message typed on it would go there, and the real primary would be told
+the device belongs to an account already. Only the person holding both
+machines can tell the two apart, so they are asked; `--account <id>`
+answers in advance for a run nobody is sitting at, and with no terminal
+to ask the answer is no. A turned-down answer leaves the link standing
+until it expires, so the right primary can still take it.
 If the primary never answers, the link expires and the device says so;
 `silver --link` again makes a new one. A snapshot that cannot be fetched
 leaves the device linked with an empty contact list, and says so: the

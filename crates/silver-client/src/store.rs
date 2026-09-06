@@ -309,6 +309,14 @@ pub struct Contact {
     /// The user compared safety numbers with this contact out of band.
     #[serde(default)]
     pub verified: bool,
+    /// The linked device whose `sync contact` supplied the pinned bundle,
+    /// when it was not this one; see [`Contact::drop_trust_from`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_by: Option<UserId>,
+    /// The linked device whose `sync contact` set `verified`, when it was
+    /// not this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_by: Option<UserId>,
     /// Capabilities their last message advertised; see
     /// [`silver_protocol::envelope::capability`].
     #[serde(default)]
@@ -343,6 +351,8 @@ impl Contact {
             sent_seq: 0,
             received: None,
             verified: false,
+            pinned_by: None,
+            verified_by: None,
             caps: Vec::new(),
             auto_files: false,
             revoked: false,
@@ -371,6 +381,45 @@ impl Contact {
                 }
             }
         }
+    }
+
+    /// Pin `bundle`, this device's own doing: whatever a sibling had
+    /// pinned here, this device has now seen the key itself.
+    pub fn pin(&mut self, bundle: Option<KeyBundle>) {
+        self.bundle = bundle;
+        self.pinned_by = None;
+    }
+
+    /// Set the verified mark, this device's own doing.
+    pub fn set_verified(&mut self, verified: bool) {
+        self.verified = verified;
+        self.verified_by = None;
+    }
+
+    /// Undo what one of the account's own devices said about this
+    /// contact's keys, because that device has been unlinked.
+    ///
+    /// A linked device can pin a bundle and mark a contact verified here
+    /// through `sync contact` (`docs/PROTOCOL.md` section 14.4). Both are
+    /// trust the user placed in the device as much as in the contact, so
+    /// when the device is unlinked — the answer to a stolen or
+    /// compromised one — they go with it: the pin is dropped, so the next
+    /// lookup pins afresh and any change is reported, and the verified
+    /// mark is cleared, so the safety numbers are compared again. What
+    /// this device pinned or verified itself is untouched.
+    pub fn drop_trust_from(&mut self, device: &UserId) -> bool {
+        let mut changed = false;
+        if self.pinned_by.as_ref() == Some(device) {
+            self.bundle = None;
+            self.pinned_by = None;
+            changed = true;
+        }
+        if self.verified_by.as_ref() == Some(device) {
+            self.verified = false;
+            self.verified_by = None;
+            changed = true;
+        }
+        changed
     }
 
     /// Whether their client advertised `capability`.
@@ -2978,5 +3027,50 @@ mod tests {
             plain.load_or_create_identity().unwrap().0.user_id(),
             identity.user_id()
         );
+    }
+
+    /// A device of one's own can pin a contact's keys and mark them
+    /// verified over `sync contact`. Unlinking it — the answer to a stolen
+    /// or compromised device — takes that word back, and leaves what this
+    /// device did itself alone.
+    #[test]
+    fn unlinking_a_device_takes_back_what_it_said_about_a_contacts_keys() {
+        let phone = Identity::generate().user_id();
+        let laptop = Identity::generate().user_id();
+        let peer = Identity::generate();
+
+        let mut contact = Contact::new(peer.user_id());
+        contact.bundle = Some(peer.key_bundle());
+        contact.pinned_by = Some(phone);
+        contact.verified = true;
+        contact.verified_by = Some(phone);
+
+        // Another device's unlinking says nothing about this contact.
+        assert!(!contact.drop_trust_from(&laptop));
+        assert!(contact.bundle.is_some() && contact.verified);
+
+        assert!(contact.drop_trust_from(&phone));
+        assert!(
+            contact.bundle.is_none(),
+            "the pin goes, so the next lookup pins afresh"
+        );
+        assert!(!contact.verified && contact.verified_by.is_none());
+        assert!(!contact.drop_trust_from(&phone), "nothing left to undo");
+
+        // What this device pinned and verified itself is not the phone's
+        // to lose.
+        let mut mine = Contact::new(peer.user_id());
+        mine.pin(Some(peer.key_bundle()));
+        mine.set_verified(true);
+        assert!(!mine.drop_trust_from(&phone));
+        assert!(mine.bundle.is_some() && mine.verified);
+
+        // And a `contacts.json` written before any of this reads as
+        // nobody else's word, with its JSON unchanged.
+        let json = serde_json::to_string(&mine).unwrap();
+        assert!(!json.contains("pinned_by") && !json.contains("verified_by"));
+        let read: Contact = serde_json::from_str(&json).unwrap();
+        assert_eq!(read.pinned_by, None);
+        assert_eq!(read.verified_by, None);
     }
 }

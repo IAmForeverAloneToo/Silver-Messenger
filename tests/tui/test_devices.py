@@ -24,7 +24,7 @@ def main():
 
     # The laptop prints a link; alice takes it in with the history.
     l_dir = fresh_dir("devices-laptop")
-    linking = Linking(l_dir, pair.relay.url, name="laptop")
+    linking = Linking(l_dir, pair.relay.url, name="laptop", account=pair.a_id)
     link = linking.link()
     a.type(f"/devices link {link}\r")
     assert a.wait('Linking "laptop"'), "alice starts linking"

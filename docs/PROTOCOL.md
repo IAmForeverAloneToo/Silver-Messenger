@@ -1451,7 +1451,10 @@ word. A member sends one of those kinds only when every leaf declares
 lifecycle statements and cover traffic are not sent in groups). `head`
 is the sender's last verified transparency
 log head (section 11), so members compare heads across a group the way
-contacts do one-to-one. `id` de-duplicates: a member remembers the last
+contacts do one-to-one. A head is taken only from a group the reader is
+actually in, and not from a blocked sender: comparing one can tell the
+user their relay is showing two views of the log, and an invitation
+nobody has accepted is a stranger's Welcome. `id` de-duplicates: a member remembers the last
 256 ids per group and shows an id once. MLS numbers messages itself, so
 there is no `seq`, and every member is a client that reads groups, so
 there are no `caps`.
@@ -1465,7 +1468,12 @@ keeps twenty on deposit and makes more when fewer than
 ten remain or one has expired; it keeps one more marked with the MLS
 `last_resort` extension, replaced every 30 days, which the relay hands
 out again and again once the others are gone. The private halves stay
-with the client; a package's is deleted when a Welcome uses it.
+with the client; a package's is deleted when a Welcome uses it. A join
+or rejoin request makes a package of its own, so the client's list can
+outgrow what the relay accepts; it is trimmed to 30 before every
+deposit, oldest first and their secrets with them, since the relay
+refuses an oversized deposit *whole* and a client that never trimmed
+would deposit nothing at all until the surplus expired.
 
 The frames, on the authenticated connection after `publish`:
 
@@ -1593,7 +1601,12 @@ missed for good: the client marks the group out of sync and asks to
 rejoin (13.8).
 Application messages decrypt for three epochs after the one they were
 sent in; older ones are reported as unreadable, as a ratchet that moved
-on would.
+on would. Within an epoch a sender's messages may arrive up to 64
+generations out of order and up to 1000 may be skipped, since a mailbox
+drains in whatever order it was filled; past that a message is
+unreadable. Holding a decryption secret until its message arrives is
+what costs forward secrecy inside an epoch, so the window is the
+ratchet's (section 8), not a larger one.
 
 ### 13.7 Membership: Welcome, invite links, admins
 
@@ -1615,7 +1628,15 @@ that admin for that group by link; a Welcome from a stranger waits for
 the user; one from a blocked sender is declined without a word. A
 Welcome for a group the client is in already is refused; one for a
 group it left, was removed from or that broke replaces what was left of
-the old membership.
+the old membership — but only once it has parsed as a Welcome, so a body
+that is not one costs an out-of-sync member nothing. At most 20
+invitations wait for an answer at once; beyond that another is refused
+until one is answered, since a Welcome needs no permission from the
+person it invites and each one is a tree on disk. A client that is an
+admin only because the Welcome that brought it in said so — the
+extension is written by whoever built the Welcome, so that is the
+inviter's word, not the group's — does an admin's automatic work (a join,
+a rejoin) only when the user asks for it.
 
 **Invite links.** `/group invite` prints
 
@@ -1636,8 +1657,14 @@ join.proof = HMAC-SHA256(key, "silver-messenger/v1/group-join" || group id || jo
 
 The admin's client checks the proof against the group's current
 `invite_key` in constant time, that it is an admin of an active group,
-that the joiner is not blocked and not a member, and adds the joiner as
-above; members see "X joined by link". The joiner's client remembers
+that the joiner is not blocked and not a member — an identity, so a
+member's further device asks for nothing here, being brought in by its
+own primary (section 14) — and adds the joiner as above; members see "X
+joined by link". A link is a key rather than a ticket, so every holder
+presents the same proof and each valid one costs the admin a commit and
+a Welcome to every member: an admin's client answers at most 32 asks for
+one invite key and then says the link wants resetting, which
+`/group link reset` does. The joiner's client remembers
 which admin it asked for which group and takes that admin's Welcome as
 the answer. A link names one admin, by the id of the device that made
 it (section 14), so the request reaches the device whose owner is
@@ -1658,12 +1685,22 @@ group context of the epoch the commit leaves:
   leaves whose credential identity is its own, which are its devices
   (section 14).
 * Every leaf added is valid (13.1). Membership, the admin list and the
-  cap below are read as identities: a leaf coming or going for an
+  caps below are read as identities: a leaf coming or going for an
   identity that stays a member is a refresh, not an add or a removal.
+* Every leaf the commit *replaces* — the committer's own in the update
+  path, and any an Update proposal carries — is valid in the same way,
+  and still names the account and device it named before: a leaf may be
+  refreshed, not handed to another identity or to another device of one.
 * The ciphersuite is unchanged, and the required capabilities still list
   `0xF000` and `0xF001`.
-* After the commit `admins` is not empty and lists only members, and
-  the group has at most 256 members.
+* After the commit `admins` is not empty and lists only members, except
+  an admin whose every leaf left the tree by its own Remove in this
+  commit: an admin that leaves stays named until an admin's commit takes
+  it out of the extension.
+* After the commit the group has at most 256 members, at most nine
+  leaves for any one identity (the devices an account may link, 14.1),
+  and at most 256 × 9 leaves in all: every leaf costs every member a
+  sealed envelope per message and a place in every commit and Welcome.
 * A proposal sent on its own (by reference) is accepted only when it is
   a member's Remove of its own leaf; every other proposal, and every
   external-join proposal, is refused and not stored.
@@ -1674,9 +1711,14 @@ honest client applies the same rules, so they all stop at the same
 epoch while the sequencer, which cannot check policy, has moved on; a
 rogue member can wedge a group but cannot get an intruder's keys
 accepted. Recovery is a new group made by an admin with the honest
-members. A message that cannot be processed at all (a replay MLS
-refuses, an unreadable message from an epoch too far back) is reported
-and dropped without changing anything.
+members. The same holds for a tree that cannot be read *after* the
+merge: the commit that left it is the fault and its committer is named,
+rather than the failure surfacing at whoever commits next. A message
+that cannot be processed at all (a replay MLS refuses, an unreadable
+message from an epoch too far back) is reported and dropped without
+changing anything — except a handshake at or above the reader's own
+epoch, which means the group moved on without it: that marks the group
+out of sync (13.8) rather than leaving it stuck.
 
 ### 13.8 Out of sync and rejoin
 
@@ -1691,7 +1733,9 @@ identity), and commits a Remove of the sender's old leaf and an Add of
 the new key package in one commit, sending the Welcome as for an add.
 The member keeps its history; the messages between are lost, and the
 client says so. `/group rejoin` sends the same
-request on demand.
+request on demand. A member that stays out of sync asks again and
+again, and each answer is a commit and a Welcome, so a client answers
+at most four rejoins per member per group in an hour.
 
 ### 13.9 Leave and remove
 
@@ -1702,7 +1746,10 @@ request on demand.
   devices until they leave too (section 14). An admin's client that
   receives the proposal commits it at once (a self-update commit that
   carries the pending proposal); until one does, the leaver is still in
-  the tree. A
+  the tree. Committing a leave is an admin's job: a non-admin's own
+  refresh commit leaves the stored proposals alone, so a leaver's Remove
+  cannot ride along in a weekly self-update nobody asked for and have
+  every reader see a non-admin removing a member. A
   proposal is accepted by reference only from the leaf it removes. The
   last admin of a group with other members cannot leave; the last member
   leaving deletes the group.
@@ -2069,7 +2116,15 @@ ordinary bodies, as the `sync` content kind:
 * `contact`: a change to the contact list, with `action` one of `add`
   (`user`, `alias`?, `bundle`?), `remove` (`user`), `alias` (`user`,
   `alias`?), `verify` (`user`, `verified`), `block` (`user`), `unblock`
-  (`user`) and `files` (`user`, `auto`).
+  (`user`) and `files` (`user`, `auto`). Two of these are trust rather
+  than bookkeeping: the `bundle` of an `add`, which pins a contact's
+  keys where none were pinned (it never replaces a pin), and `verify`,
+  which is the owner's word that safety numbers were compared. Both are
+  remembered against the device that sent them, and both are undone when
+  that device is unlinked — the answer to a device stolen or
+  compromised — so the contact's keys are pinned afresh on the next
+  lookup and the numbers want comparing again. What the device did on
+  its own is untouched.
 * `devices`: the account's device list as the primary now publishes it
   and every revocation it has issued. Applied only when the sender is
   the primary; a device revoked by it is dropped with its sessions, and a
@@ -2139,7 +2194,19 @@ it cannot open. The device checks that the message opens under its
 link's key, names the sender as `account`, certifies its own key for
 that account, and lists that account's devices and revocations alone;
 it keeps the certificate and the list, publishes its bundle again with
-`device_of`, and is linked. The primary, once the relay has confirmed
+`device_of`, and is linked — but not before the account it is about to
+join has been put to the person at the new device. The link carries a
+key and a device id, not an account, so whoever sees the QR code within
+its ten minutes may answer it with an account of their own: their
+certificate is signed by *their* key and every check above passes, so
+the device would join the wrong account and every message typed on it
+would go there, while the real primary is told the device belongs to an
+account already. Nobody but the person holding both machines can tell
+the two apart, so the device shows the account offered and asks (`silver
+--link --account <id>` answers in advance, for a run nobody is sitting
+at; without a terminal to ask, the answer is no). A turned-down answer
+leaves the link standing until it expires, so the right primary can
+still take it. The primary, once the relay has confirmed
 its own publish with the device on the list, tells its other devices the
 list (`sync devices`) and adds the device to every group it is in
 (14.7). A link the primary never answers expires and the device says so;

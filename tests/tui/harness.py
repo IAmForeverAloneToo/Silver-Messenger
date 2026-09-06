@@ -311,10 +311,15 @@ def history(data_dir, peer_id):
 class Linking:
     """`silver --link` as a child process, its output read line by line."""
 
-    def __init__(self, data_dir, relay_url, name=None):
+    def __init__(self, data_dir, relay_url, name=None, account=None):
         args = [os.path.join(BIN, "silver"), "--data-dir", data_dir, "--relay", relay_url, "--link"]
         if name:
             args += ["--device-name", name]
+        # The link carries no account, so a device with nobody at it must
+        # be told which account may claim it; without this it shows the
+        # account that answered and asks (SM-G-07).
+        if account:
+            args += ["--account", account]
         self.p = subprocess.Popen(
             args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             env=client_env(),

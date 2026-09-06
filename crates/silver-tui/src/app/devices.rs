@@ -502,6 +502,7 @@ impl App {
             ),
         );
         self.toast(format!("Unlinked {name}."));
+        self.drop_trust_from(&device);
         // Contacts whose client understands devices get the statement
         // inside a message now; the relay serves it to the rest with
         // their next lookup.
@@ -800,8 +801,13 @@ impl App {
                     at_ms.unwrap_or_else(now_ms),
                 );
             }
-            Sync::Contact { action } => self.apply_contact_action(action),
-            Sync::Devices { devices, .. } => {
+            Sync::Contact { action } => self.apply_contact_action(device, action),
+            Sync::Devices { devices, revoked } => {
+                // A device the primary has unlinked takes what it said
+                // about contacts' keys with it, here as much as there.
+                for revocation in &revoked {
+                    self.drop_trust_from(&revocation.device);
+                }
                 if self.linked {
                     // The client applied the list; this device's own name
                     // may have changed with it.
@@ -831,8 +837,34 @@ impl App {
         }
     }
 
+    /// Undo the bundle pins and verified marks a device of ours made
+    /// through `sync contact`, because it has been unlinked
+    /// ([`silver_client::store::Contact::drop_trust_from`]).
+    pub(super) fn drop_trust_from(&mut self, device: &UserId) {
+        let undone: Vec<String> = self
+            .contacts
+            .iter_mut()
+            .filter_map(|c| c.drop_trust_from(device).then(|| c.display_name()))
+            .collect();
+        if undone.is_empty() {
+            return;
+        }
+        self.persist_contacts();
+        self.system(
+            Level::Warn,
+            format!(
+                "That device had pinned or verified keys for {}. Those are dropped: their keys are pinned again on the next lookup, and safety numbers want comparing again.",
+                undone.join(", ")
+            ),
+        );
+    }
+
     /// A contact list change made on another device of this identity.
-    fn apply_contact_action(&mut self, action: ContactAction) {
+    ///
+    /// `by` is the device that made it. A bundle it pins and a verified
+    /// mark it sets are trust it asserted, so they are remembered as its
+    /// and undone if it is ever unlinked.
+    fn apply_contact_action(&mut self, by: UserId, action: ContactAction) {
         match action {
             ContactAction::Add {
                 user,
@@ -847,8 +879,11 @@ impl App {
                         if alias.is_some() {
                             self.contacts[index].alias = alias;
                         }
-                        if self.contacts[index].bundle.is_none() {
-                            self.contacts[index].bundle = bundle.map(|b| *b);
+                        if self.contacts[index].bundle.is_none()
+                            && let Some(bundle) = bundle
+                        {
+                            self.contacts[index].bundle = Some(*bundle);
+                            self.contacts[index].pinned_by = Some(by);
                         }
                         self.persist_contacts();
                     }
@@ -856,6 +891,7 @@ impl App {
                         let mut contact = Contact::new(user);
                         contact.alias = alias;
                         contact.bundle = bundle.map(|b| *b);
+                        contact.pinned_by = contact.bundle.as_ref().map(|_| by);
                         let name = contact.display_name();
                         self.contacts.push(contact);
                         self.threads.entry(user).or_default();
@@ -902,6 +938,7 @@ impl App {
             ContactAction::Verify { user, verified } => {
                 if let Some(index) = self.contact_index(&user) {
                     self.contacts[index].verified = verified;
+                    self.contacts[index].verified_by = verified.then_some(by);
                     self.persist_contacts();
                 }
             }

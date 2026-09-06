@@ -527,6 +527,10 @@ pub struct App {
     /// Whether messages are going out on the relay's anonymous submission
     /// connection. `None` until the relay says.
     pub anonymous_submission: Option<bool>,
+    /// When each member's rejoin requests were answered, per group, for
+    /// the last hour: answering one is a commit and a Welcome, and a
+    /// member that stays out of sync asks again and again.
+    rejoins: HashMap<(silver_protocol::group::GroupId, UserId), Vec<Instant>>,
     known_ids: RecentIds,
     /// Blob ids of parked group messages already fetched.
     fetched_blobs: RecentIds,
@@ -780,6 +784,7 @@ impl App {
             last_group_maintenance: Instant::now(),
             unreadable: (None, 0),
             anonymous_submission: None,
+            rejoins: HashMap::new(),
             known_ids,
             fetched_blobs: RecentIds::new(FETCHED_BLOBS_CAP),
             requests_full_noted: false,
@@ -2612,8 +2617,8 @@ impl App {
         let name = self.contacts[index].display_name();
         let was_verified = self.contacts[index].verified;
         let user_id = self.contacts[index].user_id;
-        self.contacts[index].bundle = Some(new);
-        self.contacts[index].verified = false;
+        self.contacts[index].pin(Some(new));
+        self.contacts[index].set_verified(false);
         self.persist_contacts();
         self.client.forget_sessions(&user_id);
         self.system(
@@ -2657,7 +2662,7 @@ impl App {
                 self.select(0);
             }
             Some("ok") | Some("yes") => {
-                self.contacts[index].verified = true;
+                self.contacts[index].set_verified(true);
                 self.persist_contacts();
                 self.sync_contact(silver_protocol::device::ContactAction::Verify {
                     user: peer,
@@ -2668,7 +2673,7 @@ impl App {
                 self.toast(format!("{name} verified {mark}"));
             }
             Some("no") | Some("clear") => {
-                self.contacts[index].verified = false;
+                self.contacts[index].set_verified(false);
                 self.persist_contacts();
                 self.sync_contact(silver_protocol::device::ContactAction::Verify {
                     user: peer,
@@ -3045,13 +3050,13 @@ impl App {
                                 format!("The relay has no key for {name} right now."),
                             ),
                             (None, Some(new)) => {
-                                self.contacts[index].bundle = Some(new);
+                                self.contacts[index].pin(Some(new));
                                 self.persist_contacts();
                                 self.system(Level::Info, format!("Got {name}'s key."));
                             }
                             (Some(old), Some(new)) if old.dh_public == new.dh_public => {
                                 // Same identity; keep the fresher prekeys.
-                                self.contacts[index].bundle = Some(new);
+                                self.contacts[index].pin(Some(new));
                                 self.persist_contacts();
                                 self.toast(format!("{name}'s key is unchanged."));
                             }
@@ -3095,7 +3100,7 @@ impl App {
                         if delivery.key_changed {
                             self.note_key_change(i, delivery.bundle);
                         } else {
-                            self.contacts[i].bundle = Some(delivery.bundle);
+                            self.contacts[i].pin(Some(delivery.bundle));
                             self.persist_contacts();
                         }
                     }
@@ -3683,7 +3688,7 @@ impl App {
         let name = self.contact_name(&revocation.identity);
         let peer = revocation.identity;
         self.contacts[index].revoked = true;
-        self.contacts[index].verified = false;
+        self.contacts[index].set_verified(false);
         self.persist_contacts();
         self.client.forget_sessions(&peer);
         self.system(
@@ -3739,8 +3744,8 @@ impl App {
         }
         let contact = &mut self.contacts[index];
         contact.user_id = new;
-        contact.bundle = None; // re-pin on lookup below
-        contact.verified = false;
+        contact.pin(None); // re-pinned by the lookup below
+        contact.set_verified(false);
         contact.revoked = false;
         contact.sent_seq = 0;
         contact.received = None;
@@ -5351,5 +5356,66 @@ mod tests {
         let escape = downloads.join("..").join("identity.json");
         let refused = app.received_file(&escape).unwrap_err().to_string();
         assert!(refused.contains("not a received file"), "{refused}");
+    }
+
+    /// A device of one's own can add a contact with a pinned bundle and
+    /// mark them verified from over there. Both are its word, so both are
+    /// remembered as its and go when it is unlinked (SM-G-13).
+    #[tokio::test]
+    async fn what_another_device_pinned_and_verified_goes_when_it_is_unlinked() {
+        use silver_protocol::device::{ContactAction, Sync};
+
+        let (mut app, _dir) = app();
+        let phone = Identity::generate().user_id();
+        let peer = Identity::generate();
+        let bundle = peer.key_bundle();
+
+        app.on_sync(
+            phone,
+            Sync::Contact {
+                action: ContactAction::Add {
+                    user: peer.user_id(),
+                    alias: Some("bob".into()),
+                    bundle: Some(Box::new(bundle.clone())),
+                },
+            },
+        );
+        app.on_sync(
+            phone,
+            Sync::Contact {
+                action: ContactAction::Verify {
+                    user: peer.user_id(),
+                    verified: true,
+                },
+            },
+        );
+        let index = app.contact_index(&peer.user_id()).unwrap();
+        assert_eq!(app.contacts[index].bundle, Some(bundle.clone()));
+        assert_eq!(app.contacts[index].pinned_by, Some(phone));
+        assert!(app.contacts[index].verified);
+        assert_eq!(app.contacts[index].verified_by, Some(phone));
+
+        app.drop_trust_from(&phone);
+        let index = app.contact_index(&peer.user_id()).unwrap();
+        assert_eq!(app.contacts[index].bundle, None, "re-pinned on next lookup");
+        assert!(!app.contacts[index].verified);
+        assert_eq!(app.contacts[index].pinned_by, None);
+        assert_eq!(app.contacts[index].verified_by, None);
+        assert_eq!(
+            app.contacts[index].alias.as_deref(),
+            Some("bob"),
+            "only the trust goes; the contact stays"
+        );
+        // It is on disk, not only in memory.
+        assert_eq!(app.store.load_contacts().unwrap()[index].bundle, None);
+
+        // What this device pins and verifies itself is not the phone's to
+        // lose.
+        let index = app.contact_index(&peer.user_id()).unwrap();
+        app.contacts[index].pin(Some(bundle.clone()));
+        app.contacts[index].set_verified(true);
+        app.drop_trust_from(&phone);
+        assert_eq!(app.contacts[index].bundle, Some(bundle));
+        assert!(app.contacts[index].verified);
     }
 }

@@ -785,6 +785,51 @@ impl App {
         });
     }
 
+    /// Whether this account is an admin of `group` only because the
+    /// Welcome that brought it in said so.
+    ///
+    /// That extension is written by whoever built the Welcome, so it is
+    /// the inviter's word, not the group's. A client does no admin work
+    /// by itself in such a group: the user asks for it or it does not
+    /// happen (SM-G-06).
+    fn admin_by_someone_elses_word(&self, group: &GroupId) -> bool {
+        self.groups.get(group).is_some_and(|r| r.conferred_admin)
+    }
+
+    /// Whether to answer a rejoin request from `member` now: at most
+    /// [`REJOINS_PER_HOUR`] answers per member per group in an hour.
+    fn rejoin_allowed(&mut self, group: GroupId, member: UserId) -> bool {
+        const REJOINS_PER_HOUR: usize = 4;
+        let hour = std::time::Duration::from_secs(3600);
+        let now = Instant::now();
+        let seen = self.rejoins.entry((group, member)).or_default();
+        seen.retain(|at| now.duration_since(*at) < hour);
+        if seen.len() >= REJOINS_PER_HOUR {
+            return false;
+        }
+        seen.push(now);
+        true
+    }
+
+    /// Put a sequencer entry back that the relay has lost.
+    fn recreate_entry(&mut self, created: silver_client::groups::Created) {
+        let client = self.client.clone();
+        let tx = self.internal_tx.clone();
+        tokio::spawn(async move {
+            let answer = client
+                .group_create(created)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx
+                .send(Internal::GroupSequenced {
+                    group: created.group,
+                    purpose: Purpose::Refresh,
+                    answer,
+                })
+                .await;
+        });
+    }
+
     pub(super) fn run_staged(&mut self, staged: Staged, purpose: Purpose) {
         let client = self.client.clone();
         let tx = self.internal_tx.clone();
@@ -918,6 +963,60 @@ impl App {
                 }
                 Err(e) => self.toast(format!("Could not apply the change to {name}: {e}")),
             },
+            // The relay lost the entry (its headstone's grace period ran
+            // out, or it was restored from a backup older than the
+            // group). Any member re-creates it from what the group itself
+            // knows: its epoch and the hash of that epoch's token, which
+            // is exactly what a headstone asks for
+            // (`docs/PROTOCOL.md` 13.5). Before 0.11.0 this path existed
+            // in the engine with no caller and the answer was "try
+            // again" (SM-G-09).
+            (_, Ok(SequencerAnswer::NotFound)) => {
+                let _ = self.groups.discard_staged(&group);
+                match self.groups.sequencer_entry(&group) {
+                    Ok(entry) => {
+                        self.system(
+                            Level::Warn,
+                            format!(
+                                "The relay has no sequencer entry for {name}; putting it back at epoch {}. Try the change again once it is there.",
+                                entry.epoch
+                            ),
+                        );
+                        self.recreate_entry(entry);
+                    }
+                    Err(e) => self.toast(format!(
+                        "{name}: the relay lost the group, and it cannot be put back: {e}"
+                    )),
+                }
+            }
+            // The relay is behind the group: it was restored from a
+            // backup taken while the group was younger. The tokens of the
+            // epochs since are replayed, one accepted commit per step,
+            // until the entry catches up.
+            (purpose, Ok(SequencerAnswer::Stale(theirs)))
+                if self
+                    .groups
+                    .catch_up(&group, theirs)
+                    .is_ok_and(|steps| !steps.is_empty()) =>
+            {
+                let _ = self.groups.discard_staged(&group);
+                let _ = purpose;
+                // The guard settled that there are steps to replay;
+                // `catch_up` only reads the tokens the record keeps. A
+                // relay so far behind that those are gone falls to the
+                // arm below, and `/group rejoin` starts again.
+                let steps = self.groups.catch_up(&group, theirs).unwrap_or_default();
+                self.system(
+                    Level::Warn,
+                    format!(
+                        "The relay has {name} at epoch {theirs}, behind the group; catching it up over {} step(s). Try the change again afterwards.",
+                        steps.len()
+                    ),
+                );
+                for staged in steps {
+                    self.run_staged(staged, Purpose::Refresh);
+                }
+            }
             (purpose, answer) => {
                 let _ = self.groups.discard_staged(&group);
                 let what = match &purpose {
@@ -1380,6 +1479,9 @@ impl App {
                     }
                 }
                 GroupEvent::Head { from, head } => {
+                    if self.blocked.contains(&from) {
+                        continue;
+                    }
                     let client = self.client.clone();
                     tokio::spawn(async move {
                         let _ = client.note_peer_head(from, head).await;
@@ -1472,6 +1574,18 @@ impl App {
                         ));
                         continue;
                     }
+                    if self.admin_by_someone_elses_word(&group) {
+                        self.system(
+                            Level::Warn,
+                            format!(
+                                "{} asked to join {}, where you were made an admin by whoever invited you rather than by the group. Adding them is a commit and a Welcome sealed to every member, so it is not done on their say-so: /group add {} if you want them in.",
+                                self.member_name(&joiner),
+                                self.group_name(&group),
+                                joiner.short()
+                            ),
+                        );
+                        continue;
+                    }
                     match self.groups.stage_add(&group, &[key_package]) {
                         Ok(staged) => self.run_staged(staged, Purpose::Join(joiner)),
                         Err(e) => {
@@ -1512,7 +1626,18 @@ impl App {
                     member,
                     key_package,
                 } => {
-                    if self.groups.has_staged(&group) {
+                    if self.groups.has_staged(&group) || self.admin_by_someone_elses_word(&group) {
+                        continue;
+                    }
+                    // A member out of sync asks again and again while it
+                    // stays out of sync, and each answer is a commit and
+                    // a Welcome; a member that never comes back would
+                    // have this client doing that work for ever.
+                    if !self.rejoin_allowed(group, member) {
+                        tracing::warn!(
+                            "{}… has asked to rejoin too often; not answering for now",
+                            member.short()
+                        );
                         continue;
                     }
                     match self.groups.stage_rejoin(&group, member, &key_package) {
