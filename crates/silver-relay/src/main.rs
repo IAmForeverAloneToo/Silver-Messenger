@@ -448,12 +448,13 @@ async fn run_admin(socket: PathBuf, action: AdminAction) -> anyhow::Result<()> {
                 s.counters.open_connections, s.counters.addresses, s.online
             );
             println!(
-                "refused: {} connections, {} registrations, {} uploads, {} logins; {} closed idle; {} anonymous submissions",
+                "refused: {} connections, {} registrations, {} uploads, {} logins; {} closed idle, {} closed for not reading; {} anonymous submissions",
                 s.counters.refused_connections,
                 s.counters.refused_registrations,
                 s.counters.refused_uploads,
                 s.auth_failures,
                 s.counters.idle_closed,
+                s.counters.slow_closed,
                 s.anonymous_submissions
             );
             println!(

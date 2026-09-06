@@ -57,8 +57,8 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 pub use store::{
-    Ban, BlobLimits, BlobMeta, BlobPut, Enqueue, Limits, Removed, SCHEMA_VERSION, SchemaTooNew,
-    Sequenced, Stats, Store,
+    Ban, BlobLimits, BlobMeta, BlobPut, Enqueue, GroupSweep, Limits, Removed, SCHEMA_VERSION,
+    SchemaTooNew, Sequenced, Stats, Store,
 };
 
 /// The admin setting that holds an invite token changed at runtime; an
@@ -167,6 +167,13 @@ pub const MAX_PQ_ONE_TIME_PREKEYS: usize = 50;
 /// dropped; a live group refreshes its entry with every commit, and a
 /// member of a dropped one re-creates it (`docs/PROTOCOL.md` section 13).
 pub const GROUP_IDLE_TTL: Duration = Duration::from_secs(180 * 24 * 60 * 60);
+/// How long a retired sequencer entry is kept as a headstone: the epoch
+/// and token hash it died at, and nothing else. Only a member of the group
+/// at that epoch can raise it, so an id that has been used cannot be taken
+/// over by a stranger — or by somebody the group removed — for this long
+/// after the group stops. Once it is up the headstone goes and the id is
+/// free, as an id nobody has ever used is (`docs/PROTOCOL.md` section 13.5).
+pub const GROUP_HEADSTONE_TTL: Duration = Duration::from_secs(180 * 24 * 60 * 60);
 /// Key package deposits one connection may make per minute: one, since a
 /// deposit replaces the whole list and a client has no reason to repeat
 /// it.
@@ -184,6 +191,24 @@ const ACKS_PER_MINUTE: u32 = 4000;
 /// however small it is, so charging bytes alone let a client fill the
 /// store with empty chunks that no budget ever noticed.
 const CHUNK_OVERHEAD_BYTES: usize = 1024;
+/// Envelopes the relay will have delivered to one connection and not yet
+/// seen acknowledged. A client acknowledges every envelope it is handed,
+/// so a mailbox drains a page at a time at the speed the client reads it;
+/// what the window buys is that the relay never holds more than this much
+/// of a mailbox in memory, however much is waiting and however many
+/// connections are open at once.
+const DELIVERY_WINDOW: usize = 16;
+/// Frames one connection's outbound queue holds. Only deliveries and the
+/// close notice go through it, and deliveries are already held to
+/// [`DELIVERY_WINDOW`], so the margin is for the close notice to have
+/// somewhere to sit.
+const OUTBOUND_QUEUE: usize = DELIVERY_WINDOW + 16;
+/// How long one frame may take to reach the client before the relay gives
+/// up on the connection. Without it a peer that opens a socket and then
+/// stops reading holds a task, a queue and the memory in it for as long as
+/// it likes: the idle timeout does not fire, because the connection is not
+/// idle from the relay's side, it is blocked.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Abuse controls applied per connection, plus the registration policy.
 #[derive(Clone, Debug)]
@@ -427,6 +452,7 @@ struct Counters {
     refused_registrations: AtomicU64,
     refused_uploads: AtomicU64,
     idle_closed: AtomicU64,
+    slow_closed: AtomicU64,
     group_commits: AtomicU64,
     group_rejections: AtomicU64,
 }
@@ -440,6 +466,10 @@ pub struct CounterSnapshot {
     pub refused_registrations: u64,
     pub refused_uploads: u64,
     pub idle_closed: u64,
+    /// Connections closed because the client stopped reading and a frame
+    /// could not be written within the write timeout.
+    #[serde(default)]
+    pub slow_closed: u64,
     /// Commits the group sequencer accepted, and ones it refused.
     #[serde(default)]
     pub group_commits: u64,
@@ -453,7 +483,9 @@ pub struct Expired {
     pub messages: usize,
     pub blobs: usize,
     pub key_packages: usize,
-    pub groups: usize,
+    /// Group sequencer entries retired for sitting still, and headstones
+    /// dropped after their grace period.
+    pub groups: GroupSweep,
 }
 
 /// Holds one connection's place in the counts; dropping it gives the
@@ -499,9 +531,21 @@ pub struct RelayState {
     log_salt: [u8; 16],
 }
 
+/// A logged-in connection, as the rest of the relay sees it.
+///
+/// The registry owns the only sender: the connection's own task keeps just
+/// the receiver. So taking a session out of the registry drops the sender,
+/// the queue ends, and the task winds up — an eviction cannot be lost
+/// behind a queue that a client has stopped reading.
 struct Session {
     id: u64,
-    tx: mpsc::UnboundedSender<Outbound>,
+    tx: mpsc::Sender<Outbound>,
+    /// The next mailbox position to deliver from. Everything below it has
+    /// been handed to this connection already.
+    next: u64,
+    /// Envelope ids delivered to this connection and not yet acknowledged,
+    /// at most [`DELIVERY_WINDOW`] of them.
+    in_flight: HashSet<String>,
 }
 
 enum Outbound {
@@ -515,6 +559,28 @@ enum Outbound {
 
 /// Why the relay refused a client frame.
 type Rejection = (ErrorCode, &'static str);
+
+/// What the relay has to say back to one client frame.
+enum Answer {
+    /// Frames already in hand, written in order.
+    Frames(Vec<ServerFrame>),
+    /// A stored file, read out of the store and written a chunk at a
+    /// time. The checks and the rate limit are already done
+    /// ([`RelayState::open_blob`]); what is left is the reading.
+    Blob { blob: String, total: u32 },
+}
+
+impl From<ServerFrame> for Answer {
+    fn from(frame: ServerFrame) -> Self {
+        Self::Frames(vec![frame])
+    }
+}
+
+impl From<Vec<ServerFrame>> for Answer {
+    fn from(frames: Vec<ServerFrame>) -> Self {
+        Self::Frames(frames)
+    }
+}
 
 /// What a client that published prekeys is told afterwards.
 #[derive(Debug)]
@@ -728,6 +794,7 @@ impl RelayState {
             refused_registrations: self.counters.refused_registrations.load(Ordering::Relaxed),
             refused_uploads: self.counters.refused_uploads.load(Ordering::Relaxed),
             idle_closed: self.counters.idle_closed.load(Ordering::Relaxed),
+            slow_closed: self.counters.slow_closed.load(Ordering::Relaxed),
             group_commits: self.counters.group_commits.load(Ordering::Relaxed),
             group_rejections: self.counters.group_rejections.load(Ordering::Relaxed),
         }
@@ -902,9 +969,14 @@ impl RelayState {
     }
 
     /// Take `user`'s session out of the registry and tell it to close.
+    ///
+    /// The notice is a courtesy: it says why in the log and closes the
+    /// socket politely. Taking the session out of the registry is what
+    /// actually ends it, so a client that has stopped reading — and whose
+    /// queue is therefore full — goes just the same.
     fn disconnect(&self, user: &UserId, why: &'static str) {
         if let Some(session) = self.online().remove(user) {
-            let _ = session.tx.send(Outbound::Close(why));
+            let _ = session.tx.try_send(Outbound::Close(why));
         }
     }
 
@@ -912,11 +984,13 @@ impl RelayState {
     /// first, so a device learns from its relay that it is no longer one.
     fn close_with(&self, user: &UserId, why: &'static str) {
         if let Some(session) = self.online().remove(user) {
-            let _ = session.tx.send(Outbound::Frame(Box::new(ServerFrame::error(
-                ErrorCode::Forbidden,
-                why,
-            ))));
-            let _ = session.tx.send(Outbound::Close(why));
+            let _ = session
+                .tx
+                .try_send(Outbound::Frame(Box::new(ServerFrame::error(
+                    ErrorCode::Forbidden,
+                    why,
+                ))));
+            let _ = session.tx.try_send(Outbound::Close(why));
         }
     }
 
@@ -1497,9 +1571,10 @@ impl RelayState {
         (revocation, succession)
     }
 
-    /// Delete unacknowledged envelopes and file blobs older than `ttl`,
-    /// key packages past their lifetime, and group sequencer entries idle
-    /// for [`GROUP_IDLE_TTL`]. Returns how many of each.
+    /// Delete unacknowledged envelopes and file blobs older than `ttl` and
+    /// key packages past their lifetime; retire group sequencer entries
+    /// idle for [`GROUP_IDLE_TTL`] and drop headstones older than
+    /// [`GROUP_HEADSTONE_TTL`]. Returns how many of each.
     pub fn expire(&self, ttl: Duration) -> Expired {
         let now = now_ms();
         let cutoff = now.saturating_sub(ttl.as_millis() as u64);
@@ -1515,11 +1590,15 @@ impl RelayState {
             error!("expiring key packages: {e:#}");
             0
         });
-        let group_cutoff = now.saturating_sub(GROUP_IDLE_TTL.as_millis() as u64);
-        let groups = self.store.expire_groups(group_cutoff).unwrap_or_else(|e| {
-            error!("expiring group entries: {e:#}");
-            0
-        });
+        let idle_cutoff = now.saturating_sub(GROUP_IDLE_TTL.as_millis() as u64);
+        let grace_cutoff = now.saturating_sub(GROUP_HEADSTONE_TTL.as_millis() as u64);
+        let groups = self
+            .store
+            .expire_groups(now, idle_cutoff, grace_cutoff)
+            .unwrap_or_else(|e| {
+                error!("expiring group entries: {e:#}");
+                GroupSweep::default()
+            });
         Expired {
             messages,
             blobs,
@@ -1621,80 +1700,142 @@ impl RelayState {
     }
 
     /// Every chunk of a complete blob, or one rejection.
-    fn get_blob(&self, blob: &str, bucket: &mut Bucket) -> Vec<ServerFrame> {
+    /// Answer a `blob_get`: the checks and the whole request's cost, then
+    /// the file's chunks left in the store for the connection to stream.
+    ///
+    /// A file is up to 16 MiB and the relay serves whoever asks; reading
+    /// one into a reply in one go would mean holding a copy per reader,
+    /// which is the same mistake as pushing a whole mailbox into a queue.
+    fn open_blob(&self, blob: &str, bucket: &mut Bucket) -> Answer {
+        let reject = |code, message| Answer::from(blob_rejected(blob, code, message));
         if !is_valid_blob_id(blob) {
-            return vec![blob_rejected(
-                blob,
-                ErrorCode::Malformed,
-                "blob id must be 32 hex characters",
-            )];
+            return reject(ErrorCode::Malformed, "blob id must be 32 hex characters");
         }
         let meta = match self.store.blob_meta(blob) {
             Ok(Some(meta)) if meta.is_complete() => meta,
             Ok(_) => {
-                return vec![blob_rejected(
-                    blob,
+                return reject(
                     ErrorCode::NotFound,
                     "no such file on this relay (it may have expired)",
-                )];
+                );
             }
             Err(e) => {
                 error!("reading blob: {e:#}");
-                return vec![blob_rejected(blob, ErrorCode::Internal, "storage error")];
+                return reject(ErrorCode::Internal, "storage error");
             }
         };
-        let mut frames = Vec::with_capacity(meta.total as usize);
-        for index in 0..meta.total {
-            if !bucket.try_take() {
-                return vec![blob_rejected(
-                    blob,
-                    ErrorCode::RateLimited,
-                    "too many chunks; slow down",
-                )];
-            }
-            match self.store.blob_chunk(blob, index) {
-                Ok(Some(data)) => frames.push(ServerFrame::BlobChunk {
-                    blob: blob.to_owned(),
-                    index,
-                    total: meta.total,
-                    data,
-                }),
-                Ok(None) => {
-                    return vec![blob_rejected(
-                        blob,
-                        ErrorCode::NotFound,
-                        "file is incomplete",
-                    )];
-                }
-                Err(e) => {
-                    error!("reading blob chunk: {e:#}");
-                    return vec![blob_rejected(blob, ErrorCode::Internal, "storage error")];
-                }
+        // The whole file's worth of budget, taken before a byte is read:
+        // a download either goes out entire or is refused, as before.
+        if !bucket.try_take_n(f64::from(meta.total)) {
+            return reject(ErrorCode::RateLimited, "too many chunks; slow down");
+        }
+        Answer::Blob {
+            blob: blob.to_owned(),
+            total: meta.total,
+        }
+    }
+
+    /// One chunk of a stored file, for [`Answer::Blob`] to stream.
+    fn blob_chunk(&self, blob: &str, index: u32, total: u32) -> ServerFrame {
+        match self.store.blob_chunk(blob, index) {
+            Ok(Some(data)) => ServerFrame::BlobChunk {
+                blob: blob.to_owned(),
+                index,
+                total,
+                data,
+            },
+            // Expiry can take a file out from under a download; the
+            // reader is told rather than left waiting for the rest.
+            Ok(None) => blob_rejected(blob, ErrorCode::NotFound, "file is incomplete"),
+            Err(e) => {
+                error!("reading blob chunk: {e:#}");
+                blob_rejected(blob, ErrorCode::Internal, "storage error")
             }
         }
-        frames
     }
 
     fn online(&self) -> std::sync::MutexGuard<'_, HashMap<UserId, Session>> {
         self.online.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Register a freshly authenticated session, replacing any older one for
-    /// the same user, and replay all unacknowledged envelopes into it.
-    fn register(&self, user: UserId, tx: mpsc::UnboundedSender<Outbound>) -> u64 {
+    /// Register a freshly authenticated session, replacing any older one
+    /// for the same user, and start replaying its unacknowledged mail.
+    fn register(&self, user: UserId, tx: mpsc::Sender<Outbound>) -> u64 {
         let id = self.next_session.fetch_add(1, Ordering::Relaxed);
-        let queued = self.store.queued(&user).unwrap_or_else(|e| {
-            error!("reading mailbox: {e:#}");
-            Vec::new()
-        });
-        let mut online = self.online();
-        if let Some(old) = online.insert(user, Session { id, tx: tx.clone() }) {
-            let _ = old.tx.send(Outbound::Close("replaced by a newer session"));
+        {
+            let mut online = self.online();
+            let session = Session {
+                id,
+                tx,
+                next: 0,
+                in_flight: HashSet::new(),
+            };
+            if let Some(old) = online.insert(user, session) {
+                let _ = old
+                    .tx
+                    .try_send(Outbound::Close("replaced by a newer session"));
+            }
         }
-        for envelope in queued {
-            let _ = tx.send(Outbound::Frame(Box::new(ServerFrame::Deliver { envelope })));
-        }
+        self.deliver_more(&user);
         id
+    }
+
+    /// Fill `user`'s connection back up to the delivery window from their
+    /// mailbox: the only path an envelope takes to a client.
+    ///
+    /// Everything is read from the store in mailbox order and the session
+    /// remembers where it got to, so a client is never handed the same
+    /// envelope twice within a session, whether the envelope arrived while
+    /// it was connected or was waiting when it logged in.
+    fn deliver_more(&self, user: &UserId) {
+        // What to read, decided under the lock and then let go of: the
+        // store is not touched with the registry held, so one slow read
+        // cannot hold up every other connection.
+        let (session_id, from, want) = {
+            let online = self.online();
+            let Some(session) = online.get(user) else {
+                return;
+            };
+            let want = DELIVERY_WINDOW.saturating_sub(session.in_flight.len());
+            if want == 0 {
+                return;
+            }
+            (session.id, session.next, want)
+        };
+        let page = match self.store.queued_from(user, from, want) {
+            Ok(page) => page,
+            Err(e) => {
+                error!("reading mailbox: {e:#}");
+                return;
+            }
+        };
+        if page.is_empty() {
+            return;
+        }
+        let mut online = self.online();
+        let Some(session) = online.get_mut(user) else {
+            return;
+        };
+        // Another delivery got there first: it read the same page and sent
+        // it, so this one is stale and sending it would repeat envelopes.
+        if session.id != session_id || session.next != from {
+            return;
+        }
+        for (at, envelope) in page {
+            let id = envelope.id.clone();
+            if session
+                .tx
+                .try_send(Outbound::Frame(Box::new(ServerFrame::Deliver { envelope })))
+                .is_err()
+            {
+                // The queue is full or the connection has gone. Either way
+                // the position is not advanced, so whatever is left goes
+                // out on the next acknowledgement or the next login.
+                break;
+            }
+            session.next = at + 1;
+            session.in_flight.insert(id);
+        }
     }
 
     fn unregister(&self, user: &UserId, session_id: u64) {
@@ -1923,15 +2064,14 @@ impl RelayState {
             })?;
         match outcome {
             Enqueue::Stored => {
-                let id = envelope.id.clone();
-                match self.online().get(&envelope.to) {
-                    Some(session) => {
-                        debug!(%id, "queued and pushed to the recipient's connection");
-                        let _ = session
-                            .tx
-                            .send(Outbound::Frame(Box::new(ServerFrame::Deliver { envelope })));
-                    }
-                    None => debug!(%id, "queued; recipient offline"),
+                if self.online().contains_key(&envelope.to) {
+                    debug!(id = %envelope.id, "queued and pushed to the recipient's connection");
+                    // From the store, not from here: the recipient may
+                    // have a backlog in front of this one, and everything
+                    // reaches a client in mailbox order or not at all.
+                    self.deliver_more(&envelope.to);
+                } else {
+                    debug!(id = %envelope.id, "queued; recipient offline");
                 }
                 Ok(())
             }
@@ -1982,9 +2122,19 @@ impl RelayState {
         }
     }
 
+    /// An envelope the client says it has. It leaves the mailbox, its
+    /// place in the delivery window is freed, and the next page — if the
+    /// window was full and mail is still waiting — goes out.
     fn ack(&self, me: &UserId, id: &str) {
         if let Err(e) = self.store.ack(me, id) {
             error!("acknowledging envelope: {e:#}");
+        }
+        let freed = self
+            .online()
+            .get_mut(me)
+            .is_some_and(|session| session.in_flight.remove(id));
+        if freed {
+            self.deliver_more(me);
         }
     }
 }
@@ -2004,21 +2154,26 @@ pub async fn expire_periodically(state: Arc<RelayState>, ttl: Duration, every: D
         let expired = state.expire(ttl);
         if expired != Expired::default() {
             info!(
-                "expired {} unacknowledged envelopes and {} files older than {ttl:?}, {} key packages past their lifetime and {} group entries idle for {GROUP_IDLE_TTL:?}",
-                expired.messages, expired.blobs, expired.key_packages, expired.groups
+                "expired {} unacknowledged envelopes and {} files older than {ttl:?} and {} key packages past their lifetime; retired {} group entries idle for {GROUP_IDLE_TTL:?} and dropped {} retired for {GROUP_HEADSTONE_TTL:?}",
+                expired.messages,
+                expired.blobs,
+                expired.key_packages,
+                expired.groups.retired,
+                expired.groups.dropped
             );
         }
         state.sweep_addresses();
         let c = state.counters();
         info!(
-            "{} connections open from {} addresses; refused so far: {} connections, {} registrations, {} uploads, {} logins; {} closed idle",
+            "{} connections open from {} addresses; refused so far: {} connections, {} registrations, {} uploads, {} logins; {} closed idle, {} closed for not reading",
             c.open_connections,
             c.addresses,
             c.refused_connections,
             c.refused_registrations,
             c.refused_uploads,
             state.auth_failures().total(),
-            c.idle_closed
+            c.idle_closed,
+            c.slow_closed
         );
         tokio::time::sleep(every).await;
     }
@@ -2230,9 +2385,11 @@ async fn handle_socket(
         }
     };
 
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = mpsc::channel(OUTBOUND_QUEUE);
     let mut conn = Conn::new(&state.policy, addr);
-    let session_id = state.register(user, tx.clone());
+    // The sender goes to the registry and is not kept here: the queue
+    // ending is how this task learns its session was replaced or evicted.
+    let session_id = state.register(user, tx);
     let who = state.who(&user);
     info!(%who, session_id, "client authenticated");
     let auth_ok = ServerFrame::AuthOk {
@@ -2250,7 +2407,7 @@ async fn handle_socket(
         tokio::select! {
             outbound = rx.recv() => match outbound {
                 Some(Outbound::Frame(frame)) => {
-                    if let Err(e) = send(&mut sink, &frame).await {
+                    if let Err(e) = write(&mut sink, &frame, &state).await {
                         debug!(%who, session_id, "write failed ({e}); closing");
                         break;
                     }
@@ -2260,19 +2417,26 @@ async fn handle_socket(
                     let _ = sink.close().await;
                     return; // whoever sent this owns the registry entry now
                 }
+                // The registry let go of this session: it was replaced by
+                // a newer one, or the administrator took it away.
                 None => break,
             },
             inbound = tokio::time::timeout(state.policy.idle_timeout, next_frame(&mut stream)) => match inbound {
                 Ok(Some(Ok(frame))) => {
-                    for reply in handle_frame(&state, &user, frame, &mut conn) {
-                        let _ = tx.send(Outbound::Frame(Box::new(reply)));
+                    // Replies go straight to the socket rather than round
+                    // the queue: the queue is for what the relay pushes,
+                    // and an answer must not sit behind a mailbox drain.
+                    let replies = handle_frame(&state, &user, frame, &mut conn);
+                    if let Err(e) = answer(&mut sink, &state, replies).await {
+                        debug!(%who, session_id, "write failed ({e}); closing");
+                        break;
                     }
                 }
                 Ok(Some(Err(e))) => {
-                    let _ = tx.send(Outbound::Frame(Box::new(ServerFrame::error(
-                        ErrorCode::Malformed,
-                        e,
-                    ))));
+                    let reply = ServerFrame::error(ErrorCode::Malformed, e);
+                    if write(&mut sink, &reply, &state).await.is_err() {
+                        break;
+                    }
                 }
                 Ok(None) => break,
                 Err(_) => {
@@ -2326,7 +2490,7 @@ async fn anonymous_session(
                 }
             },
         };
-        let replies = match frame {
+        let replies: Vec<ServerFrame> = match frame {
             ClientFrame::Send { envelope } => {
                 state.anonymous_submissions.fetch_add(1, Ordering::Relaxed);
                 vec![state.submit(envelope, &mut bucket, None)]
@@ -2337,7 +2501,15 @@ async fn anonymous_session(
                 total,
                 data,
             } => vec![state.put_blob(blob, index, total, &data, &mut blobs, addr)],
-            ClientFrame::BlobGet { blob } => state.get_blob(&blob, &mut blobs),
+            ClientFrame::BlobGet { blob } => {
+                if answer(&mut sink, state, state.open_blob(&blob, &mut blobs))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                continue;
+            }
             ClientFrame::GroupCreate { group, epoch, next } => {
                 vec![state.group_create(group, epoch, next, &mut bucket, addr)]
             }
@@ -2353,8 +2525,8 @@ async fn anonymous_session(
                 "this connection only accepts send, file chunks, group sequencing and ping",
             )],
         };
-        for reply in replies {
-            if send(&mut sink, &reply).await.is_err() {
+        for reply in &replies {
+            if write(&mut sink, reply, state).await.is_err() {
                 return;
             }
         }
@@ -2362,13 +2534,8 @@ async fn anonymous_session(
     debug!("anonymous submission session closed");
 }
 
-fn handle_frame(
-    state: &RelayState,
-    me: &UserId,
-    frame: ClientFrame,
-    conn: &mut Conn,
-) -> Vec<ServerFrame> {
-    match frame {
+fn handle_frame(state: &RelayState, me: &UserId, frame: ClientFrame, conn: &mut Conn) -> Answer {
+    let replies: Vec<ServerFrame> = match frame {
         ClientFrame::Auth { .. } => vec![ServerFrame::error(
             ErrorCode::Malformed,
             "already authenticated",
@@ -2381,10 +2548,10 @@ fn handle_frame(
             // time).
             if !conn.publishes.try_take() {
                 warn!(who = %state.who(me), "publish rate limit hit");
-                return vec![ServerFrame::error(
+                return Answer::from(ServerFrame::error(
                     ErrorCode::RateLimited,
                     "too many bundle publishes; slow down",
-                )];
+                ));
             }
             let devices = bundle
                 .caps
@@ -2411,10 +2578,10 @@ fn handle_frame(
         ClientFrame::LogSince { index } => {
             if !conn.lookups.try_take() {
                 warn!(who = %state.who(me), "lookup rate limit hit");
-                return vec![ServerFrame::error(
+                return Answer::from(ServerFrame::error(
                     ErrorCode::RateLimited,
                     "too many lookups; slow down",
-                )];
+                ));
             }
             let (entries, head) = state.log_since(index);
             vec![ServerFrame::LogEntries { entries, head }]
@@ -2422,10 +2589,10 @@ fn handle_frame(
         ClientFrame::Lookup { user_id } => {
             if !conn.lookups.try_take() {
                 warn!(who = %state.who(me), "lookup rate limit hit");
-                return vec![ServerFrame::error(
+                return Answer::from(ServerFrame::error(
                     ErrorCode::RateLimited,
                     "too many lookups; slow down",
-                )];
+                ));
             }
             // Only a client that can use a one-time prekey gets one.
             let bundle = if conn.prekeys {
@@ -2474,17 +2641,17 @@ fn handle_frame(
         ClientFrame::Send { envelope } => vec![state.submit(envelope, &mut conn.sends, Some(me))],
         ClientFrame::Ack { id } => {
             if !silver_protocol::envelope::is_valid_message_id(&id) {
-                return vec![ServerFrame::error(
+                return Answer::from(ServerFrame::error(
                     ErrorCode::Malformed,
                     "envelope id must be 1 to 64 printable ASCII characters",
-                )];
+                ));
             }
             if !conn.acks.try_take() {
                 warn!(who = %state.who(me), "ack rate limit hit");
-                return vec![ServerFrame::error(
+                return Answer::from(ServerFrame::error(
                     ErrorCode::RateLimited,
                     "too many acknowledgements; slow down",
-                )];
+                ));
             }
             state.ack(me, &id);
             Vec::new()
@@ -2495,7 +2662,7 @@ fn handle_frame(
             total,
             data,
         } => vec![state.put_blob(blob, index, total, &data, &mut conn.blobs, conn.addr)],
-        ClientFrame::BlobGet { blob } => state.get_blob(&blob, &mut conn.blobs),
+        ClientFrame::BlobGet { blob } => return state.open_blob(&blob, &mut conn.blobs),
         ClientFrame::KeyPackages {
             packages,
             last_resort,
@@ -2511,11 +2678,69 @@ fn handle_frame(
             next,
         } => vec![state.group_commit(group, epoch, token, next, &mut conn.sends)],
         ClientFrame::Ping => vec![ServerFrame::Pong],
+    };
+    Answer::Frames(replies)
+}
+
+/// Why a frame did not reach the client.
+enum SendError {
+    Socket(axum::Error),
+    /// The client stopped reading: the write did not go in
+    /// [`WRITE_TIMEOUT`], so the connection is given up on.
+    TooSlow,
+}
+
+impl std::fmt::Display for SendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Socket(e) => write!(f, "{e}"),
+            Self::TooSlow => write!(f, "the client did not read for {WRITE_TIMEOUT:?}"),
+        }
     }
 }
 
-async fn send(sink: &mut Sink, frame: &ServerFrame) -> Result<(), axum::Error> {
-    sink.send(Message::Text(frame.encode().into())).await
+/// Write one frame to the client, giving up after [`WRITE_TIMEOUT`].
+async fn send(sink: &mut Sink, frame: &ServerFrame) -> Result<(), SendError> {
+    let write = sink.send(Message::Text(frame.encode().into()));
+    match tokio::time::timeout(WRITE_TIMEOUT, write).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(SendError::Socket(e)),
+        Err(_) => Err(SendError::TooSlow),
+    }
+}
+
+/// [`send`], counting a client that stopped reading so an operator sees
+/// how often it happens.
+async fn write(sink: &mut Sink, frame: &ServerFrame, state: &RelayState) -> Result<(), SendError> {
+    let out = send(sink, frame).await;
+    if matches!(out, Err(SendError::TooSlow)) {
+        state.counters.slow_closed.fetch_add(1, Ordering::Relaxed);
+    }
+    out
+}
+
+/// Write everything one client frame is answered with. A file's chunks
+/// are read from the store one at a time, so the relay holds a chunk per
+/// reader rather than a file.
+async fn answer(sink: &mut Sink, state: &RelayState, answer: Answer) -> Result<(), SendError> {
+    match answer {
+        Answer::Frames(frames) => {
+            for frame in &frames {
+                write(sink, frame, state).await?;
+            }
+        }
+        Answer::Blob { blob, total } => {
+            for index in 0..total {
+                let frame = state.blob_chunk(&blob, index, total);
+                let done = !matches!(frame, ServerFrame::BlobChunk { .. });
+                write(sink, &frame, state).await?;
+                if done {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Read the next JSON frame. `None` means the socket closed.
@@ -2744,6 +2969,150 @@ mod lifecycle_tests {
         );
     }
 
+    /// A mailbox reaches a connection a page at a time, and the page moves
+    /// as the client acknowledges: the relay never holds more of it than
+    /// the delivery window, whatever is waiting, and nothing is skipped or
+    /// repeated on the way.
+    #[test]
+    fn a_mailbox_is_delivered_a_page_at_a_time() {
+        use silver_protocol::{Content, seal};
+        let state = RelayState::new();
+        let here = addr(10);
+        let alice = Identity::generate();
+        let bob = Identity::generate();
+        state
+            .publish(&alice.user_id(), alice.key_bundle(), None, here)
+            .unwrap();
+        state
+            .publish(&bob.user_id(), bob.key_bundle(), None, here)
+            .unwrap();
+        // More waiting than a window holds, queued before bob connects.
+        let waiting = DELIVERY_WINDOW * 2 + 3;
+        let mut ids = Vec::new();
+        for n in 0..waiting {
+            let envelope = seal(
+                &alice,
+                &bob.key_bundle(),
+                Content::text(format!("message {n}")),
+                n as u64,
+            )
+            .unwrap();
+            ids.push(envelope.id.clone());
+            state.route(envelope).unwrap();
+        }
+        let (tx, mut rx) = mpsc::channel(OUTBOUND_QUEUE);
+        state.register(bob.user_id(), tx);
+        let delivered = |rx: &mut mpsc::Receiver<Outbound>| match rx.try_recv() {
+            Ok(Outbound::Frame(frame)) => match *frame {
+                ServerFrame::Deliver { envelope } => Some(envelope.id),
+                other => panic!("expected a delivery, got {other:?}"),
+            },
+            _ => None,
+        };
+        // One window's worth on logging in, in mailbox order, and no more.
+        for id in ids.iter().take(DELIVERY_WINDOW) {
+            assert_eq!(delivered(&mut rx).as_ref(), Some(id));
+        }
+        assert_eq!(delivered(&mut rx), None);
+        // Each acknowledgement lets exactly one more through, in order,
+        // until the mailbox is empty.
+        for (n, id) in ids.iter().enumerate() {
+            state.ack(&bob.user_id(), id);
+            assert_eq!(delivered(&mut rx).as_ref(), ids.get(n + DELIVERY_WINDOW));
+        }
+        assert_eq!(state.queued_for(&bob.user_id()), 0);
+        // And mail that arrives while the client is caught up goes out at
+        // once, still from the mailbox and still in order.
+        let last = seal(&alice, &bob.key_bundle(), Content::text("after"), 99).unwrap();
+        let id = last.id.clone();
+        state.route(last).unwrap();
+        assert_eq!(delivered(&mut rx), Some(id));
+    }
+
+    /// A stored file is answered as chunks left in the store, read one at
+    /// a time, and the whole download is charged before the first is read.
+    #[test]
+    fn a_file_is_answered_a_chunk_at_a_time() {
+        let state = RelayState::new();
+        let here = addr(12);
+        let id = "a".repeat(32);
+        let mut puts = Bucket::per_minute(60);
+        for index in 0..3u32 {
+            let reply = state.put_blob(id.clone(), index, 3, &[index as u8; 8], &mut puts, here);
+            assert!(matches!(reply, ServerFrame::BlobAck { .. }));
+        }
+        // Nothing of the file is in the answer: only what to read next.
+        let mut gets = Bucket::per_minute(60);
+        let Answer::Blob { blob, total } = state.open_blob(&id, &mut gets) else {
+            panic!("expected a file to stream");
+        };
+        assert_eq!((blob.as_str(), total), (id.as_str(), 3));
+        for index in 0..3u32 {
+            match state.blob_chunk(&id, index, 3) {
+                ServerFrame::BlobChunk { data, .. } => assert_eq!(data, vec![index as u8; 8]),
+                other => panic!("expected chunk {index}, got {other:?}"),
+            }
+        }
+        // A file that went while it was being read stops the reader.
+        assert!(matches!(
+            state.blob_chunk(&id, 3, 3),
+            ServerFrame::BlobRejected {
+                code: ErrorCode::NotFound,
+                ..
+            }
+        ));
+        // The budget is for the whole file, taken before anything is read.
+        let mut small = Bucket::per_minute(2);
+        assert!(matches!(
+            state.open_blob(&id, &mut small),
+            Answer::Frames(frames) if matches!(
+                frames.as_slice(),
+                [ServerFrame::BlobRejected { code: ErrorCode::RateLimited, .. }]
+            )
+        ));
+    }
+
+    /// A client that stops reading cannot keep its session: the relay holds
+    /// the only sender, so taking the session out of the registry ends the
+    /// connection whether or not the notice fits in the queue.
+    #[tokio::test]
+    async fn a_session_ends_even_when_the_client_has_stopped_reading() {
+        use silver_protocol::{Content, seal};
+        let state = RelayState::new();
+        let here = addr(11);
+        let alice = Identity::generate();
+        let bob = Identity::generate();
+        state
+            .publish(&alice.user_id(), alice.key_bundle(), None, here)
+            .unwrap();
+        state
+            .publish(&bob.user_id(), bob.key_bundle(), None, here)
+            .unwrap();
+        let (tx, mut rx) = mpsc::channel(1);
+        state.register(bob.user_id(), tx);
+        // Bob reads nothing, so his queue fills at the first envelope and
+        // the window stops the rest reaching it.
+        for n in 0..DELIVERY_WINDOW * 4 {
+            let envelope = seal(
+                &alice,
+                &bob.key_bundle(),
+                Content::text(format!("message {n}")),
+                n as u64,
+            )
+            .unwrap();
+            state.route(envelope).unwrap();
+        }
+        state.evict(&bob.user_id()).unwrap();
+        // The queue ends after what was already in it: no notice fitted,
+        // and the connection winds up all the same.
+        let mut frames = 0;
+        while let Some(outbound) = rx.recv().await {
+            assert!(matches!(outbound, Outbound::Frame(_)));
+            frames += 1;
+        }
+        assert_eq!(frames, 1);
+    }
+
     #[test]
     fn a_device_revocation_takes_only_a_device_of_the_account() {
         let state = RelayState::new();
@@ -2911,7 +3280,7 @@ mod lifecycle_tests {
         let to_laptop =
             |text: &str| seal(&alice, &laptop.key_bundle(), Content::text(text), 0).unwrap();
         // Online, with mail waiting.
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(OUTBOUND_QUEUE);
         state.register(laptop.user_id(), tx);
         state.route(to_laptop("one")).unwrap();
         assert_eq!(state.queued_for(&laptop.user_id()), 1);
@@ -2986,7 +3355,7 @@ mod lifecycle_tests {
             .unwrap();
         assert_eq!(state.login_refusal(&laptop.user_id()), None);
         // The account dies: the device is told, and refused from then on.
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(OUTBOUND_QUEUE);
         state.register(laptop.user_id(), tx);
         state
             .store

@@ -206,6 +206,11 @@ pub fn render(state: &RelayState, tls: Option<&CertStore>) -> String {
         c.idle_closed,
     );
     t.counter(
+        "silver_relay_slow_closed_total",
+        "Connections closed because the client stopped reading what was written to it.",
+        c.slow_closed,
+    );
+    t.counter(
         "silver_relay_anonymous_submissions_total",
         "Envelopes submitted on connections that never authenticated.",
         state.anonymous_submission_count(),
@@ -263,8 +268,13 @@ pub fn render(state: &RelayState, tls: Option<&CertStore>) -> String {
     );
     t.gauge(
         "silver_relay_groups",
-        "Groups with an epoch sequencer entry.",
+        "Groups with a live epoch sequencer entry.",
         s.groups,
+    );
+    t.gauge(
+        "silver_relay_retired_groups",
+        "Sequencer entries retired for sitting still, kept so the group ids stay taken.",
+        s.retired_groups,
     );
     t.gauge(
         "silver_relay_groups_limit",

@@ -195,7 +195,11 @@ Cannot:
   the sender's identity key. It can move a group's epoch counter only
   with a token that members of the current epoch derive (it keeps a
   hash, not the token), and a removed member cannot either; what it can
-  do to a group is what it can do to a mailbox, refuse or delay.
+  do to a group is what it can do to a mailbox, refuse or delay. Nor can
+  a removed member take a group's id back by waiting: from 0.11.0 an
+  entry the relay retires for sitting still leaves a headstone, and only
+  the epoch and token hash the group ended at will raise it — which is
+  to say, only somebody who was still a member then.
 - Add a device to anyone's account, or forge a device certificate: the
   list is signed as a whole by the identity key and bound to the bundle,
   every certificate is the identity key's signature, and clients verify
@@ -277,7 +281,12 @@ connections, 20 new identities and 256 MiB of uploads an hour; mailboxes,
 file storage and the number of identities are capped, and an operator can
 require an invite token to register at all. Flooding a mailbox to its cap
 remains possible for anyone with the id; filling the relay's shared file
-storage takes as many addresses as there are 256 MiB shares in it. From
+storage takes as many addresses as there are 256 MiB shares in it. What a
+full mailbox costs the relay is disk, not memory: from 0.11.0 a
+connection is handed at most sixteen envelopes at a time and the rest as
+it acknowledges them, so the size of what is waiting does not decide how
+much the relay holds for the reader, and a connection that stops reading
+is closed after thirty seconds rather than left with a queue. From
 your bundle they also learn how many devices you have, their ids and the
 names you gave them (the certificates are in the bundle, so a name like
 "office" is public; the client shows names to your own devices only),

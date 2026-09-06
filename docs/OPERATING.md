@@ -128,7 +128,7 @@ capitals with `SILVER_RELAY_` in front: `--max-connections` is
 | `--blob-storage-mib` | 1024 | Files on deposit in total | Disk |
 | `--mailbox-storage-mib` | 4096 | Queued messages in every mailbox together; 0 for no cap | Disk. Mail is freed as recipients acknowledge it and by `--message-ttl-days`; past the cap a send is answered `storage_full` |
 | `--blob-mib-per-address-per-hour` | 256 | Uploads from one address | Abuse, or a shared address |
-| `--max-groups` | 100000 | Groups with an epoch sequencer entry (one counter and one hash each; idle ones go after 180 days); 0 for no cap | A small relay, with room: a group costs the relay almost nothing, so this is a guard against a loop making entries, not a sizing knob |
+| `--max-groups` | 100000 | Groups with a live epoch sequencer entry (one counter and one hash each; an entry idle for 180 days is retired and its headstone dropped 180 days after that, neither counting against the cap); 0 for no cap | A small relay, with room: a group costs the relay almost nothing, so this is a guard against a loop making entries, not a sizing knob |
 | `--trusted-proxy` | loopback | Whose `X-Forwarded-For` names the client | A TLS front on another host |
 | `--require-bound-auth` | off | Refuse the login of clients before 0.6.0 | Once everyone has updated |
 | `--host` | the ACME domains and the names in `--tls-cert` | The names clients reach this relay by, which a bound login must name | A TLS front, an onion address, or an address clients use literally: without the name, a login collected by another relay under that name is taken here (protocol section 7.1). The relay says at start which names it takes, or that it knows none |
@@ -185,11 +185,12 @@ say:
 | `silver_relay_connected_addresses` | Distinct client addresses connected |
 | `silver_relay_refused_total{reason}` | Refusals by kind: `connection`, `registration`, `upload`. Refused logins are not one of these; they are `silver_relay_auth_failures_total` below |
 | `silver_relay_idle_closed_total` | Connections closed for silence |
+| `silver_relay_slow_closed_total` | Connections closed because the client stopped reading what was written to it (a frame did not go within 30 seconds) |
 | `silver_relay_anonymous_submissions_total` | Messages submitted on connections that never logged in |
 | `silver_relay_auth_failures_total`, `silver_relay_auth_failure_addresses`, `silver_relay_auth_failures_max_per_address` | Failed logins in total, addresses that failed in the last hour, the most from one of them (the address itself is in the log, never here) |
 | `silver_relay_identities`, `silver_relay_mailboxes`, `silver_relay_messages_queued`, `silver_relay_mailbox_bytes` | What the store holds |
 | `silver_relay_blobs`, `silver_relay_blob_bytes`, `silver_relay_blob_bytes_limit` | Files on deposit against the cap |
-| `silver_relay_key_packages`, `silver_relay_groups`, `silver_relay_groups_limit` | MLS key packages on deposit (the last-resort ones not counted), groups with a sequencer entry, and the cap |
+| `silver_relay_key_packages`, `silver_relay_groups`, `silver_relay_retired_groups`, `silver_relay_groups_limit` | MLS key packages on deposit (the last-resort ones not counted), groups with a live sequencer entry, entries retired for sitting still (kept so the ids stay taken), and the cap |
 | `silver_relay_group_commits_total`, `silver_relay_group_rejections_total` | Group commits the sequencer accepted and refused; rejections are normal when two members change a group at once, a steady stream of them is a client stuck on a stale epoch |
 | `silver_relay_devices`, `silver_relay_device_revocations_total` | Linked devices (identities whose bundle carries a device certificate; each is one of the identities above too) and device revocations held, which nothing removes |
 | `silver_relay_certificate_expiry_seconds`, `silver_relay_acme_failures_total` | When the served certificate expires (0 while there is none), and renewals that failed |
