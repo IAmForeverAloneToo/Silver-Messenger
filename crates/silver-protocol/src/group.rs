@@ -185,6 +185,28 @@ impl BlobRef {
     }
 }
 
+/// The check a group name must pass when it is chosen — at creation or a
+/// rename — as opposed to when it is read back. Refuses the invisible
+/// characters a reaction already refuses, which would otherwise reach the
+/// sidebar and the "joined" lines: a name is not refused on the reading
+/// side, where it is part of a context every member has already agreed on.
+pub fn check_new_name(name: &str) -> Result<(), ProtocolError> {
+    if name.len() > MAX_NAME_BYTES {
+        return Err(ProtocolError::Malformed("group name too long".into()));
+    }
+    if name.chars().any(char::is_control) {
+        return Err(ProtocolError::Malformed(
+            "control character in group name".into(),
+        ));
+    }
+    if name.chars().any(crate::envelope::is_invisible) {
+        return Err(ProtocolError::Malformed(
+            "invisible character in group name".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Proof that a join request came from someone holding a valid invite
 /// link; see [`join_proof`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -319,7 +341,11 @@ impl GroupPlaintext {
         }
         let plain: Self =
             serde_json::from_slice(bytes).map_err(|e| ProtocolError::Malformed(e.to_string()))?;
-        if plain.id.is_empty() || plain.id.len() > MAX_ID_BYTES {
+        // The same rule a one-to-one message id follows (section 4): an
+        // id reaches the log and the screen through the edits, deletions
+        // and reactions that name it, so it is printable ASCII and no
+        // longer than a message id may be.
+        if !crate::envelope::is_valid_message_id(&plain.id) {
             return Err(ProtocolError::Malformed("group message: bad id".into()));
         }
         plain.content.check()?;
@@ -402,6 +428,11 @@ impl SilverGroup {
     }
 
     fn check(&self) -> Result<(), ProtocolError> {
+        // The reading side takes a name as it was written: the extension is
+        // inside the group context every member agreed on, so refusing one
+        // here would break a group made by an older version. What a name
+        // may be when it is *chosen* is stricter; see [`check_new_name`].
+
         let malformed =
             |what: &str| Err(ProtocolError::Malformed(format!("group extension: {what}")));
         if self.name.len() > MAX_NAME_BYTES {
@@ -568,6 +599,23 @@ pub fn token_hash(token: &[u8; 32]) -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_group_is_named_without_invisible_characters() {
+        for bad in ["Team\u{202E}", "papers\u{200B}", "\u{FEFF}quiet"] {
+            assert!(check_new_name(bad).is_err(), "{bad:?} names a group");
+        }
+        assert!(check_new_name("the papers").is_ok());
+        assert!(check_new_name(&"x".repeat(MAX_NAME_BYTES + 1)).is_err());
+        assert!(check_new_name("two\nlines").is_err());
+
+        // A group made by an older version keeps its name: the extension is
+        // inside the context every member agreed on, so the reader takes it
+        // as it was written.
+        let alice = crate::Identity::generate().user_id();
+        let group = SilverGroup::new("Team\u{202E}", alice, 1);
+        assert!(group.is_ok(), "the reader's rule is looser");
+    }
     /// As for a user id: the length before the quadratic decoding.
     #[test]
     fn an_overlong_group_id_costs_nothing_to_refuse() {

@@ -100,7 +100,14 @@ What a relay stores for a user and serves on lookup:
   "caps_signature": "<b64 64 bytes>"
   ```
   with `caps_signature = sign("silver-messenger/v4/bundle-caps", dh_public
-  (32) || caps.join("\n"))`. `pq_ratchet` says the client reads v4 bodies
+  (32) || caps.join("\n"))`. A capability name is one or more of
+  `[a-z0-9_]`, which is what makes that join unambiguous: no name can hold
+  the separator, so `["a", "b"]` and `["a\nb"]` are not two readings of one
+  signature, and a bundle whose list carries a name outside the set is
+  refused rather than read as advertising nothing. (The names are
+  length-prefixed in the transparency leaf already, and will be in the
+  signed bytes at the next domain bump.) `pq_ratchet` says the client
+  reads v4 bodies
   (section 4.2). The signature lets a peer trust the advertisement even
   though the relay serves it; a relay that drops the fields only downgrades
   the session to v3, which the clients show, and one that adds them cannot
@@ -1308,7 +1315,7 @@ of this section is ever sent to a client that does not advertise it.
   commits:
 
   ```text
-  version (1 byte, = 1) || name length (1 byte) || name (UTF-8, at most 64 bytes, no control characters)
+  version (1 byte, = 1) || name length (1 byte) || name (UTF-8, at most 64 bytes, no control characters; and, when a name is chosen, none of the invisible characters of 4.7)
   || admins length in bytes (2 BE) || admins (32 bytes each, ascending, no duplicates, at least 1, at most 256)
   || invite_key (32 bytes) || created_at_ms (8 BE)
   ```
@@ -1393,7 +1400,7 @@ A body with `v: 5` carries one MLS message for one group to one member:
 The plaintext of a `message` is JSON:
 
 ```json
-{ "id": "<random, 1 to 64 bytes>", "sent_at_ms": n, "content": { ... }, "head": { ... } }
+{ "id": "<random, printable ASCII, 1 to 64 bytes>", "sent_at_ms": n, "content": { ... }, "head": { ... } }
 ```
 
 `content` is a `text` or a `file` of section 4 or, from 0.10.0, an
@@ -1706,7 +1713,13 @@ its own:
 with `signature = sign("silver-messenger/v5/device", account (32) ||
 device (32) || created_at_ms (8 BE) || name length (1) || name)`, raw
 key bytes, and `name` the owner's name for the device: at most 32 bytes
-of UTF-8 without control characters, left out of the JSON when empty.
+of UTF-8 without control characters, left out of the JSON when empty. A
+name is refused when it is chosen if it carries any of the invisible
+characters of 4.7 (zero-width spaces, the bidi embeddings and overrides,
+word joiners, the byte-order mark), which would otherwise reorder or
+hide what is shown around it; a name already certified is read as it was
+written, since the signature covers those bytes and refusing it would
+cut off a device already linked. The same holds for a group name.
 Clients show the name to the owner's own devices only, but it is part
 of the certificate, which the bundle's list and every message from the
 device carry, so the relay and anyone who fetches the bundle can read

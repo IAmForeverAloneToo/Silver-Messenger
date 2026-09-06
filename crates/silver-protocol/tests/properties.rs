@@ -390,13 +390,28 @@ proptest! {
 
     /// An application message's plaintext round-trips for any content.
     #[test]
-    fn group_plaintext_round_trips(content in content(), id in text(30), sent_at_ms in any::<u64>(), head in head()) {
-        prop_assume!(!id.is_empty() && id.len() <= 64);
+    fn group_plaintext_round_trips(content in content(), id in message_id(), sent_at_ms in any::<u64>(), head in head()) {
         let plain = GroupPlaintext { id, sent_at_ms, content, head };
         match plain.encode() {
             Ok(encoded) => prop_assert_eq!(GroupPlaintext::decode(&encoded).unwrap(), plain),
             Err(ProtocolError::TooLarge(n)) => prop_assert!(n > MAX_BODY_BYTES),
             Err(e) => prop_assert!(false, "unexpected error {e:?}"),
+        }
+    }
+
+    /// A group message id follows the rule a one-to-one id follows: an id
+    /// outside it is refused when the plaintext is read, whatever wrote it.
+    #[test]
+    fn a_group_message_id_outside_the_rule_is_refused(
+        content in content(),
+        id in text(30),
+        sent_at_ms in any::<u64>(),
+        head in head(),
+    ) {
+        prop_assume!(!silver_protocol::envelope::is_valid_message_id(&id));
+        let plain = GroupPlaintext { id, sent_at_ms, content, head };
+        if let Ok(encoded) = plain.encode() {
+            prop_assert!(GroupPlaintext::decode(&encoded).is_err());
         }
     }
 }
