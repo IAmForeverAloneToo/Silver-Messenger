@@ -59,6 +59,18 @@ the response note, section 5.
   is started with `--allow-unbound-login`. Only relays from before 0.6.0
   ask for it.
 
+- **A relay pin names the relay's own certificate** (finding SM-C-01,
+  High). A pin matched any certificate the server sent, not only the one
+  it proves it holds the key for. Since the relay's certificate is public
+  (`--print-pin` fetches it, and so can anyone), a proxy inspecting TLS
+  could present its own leaf, validated through the root it installed,
+  append the relay's certificate to the chain, and pass the pin on
+  precisely the connection a pin exists to refuse. The pin is now matched
+  against the end-entity certificate alone, which is the first one
+  `--print-pin` prints and the one the README's `openssl` recipe
+  computes. Anyone who pinned an issuer key from further down the chain
+  has to pin the relay's own key instead.
+
 - **An identifier is measured before it is decoded** (findings SM-P-02,
   High, and SM-C-17, Low). Base58 decoding is a big-integer conversion
   whose cost grows with the square of the input, and user and group ids

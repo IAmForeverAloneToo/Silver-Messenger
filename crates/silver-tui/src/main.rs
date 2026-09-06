@@ -419,7 +419,7 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
             Err(e) => println!("Its certificate is NOT trusted by this computer: {e}"),
         }
         for pin in &observed.pins[1..] {
-            println!("Issuer key in its chain: {pin}");
+            println!("(Also in its chain, and not a key to pin: {pin})");
         }
         println!(
             "This is what answered right now; compare it with the pin the relay's operator \

@@ -493,7 +493,13 @@ renewal (delete `acme/key.pem` to change it), the installer's Caddyfile
 sets `reuse_private_keys`, and certbot does the same with `--reuse-key`.
 When the key does change, clients fail to connect until they are given the
 new pin (`--pin` again adds it; the list is `relay_pins` in
-`config.json`).
+`config.json`). A pin names the relay's own certificate, the first one
+`--print-pin` prints and the one the command above computes, and nothing
+else in the chain: a certificate an inspecting proxy adds to the chain to
+make a pin match is not the certificate it proves it holds the key for.
+(Before 0.10.1 a pin matched anywhere in the chain, which that trick
+defeated; anyone who pinned an issuer key rather than the relay's own has
+to pin the relay's.)
 
 **Through Tor.** With Tor running locally, `silver --proxy
 socks5://127.0.0.1:9050` sends both relay connections through it. The
