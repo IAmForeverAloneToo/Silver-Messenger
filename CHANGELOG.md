@@ -69,6 +69,52 @@ Section 13.1 went out in 0.10.1; this is section 13.2.
   differ from any name that verifies, so the signature fails and no leaf
   is quietly wrong.
 
+- **Smaller relay hardening** (findings SM-R-09 to SM-R-13). Each is
+  minor on its own:
+
+  A revoked identity could still log in, read and acknowledge its
+  mailbox, and deposit key packages, though a revoked *device* was
+  refused — so whoever held a key that was revoked because it was
+  compromised kept the one thing revocation was for. A revoked identity
+  is now refused at login like a revoked device.
+
+  The sequencer's epoch was incremented with `+=`, and an anonymous
+  connection could create an entry at `u64::MAX` and then commit it: the
+  overflow panicked inside a write transaction and skipped the
+  connection's own cleanup. The last epoch has no successor, so a commit
+  from it is refused as stale.
+
+  A dual-stack listener hands an IPv4 peer over as `::ffff:a.b.c.d`, and
+  loopback detection, the trusted-proxy list and ban matching all used
+  the address as it arrived: a loopback front was not recognised as
+  trusted, so every client behind it shared one address's connection
+  cap, and `ban 1.2.3.4` did not match the mapped form. Addresses are
+  canonicalised before any of those comparisons.
+
+  Serde's parse errors quote the offending input with its JSON escapes
+  already decoded, and the relay logged them, so anyone who could open a
+  socket could write a line of their choosing into a text-format log
+  before authenticating. The log gets the kind of error and where it
+  was; the client still gets the detail, which is its own input.
+
+  An envelope id was whatever the sender put there, though it becomes a
+  key in the store and reaches the recipient's client and log; it now
+  follows the rule every message id follows, on `send` and on `ack`. A
+  blob chunk is charged at least a kilobyte against the uploading
+  address's budget, so a client cannot fill the store with zero-byte
+  chunks no byte budget notices. `--lookups-per-minute 0` turns lookups
+  off rather than allowing one a minute. The startup line reports the
+  invite policy in force rather than the one the command line asked for,
+  since an operator can change it at runtime. `--message-ttl-days`
+  saturates instead of panicking on a number that overflows. And the
+  data directory is made private only when the relay creates it, so
+  `--data-dir .` no longer chmods the working directory.
+
+  The threat model now also states, next to the journal's pseudonyms,
+  that the transparency log keeps the time of every publish and serves it
+  to anyone — a per-identity activity timeline that is inherent to the
+  log being auditable.
+
 - **A commit is framed and sealed before anything moves** (finding
   SM-P-05, Medium, and one more the review did not name). Committing went:
   ask the relay's sequencer, merge the commit, then frame it into a body

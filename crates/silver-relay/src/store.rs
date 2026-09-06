@@ -442,9 +442,15 @@ impl Store {
     /// mailbox and every key bundle.
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         if let Some(parent) = path.parent() {
+            // Only a directory the relay makes is made private. A path the
+            // operator pointed at something that already exists is theirs:
+            // `--data-dir .` should not chmod the working directory.
+            let existed = parent.exists();
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
-            Self::private(parent, 0o700);
+            if !existed {
+                Self::private(parent, 0o700);
+            }
         }
         let db = Database::create(path).with_context(|| format!("opening {}", path.display()))?;
         Self::private(path, 0o600);
@@ -1520,6 +1526,14 @@ impl Store {
                         Sequenced::Stale(entry.epoch)
                     } else if !bool::from(token_hash(token).ct_eq(&entry.next)) {
                         Sequenced::Forbidden
+                    } else if entry.epoch == u64::MAX {
+                        // Nothing follows the last epoch. Under overflow
+                        // checks the increment below would panic, and the
+                        // panic would unwind a write transaction and skip
+                        // the connection's own cleanup; a group that got
+                        // here is beyond saving anyway, so it is refused
+                        // as standing where it stands.
+                        Sequenced::Stale(entry.epoch)
                     } else {
                         entry.epoch += 1;
                         entry.next = next;

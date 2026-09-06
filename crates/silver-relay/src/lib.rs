@@ -80,7 +80,7 @@ impl Bans {
                 for (key, _) in list {
                     match BanTarget::from_key(&key) {
                         Some(BanTarget::Address(addr)) => {
-                            bans.addresses.insert(addr);
+                            bans.addresses.insert(canonical_address(addr));
                         }
                         Some(BanTarget::Identity(user)) => {
                             bans.users.insert(user);
@@ -179,6 +179,11 @@ const PUBLISHES_PER_MINUTE: u32 = 6;
 /// a full mailbox acknowledges as fast as it reads, so this is well above
 /// the per-recipient message cap.
 const ACKS_PER_MINUTE: u32 = 4000;
+/// What a blob chunk is charged against an address's upload budget at
+/// least, whatever it holds. A chunk costs a database entry and a key
+/// however small it is, so charging bytes alone let a client fill the
+/// store with empty chunks that no budget ever noticed.
+const CHUNK_OVERHEAD_BYTES: usize = 1024;
 
 /// Abuse controls applied per connection, plus the registration policy.
 #[derive(Clone, Debug)]
@@ -283,6 +288,22 @@ impl Policy {
     }
 }
 
+/// One address, written one way. A dual-stack listener hands an IPv4 peer
+/// over as `::ffff:a.b.c.d`, which is the same client as `a.b.c.d` and
+/// must count, be banned and be trusted as one: otherwise a loopback front
+/// is not recognised (so every client behind it collapses to one address
+/// and shares the per-address connection cap), and a ban on the IPv4 form
+/// does not match the mapped one.
+pub fn canonical_address(addr: IpAddr) -> IpAddr {
+    match addr {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => IpAddr::V6(v6),
+        },
+        v4 => v4,
+    }
+}
+
 /// A token bucket: `burst` tokens, refilled at `per_minute / 60` per second.
 struct Bucket {
     tokens: f64,
@@ -302,7 +323,9 @@ impl Bucket {
     }
 
     fn per_minute(per_minute: u32) -> Self {
-        let burst = f64::from(per_minute.max(1));
+        // Zero means none: an operator who sets a limit to zero is turning
+        // the thing off, not asking for one an hour.
+        let burst = f64::from(per_minute);
         Self::new(burst, burst / 60.0)
     }
 
@@ -595,9 +618,10 @@ impl RelayState {
     }
 
     /// The address a connection counts under: what the socket says, or
-    /// what a trusted front says the client was.
+    /// what a trusted front says the client was. Canonical, so that one
+    /// client is one address however it reached the socket.
     pub fn client_address(&self, peer: Option<IpAddr>, headers: &HeaderMap) -> IpAddr {
-        let peer = peer.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        let peer = canonical_address(peer.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED)));
         let trusted = if self.policy.trusted_proxies.is_empty() {
             peer.is_loopback()
         } else {
@@ -612,7 +636,7 @@ impl RelayState {
                 .and_then(|v| v.rsplit(',').next())
                 .and_then(|v| v.trim().parse::<IpAddr>().ok());
             if let Some(forwarded) = forwarded {
-                return forwarded;
+                return canonical_address(forwarded);
             }
         }
         peer
@@ -753,7 +777,7 @@ impl RelayState {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .addresses
-            .contains(&addr)
+            .contains(&canonical_address(addr))
     }
 
     pub fn user_banned(&self, user: &UserId) -> bool {
@@ -778,7 +802,7 @@ impl RelayState {
             let mut bans = self.bans.write().unwrap_or_else(|e| e.into_inner());
             match target {
                 BanTarget::Address(addr) => {
-                    bans.addresses.insert(*addr);
+                    bans.addresses.insert(canonical_address(*addr));
                 }
                 BanTarget::Identity(user) => {
                     bans.users.insert(*user);
@@ -797,7 +821,7 @@ impl RelayState {
         let mut bans = self.bans.write().unwrap_or_else(|e| e.into_inner());
         match target {
             BanTarget::Address(addr) => {
-                bans.addresses.remove(addr);
+                bans.addresses.remove(&canonical_address(*addr));
             }
             BanTarget::Identity(user) => {
                 bans.users.remove(user);
@@ -1328,10 +1352,17 @@ impl RelayState {
         }
     }
 
-    /// Why `user` may not log in as a device, if it may not: its account
-    /// revoked it, or its account is dead. `None` for anyone else,
-    /// identities that are no device included.
-    fn device_refusal(&self, user: &UserId) -> Option<&'static str> {
+    /// Why `user` may not log in, if it may not: it is revoked, its
+    /// account revoked it, or its account is dead. `None` for anyone else.
+    ///
+    /// A revoked identity is dead everywhere else — it cannot publish, and
+    /// its contacts drop it — so it does not go on reading and
+    /// acknowledging the mailbox either. Whoever holds a key that was
+    /// revoked because it was compromised is exactly who this refuses.
+    pub fn login_refusal(&self, user: &UserId) -> Option<&'static str> {
+        if self.is_revoked(user) {
+            return Some("this identity has been revoked");
+        }
         if self.is_revoked_device(user) {
             return Some("this device has been revoked by its account");
         }
@@ -1524,10 +1555,14 @@ impl RelayState {
         if total == 0 || total > MAX_CHUNKS || data.len() > MAX_CHUNK_CIPHERTEXT {
             return blob_rejected(&blob, ErrorCode::TooLarge, "chunk or file too large");
         }
+        // A chunk costs a database entry whatever it holds, so a tiny one
+        // is charged for the entry: otherwise a client fills the store
+        // with zero-byte chunks that no byte budget ever notices.
+        let charge = data.len().max(CHUNK_OVERHEAD_BYTES);
         if !bucket.try_take() {
             return blob_rejected(&blob, ErrorCode::RateLimited, "too many chunks; slow down");
         }
-        if !self.upload_allowed(addr, data.len()) {
+        if !self.upload_allowed(addr, charge) {
             self.counters
                 .refused_uploads
                 .fetch_add(1, Ordering::Relaxed);
@@ -1691,7 +1726,7 @@ impl RelayState {
         // a revoked device, under the claim it makes now or the one it
         // made before; a revocation by an account this key never claimed
         // is somebody else's statement and binds nothing.
-        if self.store.is_revoked(me).unwrap_or(false) {
+        if self.is_revoked(me) {
             return Err((ErrorCode::Forbidden, "this identity has been revoked"));
         }
         let claims_now = bundle.device_of.as_ref().map(|c| c.account);
@@ -1914,6 +1949,18 @@ impl RelayState {
     /// Rate-limit and route a submitted envelope; the reply for the sender.
     fn submit(&self, envelope: Envelope, bucket: &mut Bucket, who: Option<&UserId>) -> ServerFrame {
         let id = envelope.id.clone();
+        // The id becomes a key in the store and reaches the recipient's
+        // client and its log, so it follows the rule every message id
+        // follows (protocol section 4) rather than being whatever the
+        // sender put there: empty, enormous, or full of control
+        // characters.
+        if !silver_protocol::envelope::is_valid_message_id(&id) {
+            return ServerFrame::Rejected {
+                id: String::new(),
+                code: ErrorCode::Malformed,
+                message: "envelope id must be 1 to 64 printable ASCII characters".into(),
+            };
+        }
         if !bucket.try_take() {
             match who {
                 Some(me) => warn!(who = %self.who(me), "send rate limit hit"),
@@ -2126,9 +2173,10 @@ async fn handle_socket(
                 .await;
                 return;
             }
-            // A device its account revoked, or whose account is dead, is
-            // told so and gets no session: its mailbox is not its to read.
-            if let Some(why) = state.device_refusal(&user_id) {
+            // A revoked identity, a device its account revoked, or one
+            // whose account is dead: told so, and given no session. The
+            // mailbox is not theirs to read.
+            if let Some(why) = state.login_refusal(&user_id) {
                 let _ = send(&mut sink, &ServerFrame::error(ErrorCode::Forbidden, why)).await;
                 return;
             }
@@ -2425,6 +2473,12 @@ fn handle_frame(
         }
         ClientFrame::Send { envelope } => vec![state.submit(envelope, &mut conn.sends, Some(me))],
         ClientFrame::Ack { id } => {
+            if !silver_protocol::envelope::is_valid_message_id(&id) {
+                return vec![ServerFrame::error(
+                    ErrorCode::Malformed,
+                    "envelope id must be 1 to 64 printable ASCII characters",
+                )];
+            }
             if !conn.acks.try_take() {
                 warn!(who = %state.who(me), "ack rate limit hit");
                 return vec![ServerFrame::error(
@@ -2485,7 +2539,18 @@ async fn next_frame(stream: &mut Stream) -> Option<Result<ClientFrame, String>> 
             Message::Ping(_) | Message::Pong(_) => continue,
         };
         return Some(ClientFrame::decode(&text).map_err(|e| {
-            warn!("malformed client frame: {e}");
+            // Serde's message quotes the input that failed, with the JSON
+            // escapes already decoded, so logging it lets anyone who can
+            // open a socket write a line of their choosing into the log --
+            // a forged line in a text-format log, before authenticating.
+            // The kind of error and where it was are what a reader needs.
+            debug!(
+                "malformed client frame: {:?} at line {} column {}",
+                e.classify(),
+                e.line(),
+                e.column()
+            );
+            // The client gets the detail: it is their own input.
             format!("malformed frame: {e}")
         }));
     }
@@ -2573,6 +2638,113 @@ mod lifecycle_tests {
     }
 
     #[test]
+    fn one_client_is_one_address_however_it_arrives() {
+        use std::net::Ipv6Addr;
+        // A dual-stack listener hands an IPv4 peer over mapped into IPv6.
+        // It is the same client: it counts as one address, a ban on either
+        // form matches it, and a loopback front is recognised as trusted.
+        let mapped: IpAddr = IpAddr::V6("::ffff:1.2.3.4".parse::<Ipv6Addr>().unwrap());
+        let plain: IpAddr = "1.2.3.4".parse().unwrap();
+        assert_eq!(canonical_address(mapped), plain);
+        assert_eq!(canonical_address(plain), plain);
+        let six: IpAddr = "2001:db8::1".parse().unwrap();
+        assert_eq!(canonical_address(six), six, "a real IPv6 address is left");
+
+        let state = RelayState::new();
+        state.ban(&BanTarget::Address(plain), "test").expect("ban");
+        assert!(state.address_banned(plain));
+        assert!(
+            state.address_banned(mapped),
+            "the mapped form is the same client"
+        );
+
+        // And the mapped loopback is loopback, so a front on it is trusted.
+        let loopback: IpAddr = IpAddr::V6("::ffff:127.0.0.1".parse::<Ipv6Addr>().unwrap());
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "9.9.9.9".parse().unwrap());
+        assert_eq!(
+            state.client_address(Some(loopback), &headers),
+            "9.9.9.9".parse::<IpAddr>().unwrap(),
+        );
+    }
+
+    #[test]
+    fn an_envelope_id_is_one_a_message_id_may_be() {
+        let state = RelayState::new();
+        let alice = Identity::generate();
+        let bob = Identity::generate();
+        state.store.put_bundle(&bob.key_bundle()).unwrap();
+        let mut bucket = Bucket::per_minute(60);
+        let good = silver_protocol::seal(
+            &alice,
+            &bob.key_bundle(),
+            silver_protocol::Content::text("hi"),
+            0,
+        )
+        .unwrap();
+        assert!(matches!(
+            state.submit(good.clone(), &mut bucket, None),
+            ServerFrame::Sent { .. }
+        ));
+        // The id becomes a key in the store and reaches the recipient's
+        // client and log, so it is not whatever the sender put there.
+        for bad in ["", "with space", "line\nbreak", &"x".repeat(65)] {
+            let mut envelope = good.clone();
+            envelope.id = bad.to_owned();
+            assert!(
+                matches!(
+                    state.submit(envelope, &mut bucket, None),
+                    ServerFrame::Rejected {
+                        code: ErrorCode::Malformed,
+                        ..
+                    }
+                ),
+                "{bad:?} is not an envelope id"
+            );
+        }
+    }
+
+    #[test]
+    fn the_sequencer_stops_at_the_last_epoch_rather_than_panicking() {
+        let state = RelayState::new();
+        let group = silver_protocol::GroupId::generate();
+        let token = [7u8; 32];
+        let next = silver_protocol::group::token_hash(&token);
+        // An anonymous connection may create an entry at any epoch. The
+        // last one has no successor: the commit is refused, and the
+        // increment that would panic under overflow checks never runs.
+        assert!(matches!(
+            state.store.group_create(&group, u64::MAX, next, 1).unwrap(),
+            Sequenced::Stands(_)
+        ));
+        assert!(matches!(
+            state
+                .store
+                .group_commit(&group, u64::MAX, &token, [9; 32], 2)
+                .unwrap(),
+            Sequenced::Stale(e) if e == u64::MAX
+        ));
+    }
+
+    #[test]
+    fn a_revoked_identity_does_not_log_in() {
+        let state = RelayState::new();
+        let here = addr(9);
+        let alice = Identity::generate();
+        let me = alice.user_id();
+        assert!(state.publish(&me, alice.key_bundle(), None, here).is_ok());
+        assert_eq!(state.login_refusal(&me), None);
+        state.apply_revocation(alice.revocation(1), here).unwrap();
+        // The key is dead: it does not publish, and it does not read the
+        // mailbox it used to own either.
+        assert!(state.publish(&me, alice.key_bundle(), None, here).is_err());
+        assert_eq!(
+            state.login_refusal(&me),
+            Some("this identity has been revoked")
+        );
+    }
+
+    #[test]
     fn a_device_revocation_takes_only_a_device_of_the_account() {
         let state = RelayState::new();
         let here = addr(5);
@@ -2619,7 +2791,7 @@ mod lifecycle_tests {
         let (code, _) = revoke(&alice, &stranger, 1).unwrap_err();
         assert!(matches!(code, ErrorCode::Forbidden));
         assert!(!state.store.is_device_revoked(&stranger.user_id()).unwrap());
-        assert_eq!(state.device_refusal(&stranger.user_id()), None);
+        assert_eq!(state.login_refusal(&stranger.user_id()), None);
         assert!(
             state
                 .route(
@@ -2692,7 +2864,7 @@ mod lifecycle_tests {
         // is refused neither a login nor a bundle of its own. It bites the
         // moment that bundle claims alice.
         assert!(!state.is_revoked_device(&phone.user_id()));
-        assert_eq!(state.device_refusal(&phone.user_id()), None);
+        assert_eq!(state.login_refusal(&phone.user_id()), None);
         let (code, _) = state
             .publish(
                 &phone.user_id(),
@@ -2711,7 +2883,7 @@ mod lifecycle_tests {
         // nothing, and can claim the account again.
         assert!(state.unrevoke_device(&laptop.user_id()).unwrap());
         assert!(!state.unrevoke_device(&laptop.user_id()).unwrap());
-        assert_eq!(state.device_refusal(&laptop.user_id()), None);
+        assert_eq!(state.login_refusal(&laptop.user_id()), None);
         assert_eq!(state.device_revocations(&laptop.user_id()).len(), 0);
         assert_eq!(state.device_revocations(&alice.user_id()).len(), 1);
     }
@@ -2765,7 +2937,7 @@ mod lifecycle_tests {
         assert_eq!(state.queued_for(&laptop.user_id()), 0);
         // No login, no publish, no mail, and not back on the list.
         assert_eq!(
-            state.device_refusal(&laptop.user_id()),
+            state.login_refusal(&laptop.user_id()),
             Some("this device has been revoked by its account")
         );
         let (code, _) = state
@@ -2812,7 +2984,7 @@ mod lifecycle_tests {
         state
             .publish(&laptop.user_id(), claim(), None, here)
             .unwrap();
-        assert_eq!(state.device_refusal(&laptop.user_id()), None);
+        assert_eq!(state.login_refusal(&laptop.user_id()), None);
         // The account dies: the device is told, and refused from then on.
         let (tx, mut rx) = mpsc::unbounded_channel();
         state.register(laptop.user_id(), tx);
@@ -2829,7 +3001,7 @@ mod lifecycle_tests {
         assert!(matches!(rx.try_recv(), Ok(Outbound::Frame(_))));
         assert!(matches!(rx.try_recv(), Ok(Outbound::Close(_))));
         assert_eq!(
-            state.device_refusal(&laptop.user_id()),
+            state.login_refusal(&laptop.user_id()),
             Some("this device's account has been revoked")
         );
         let (code, _) = state
@@ -2837,7 +3009,7 @@ mod lifecycle_tests {
             .unwrap_err();
         assert!(matches!(code, ErrorCode::Forbidden));
         // An identity that is no device is refused nothing.
-        assert_eq!(state.device_refusal(&Identity::generate().user_id()), None);
+        assert_eq!(state.login_refusal(&Identity::generate().user_id()), None);
     }
 
     #[test]

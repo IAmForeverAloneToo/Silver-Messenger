@@ -737,9 +737,6 @@ async fn main() -> anyhow::Result<()> {
         policy.max_identities,
         policy.blob_mib_per_address_per_hour
     );
-    if policy.invite_token.is_some() {
-        info!("registration requires an invite token");
-    }
     if policy.anonymous_sends_per_minute == 0 {
         info!("anonymous submission is off; senders submit on their own connection");
     }
@@ -761,8 +758,18 @@ async fn main() -> anyhow::Result<()> {
         );
         state
     };
+    // After the store is open, so this is the policy in force and not the
+    // one the command line asked for: an operator can set or clear the
+    // token at runtime (`admin invite`), and that is what the relay obeys.
+    if state.invite_token().is_some() {
+        info!("registration requires an invite token");
+    } else {
+        info!("registration is open");
+    }
 
-    let ttl = Duration::from_secs(args.message_ttl_days * 86_400);
+    // Days to seconds, without the multiplication panicking under overflow
+    // checks on a number an operator typed.
+    let ttl = Duration::from_secs(args.message_ttl_days.saturating_mul(86_400));
     tokio::spawn(expire_periodically(
         state.clone(),
         ttl,
