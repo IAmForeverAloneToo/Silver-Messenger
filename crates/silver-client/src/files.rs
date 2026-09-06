@@ -14,101 +14,32 @@ use unicode_normalization::UnicodeNormalization;
 /// Longest file name saved, in characters.
 const MAX_NAME_CHARS: usize = 120;
 
-/// Extensions the operating system runs as a program or script when a
-/// file is "opened", rather than showing it in a viewer.
-const RUNNABLE: &[&str] = &[
-    // Windows programs, installers and shell objects
-    "exe",
-    "com",
-    "msi",
-    "msix",
-    "msixbundle",
-    "appx",
-    "appxbundle",
-    "bat",
-    "cmd",
-    "scr",
-    "pif",
-    "cpl",
-    "hta",
-    "reg",
-    "lnk",
-    "url",
-    "inf",
-    "dll",
-    "sys",
-    "drv",
-    "ocx",
-    "msc",
-    "msp",
-    "mst",
-    "gadget",
-    "application",
-    "xbap",
-    "diagcab",
-    "settingcontent-ms",
-    "library-ms",
-    "website",
-    // Windows scripts
-    "vb",
-    "vbs",
-    "vbe",
-    "vbscript",
-    "js",
-    "jse",
-    "wsf",
-    "wsh",
-    "ws",
-    "sct",
-    "shb",
-    "shs",
-    "ps1",
-    "psm1",
-    "psd1",
-    "ps1xml",
-    "psc1",
-    // interpreters that register themselves as openers
-    "py",
-    "pyw",
-    "pyc",
-    "pl",
-    "rb",
-    "php",
-    "jar",
-    "jnlp",
-    // Unix and macOS
-    "sh",
-    "bash",
-    "zsh",
-    "ksh",
-    "csh",
-    "fish",
-    "command",
-    "tool",
-    "action",
-    "workflow",
-    "app",
-    "desktop",
-    "run",
-    "appimage",
-    "elf",
-    "deb",
-    "rpm",
-    "pkg",
-    "mpkg",
-    "dmg",
-    "apk",
-    "ipa",
-    "terminal",
-    "scpt",
-    "applescript",
-    "webloc",
-    // certificates: opening one offers to install it
-    "cer",
-    "crt",
-    "der",
-    "p12",
-    "pfx",
+/// Extensions this program will hand to the system's opener: kinds that
+/// are *shown*, not run.
+///
+/// An allowlist, not a list of dangerous extensions. The list of things
+/// an operating system executes on open is long, platform-specific and
+/// keeps growing — `.appref-ms`, `.scf`, `.chm`, `.xll`, `.search-ms`,
+/// `.rdp`, `.theme`, `.inetloc`, `.fileloc`, `.udl`, `.iso` (which mounts
+/// itself), `.docm` and its macro cousins, and whatever the next release
+/// of an operating system adds — so a list of what to refuse is a list
+/// that is always one entry short. A file whose kind is not here is not
+/// opened; the user can still open it from the downloads folder, which is
+/// their computer's decision to make and not this program's.
+const VIEWABLE: &[&str] = &[
+    // images
+    "png", "jpg", "jpeg", "gif", "bmp", "webp", "tif", "tiff", "heic", "heif", "avif", "ico",
+    // documents that are read, not run. Macro-bearing office formats
+    // (docm, xlsm, pptm, and the older doc/xls/ppt) are not here.
+    "pdf", "epub", "docx", "xlsx", "pptx", "odt", "ods", "odp",
+    // plain text and the text formats a viewer shows as text
+    "txt", "text", "md", "markdown", "rst", "csv", "tsv", "log", "json", "yaml", "yml", "toml",
+    "ini", "conf", "diff", "patch", // audio and video
+    "mp3", "m4a", "aac", "flac", "ogg", "oga", "opus", "wav", "aiff", "mp4", "m4v", "mkv", "webm",
+    "mov", "avi", "mpg", "mpeg", "wmv",
+    // archives, which open in an archive viewer. Disk images (iso, img,
+    // vhd, vhdx) are not here: opening one mounts it.
+    "zip", "7z", "rar", "gz", "bz2", "xz", "zst", "tar", "tgz", "tbz", "txz",
 ];
 
 /// What a [`Content::File`] message says about a file. Serialized as the
@@ -314,7 +245,9 @@ pub fn save_as(
     quota: Option<u64>,
     make: impl FnOnce(&str) -> Vec<u8>,
 ) -> anyhow::Result<PathBuf> {
-    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    // A received file is as private as the message that carried it: the
+    // directory is the owner's alone and so is everything saved into it.
+    crate::store::create_private_dir(dir, None)?;
     check_quota(dir, size, quota)?;
     let name = sanitize_name(name);
     let (stem, ext) = split_extension(&name);
@@ -326,11 +259,14 @@ pub fn save_as(
     let mut n = 2;
     let mut make = Some(make);
     loop {
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&candidate)
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
         {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        match opts.open(&candidate) {
             Ok(mut file) => {
                 let bytes = make.take().expect("made once")(&final_name);
                 if let Err(e) = std::io::Write::write_all(&mut file, &bytes) {
@@ -339,7 +275,9 @@ pub fn save_as(
                     return Err(e).with_context(|| format!("writing {}", candidate.display()));
                 }
                 drop(file);
-                mark_of_the_web(&candidate);
+                if let Err(e) = mark_of_the_web(&candidate) {
+                    tracing::warn!("could not mark {} as a download: {e}", candidate.display());
+                }
                 return Ok(candidate);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -386,25 +324,46 @@ pub fn check_quota(dir: &Path, incoming: u64, quota: Option<u64>) -> anyhow::Res
 }
 
 /// On Windows, tag a saved file as a download (the "mark of the web") so
-/// Explorer, SmartScreen and Defender treat it like one from a browser.
+/// Explorer, SmartScreen, Protected View and Office's macro blocking
+/// treat it like one from a browser. Every copy of a received file gets
+/// one, the plain copy `/open` makes of an encrypted download included:
+/// without it those protections do not apply to that copy while they do
+/// to the file beside it.
+///
+/// Says whether it worked. A file system that has no alternate data
+/// streams (a FAT volume, a network share) is a real answer and the
+/// caller says so rather than leaving the user to assume the mark is
+/// there.
 #[cfg(windows)]
-fn mark_of_the_web(path: &Path) {
+pub fn mark_of_the_web(path: &Path) -> std::io::Result<()> {
     let stream = format!("{}:Zone.Identifier", path.display());
-    let _ = std::fs::write(stream, "[ZoneTransfer]\r\nZoneId=3\r\n");
+    std::fs::write(stream, "[ZoneTransfer]\r\nZoneId=3\r\n")
 }
 
 #[cfg(not(windows))]
-fn mark_of_the_web(_path: &Path) {}
+pub fn mark_of_the_web(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
 
 /// Why `path` should not be handed to the system's opener, if it should
-/// not: it would run rather than be shown.
+/// not: it is not one of the kinds that are shown rather than run.
 pub fn refuse_to_open(path: &Path) -> Option<String> {
     let name = path.file_name()?.to_string_lossy();
     let (_, ext) = split_extension(&name);
     let ext = ext.trim_start_matches('.').to_ascii_lowercase();
-    RUNNABLE.contains(&ext.as_str()).then(|| {
+    if VIEWABLE.contains(&ext.as_str()) {
+        return None;
+    }
+    Some(if ext.is_empty() {
+        "a file with no extension is not one of the kinds opened from here (pictures, PDFs, \
+         text, sound, video, archives); if you trust it, open it from the downloads folder \
+         yourself"
+            .to_owned()
+    } else {
         format!(
-            ".{ext} files run as programs when opened; if you trust it, open it from the downloads folder yourself"
+            ".{ext} is not one of the kinds opened from here (pictures, PDFs, text, sound, \
+             video, archives), because the system may run it rather than show it; if you \
+             trust it, open it from the downloads folder yourself"
         )
     })
 }
@@ -716,8 +675,13 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&second).unwrap(), "a (2).txt");
     }
 
+    /// Only kinds that are shown go to the opener. The refused list here
+    /// is not the rule — the rule is that anything not on the allowlist
+    /// is refused — but it names the ones a list of dangerous extensions
+    /// kept missing: shell objects, macro documents, disk images that
+    /// mount themselves, and files with no extension at all.
     #[test]
-    fn programs_are_not_handed_to_the_opener() {
+    fn only_what_is_shown_is_handed_to_the_opener() {
         for name in [
             "a.exe",
             "b.EXE",
@@ -730,17 +694,49 @@ mod tests {
             "v.bat",
             "u.desktop",
             "t.Ps1",
+            "noext",
+            "photo.bin",
+            // the ones the old list did not have
+            "app.appref-ms",
+            "share.scf",
+            "help.chm",
+            "sheet.xll",
+            "find.search-ms",
+            "host.rdp",
+            "look.theme",
+            "s.wsc",
+            "s.msh1",
+            "s.ps2",
+            "app.pyz",
+            "app.pyzw",
+            "macro.ahk",
+            "db.udl",
+            "disk.iso",
+            "disk.img",
+            "disk.vhd",
+            "disk.vhdx",
+            "task.job",
+            "link.inetloc",
+            "link.fileloc",
+            "link.ftploc",
+            "link.afploc",
+            "link.vncloc",
+            "prog.bin",
+            "Main.class",
+            "s.lua",
+            "s.tcl",
+            "unit.service",
+            "book.docm",
+            "sheet.xlsm",
+            "deck.pptm",
+            "old.doc",
+            "vector.svg",
         ] {
             assert!(refuse_to_open(Path::new(name)).is_some(), "{name}");
         }
         for name in [
-            "a.pdf",
-            "b.png",
-            "c.tar.gz",
-            "noext",
-            "d.docx",
-            "e.txt",
-            "photo.bin",
+            "a.pdf", "b.png", "c.tar.gz", "d.docx", "e.txt", "f.mp4", "g.flac", "h.zip", "i.CSV",
+            "j.epub",
         ] {
             assert!(refuse_to_open(Path::new(name)).is_none(), "{name}");
         }

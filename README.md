@@ -117,7 +117,11 @@ carry no embedded signature and reproduce byte for byte.
 `silver --check-release` asks the releases page once whether a newer
 version exists and prints the answer. It never runs by itself, downloads
 nothing, and tells GitHub only that some computer at your address runs
-Silver Messenger.
+Silver Messenger — and it goes through the proxy and the extra roots this
+data directory remembers, as the relay connection does, so a client whose
+traffic is routed through Tor does not step outside it for the check. A
+protected directory asks for its passphrase so that they can be read;
+`--proxy` on the command line answers the question without it.
 
 ### From source
 
@@ -297,7 +301,8 @@ silver --reader            reader mode for a screen reader: one line per event, 
 silver --set-passphrase    encrypt keys, contacts and history under a passphrase (asked at every start)
 silver --remove-passphrase drop the passphrase; files stay encrypted under this computer's key store where there is one
 silver --no-keystore       keep the files unencrypted rather than under a key from this computer's key store; remembered
-SILVER_PASSPHRASE=…        supplies the passphrase non-interactively (scripts, tests)
+SILVER_PASSPHRASE=…        supplies the passphrase non-interactively (scripts, tests); used once, then forgotten, so /lock asks for it again
+silver --keep-passphrase   keep SILVER_PASSPHRASE in memory so /lock and the idle lock re-open without asking; for runs nobody is sitting at (env SILVER_KEEP_PASSPHRASE)
 silver --export-backup <F> write an encrypted backup of identity and contacts to F (asks for a passphrase for it)
 silver --import-backup <F> restore identity and contacts from F; add --force to replace an existing identity
 SILVER_BACKUP_PASSPHRASE=… supplies the backup passphrase non-interactively

@@ -69,6 +69,83 @@ Section 13.1 went out in 0.10.1; this is section 13.2.
   differ from any name that verifies, so the signature fails and no leaf
   is quietly wrong.
 
+- **The data directory is the owner's alone** (finding SM-C-10, Medium).
+  Only the key-bearing files were created 0600; the directory itself was
+  0755 under a normal umask and `config.json`, `contacts.json`,
+  `devices.json`, `requests.json`, `blocked.json`, every history file,
+  downloads, exports and backups were 0644. On a machine with no key
+  store and no passphrase — the headless-Linux case, where the fallback
+  is plain files — any other local user could read the proxy's
+  credentials, the invite token, the contact list and every
+  conversation. The directory is now made 0700 (and an existing Silver
+  directory is tightened on the way, though a directory that is not ours
+  is left alone: `--data-dir` could name anything), every file the store
+  writes goes through the private writer, and downloads, exports and
+  backups are 0600 in a 0700 directory. The outbox and the transparency
+  checkpoints are written and synced the way the rest are, rather than
+  with a plain write.
+
+- **Changing the passphrase changes the key** (finding SM-C-23, Low).
+  Moving between a passphrase and the key store re-wrapped the same data
+  key, so anyone with an old copy of `vault.json` and the passphrase in
+  force when they took it went on reading everything written afterwards
+  — including everything written after the passphrase was changed
+  *because* the old one had got out. The files are rewritten under a
+  fresh key instead. The vault names both keys while that runs, so a
+  crash at any point leaves a directory that still opens: whichever key
+  a file is under is in the vault, and the next unlock finishes the move
+  and drops the old key.
+
+- **A file asking for more work than the program will do is refused**
+  (finding SM-C-21, Low). The Argon2id parameters are what the key to
+  check the AEAD is made from, so they cannot themselves be
+  authenticated: `vault.json`, or a backup file handed to somebody, could
+  name any cost the `argon2` crate accepts — up to 4 TiB of memory — and
+  the client would ask the allocator for it and be killed. Anything above
+  1 GiB, 16 passes or 8 lanes is refused on read, far above the defaults
+  (64 MiB, 3 passes, 1 lane).
+
+- **Only what is shown goes to the system's opener** (finding SM-C-11,
+  Medium). `/open` refused a list of extensions the system runs rather
+  than shows, and the list was missing a good many: `.appref-ms`,
+  `.scf`, `.chm`, `.xll`, `.search-ms`, `.rdp`, `.theme`, `.wsc`,
+  `.msh*`, `.ps2`, `.pyz`, `.ahk`, `.udl`, `.iso` and the other disk
+  images that mount themselves, `.job`, `.inetloc` and its macOS
+  cousins, `.class`, `.lua`, `.tcl`, `.service`, and the macro-bearing
+  office formats. A list of what to refuse is always one entry short of
+  the next release of an operating system, so it is an allowlist now:
+  pictures, PDFs and e-books, macro-free documents, text, sound, video
+  and archives go to the opener and nothing else does. Anything else can
+  still be opened from the downloads folder, which is the computer's
+  decision and not this program's. Separately, the plain copy `/open`
+  makes of an encrypted download never carried the mark of the web,
+  so on Windows SmartScreen, Protected View and Office's macro blocking
+  did not apply to it while they did to the plain file beside it; it
+  carries one now, and a copy that could not be marked is reported
+  rather than handed over as if it had been.
+
+- **The release check goes the way everything else goes** (finding
+  SM-C-09, Medium). `--check-release` took its proxy from the command
+  line or the environment only, never from the settings, so a user who
+  had run `silver --proxy socks5://127.0.0.1:9050` once — and whose
+  relay traffic went through Tor from then on — reached GitHub directly
+  with one documented command, resolving the name locally and telling
+  GitHub and everyone on the path that this address runs Silver
+  Messenger. It now reads the remembered proxy and extra roots, as the
+  relay connection does; a protected directory asks for its passphrase
+  so that they can be read, and `--proxy` on the command line answers
+  the question without it.
+
+- **The passphrase from the environment is spent, not kept** (finding
+  SM-C-22, Low). `SILVER_PASSPHRASE` was held for the life of the
+  process, so `/lock` and the idle lock dropped the keys and
+  immediately re-derived them with nothing asked — a lock that opens
+  itself locks nothing. It is used once and dropped now, and a lock
+  asks for it again as it does for a typed one; `--keep-passphrase`
+  keeps the old behaviour for runs nobody is sitting at. Passphrases
+  read from the terminal and taken from the environment are held in
+  memory that is wiped when it goes.
+
 - **A mailbox is delivered a page at a time** (finding SM-R-07, Medium).
   A connection's outbound queue was unbounded, and logging in pushed
   every waiting envelope into it at once, so a client with a full

@@ -65,29 +65,29 @@ const HISTORY_DIR: &str = "history";
 /// unreadable when the protection is taken off; `groups.json`,
 /// `groups.mls` and `revocation.json` were missed until 0.10.1, which
 /// left the MLS epoch secrets of every group in plaintext.
-const IDENTITY_FILES: &[(&str, bool)] = &[
-    (IDENTITY_FILE, true),
-    (REVOCATION_FILE, true),
-    (PREKEYS_FILE, true),
-    (SESSIONS_FILE, true),
-    (CONTACTS_FILE, false),
-    (OUTBOX_FILE, false),
-    (TRANSPARENCY_FILE, false),
-    (REQUESTS_FILE, false),
-    (BLOCKED_FILE, false),
-    (DEVICES_FILE, false),
-    (crate::groups::GROUPS_FILE, true),
-    (crate::groups::MLS_FILE, true),
+const IDENTITY_FILES: &[&str] = &[
+    IDENTITY_FILE,
+    REVOCATION_FILE,
+    PREKEYS_FILE,
+    SESSIONS_FILE,
+    CONTACTS_FILE,
+    OUTBOX_FILE,
+    TRANSPARENCY_FILE,
+    REQUESTS_FILE,
+    BLOCKED_FILE,
+    DEVICES_FILE,
+    crate::groups::GROUPS_FILE,
+    crate::groups::MLS_FILE,
 ];
 
 /// The files the re-encryption walks: everything belonging to the
 /// identity, and the settings, which the wipe keeps but the data key
 /// covers.
-fn recrypted_files() -> impl Iterator<Item = (&'static str, bool)> {
+fn recrypted_files() -> impl Iterator<Item = &'static str> {
     IDENTITY_FILES
         .iter()
         .copied()
-        .chain(std::iter::once((CONFIG_FILE, false)))
+        .chain(std::iter::once(CONFIG_FILE))
 }
 
 /// Client-side configuration.
@@ -686,8 +686,8 @@ impl Store {
     /// starts locked; call [`Store::unlock`] before reading anything.
     pub fn open(root: impl Into<PathBuf>) -> anyhow::Result<Self> {
         let root = root.into();
-        fs::create_dir_all(root.join(HISTORY_DIR))
-            .with_context(|| format!("creating data dir {}", root.display()))?;
+        create_private_dir(&root, Some(HISTORY_DIR))?;
+        create_private_dir(&root.join(HISTORY_DIR), None)?;
         Ok(Self { root, cipher: None })
     }
 
@@ -737,7 +737,7 @@ impl Store {
     }
 
     fn write_vault(&self, vault: &VaultFile) -> anyhow::Result<()> {
-        write_private(
+        write_atomic(
             &self.root.join(VAULT_FILE),
             serde_json::to_string_pretty(vault)?.as_bytes(),
         )
@@ -750,6 +750,7 @@ impl Store {
             .ok_or_else(|| VaultError::Other(anyhow::anyhow!("no passphrase is set")))?;
         self.cipher = Some(Arc::new(FileCipher::unlock(&vault, passphrase)?));
         self.seal_stragglers().map_err(VaultError::Other)?;
+        self.finish_rotation(&vault).map_err(VaultError::Other)?;
         Ok(())
     }
 
@@ -772,6 +773,32 @@ impl Store {
         })?;
         self.cipher = Some(Arc::new(cipher));
         self.seal_stragglers()?;
+        self.finish_rotation(&vault)?;
+        Ok(())
+    }
+
+    /// Finish a key rotation a crash cut short.
+    ///
+    /// The vault names two keys while files are being moved from one to
+    /// the other ([`Store::rotate_key`]). Everything is readable meanwhile,
+    /// so this is not urgent, but the whole point of the rotation is that
+    /// the old key stops opening what is written from now on: the files
+    /// still under it are rewritten and it is dropped from the vault. The
+    /// wrapping itself does not change, so no passphrase is needed here.
+    fn finish_rotation(&mut self, vault: &VaultFile) -> anyhow::Result<()> {
+        if vault.previous_key.is_none() {
+            return Ok(());
+        }
+        let Some(rotating) = self.cipher.clone() else {
+            return Ok(());
+        };
+        tracing::info!("finishing a key rotation an earlier run left half done");
+        self.recrypt_all(Some(&rotating), Some(&rotating))?;
+        self.write_vault(&VaultFile {
+            previous_key: None,
+            ..vault.clone()
+        })?;
+        self.cipher = Some(Arc::new(rotating.settled()));
         Ok(())
     }
 
@@ -795,7 +822,7 @@ impl Store {
 
     /// Whether any file the data key covers is lying in the clear.
     fn any_plain(&self) -> anyhow::Result<bool> {
-        for (name, _) in recrypted_files() {
+        for name in recrypted_files() {
             let path = self.root.join(name);
             if !path.exists() {
                 continue;
@@ -865,7 +892,9 @@ impl Store {
                     .cipher
                     .clone()
                     .context("the data directory is locked")?;
-                self.write_vault(&cipher.wrap_under_passphrase(passphrase, kdf)?)?;
+                self.rotate_key(&cipher, |c| {
+                    c.wrap_under_passphrase(passphrase, kdf.clone())
+                })?;
                 crate::keystore::delete(&old.kdf.keystore_name())?;
                 Ok(())
             }
@@ -898,10 +927,41 @@ impl Store {
         if crate::keystore::available() {
             let kdf = Kdf::keystore();
             let kek = crate::keystore::create(&kdf.keystore_name())?;
-            self.write_vault(&cipher.wrap_under_kek(&kek, kdf))?;
+            self.rotate_key(&cipher, |c| Ok(c.wrap_under_kek(&kek, kdf.clone())))?;
             return Ok(Protection::Keystore);
         }
         self.remove_protection()
+    }
+
+    /// Move the directory onto a fresh data key, `wrap` saying how the new
+    /// key is to be kept.
+    ///
+    /// Changing the protection used to re-wrap the same data key, so an old
+    /// copy of `vault.json` and the passphrase in force when it was taken
+    /// went on opening everything written afterwards — including everything
+    /// written after the user changed the passphrase because the old one had
+    /// got out. The files are rewritten under a new key instead.
+    ///
+    /// The order is chosen so that a crash at any point leaves a directory
+    /// that still opens: the vault written first names *both* keys, so a
+    /// file rewritten and a file not yet rewritten are both readable, and
+    /// only when the last one is done is the old key dropped from it.
+    fn rotate_key(
+        &mut self,
+        old: &Arc<FileCipher>,
+        wrap: impl Fn(&FileCipher) -> anyhow::Result<VaultFile>,
+    ) -> anyhow::Result<()> {
+        let rotating = Arc::new(old.rotating());
+        self.write_vault(&wrap(&rotating)?)?;
+        self.cipher = Some(rotating.clone());
+        self.recrypt_all(Some(old), Some(&rotating)).context(
+            "the protection changed, but not every file could be written under the new key; \
+             the old key is kept in vault.json until they are",
+        )?;
+        let settled = Arc::new(rotating.settled());
+        self.write_vault(&wrap(&settled)?)?;
+        self.cipher = Some(settled);
+        Ok(())
     }
 
     /// Store everything unencrypted again, whatever protected it.
@@ -940,26 +1000,23 @@ impl Store {
         from: Option<&FileCipher>,
         to: Option<&FileCipher>,
     ) -> anyhow::Result<()> {
-        for (name, private) in recrypted_files() {
+        for name in recrypted_files() {
             let path = self.root.join(name);
             if !path.exists() {
                 continue;
             }
             let bytes = fs::read(&path)?;
             let plain = decode_file(from, name, &bytes)?;
-            let out = encode_file(to, name, &plain);
-            if private {
-                write_private(&path, &out)?;
-            } else {
-                write_atomic(&path, &out)?;
-            }
+            write_atomic(&path, &encode_file(to, name, &plain))?;
         }
         // Files received while `encrypted_downloads` was on are bound to
         // their own name, not to a path under the data directory, and sit
         // beside plain ones, which stay as they are. On the way out they
-        // are decrypted, since the key is about to be gone.
+        // are decrypted, since the key is about to be gone; on a rotation
+        // they move onto the new key with everything else, or they would
+        // be the one thing left behind when the old key is dropped.
         let downloads = self.downloads_dir();
-        if from.is_none() != to.is_none() && downloads.exists() {
+        if (from.is_some() || to.is_some()) && downloads.exists() {
             for entry in fs::read_dir(&downloads)? {
                 let path = entry?.path();
                 if !path.is_file() {
@@ -1009,15 +1066,14 @@ impl Store {
         Ok(Some(decode_file(self.cipher.as_deref(), name, &bytes)?))
     }
 
-    fn write_file(&self, name: &str, bytes: &[u8], private: bool) -> anyhow::Result<()> {
+    /// Write one of the store's files whole. Every one of them is
+    /// owner-only: `config.json` holds the proxy's credentials and the
+    /// invite token, `contacts.json` and the history are the contact
+    /// graph, and neither is anyone else's on a shared machine.
+    fn write_file(&self, name: &str, bytes: &[u8]) -> anyhow::Result<()> {
         self.ensure_unlocked()?;
         let out = encode_file(self.cipher.as_deref(), name, bytes);
-        let path = self.root.join(name);
-        if private {
-            write_private(&path, &out)
-        } else {
-            write_atomic(&path, &out)
-        }
+        write_atomic(&self.root.join(name), &out)
     }
 
     pub(crate) fn read_json_or_default<T: Default + for<'de> Deserialize<'de>>(
@@ -1039,7 +1095,7 @@ impl Store {
         value: &T,
     ) -> anyhow::Result<()> {
         let bytes = serde_json::to_vec(value).with_context(|| format!("encoding {name}"))?;
-        self.write_file(name, &bytes, true)
+        self.write_file(name, &bytes)
     }
 
     /// A private file's bytes, if it exists.
@@ -1048,7 +1104,7 @@ impl Store {
     }
 
     pub(crate) fn write_private_file(&self, name: &str, bytes: &[u8]) -> anyhow::Result<()> {
-        self.write_file(name, bytes, true)
+        self.write_file(name, bytes)
     }
 
     // --- identity, config, contacts ------------------------------------------
@@ -1063,7 +1119,7 @@ impl Store {
         }
         let identity = Identity::generate();
         let text = serde_json::to_string_pretty(&identity.to_secrets())?;
-        self.write_file(IDENTITY_FILE, text.as_bytes(), true)?;
+        self.write_file(IDENTITY_FILE, text.as_bytes())?;
         Ok((identity, true))
     }
 
@@ -1132,7 +1188,7 @@ impl Store {
             }
         }
         let text = serde_json::to_string_pretty(&file)?;
-        self.write_file(IDENTITY_FILE, text.as_bytes(), true)
+        self.write_file(IDENTITY_FILE, text.as_bytes())
     }
 
     /// The account's devices as this device last knew them.
@@ -1144,14 +1200,13 @@ impl Store {
         self.write_file(
             DEVICES_FILE,
             serde_json::to_string_pretty(devices)?.as_bytes(),
-            false,
         )
     }
 
     /// Overwrite the identity, e.g. when restoring a backup.
     pub fn save_identity(&self, identity: &Identity) -> anyhow::Result<()> {
         let text = serde_json::to_string_pretty(&identity.to_secrets())?;
-        self.write_file(IDENTITY_FILE, text.as_bytes(), true)
+        self.write_file(IDENTITY_FILE, text.as_bytes())
     }
 
     /// Load the pre-signed revocation certificate, minting and saving one for
@@ -1188,7 +1243,7 @@ impl Store {
     /// Store a revocation certificate, e.g. when restoring a backup.
     pub fn save_revocation(&self, revocation: &Revocation) -> anyhow::Result<()> {
         let text = serde_json::to_string_pretty(revocation)?;
-        self.write_file(REVOCATION_FILE, text.as_bytes(), true)
+        self.write_file(REVOCATION_FILE, text.as_bytes())
     }
 
     // --- prekeys and sessions ------------------------------------------------
@@ -1198,7 +1253,7 @@ impl Store {
     }
 
     pub(crate) fn save_prekeys(&self, prekeys: &PrekeyFile) -> anyhow::Result<()> {
-        self.write_file(PREKEYS_FILE, &serde_json::to_vec(prekeys)?, true)
+        self.write_file(PREKEYS_FILE, &serde_json::to_vec(prekeys)?)
     }
 
     pub(crate) fn load_sessions(&self) -> anyhow::Result<SessionsFile> {
@@ -1206,7 +1261,7 @@ impl Store {
     }
 
     pub(crate) fn save_sessions(&self, sessions: &SessionsFile) -> anyhow::Result<()> {
-        self.write_file(SESSIONS_FILE, &serde_json::to_vec(sessions)?, true)
+        self.write_file(SESSIONS_FILE, &serde_json::to_vec(sessions)?)
     }
 
     /// Delete prekeys and sessions, e.g. when the identity is replaced.
@@ -1226,7 +1281,7 @@ impl Store {
     pub fn wipe(&self) -> anyhow::Result<()> {
         for name in IDENTITY_FILES
             .iter()
-            .map(|(name, _)| *name)
+            .copied()
             .chain(std::iter::once(VAULT_FILE))
         {
             let path = self.root.join(name);
@@ -1255,7 +1310,6 @@ impl Store {
         self.write_file(
             CONFIG_FILE,
             serde_json::to_string_pretty(config)?.as_bytes(),
-            false,
         )
     }
 
@@ -1284,7 +1338,6 @@ impl Store {
         self.write_file(
             CONTACTS_FILE,
             serde_json::to_string_pretty(contacts)?.as_bytes(),
-            false,
         )
     }
 
@@ -1298,7 +1351,6 @@ impl Store {
         self.write_file(
             REQUESTS_FILE,
             serde_json::to_string_pretty(requests)?.as_bytes(),
-            false,
         )
     }
 
@@ -1310,7 +1362,6 @@ impl Store {
         self.write_file(
             BLOCKED_FILE,
             serde_json::to_string_pretty(blocked)?.as_bytes(),
-            false,
         )
     }
 
@@ -1390,12 +1441,7 @@ impl Store {
     fn append_history_line(&self, name: &str, json: &str) -> anyhow::Result<()> {
         self.ensure_unlocked()?;
         let path = self.root.join(name);
-        let mut file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .append(true)
-            .open(&path)
-            .with_context(|| format!("opening {}", path.display()))?;
+        let mut file = append_private(&path)?;
         let mut line = encode_line(self.cipher.as_deref(), name, json);
         line.push('\n');
         // A line cut short by a crash has no newline; start a fresh one
@@ -1426,11 +1472,7 @@ impl Store {
             .with_context(|| format!("reading {}", old_path.display()))?;
         let new_name = history_name(new);
         let new_path = self.root.join(&new_name);
-        let mut out = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&new_path)
-            .with_context(|| format!("opening {}", new_path.display()))?;
+        let mut out = append_private(&new_path)?;
         for line in text.lines() {
             if line.trim().is_empty() {
                 continue;
@@ -1874,23 +1916,11 @@ fn ends_with_newline(file: &mut File) -> std::io::Result<bool> {
     Ok(last[0] == b'\n')
 }
 
-/// Write via a temp file + rename so a crash never leaves a half-written
-/// file, the temp file synced first so the name never points at an empty
-/// one after a power loss.
-fn write_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
-    let tmp = path.with_extension("tmp");
-    let mut file = File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
-    file.write_all(bytes)
-        .with_context(|| format!("writing {}", tmp.display()))?;
-    file.sync_all()?;
-    drop(file);
-    fs::rename(&tmp, path).with_context(|| format!("renaming into {}", path.display()))?;
-    Ok(())
-}
-
-/// Like [`write_atomic`] but the file is created owner-readable only on Unix.
-fn write_private(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
-    let tmp = path.with_extension("tmp");
+/// Open a file for writing, owner-only on Unix. Every file this program
+/// writes goes through here: what is in the data directory is nobody
+/// else's business even when it is encrypted, and on a machine with no
+/// key store and no passphrase it is not encrypted at all.
+pub(crate) fn create_private(path: &Path) -> anyhow::Result<File> {
     let mut opts = OpenOptions::new();
     opts.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -1898,10 +1928,57 @@ fn write_private(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
-    let mut file = opts
-        .open(&tmp)
-        .with_context(|| format!("creating {}", tmp.display()))?;
-    file.write_all(bytes)?;
+    opts.open(path)
+        .with_context(|| format!("creating {}", path.display()))
+}
+
+/// Open a file to append to, readable, owner-only on Unix, created if it
+/// is not there.
+fn append_private(path: &Path) -> anyhow::Result<File> {
+    let mut opts = OpenOptions::new();
+    opts.create(true).read(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(path)
+        .with_context(|| format!("opening {}", path.display()))
+}
+
+/// Make a directory, owner-only on Unix, and tighten it if it is already
+/// there under wider modes — which it will be for anyone upgrading from
+/// before 0.11.0, when the directory was made at the umask's mercy.
+///
+/// Only a directory this program owns is tightened: `guard` names a file
+/// or directory that only Silver Messenger puts there. Without that a
+/// `--data-dir ~` would take the user's home directory to 0700 with it.
+pub(crate) fn create_private_dir(path: &Path, guard: Option<&str>) -> anyhow::Result<()> {
+    let existed = path.exists();
+    fs::create_dir_all(path).with_context(|| format!("creating {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let ours = !existed || guard.is_none_or(|g| path.join(g).exists());
+        if ours && let Ok(meta) = fs::metadata(path) {
+            let mode = meta.permissions().mode();
+            if mode & 0o077 != 0 {
+                let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode & !0o077));
+            }
+        }
+    }
+    let _ = (existed, guard);
+    Ok(())
+}
+
+/// Write via a temp file + rename so a crash never leaves a half-written
+/// file, the temp file synced first so the name never points at an empty
+/// one after a power loss, and created owner-only.
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    let tmp = path.with_extension("tmp");
+    let mut file = create_private(&tmp)?;
+    file.write_all(bytes)
+        .with_context(|| format!("writing {}", tmp.display()))?;
     file.sync_all()?;
     drop(file);
     fs::rename(&tmp, path).with_context(|| format!("renaming into {}", path.display()))?;
@@ -1942,6 +2019,79 @@ mod tests {
         );
     }
 
+    /// The data directory and everything in it are the owner's alone. It
+    /// holds the proxy's credentials, the invite token, the contact list
+    /// and the history, and on a machine with no key store and no
+    /// passphrase it holds them in the clear.
+    #[cfg(unix)]
+    #[test]
+    fn nothing_in_the_data_directory_is_anyone_elses() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("data");
+        // As an upgrade finds it: made by an older version at the umask.
+        fs::create_dir_all(root.join(HISTORY_DIR)).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let store = Store::open(&root).unwrap();
+        let peer = Identity::generate().user_id();
+        store.load_or_create_identity().unwrap();
+        store.save_config(&Config::default()).unwrap();
+        store.append_history(&peer, &entry(0)).unwrap();
+
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&root), 0o700, "the directory itself");
+        for name in [IDENTITY_FILE, CONFIG_FILE, HISTORY_DIR] {
+            let path = root.join(name);
+            assert_eq!(mode(&path) & 0o077, 0, "{name} is readable by others");
+        }
+        assert_eq!(mode(&root.join(history_name(&peer))) & 0o077, 0);
+
+        // A directory that is not ours is left as it is: --data-dir could
+        // name anything, and tightening someone's home directory with it
+        // would be the program's doing, not theirs.
+        let theirs = dir.path().join("theirs");
+        fs::create_dir_all(&theirs).unwrap();
+        fs::set_permissions(&theirs, fs::Permissions::from_mode(0o755)).unwrap();
+        create_private_dir(&theirs, Some("identity.json")).unwrap();
+        assert_eq!(mode(&theirs), 0o755);
+    }
+
+    /// A crash in the middle of a key rotation leaves both keys in the
+    /// vault, so nothing is lost; the next unlock finishes the move and
+    /// drops the old key.
+    #[test]
+    fn a_rotation_cut_short_is_finished_on_the_next_unlock() {
+        let (mut store, dir) = temp_store();
+        let peer = Identity::generate().user_id();
+        store.load_or_create_identity().unwrap();
+        store.append_history(&peer, &entry(0)).unwrap();
+        store.set_passphrase_with("first", Kdf::fast()).unwrap();
+
+        // The state a crash between the two writes leaves: the vault names
+        // both keys and the files are still under the old one.
+        let old = store.cipher().unwrap();
+        let rotating = Arc::new(old.rotating());
+        let vault = rotating
+            .wrap_under_passphrase("first", Kdf::fast())
+            .unwrap();
+        store.write_vault(&vault).unwrap();
+        assert!(store.read_vault().unwrap().unwrap().previous_key.is_some());
+        let stale = fs::read(dir.path().join(IDENTITY_FILE)).unwrap();
+
+        let mut again = Store::open(dir.path()).unwrap();
+        again.unlock("first").unwrap();
+        assert_eq!(again.load_history(&peer).unwrap().len(), 1);
+        // Finished: one key in the vault, and the files under it.
+        assert!(again.read_vault().unwrap().unwrap().previous_key.is_none());
+        let fresh = fs::read(dir.path().join(IDENTITY_FILE)).unwrap();
+        assert_ne!(fresh, stale);
+        assert!(old.decrypt(IDENTITY_FILE, &fresh).is_err());
+        let mut third = Store::open(dir.path()).unwrap();
+        third.unlock("first").unwrap();
+        assert_eq!(third.load_history(&peer).unwrap().len(), 1);
+    }
+
     #[test]
     fn the_key_store_protects_files_without_a_passphrase() {
         crate::keystore::use_mock_store();
@@ -1969,24 +2119,37 @@ mod tests {
         );
         assert_eq!(again.load_history(&peer.user_id()).unwrap().len(), 2);
 
-        // A passphrase takes over without rewriting the files; the key
-        // store forgets its key, so a copy is useless without the passphrase.
+        // A passphrase takes over. The files are rewritten under a fresh
+        // data key, so the vault as it stood — kept here as somebody with
+        // an old copy would keep it — no longer opens them; the key store
+        // forgets its key too.
         let raw_before = fs::read(&identity_path).unwrap();
-        let name = again.read_vault().unwrap().unwrap().kdf.keystore_name();
+        let old_vault = again.read_vault().unwrap().unwrap();
+        let name = old_vault.kdf.keystore_name();
+        let old_kek = crate::keystore::load(&name).unwrap().unwrap();
         again
             .set_passphrase_with("correct horse", Kdf::fast())
             .unwrap();
         assert_eq!(again.protection(), Protection::Passphrase);
-        assert_eq!(fs::read(&identity_path).unwrap(), raw_before);
+        let raw_after = fs::read(&identity_path).unwrap();
+        assert_ne!(raw_after, raw_before);
+        let old_key = FileCipher::unlock_with_kek(&old_vault, &old_kek).unwrap();
+        assert!(old_key.decrypt("identity.json", &raw_after).is_err());
         assert!(crate::keystore::load(&name).unwrap().is_none());
         let mut third = Store::open(dir.path()).unwrap();
         assert!(third.unlock_with_keystore().is_err());
         third.unlock("correct horse").unwrap();
         assert_eq!(third.load_history(&peer.user_id()).unwrap().len(), 2);
 
-        // Dropping the passphrase goes back to the key store, files untouched.
+        // Dropping the passphrase goes back to the key store, and rotates
+        // the data key again: the passphrase that was in force opens
+        // nothing written from now on.
+        let vault_with_passphrase = third.read_vault().unwrap().unwrap();
         assert_eq!(third.remove_passphrase().unwrap(), Protection::Keystore);
-        assert_eq!(fs::read(&identity_path).unwrap(), raw_before);
+        let raw_last = fs::read(&identity_path).unwrap();
+        assert_ne!(raw_last, raw_after);
+        let passphrase_key = FileCipher::unlock(&vault_with_passphrase, "correct horse").unwrap();
+        assert!(passphrase_key.decrypt("identity.json", &raw_last).is_err());
         let mut fourth = Store::open(dir.path()).unwrap();
         fourth.unlock_with_keystore().unwrap();
         assert_eq!(fourth.load_history(&peer.user_id()).unwrap().len(), 2);
@@ -2401,7 +2564,7 @@ mod tests {
             .write_private_file(crate::groups::MLS_FILE, b"mls state")
             .unwrap();
 
-        let named: Vec<&str> = recrypted_files().map(|(name, _)| name).collect();
+        let named: Vec<&str> = recrypted_files().collect();
         let root = store.root.clone();
         let is_encrypted = |name: &str| {
             let path = root.join(name);

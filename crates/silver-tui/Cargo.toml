@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 silver-protocol = { workspace = true }
 silver-client = { workspace = true }
+zeroize = { workspace = true }
 tokio = { workspace = true }
 ratatui = { workspace = true }
 unicode-width = { workspace = true }

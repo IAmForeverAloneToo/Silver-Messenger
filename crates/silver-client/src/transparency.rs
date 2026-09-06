@@ -457,10 +457,9 @@ fn write(path: &Path, cipher: Option<&FileCipher>, state: &LogState) -> anyhow::
         Some(c) => c.encrypt(LOG_NAME, &plain),
         None => plain,
     };
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, out).with_context(|| format!("writing {}", tmp.display()))?;
-    fs::rename(&tmp, path).with_context(|| format!("renaming into {}", path.display()))?;
-    Ok(())
+    // Owner-only and synced: the checkpoints are what catches a forked
+    // log, and a half-written file would be one fewer place to catch it.
+    crate::store::write_atomic(path, &out)
 }
 
 #[cfg(test)]

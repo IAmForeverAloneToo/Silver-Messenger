@@ -308,8 +308,16 @@ ahead;
 names are sanitised so that nothing they contain reaches the terminal or
 the file system raw; a file is fetched only when you ask (or you told the
 client to fetch that contact's files as they arrive), never overwrites,
-and is refused for opening if the system would run it rather than show
-it. What is inside the file is for you and your other software to judge.
+and reaches the system's opener only if its kind is one that is *shown*
+rather than run (0.11.0: an allowlist — pictures, PDFs, text, sound,
+video, archives — where before it was a list of dangerous extensions
+that was always one entry short of a new one). Anything else you can
+still open yourself from the downloads folder, which is your computer's
+decision to make and not this program's. On Windows every copy carries
+the mark of the web, the plain copy `/open` makes of an encrypted
+download included, so SmartScreen, Protected View and Office's macro
+blocking apply to it; a copy that could not be marked is not handed over
+silently. What is inside the file is for you and your other software to judge.
 Nothing they write picks the file that `/open` or `/files decrypt` acts
 on: where a received file went is what the download recorded, and only
 `downloads/` is reachable either way, so a message whose text is dressed
@@ -399,9 +407,18 @@ the data key is wrapped under a random key kept there, so a copied
 directory is useless elsewhere. With a passphrase set, every file is
 encrypted under a key that only the passphrase unlocks (Argon2id, 64 MiB
 and 3 passes, then XChaCha20-Poly1305), and the thief is left guessing
-the passphrase offline; a weak passphrase is the remaining risk. Where
+the passphrase offline; a weak passphrase is the remaining risk.
+Changing the passphrase, or moving between it and the key store, moves
+the files onto a fresh data key (0.11.0), so somebody holding an old copy
+of `vault.json` and the passphrase that was in force when they took it
+reads nothing written after the change — which is what changing a
+passphrase is for. Where
 there is neither (no key store and no passphrase), the files are plain and
-the client says so at start. Received files in `downloads/` are saved
+the client says so at start. Plain or not, the data directory and every
+file in it are the owner's alone (0.11.0: the directory 0700, the files
+0600, an existing directory tightened on the way), so a shared machine's
+other users do not read the settings — which hold the proxy's credentials
+and the invite token — the contact list, or the history. Received files in `downloads/` are saved
 as ordinary files so other programs can open them, unless `/files
 encrypt on` was chosen (0.10.0), which writes them under the data key
 like the rest; `/open` then hands the opener a private plain copy under

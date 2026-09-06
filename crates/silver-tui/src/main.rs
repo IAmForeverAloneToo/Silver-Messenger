@@ -13,7 +13,7 @@ mod terminal;
 mod theme;
 mod ui;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use std::io::IsTerminal;
@@ -25,6 +25,7 @@ use silver_client::{
     Store, VaultError, keystore,
 };
 use tracing_subscriber::EnvFilter;
+use zeroize::Zeroizing;
 
 use crate::app::{AtRest, Exit};
 
@@ -134,10 +135,20 @@ struct Args {
 
     /// Ask the releases page once whether a newer version exists, print
     /// the answer, and exit. Never happens by itself: the request shows
-    /// GitHub this computer's address. Goes through --proxy / --ca-cert
-    /// from this command line (or the environment), and touches no data.
+    /// GitHub this computer's address. It goes through the proxy and the
+    /// extra roots this data directory remembers, as the relay connection
+    /// does, unless --proxy is given here; a protected directory asks for
+    /// its passphrase so that they can be read.
     #[arg(long)]
     check_release: bool,
+
+    /// Keep the passphrase from SILVER_PASSPHRASE in memory, so that
+    /// /lock and the idle lock re-open the directory without asking. For
+    /// runs nobody is sitting at; without it the passphrase is used once
+    /// and dropped, and a lock asks for it again as it does for a typed
+    /// one.
+    #[arg(long, env = "SILVER_KEEP_PASSPHRASE")]
+    keep_passphrase: bool,
 
     /// Submit messages on the authenticated relay connection even when the
     /// relay offers a separate anonymous one (which hides the sender from
@@ -180,16 +191,28 @@ struct Args {
 /// Passphrases handed over in the environment (scripts, tests), taken out
 /// of it before anything else runs so that no child process (the file
 /// opener, say) and no other reader of the environment sees them.
+///
+/// The passphrase is used once and then dropped, so `/lock` and the idle
+/// lock ask for it as they would for a typed one: a lock that re-opens
+/// itself from a copy the program is still holding locks nothing.
+/// `--keep-passphrase` says to hold on to it, for a run nobody is sitting
+/// at. On Linux the original environment block stays readable through
+/// `/proc/<pid>/environ` whatever this does; the non-dumpable flag keeps
+/// other users out of it, and root was never kept out.
 struct EnvSecrets {
-    passphrase: Option<String>,
-    backup_passphrase: Option<String>,
+    passphrase: Option<Zeroizing<String>>,
+    backup_passphrase: Option<Zeroizing<String>>,
+    /// Keep [`Self::passphrase`] after the first unlock.
+    keep: bool,
 }
 
 impl EnvSecrets {
     #[allow(unsafe_code)]
     fn take() -> Self {
-        let passphrase = std::env::var("SILVER_PASSPHRASE").ok();
-        let backup_passphrase = std::env::var("SILVER_BACKUP_PASSPHRASE").ok();
+        let passphrase = std::env::var("SILVER_PASSPHRASE").ok().map(Zeroizing::new);
+        let backup_passphrase = std::env::var("SILVER_BACKUP_PASSPHRASE")
+            .ok()
+            .map(Zeroizing::new);
         // SAFETY: this runs first thing in `main`, before the runtime and
         // therefore before any other thread exists, so nothing can be
         // reading the environment while it changes.
@@ -200,6 +223,16 @@ impl EnvSecrets {
         Self {
             passphrase,
             backup_passphrase,
+            keep: false,
+        }
+    }
+
+    /// The environment passphrase, spent unless the run asked to keep it.
+    fn spend(&mut self) -> Option<Zeroizing<String>> {
+        if self.keep {
+            self.passphrase.clone()
+        } else {
+            self.passphrase.take()
         }
     }
 }
@@ -228,25 +261,28 @@ fn harden_process() {
 
 async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
     let args = Args::parse();
-
-    if args.check_release {
-        return check_release(&args).await;
-    }
+    let mut secrets = secrets;
+    secrets.keep = args.keep_passphrase;
 
     if args.data_dir.is_none() {
         Store::migrate_legacy_dir();
     }
     let data_dir = args
         .data_dir
+        .clone()
         .or_else(Store::default_dir)
         .context("could not determine a data directory; pass --data-dir")?;
+
+    if args.check_release {
+        return check_release(&args, &data_dir, &mut secrets).await;
+    }
     let mut store = Store::open(&data_dir)?;
-    open_protected(&mut store, &secrets)?;
+    open_protected(&mut store, &mut secrets)?;
     if args.set_passphrase {
         if store.has_passphrase() {
             bail!("a passphrase is already set; run --remove-passphrase first to change it");
         }
-        let passphrase = new_passphrase(&secrets)?;
+        let passphrase = new_passphrase(&mut secrets)?;
         store.set_passphrase(&passphrase)?;
         println!(
             "Keys, contacts and history in {} are now encrypted under your passphrase.",
@@ -308,9 +344,10 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
             Some(p) => p.clone(),
             None => {
                 println!("Choose a passphrase for the backup file; it is needed to restore it.");
-                new_passphrase(&EnvSecrets {
+                new_passphrase(&mut EnvSecrets {
                     passphrase: None,
                     backup_passphrase: None,
+                    keep: false,
                 })?
             }
         };
@@ -544,7 +581,7 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
                 // sessions and the data key.
                 println!("Locked. The passphrase opens it again; Ctrl-C quits.");
                 store = Store::open(&data_dir)?;
-                unlock(&mut store, &secrets)?;
+                unlock(&mut store, &mut secrets)?;
                 identity = store.load_or_create_identity()?.0;
                 created = false;
             }
@@ -553,13 +590,43 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
 }
 
 /// `--check-release`: one request to the releases page, then a line.
-async fn check_release(args: &Args) -> anyhow::Result<()> {
+///
+/// It goes the way the relay connection goes, the remembered proxy
+/// included. Reaching GitHub directly from a machine whose relay traffic
+/// is routed through Tor would say plainly, to GitHub and to anyone on
+/// the path, that this address runs Silver Messenger — which is the one
+/// thing the proxy is there to prevent. When the settings name a proxy
+/// and the directory cannot be read to find out (it is locked), the
+/// check is refused rather than made in the clear.
+async fn check_release(
+    args: &Args,
+    data_dir: &Path,
+    secrets: &mut EnvSecrets,
+) -> anyhow::Result<()> {
     use silver_client::update::{RELEASES_API, compare, latest_release};
     use std::cmp::Ordering;
 
+    // Reading the settings means opening the data directory, so a
+    // protected one asks for its passphrase here as it would anywhere
+    // else; --proxy on the command line answers the question without it.
+    let (stored_proxy, stored_ca) = if args.proxy.is_some() {
+        (None, None)
+    } else {
+        let mut store = Store::open(data_dir)?;
+        open_protected(&mut store, secrets).context(
+            "the proxy this data directory remembers cannot be read while it is locked; \
+             unlock it, or pass --proxy",
+        )?;
+        let config = store.load_config()?;
+        (config.proxy, config.ca_cert)
+    };
     let options = ConnectOptions {
-        extra_ca_certs: args.ca_cert.iter().cloned().collect(),
-        proxy: args.proxy.clone().or_else(Proxy::url_from_env),
+        extra_ca_certs: args.ca_cert.iter().cloned().chain(stored_ca).collect(),
+        proxy: args
+            .proxy
+            .clone()
+            .or(stored_proxy)
+            .or_else(Proxy::url_from_env),
         ..Default::default()
     };
     let current = env!("CARGO_PKG_VERSION");
@@ -598,7 +665,7 @@ fn refuse_downgrade(config: &silver_client::Config, url: &str) -> anyhow::Result
 }
 
 /// Unlock the directory by whatever protects it.
-fn open_protected(store: &mut Store, secrets: &EnvSecrets) -> anyhow::Result<()> {
+fn open_protected(store: &mut Store, secrets: &mut EnvSecrets) -> anyhow::Result<()> {
     match store.protection() {
         Protection::None => Ok(()),
         Protection::Keystore => store.unlock_with_keystore(),
@@ -606,19 +673,25 @@ fn open_protected(store: &mut Store, secrets: &EnvSecrets) -> anyhow::Result<()>
     }
 }
 
-fn backup_passphrase(secrets: &EnvSecrets, prompt: &str) -> anyhow::Result<String> {
+fn backup_passphrase(secrets: &EnvSecrets, prompt: &str) -> anyhow::Result<Zeroizing<String>> {
     match &secrets.backup_passphrase {
         Some(p) => Ok(p.clone()),
-        None => Ok(rpassword::prompt_password(prompt)?),
+        None => Ok(ask(prompt)?),
     }
 }
 
-fn unlock(store: &mut Store, secrets: &EnvSecrets) -> anyhow::Result<()> {
-    if let Some(passphrase) = &secrets.passphrase {
-        return store.unlock(passphrase).map_err(Into::into);
+/// A passphrase read from the terminal, held in memory that is wiped when
+/// it goes.
+fn ask(prompt: &str) -> anyhow::Result<Zeroizing<String>> {
+    Ok(Zeroizing::new(rpassword::prompt_password(prompt)?))
+}
+
+fn unlock(store: &mut Store, secrets: &mut EnvSecrets) -> anyhow::Result<()> {
+    if let Some(passphrase) = secrets.spend() {
+        return store.unlock(&passphrase).map_err(Into::into);
     }
     for attempt in 1..=3 {
-        let passphrase = rpassword::prompt_password("Passphrase: ")?;
+        let passphrase = ask("Passphrase: ")?;
         match store.unlock(&passphrase) {
             Ok(()) => return Ok(()),
             Err(VaultError::WrongPassphrase) if attempt < 3 => {
@@ -630,19 +703,19 @@ fn unlock(store: &mut Store, secrets: &EnvSecrets) -> anyhow::Result<()> {
     bail!("too many failed attempts")
 }
 
-fn new_passphrase(secrets: &EnvSecrets) -> anyhow::Result<String> {
-    if let Some(passphrase) = &secrets.passphrase {
+fn new_passphrase(secrets: &mut EnvSecrets) -> anyhow::Result<Zeroizing<String>> {
+    if let Some(passphrase) = secrets.spend() {
         if passphrase.is_empty() {
             bail!("SILVER_PASSPHRASE is set but empty");
         }
-        return Ok(passphrase.clone());
+        return Ok(passphrase);
     }
     loop {
-        let first = rpassword::prompt_password("New passphrase: ")?;
+        let first = ask("New passphrase: ")?;
         if first.is_empty() {
             bail!("the passphrase must not be empty");
         }
-        let second = rpassword::prompt_password("Repeat passphrase: ")?;
+        let second = ask("Repeat passphrase: ")?;
         if first == second {
             return Ok(first);
         }
