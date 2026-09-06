@@ -773,3 +773,87 @@ async fn a_device_links_by_its_link_and_takes_the_snapshot() {
     alice_c.shutdown().await;
     laptop_c.shutdown().await;
 }
+
+/// The audit's SM-P-01: a device revocation is the word of the account it
+/// names, so one from anybody else is not about that device at all. A
+/// stranger who signs a statement about a contact's device must not make
+/// the client drop its sessions with it: the messages in flight would be
+/// lost, and repeating it would keep them apart.
+#[tokio::test]
+async fn a_device_revocation_from_another_account_is_ignored() {
+    let (url, _state) = start_relay().await;
+    let mut h = household(&url).await;
+    let bob = Arc::new(Identity::generate());
+    let (bob_c, mut bob_ev) =
+        Client::spawn(url.clone(), bob.clone(), options(&bob, None, Vec::new())).unwrap();
+    connected(&mut bob_ev, "bob").await;
+    // Bob talks to alice, so he holds a session with the laptop and its
+    // bundle: the state a forged statement would throw away.
+    let first = bob_c
+        .send_content(h.alice.user_id(), None, text("one"), seq(1, 1))
+        .await
+        .unwrap();
+    assert_eq!(first.copies.len(), 1, "a copy for the laptop");
+    wait_for(&mut h.laptop_ev, "the laptop's copy", |e| {
+        text_of(e).is_some()
+    })
+    .await;
+
+    // Mallory, who is nobody to anybody, signs a statement about alice's
+    // laptop and sends it to bob, then an ordinary message so the test can
+    // tell "ignored" from "not yet arrived".
+    let mallory = Arc::new(Identity::generate());
+    let (mallory_c, mut mallory_ev) = Client::spawn(
+        url.clone(),
+        mallory.clone(),
+        options(&mallory, None, Vec::new()),
+    )
+    .unwrap();
+    connected(&mut mallory_ev, "mallory").await;
+    let forged = mallory.revoke_device(&h.laptop.user_id(), now_ms());
+    assert!(forged.verify().is_ok(), "it is a valid signature, of hers");
+    mallory_c
+        .send_content(
+            bob.user_id(),
+            None,
+            Content::DeviceRevocation(forged),
+            seq(1, 1),
+        )
+        .await
+        .unwrap();
+    mallory_c
+        .send_content(bob.user_id(), None, text("after"), seq(1, 2))
+        .await
+        .unwrap();
+
+    let mut revoked = false;
+    wait_for(&mut bob_ev, "mallory's message", |e| {
+        revoked |= matches!(e, ClientEvent::DeviceRevoked { .. });
+        matches!(text_of(e), Some((_, _, _, body)) if body == "after")
+    })
+    .await;
+    assert!(!revoked, "a stranger's statement about a device is ignored");
+
+    // The session with the laptop is untouched: the next copy goes under
+    // it, and the laptop reads it.
+    let second = bob_c
+        .send_content(
+            h.alice.user_id(),
+            Some(first.bundle.clone()),
+            text("two"),
+            seq(1, 2),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.copies.len(), 1);
+    let seen = wait_for(&mut h.laptop_ev, "the laptop's second copy", |e| {
+        text_of(e).is_some()
+    })
+    .await;
+    assert!(matches!(text_of(&seen), Some((_, _, _, body)) if body == "two"));
+
+    mallory_c.shutdown().await;
+    bob_c.shutdown().await;
+    h.alice_c.shutdown().await;
+    h.laptop_c.shutdown().await;
+}

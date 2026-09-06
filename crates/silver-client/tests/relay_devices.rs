@@ -477,3 +477,78 @@ async fn a_device_revocation_is_the_accounts_own_to_make() {
     .await;
     assert!(is_error(&reply, ErrorCode::Unauthenticated), "{reply:?}");
 }
+
+/// The audit's SM-R-01: an account that names another registered identity
+/// on its device list and revokes it must not cut that identity off. The
+/// list is taken (a device is listed while it still has a bundle of its
+/// own, between registering and claiming), the statement is refused, and
+/// the victim keeps its login, its publish and its mail.
+#[tokio::test]
+async fn an_account_cannot_cut_off_a_registered_identity_by_listing_it() {
+    let (url, state) = start().await;
+    let (mut attacker_ws, attacker) = member(&url, &[capability::DEVICES]).await;
+    let (mut victim_ws, victim) = member(&url, &[capability::DEVICES]).await;
+    let (mut other_ws, other) = member(&url, &[capability::DEVICES]).await;
+
+    let forged = attacker
+        .certify_device(&victim.user_id(), "not mine", 1)
+        .unwrap();
+    assert_eq!(
+        publish(
+            &mut attacker_ws,
+            bundle_of(&attacker, &[capability::DEVICES])
+                .with_devices(&attacker, vec![forged])
+                .unwrap()
+        )
+        .await,
+        ServerFrame::Published,
+        "a list is taken before the device claims the account"
+    );
+    let reply = ask(
+        &mut attacker_ws,
+        &ClientFrame::RevokeDevice {
+            revocation: attacker.revoke_device(&victim.user_id(), 2),
+        },
+    )
+    .await;
+    assert!(is_error(&reply, ErrorCode::Forbidden), "{reply:?}");
+    assert!(!state.store().is_device_revoked(&victim.user_id()).unwrap());
+    assert_eq!(
+        state.store().log_len().unwrap(),
+        state.store().log_len().unwrap(),
+        "nothing is logged under the victim"
+    );
+
+    // The victim publishes, is looked up, receives and logs in again.
+    assert_eq!(
+        publish(&mut victim_ws, bundle_of(&victim, &[capability::DEVICES])).await,
+        ServerFrame::Published
+    );
+    let answer = lookup(&mut other_ws, &victim).await;
+    match answer {
+        ServerFrame::LookupResult {
+            bundle,
+            device_revocations,
+            ..
+        } => {
+            assert!(bundle.is_some());
+            assert!(device_revocations.is_empty());
+        }
+        other => panic!("{other:?}"),
+    }
+    drop(victim_ws);
+    let mut again = connect(&url, &victim).await;
+    assert_eq!(
+        publish(&mut again, bundle_of(&victim, &[capability::DEVICES])).await,
+        ServerFrame::Published
+    );
+    send(&mut other_ws, &envelope_to(&other, &victim, "still here")).await;
+    assert!(matches!(
+        next(&mut other_ws).await,
+        Some(ServerFrame::Sent { .. })
+    ));
+    assert!(matches!(
+        next(&mut again).await,
+        Some(ServerFrame::Deliver { .. })
+    ));
+}

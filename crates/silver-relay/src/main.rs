@@ -341,6 +341,12 @@ enum AdminAction {
     },
     /// Lift a ban.
     Unban { target: String },
+    /// Drop the device revocation held for an id, so it may publish, log
+    /// in and receive again: for putting right a revocation that should
+    /// not have been taken. WHO is a pseudonym from the listing or a full
+    /// id. The log entry stays; clients read it against the statement the
+    /// relay serves, and there is none afterwards.
+    UnrevokeDevice { who: String },
     /// The bans in force.
     Bans,
     /// Require this token from new identities from now on, or a fresh
@@ -394,6 +400,9 @@ async fn run_admin(socket: PathBuf, action: AdminAction) -> anyhow::Result<()> {
             request(&socket, "POST", &ban_path(target), note).await?
         }
         AdminAction::Unban { target } => request(&socket, "DELETE", &ban_path(target), "").await?,
+        AdminAction::UnrevokeDevice { who } => {
+            request(&socket, "DELETE", &format!("/devices/{who}/revocation"), "").await?
+        }
         AdminAction::Bans => request(&socket, "GET", "/bans", "").await?,
         AdminAction::InviteSet { token } => {
             request(&socket, "POST", "/invite", token.as_deref().unwrap_or("")).await?
@@ -512,6 +521,9 @@ async fn run_admin(socket: PathBuf, action: AdminAction) -> anyhow::Result<()> {
         }
         AdminAction::Ban { target, .. } => println!("banned {target}"),
         AdminAction::Unban { target } => println!("unbanned {target}"),
+        AdminAction::UnrevokeDevice { who } => {
+            println!("the device revocation held for {who} is dropped")
+        }
         AdminAction::Bans => {
             let rows: Vec<BanRow> = serde_json::from_value(body)?;
             if rows.is_empty() {

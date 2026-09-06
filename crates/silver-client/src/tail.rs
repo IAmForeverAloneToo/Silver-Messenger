@@ -422,6 +422,18 @@ fn resolve(log: &SharedLog, mut answer: Answer, step: &mut Step) {
         answer.succession.as_ref(),
         answer.logged,
     );
+    // A revoked device's own lookup is answered with the device statement,
+    // not with an identity revocation, and the two are logged alike; the
+    // statement served bears the entry out.
+    let check = match check {
+        Err(crate::transparency::Discrepancy::WithheldRevocation { .. })
+            if lock(log)
+                .revocation_is_device_statement(&answer.user_id, &answer.device_revocations) =>
+        {
+            Ok(())
+        }
+        other => other,
+    };
     if let Err(problem) = check {
         let problem = problem.to_string();
         refuse(answer, &problem, step);

@@ -227,6 +227,17 @@ across restarts and listed by `admin bans`; `admin unban` lifts one.
 messages and disconnects it; the identity can register again unless it
 is also banned. A ban on an address hits everyone behind it.
 
+**Devices.** `admin unrevoke-device <who>` drops the device revocation
+the relay holds for an id, so it may publish, log in and receive again.
+An account revokes its own devices (protocol section 14.2) and the relay
+takes the statement only for a device that claims that account, so this
+is for putting right a revocation that should not have been taken: an
+account revoking a device it had not lost, or a statement a relay before
+0.10.1 took under the rule that finding SM-R-01 of the audit closed. The
+log entry stays, as an append-only log's do; a client reads the entry
+against the statement served beside the bundle, and there is none once
+this returns.
+
 The limits handle most abuse on their own: the counters and the hourly
 line tell you when one is biting, and the warning about failed logins
 names the address. Anonymous submission (a client sends on a connection

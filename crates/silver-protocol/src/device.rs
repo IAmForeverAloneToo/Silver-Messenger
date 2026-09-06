@@ -168,6 +168,25 @@ impl DeviceRevocation {
             &self.signature,
         )
     }
+
+    /// Verify the statement as `account`'s word about one of its devices:
+    /// the signature, and that the account it names is the one the reader
+    /// knows the device under.
+    ///
+    /// [`DeviceRevocation::verify`] alone proves only that *some* key
+    /// signed about *some* id, so nothing should be dropped or cut off on
+    /// a bare `verify`: the caller passes the account whose device it
+    /// knows this one to be (the certificate in the device's own bundle,
+    /// or the account whose signed list carries it), and a statement from
+    /// anyone else is not about that device at all.
+    pub fn verify_for(&self, account: &UserId) -> Result<(), ProtocolError> {
+        if self.account != *account {
+            return Err(ProtocolError::Malformed(
+                "a device revocation by another account".into(),
+            ));
+        }
+        self.verify()
+    }
 }
 
 impl Identity {

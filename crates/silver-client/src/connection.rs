@@ -949,9 +949,15 @@ impl Client {
             }
             b.verify()?;
         }
-        lookup
-            .device_revocations
-            .retain(|r| r.verify().is_ok() && (r.account == user_id || r.device == user_id));
+        // The account's word about its own devices, and, when a device is
+        // what was looked up, its account's word about it: a statement
+        // from anyone but the account the device's bundle claims is
+        // somebody else's and binds nothing here.
+        let claims = lookup.bundle.as_ref().and_then(|b| b.account().copied());
+        lookup.device_revocations.retain(|r| {
+            r.verify().is_ok()
+                && (r.account == user_id || (r.device == user_id && claims == Some(r.account)))
+        });
         let listed = |device: &UserId| {
             lookup
                 .bundle
@@ -3070,9 +3076,25 @@ async fn plain_received(
                 .await;
         }
         Content::DeviceRevocation(revocation) => {
-            if revocation.verify().is_err() {
-                debug!("a device revocation that does not verify; dropped");
-                return;
+            // A revocation is the word of the account it names about one
+            // of its own devices, and proves only that; it binds a device
+            // this client already knows as that account's, by the
+            // certificate in the device's own bundle. A statement about
+            // anyone else's device, or about a device we know nothing of,
+            // is not ours to act on: otherwise a stranger could drop the
+            // sessions with a contact's device by signing one
+            // (PROTOCOL.md section 14.2). A device we have not looked up
+            // is learned about with its account's next lookup, which
+            // carries the statement again.
+            let known = lock(&setup.device_bundles)
+                .get(&revocation.device)
+                .and_then(|b| b.account().copied());
+            match known {
+                Some(account) if revocation.verify_for(&account).is_ok() => {}
+                _ => {
+                    debug!("a device revocation we cannot place with its account; dropped");
+                    return;
+                }
             }
             if let Some(sessions) = &setup.sessions
                 && let Err(e) = lock(sessions).forget(&revocation.device)

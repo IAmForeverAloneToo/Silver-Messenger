@@ -321,10 +321,7 @@ fn checked_list(
         }
     }
     for revocation in &revoked {
-        revocation.verify()?;
-        if revocation.account != *account {
-            anyhow::bail!("a revocation is another account's");
-        }
+        revocation.verify_for(account)?;
     }
     let mut devices = devices;
     devices.sort_by_key(|d| d.device);

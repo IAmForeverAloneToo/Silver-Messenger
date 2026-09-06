@@ -1191,10 +1191,16 @@ impl RelayState {
             return Err((ErrorCode::Forbidden, "publish a bundle first"));
         };
         let listed = mine.devices.iter().any(|d| d.device == revocation.device);
-        let claims_me = self
-            .bundle(&revocation.device)
-            .is_some_and(|b| b.account() == Some(me));
-        if !listed && !claims_me {
+        let published = self.bundle(&revocation.device);
+        let claims_me = published.as_ref().is_some_and(|b| b.account() == Some(me));
+        // A key that published a bundle of its own that does not claim this
+        // account is an identity in its own right, and no list of this
+        // account's makes it otherwise: taking the statement would cut a
+        // stranger off for good. A listed key that has published nothing
+        // here is still this account's to cancel; it is the state a device
+        // is in between registering and claiming (section 14.6), and the
+        // statement binds nothing until a bundle claims this account.
+        if !claims_me && !(listed && published.is_none()) {
             return Err((
                 ErrorCode::Forbidden,
                 "that is not a device of this account on this relay",
@@ -1204,36 +1210,77 @@ impl RelayState {
             error!("storing device revocation: {e:#}");
             (ErrorCode::Internal, "storage error")
         })?;
-        if new {
-            match self.store.cut_off(&revocation.device) {
-                Ok(removed) => info!(
-                    device = %self.who(&revocation.device),
-                    "device revoked by its account; {} queued envelopes and {} prekeys dropped",
-                    removed.messages,
-                    removed.prekeys
-                ),
-                Err(e) => error!("dropping a revoked device's mailbox: {e:#}"),
+        // Only a device that claims this account is cut off: for one that
+        // published nothing there is nothing to drop, and the id may yet
+        // belong to somebody who is nobody's device.
+        if claims_me {
+            if new {
+                match self.store.cut_off(&revocation.device) {
+                    Ok(removed) => info!(
+                        device = %self.who(&revocation.device),
+                        "device revoked by its account; {} queued envelopes and {} prekeys dropped",
+                        removed.messages,
+                        removed.prekeys
+                    ),
+                    Err(e) => error!("dropping a revoked device's mailbox: {e:#}"),
+                }
             }
+            self.close_with(
+                &revocation.device,
+                "this device has been revoked by its account",
+            );
         }
-        self.close_with(
-            &revocation.device,
-            "this device has been revoked by its account",
-        );
         Ok(())
     }
 
-    fn is_device_revoked(&self, device: &UserId) -> bool {
-        self.store.is_device_revoked(device).unwrap_or_else(|e| {
-            error!("reading device revocation: {e:#}");
-            false
-        })
+    /// Undo a device revocation: the statement is dropped, so the id is
+    /// refused nothing on its strength and may publish, log in and receive
+    /// again. The log entry stays, as everything in an append-only log
+    /// does; a client reads it against the statement the relay serves, and
+    /// there is none once this returns. For an operator putting right a
+    /// revocation that should not have been taken.
+    pub fn unrevoke_device(&self, device: &UserId) -> anyhow::Result<bool> {
+        self.store.remove_device_revocation(device)
+    }
+
+    /// The account whose device `user` is here: the certificate in the
+    /// bundle it published, which the account signed and which was checked
+    /// on publish. An identity that published no claim is nobody's device,
+    /// whatever anyone else's list says about it.
+    fn device_account(&self, user: &UserId) -> Option<UserId> {
+        self.bundle(user)?.account().copied()
+    }
+
+    /// Whether the relay holds `account`'s revocation of `device`.
+    fn revoked_by(&self, account: &UserId, device: &UserId) -> bool {
+        match self.store.device_revocation(device) {
+            Ok(held) => held.is_some_and(|r| r.account == *account),
+            Err(e) => {
+                error!("reading device revocation: {e:#}");
+                false
+            }
+        }
+    }
+
+    /// Whether `user` is cut off as a revoked device: the relay holds a
+    /// revocation for it from the very account its own bundle claims.
+    ///
+    /// A statement about an id that claims nobody, or that claims someone
+    /// else, binds nothing here; otherwise any account could cut any
+    /// identity off by naming it a device of its own and revoking it, and
+    /// the victim would never register, publish or receive again.
+    fn is_revoked_device(&self, user: &UserId) -> bool {
+        match self.device_account(user) {
+            Some(account) => self.revoked_by(&account, user),
+            None => false,
+        }
     }
 
     /// Why `user` may not log in as a device, if it may not: its account
     /// revoked it, or its account is dead. `None` for anyone else,
     /// identities that are no device included.
     fn device_refusal(&self, user: &UserId) -> Option<&'static str> {
-        if self.is_device_revoked(user) {
+        if self.is_revoked_device(user) {
             return Some("this device has been revoked by its account");
         }
         let account = self.bundle(user)?.account().copied()?;
@@ -1252,7 +1299,7 @@ impl RelayState {
         bundle
             .devices
             .iter()
-            .filter(|device| !self.is_device_revoked(&device.device))
+            .filter(|device| !self.revoked_by(account, &device.device))
             .filter_map(|device| {
                 let mut bundle = self.bundle(&device.device)?;
                 if bundle.account() != Some(account) {
@@ -1589,11 +1636,16 @@ impl RelayState {
             return Err((ErrorCode::BadSignature, "bundle signature is invalid"));
         }
         // A revoked identity is dead: it cannot be published again. Nor can
-        // a revoked device, whatever its bundle now says.
+        // a revoked device, under the claim it makes now or the one it
+        // made before; a revocation by an account this key never claimed
+        // is somebody else's statement and binds nothing.
         if self.store.is_revoked(me).unwrap_or(false) {
             return Err((ErrorCode::Forbidden, "this identity has been revoked"));
         }
-        if self.is_device_revoked(me) {
+        let claims_now = bundle.device_of.as_ref().map(|c| c.account);
+        if claims_now.is_some_and(|account| self.revoked_by(&account, me))
+            || self.is_revoked_device(me)
+        {
             return Err((
                 ErrorCode::Forbidden,
                 "this device has been revoked by its account",
@@ -1616,16 +1668,31 @@ impl RelayState {
                 ));
             }
         }
-        // The list verified as signed and within its cap; a device the
-        // relay holds a revocation for cannot be listed back in.
+        // The list verified as signed and within its cap; a device this
+        // account revoked cannot be listed back in. Another account's
+        // revocation is not this list's business.
         if bundle
             .devices
             .iter()
-            .any(|device| self.is_device_revoked(&device.device))
+            .any(|device| self.revoked_by(me, &device.device))
         {
             return Err((
                 ErrorCode::Forbidden,
                 "the device list names a device that has been revoked",
+            ));
+        }
+        // Nor may a list name an identity that is already another
+        // account's device here. A key that has published nothing, or a
+        // plain bundle of its own, is still listable: that is the state a
+        // device is in between registering and claiming the account
+        // (section 14.6), so the list is published before the claim.
+        if bundle.devices.iter().any(|device| {
+            self.device_account(&device.device)
+                .is_some_and(|a| a != *me)
+        }) {
+            return Err((
+                ErrorCode::Forbidden,
+                "the device list names another account's device",
             ));
         }
         // A new identity: the invite token, the registration rate for the
@@ -1745,7 +1812,7 @@ impl RelayState {
         }
         // A revoked device is gone: the refusal tells a sender that its
         // copy of the recipient's device list is stale.
-        if self.is_device_revoked(&envelope.to) {
+        if self.is_revoked_device(&envelope.to) {
             return Err((
                 ErrorCode::NotFound,
                 "the recipient device has been revoked by its account",
@@ -2419,7 +2486,45 @@ mod lifecycle_tests {
         // account can cut an identity off by calling it a device of its own.
         let (code, _) = revoke(&alice, &laptop, 1).unwrap_err();
         assert!(matches!(code, ErrorCode::Forbidden));
-        assert!(!state.is_device_revoked(&laptop.user_id()));
+        assert!(!state.store.is_device_revoked(&laptop.user_id()).unwrap());
+        // Nor by listing a registered identity as one of its devices. The
+        // list is taken: a device is listed while it still has a bundle of
+        // its own, between registering and claiming the account (section
+        // 14.6), and the relay cannot tell that apart from this. The
+        // statement is what is refused, so the stranger keeps its account:
+        // nothing is refused it on the strength of somebody else's list.
+        let listing = alice
+            .key_bundle()
+            .with_devices(
+                &alice,
+                vec![
+                    alice
+                        .certify_device(&stranger.user_id(), "not mine", 1)
+                        .unwrap(),
+                ],
+            )
+            .unwrap();
+        state
+            .publish(&alice.user_id(), listing, None, here)
+            .unwrap();
+        let (code, _) = revoke(&alice, &stranger, 1).unwrap_err();
+        assert!(matches!(code, ErrorCode::Forbidden));
+        assert!(!state.store.is_device_revoked(&stranger.user_id()).unwrap());
+        assert_eq!(state.device_refusal(&stranger.user_id()), None);
+        assert!(
+            state
+                .route(
+                    silver_protocol::seal(
+                        &alice,
+                        &stranger.key_bundle(),
+                        silver_protocol::Content::text("still here"),
+                        0,
+                    )
+                    .unwrap()
+                )
+                .is_ok()
+        );
+        state.store.put_bundle(&alice.key_bundle()).unwrap();
         // The laptop claims alice. Alice's statement on someone else's
         // connection, someone else's statement, and a forged one are all
         // refused.
@@ -2446,10 +2551,10 @@ mod lifecycle_tests {
             .apply_device_revocation(&alice.user_id(), forged, here)
             .unwrap_err();
         assert!(matches!(code, ErrorCode::BadSignature));
-        assert!(!state.is_device_revoked(&laptop.user_id()));
+        assert!(!state.store.is_device_revoked(&laptop.user_id()).unwrap());
         // Alice's own is taken, and served for the account and the device.
         revoke(&alice, &laptop, 2).unwrap();
-        assert!(state.is_device_revoked(&laptop.user_id()));
+        assert!(state.is_revoked_device(&laptop.user_id()));
         assert_eq!(state.device_revocations(&alice.user_id()).len(), 1);
         assert_eq!(state.device_revocations(&laptop.user_id()).len(), 1);
         assert_eq!(state.device_revocations(&stranger.user_id()).len(), 0);
@@ -2472,8 +2577,34 @@ mod lifecycle_tests {
             )
             .unwrap();
         revoke(&alice, &phone, 5).unwrap();
-        assert!(state.is_device_revoked(&phone.user_id()));
+        assert!(state.store.is_device_revoked(&phone.user_id()).unwrap());
         assert_eq!(state.device_revocations(&alice.user_id()).len(), 2);
+        // It binds nothing while the key claims nobody: whoever holds it
+        // is refused neither a login nor a bundle of its own. It bites the
+        // moment that bundle claims alice.
+        assert!(!state.is_revoked_device(&phone.user_id()));
+        assert_eq!(state.device_refusal(&phone.user_id()), None);
+        let (code, _) = state
+            .publish(
+                &phone.user_id(),
+                phone
+                    .key_bundle()
+                    .as_device_of(alice.certify_device(&phone.user_id(), "phone", 4).unwrap()),
+                None,
+                here,
+            )
+            .unwrap_err();
+        assert!(matches!(code, ErrorCode::Forbidden));
+        state
+            .publish(&phone.user_id(), phone.key_bundle(), None, here)
+            .unwrap();
+        // The operator can put a revocation right; the id is then refused
+        // nothing, and can claim the account again.
+        assert!(state.unrevoke_device(&laptop.user_id()).unwrap());
+        assert!(!state.unrevoke_device(&laptop.user_id()).unwrap());
+        assert_eq!(state.device_refusal(&laptop.user_id()), None);
+        assert_eq!(state.device_revocations(&laptop.user_id()).len(), 0);
+        assert_eq!(state.device_revocations(&alice.user_id()).len(), 1);
     }
 
     #[test]
