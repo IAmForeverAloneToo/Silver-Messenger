@@ -166,6 +166,56 @@ async fn a_pinned_relay_must_present_the_pinned_key() {
     assert!(!reason.contains("pin mismatch"), "{reason}");
 }
 
+/// The audit's SM-C-01: a pin names the certificate the relay proves it
+/// holds the key for, not anything else the server sends after it. A
+/// proxy that inspects TLS validates its own leaf through the root it
+/// installed and can append the relay's real certificate, which is
+/// public, so a pin matched anywhere in the chain would pass on exactly
+/// the connection it is meant to refuse.
+#[tokio::test]
+async fn a_pin_is_not_matched_against_the_rest_of_the_chain() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    // What the relay's real certificate would be: public, and pinned.
+    let real = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+    let pinned = Pin::of(real.cert.der()).unwrap();
+    // What the proxy presents: its own leaf, trusted by this client
+    // because we hand it the certificate, with the relay's appended.
+    let proxy = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+    let chain = format!("{}{}", proxy.cert.pem(), real.cert.pem());
+    let config = RustlsConfig::from_pem(
+        chain.into_bytes(),
+        proxy.signing_key.serialize_pem().into_bytes(),
+    )
+    .await
+    .unwrap();
+    let handle = Handle::new();
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let router = silver_relay::router(RelayState::new());
+    tokio::spawn(
+        axum_server::bind_rustls(addr, config)
+            .handle(handle.clone())
+            .serve(router.into_make_service()),
+    );
+    let port = handle.listening().await.expect("server bound").port();
+    let mut ca = tempfile::NamedTempFile::new().unwrap();
+    ca.write_all(proxy.cert.pem().as_bytes()).unwrap();
+
+    let reason = first_rejection(
+        port,
+        ConnectOptions {
+            extra_ca_certs: vec![ca.path().to_path_buf()],
+            pins: vec![pinned],
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(reason.contains("pin mismatch"), "{reason}");
+    assert!(
+        reason.contains(&Pin::of(proxy.cert.der()).unwrap().to_hex()),
+        "the message names the key that answered: {reason}"
+    );
+}
+
 #[tokio::test]
 async fn observing_a_relay_reports_its_pin_and_trust() {
     let (port, ca, pin) = start_tls_relay().await;

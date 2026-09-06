@@ -274,8 +274,18 @@ fn client_config(verifier: Arc<dyn ServerCertVerifier>) -> rustls::ClientConfig 
         .with_no_client_auth()
 }
 
-/// Chain validation as usual, then one of the pins must name a key in the
-/// chain.
+/// Chain validation as usual, and then the relay's own certificate must
+/// carry a pinned key.
+///
+/// The pin is matched against the end-entity certificate alone, which is
+/// the one the relay proves it holds the key for, and the one
+/// `--print-pin` prints. Everything after it in the handshake is whatever
+/// the server chose to send: the path builder ignores certificates it
+/// does not need, so an inspecting proxy could present its own leaf,
+/// validated through the root it installed, and append the relay's real
+/// certificate, which is public, to make a pin match. Then the pin would
+/// pass on a connection the proxy is reading, which is the one thing pins
+/// are for.
 #[derive(Debug)]
 struct PinnedVerifier {
     inner: Arc<WebPkiServerVerifier>,
@@ -298,18 +308,14 @@ impl ServerCertVerifier for PinnedVerifier {
             ocsp_response,
             now,
         )?;
-        let mut presented = Vec::with_capacity(1 + intermediates.len());
-        for cert in std::iter::once(end_entity).chain(intermediates) {
-            let pin = Pin::of(cert).map_err(|e| rustls::Error::General(e.to_string()))?;
-            if self.pins.contains(&pin) {
-                return Ok(verified);
-            }
-            presented.push(pin);
+        let presented = Pin::of(end_entity).map_err(|e| rustls::Error::General(e.to_string()))?;
+        if self.pins.contains(&presented) {
+            return Ok(verified);
         }
         Err(rustls::Error::General(format!(
-            "certificate pin mismatch: the relay's key is {}, which is not one of the pinned keys; \
-             if the relay's key really changed, set the new pin, otherwise something is in the way",
-            presented[0]
+            "certificate pin mismatch: the relay's key is {presented}, which is not one of the \
+             pinned keys; if the relay's key really changed, set the new pin, otherwise something \
+             is in the way"
         )))
     }
 

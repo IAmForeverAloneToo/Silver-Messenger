@@ -217,6 +217,10 @@ the operating system's trust store and Mozilla's roots; a corporate proxy
 that inspects TLS with an installed root sees what the relay sees, unless
 the client carries a pin for the relay's key (`--pin`), in which case the
 connection fails loudly instead of going through the proxy's certificate.
+The pin is matched against the certificate the server proves it holds the
+key for, and nothing else it sends: the relay's real certificate is
+public, so a proxy could otherwise append it to its own chain and have
+the pin match the connection it is reading.
 A relay once reached over `wss://` is never talked to over `ws://` again
 by that client, so a changed URL (a bad invite link, a typo, a tampered
 config file) cannot quietly strip the transport encryption. From 0.7.0
