@@ -87,3 +87,10 @@ path = "fuzz_targets/device.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "identifier"
+path = "fuzz_targets/identifier.rs"
+test = false
+doc = false
+bench = false

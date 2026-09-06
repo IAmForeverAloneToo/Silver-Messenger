@@ -317,6 +317,13 @@ pub async fn serve_unix(
     {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
+        // The socket is made by `bind` under whatever umask is in force and
+        // narrowed afterwards, so for that moment it can be reachable by
+        // anyone. Shutting the directory instead closes the window without
+        // an unsafe call to `umask`, and holds wherever the relay runs
+        // rather than only where the systemd unit sets `UMask=0077`.
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("restricting {}", parent.display()))?;
     }
     // A socket file left by an earlier run would refuse the bind.
     match std::fs::remove_file(&path) {

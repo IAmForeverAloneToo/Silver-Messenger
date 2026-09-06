@@ -14,9 +14,12 @@ name: Release binaries
 #   * binaries built with `cargo auditable`, so `cargo audit bin <file>`
 #     lists the exact dependencies inside them;
 #   * a CycloneDX SBOM per binary and target;
-#   * SHA256SUMS over every file, signed with the project's minisign key
-#     (minisign.pub in the repository) when the MINISIGN_SECRET_KEY secret
-#     is set;
+#   * SHA256SUMS over every file. The maintainer's signature over it is
+#     made afterwards, off this platform, and attached by hand: a key the
+#     workflow could use would add nothing to the attestation below
+#     (README, "Signing releases");
+#   * a BUILD-INFO.txt per target naming the compiler, the commit and the
+#     flags, so the build can be repeated years later;
 #   * a SLSA build provenance attestation from GitHub for every file, which
 #     `gh attestation verify <file> --owner IAmForeverAloneToo` checks;
 #   * builds with locked dependencies, remapped paths and a fixed timestamp,
@@ -62,9 +65,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
+      - uses: ./.github/actions/rust
         with:
-          toolchain: stable
           targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -200,6 +202,18 @@ jobs:
             cp "target/${{ matrix.target }}/release/$bin$ext" "dist/$name/"
           done
           cp README.md CHANGELOG.md LICENSE "dist/$name/"
+          # What a verifier needs to reproduce these bytes, in the archive
+          # and next to it, so the compiler version does not have to be dug
+          # out of workflow logs that expire (SM-S-02).
+          {
+            printf 'target: %s\n' "${{ matrix.target }}"
+            printf 'commit: %s\n' "$GITHUB_SHA"
+            printf 'toolchain: %s\n' "$(rustc --version)"
+            printf 'source-date-epoch: %s\n' "$(git log -1 --format=%ct)"
+            printf 'rustflags: --remap-path-prefix=<workspace>=/src --remap-path-prefix=<cargo home>=/cargo\n'
+            printf 'command: cargo auditable build --release --locked --workspace --target %s\n' "${{ matrix.target }}"
+          } > "dist/$name/BUILD-INFO.txt"
+          cp "dist/$name/BUILD-INFO.txt" "dist/$name-BUILD-INFO.txt"
           # The SBOMs go inside the archive and next to it, so they can be
           # read without unpacking anything.
           find crates -name '*.cdx.json' -exec cp {} "dist/$name/sbom/" \;
@@ -226,6 +240,12 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v') || inputs.tag != ''
     needs: build
     runs-on: ubuntu-latest
+    # `workflow_dispatch` with a tag publishes from whatever branch was
+    # selected, so anyone who may run workflows here may publish a release
+    # from any commit. Naming an environment is what lets a protection
+    # rule — reviewers, or a branch and tag restriction — be attached in
+    # the repository's settings (SM-S-09).
+    environment: release
     permissions:
       contents: write
       # For the build provenance attestation.
@@ -239,6 +259,7 @@ jobs:
             CHANGELOG.md
             minisign.pub
             packaging
+            deploy/install.sh
             deploy/silver-relay.service
           sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -263,6 +284,11 @@ jobs:
           done
           rm -r unpacked
 
+      # The relay installer, so an operator can check it against the list
+      # below instead of piping it out of a branch into a shell (SM-S-03).
+      - name: The installer as a release asset
+        run: cp deploy/install.sh dist/install.sh
+
       - name: Checksums
         run: |
           cd dist
@@ -286,29 +312,21 @@ jobs:
           sha256sum "silver-messenger-${TAG}-packaging.tar.gz" >> SHA256SUMS
           tail -1 SHA256SUMS
 
-      - name: Sign the checksums
+      # The maintainer's signature is deliberately not made here. A key this
+      # workflow can use lives where the build lives, so it says exactly
+      # what the provenance attestation below already says and is no
+      # separate thing to compromise (SM-S-01). Signing happens afterwards,
+      # on a machine the maintainer holds, and the signature is attached to
+      # the release by hand; this step only says so.
+      - name: How to sign the checksums
         env:
-          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
           TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          if [ -z "$MINISIGN_SECRET_KEY" ]; then
-            echo "::notice::MINISIGN_SECRET_KEY is not set; SHA256SUMS is published unsigned (README, \"Signing releases\")"
-            exit 0
+          if [ -f minisign.pub ]; then
+            echo "::notice::SHA256SUMS is published unsigned. On the machine holding minisign.key: download SHA256SUMS, run 'minisign -Sm SHA256SUMS -t \"Silver Messenger $TAG\"', and attach SHA256SUMS.minisig to the release."
+          else
+            echo "::notice::the repository publishes no minisign.pub, so releases carry no maintainer signature; the build provenance attestation is what a download is checked against (README, \"Signing releases\")"
           fi
-          if [ ! -f minisign.pub ]; then
-            echo "::error::MINISIGN_SECRET_KEY is set but the repository has no minisign.pub to check it against"
-            exit 1
-          fi
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq minisign
-          umask 077
-          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$RUNNER_TEMP/minisign.key"
-          minisign -S -s "$RUNNER_TEMP/minisign.key" -m dist/SHA256SUMS -t "Silver Messenger $TAG"
-          rm -f "$RUNNER_TEMP/minisign.key"
-          # The signature must check out against the key the repository
-          # publishes, or the secret is not the key people will verify with.
-          minisign -Vm dist/SHA256SUMS -p minisign.pub
-          cat dist/SHA256SUMS.minisig
 
       - name: Build provenance attestation
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -333,7 +351,11 @@ jobs:
           target_commitish: ${{ github.sha }}
           files: dist/*
           body_path: notes.md
-          generate_release_notes: true
+          # The notes are the changelog section for this tag and nothing
+          # else. GitHub's generated notes list pull request titles written
+          # by whoever opened them, which would reach every reader of the
+          # release page unreviewed (SM-S-09).
+          generate_release_notes: false
 
   image:
     # The relay's container image for amd64 and arm64, built from the very

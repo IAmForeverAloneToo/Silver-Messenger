@@ -596,6 +596,92 @@ Section 13.1 went out in 0.10.1; this is section 13.2.
   showing two views of the log. A head now counts only from a group the
   user is actually in and a sender they have not blocked.
 
+- **The compiler is pinned, and the release says which one** (finding
+  SM-S-02, Low). `rust-toolchain.toml` said `channel = "stable"` and every
+  workflow asked for "stable" explicitly, which overrides the file. Both
+  float: a rebuild of a tagged commit a month later uses a different rustc
+  and produces different bytes, and the reproducibility job compares two
+  builds on the same runner minutes apart, which never notices. The file
+  pins an exact version, one small local action installs what the file
+  says everywhere, and each release carries a `BUILD-INFO.txt` naming the
+  compiler, the commit, the flags and the timestamp — so a verifier reads
+  the compiler off the tag instead of out of workflow logs that expire.
+
+- **The installer is a release asset, and defaults to no public plaintext
+  port** (finding SM-S-03, Low). It was documented as `curl … | bash` of a
+  script from a branch, which is neither pinned nor checkable; it is now
+  published with each release and listed in `SHA256SUMS`, and the README
+  says to check it before running it as root. Four more: without
+  `SILVER_DOMAIN` the listener is `127.0.0.1:7777` rather than
+  `0.0.0.0:7777`, since a public port with no TLS should not be something
+  anyone gets by accident (`SILVER_ALLOW_PLAINTEXT=1` is the opt-in for a
+  relay behind a TLS front of your own); Rust is installed from
+  `rustup-init` on the Rust project's own host, checked against the
+  SHA-256 published next to it, instead of piping `sh.rustup.rs` into a
+  shell; the public address printed at the end is the machine's own rather
+  than one fetched from a third party, which would have told that third
+  party the host runs a relay (`SILVER_PUBLIC_IP` says it outright behind
+  NAT); and the environment file is edited with awk rather than a `sed`
+  expression the operator's own domain could break.
+
+- **The deploy workflow knows the server's host key in advance** (finding
+  SM-S-04, Low). It ran `ssh-keyscan` on every run, which is trust on
+  first use every run: whoever is on the path between GitHub's runners
+  and the server could answer with a key of their own and take the deploy
+  session. The key goes in the repository variable `VPS_HOST_KEY`, read
+  once from somewhere trusted; without it the deploy stops and says how
+  to get it.
+
+- **Container images are pinned by digest** (finding SM-S-05, Low). The
+  relay's base images and the two containers CI runs the Debian and Arch
+  package checks in were named by tag, and a tag can be moved — so "a
+  rebuild of the same release gives the same layers" held only while the
+  tags did. All four carry a `@sha256:` digest now, moved by hand like
+  the action pins. The Rust image also follows the pinned compiler.
+
+- **The systemd unit carries the rest of the usual hardening** (finding
+  SM-S-06, Informational). `UMask=0077`, `SystemCallFilter=@system-service`
+  with `SystemCallErrorNumber=EPERM`, `ProtectClock`, `ProtectHostname`,
+  `ProtectProc=invisible`, `ProcSubset=pid`, `RestrictRealtime`,
+  `RestrictSUIDSGID` and `RemoveIPC`. The relay also shuts the directory
+  holding its admin socket to 0700 before binding, which closes the moment
+  between `bind` and the `chmod` after it wherever the relay runs, not
+  only where the unit sets the umask.
+
+- **Fuzzing keeps what it finds** (finding SM-S-08, Informational). Each
+  target ran for a minute from an empty corpus on every push, and the
+  corpus was thrown away; a minute from nothing explores very little. Each
+  target's corpus is now carried between runs, so every run starts from
+  what the last one found, and a weekly run gives each target half an
+  hour. A new `identifier` target covers the base58 and JSON identifier
+  path with inputs as large as the relay accepts, which is where SM-P-02
+  was.
+
+- **Release notes are the changelog, and nothing generated** (finding
+  SM-S-09, Informational). GitHub's auto-generated notes list pull request
+  titles written by whoever opened them, which reached every reader of a
+  release page unreviewed; the notes are now the tag's changelog section
+  alone. `packaging/update.sh` decides by `SHA256SUMS` what the Homebrew
+  formula, the PKGBUILD and the winget manifests install, so it checks
+  that file's minisign signature before reading it whenever the release
+  is signed and the checkout has the key.
+
+- **What a release signature is worth, said plainly** (findings SM-S-01,
+  Medium, and SM-S-07, Informational). The threat model claimed a
+  maintainer's signature that leaves "a compromised GitHub account
+  without the signing key nothing to offer". No `minisign.pub` is
+  published, so every release so far is unsigned by the maintainer; and
+  the setup the README described puts the key in a repository secret,
+  where the build already lives, which is not independent of GitHub at
+  all. The README, the threat model, the security policy, the ASVS
+  assessment and the distribution note now say what exists (GitHub's
+  provenance attestation on every file), what a workflow-held key would
+  and would not add, and what signing on a maintainer's own machine
+  would. The threat model also records what the dependency tree carries:
+  no known vulnerability, one unmaintained build-time macro crate that is
+  not in the binary, and several dependencies present in two major
+  versions because upstreams have not converged.
+
 ## 0.10.1 - 2026-09-06
 
 An independent security review of the 0.10.0 line reported 76 findings.

@@ -22,8 +22,23 @@ download="$url/releases/download/v$version"
 sums="${2:-}"
 if [ -z "$sums" ]; then
   sums="$(mktemp)"
-  trap 'rm -f "$sums"' EXIT
+  sig="$sums.minisig"
+  trap 'rm -f "$sums" "$sig"' EXIT
   curl -fsSL "$download/SHA256SUMS" > "$sums"
+  # Every checksum below comes out of this file, so it decides what the
+  # packages install. When the release is signed and this checkout carries
+  # the public key, check the signature before reading it; the list is
+  # fetched over HTTPS from GitHub either way, and a signature is the only
+  # thing that does not rest on GitHub (SM-S-09).
+  if [ -f "$repo/minisign.pub" ] && command -v minisign >/dev/null; then
+    curl -fsSL "$download/SHA256SUMS.minisig" > "$sig" ||
+      { echo "release v$version publishes no SHA256SUMS.minisig, though this checkout has minisign.pub" >&2; exit 1; }
+    minisign -Vm "$sums" -x "$sig" -p "$repo/minisign.pub" >/dev/null ||
+      { echo "SHA256SUMS does not verify against minisign.pub" >&2; exit 1; }
+    echo "SHA256SUMS verified against minisign.pub"
+  elif [ -f "$repo/minisign.pub" ]; then
+    echo "note: minisign is not installed, so SHA256SUMS is used unverified" >&2
+  fi
 fi
 
 # The checksum of a release file, from SHA256SUMS.

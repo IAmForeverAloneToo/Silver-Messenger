@@ -29,7 +29,7 @@ all. The gaps that matter are listed at the end with what closes them.
 
 | Control | Verdict | Evidence |
 | --- | --- | --- |
-| 1.1.1 Secure development lifecycle | Partly | Every change runs `cargo test` (the known-answer vectors in `docs/vectors/` and the property tests among them), `clippy -D warnings`, `cargo fmt`, `cargo deny`, `cargo audit`, a minute of fuzzing per parser, the Verifpal models in `formal/` against their recorded outcomes, and the terminal tests in CI; there is no formal review step because there is one author. |
+| 1.1.1 Secure development lifecycle | Partly | Every change runs `cargo test` (the known-answer vectors in `docs/vectors/` and the property tests among them), `clippy -D warnings`, `cargo fmt`, `cargo deny`, `cargo audit`, a minute of fuzzing per parser (weekly, half an hour each, against a corpus kept between runs), the Verifpal models in `formal/` against their recorded outcomes, and the terminal tests in CI; there is no formal review step because there is one author. |
 | 1.1.2 Threat modelling | Met | [THREAT_MODEL.md](THREAT_MODEL.md), kept in step with the code; every Phase 6 item updated it. |
 | 1.1.3 Security in user stories | Met | ROADMAP items state the attacker and the property gained before the work; Phase 6 is entirely such items. |
 | 1.1.4 Trust boundaries documented | Met | The threat model's actors and the protocol's "what the relay sees" sections. |
@@ -59,7 +59,7 @@ all. The gaps that matter are listed at the end with what closes them.
 | 1.11.2 No unsynchronised shared state | Met | Shared client state is behind mutexes; the relay's store is a transactional database (redb). |
 | 1.12.2 Uploaded files served safely | N/A | The relay stores ciphertext chunks by random id and never serves files as files. |
 | 1.14.1 Segregation of components | Met | Separate crates; the relay has no client code and vice versa. |
-| 1.14.2 Binary signatures, trusted pipeline | Met | Reproducible builds, SLSA provenance, minisign signature on `SHA256SUMS` (once the key is set up); README "Verifying a release". |
+| 1.14.2 Binary signatures, trusted pipeline | Partly | Reproducible builds from a pinned toolchain, SLSA provenance on every file, actions pinned by commit and images by digest; `SHA256SUMS` carries no maintainer signature, and the designed key in a repository secret would not be independent of GitHub. README "Verifying a release", THREAT_MODEL "Supply chain". |
 | 1.14.3 Pipeline warns on outdated or insecure components | Met | `cargo audit`, `cargo deny` on every push. |
 | 1.14.4 Deployment automated and repeatable | Met | `deploy/install.sh`, the deploy workflow, pinned actions. |
 | 1.14.6 No unsupported or insecure client technologies | Met | Native Rust binaries; no plugins, no embedded browser. |

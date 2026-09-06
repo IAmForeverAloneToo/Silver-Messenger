@@ -6,6 +6,13 @@ name: Deploy relay
 #   VPS_HOST     server IP or hostname
 #   VPS_SSH_KEY  private key whose public half is in the server's authorized_keys
 #   VPS_USER     optional, defaults to root
+# the repository variable
+#   VPS_HOST_KEY the server's own SSH public host key, one or more lines as
+#                `ssh-keyscan <host>` prints them, read once from the console
+#                and pasted in. Without it the deploy is refused: fetching the
+#                host key on every run is trust on first use every run, and
+#                whoever is on the path between GitHub's runners and the
+#                server can answer instead (SM-S-04).
 # and optionally the repository variables VPS_DOMAIN (a hostname pointing at
 # the server) to serve the relay over HTTPS/wss on port 443, with the
 # relay obtaining its own certificate, and VPS_EMAIL for the certificate
@@ -48,19 +55,26 @@ jobs:
         env:
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
           VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_HOST_KEY: ${{ vars.VPS_HOST_KEY }}
         run: |
           test -n "$VPS_SSH_KEY" || { echo "::error::repository secret VPS_SSH_KEY is not set"; exit 1; }
           test -n "$VPS_HOST" || { echo "::error::repository secret VPS_HOST is not set"; exit 1; }
+          if [ -z "$VPS_HOST_KEY" ]; then
+            echo "::error::repository variable VPS_HOST_KEY is not set. Run 'ssh-keyscan $VPS_HOST' from a machine you trust (or read the key off the server's console with 'ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub') and paste the line or lines in. Fetching the key here instead would trust whatever answers."
+            exit 1
+          fi
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          # The key the operator pasted in, and nothing the network offers.
+          printf '%s\n' "$VPS_HOST_KEY" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+          echo "StrictHostKeyChecking=yes" >> ~/.ssh/config
 
       - name: Install Rust
         if: inputs.action == 'deploy'
-        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
+        uses: ./.github/actions/rust
         with:
-          toolchain: stable
           targets: x86_64-unknown-linux-musl
 
       - name: Cache cargo

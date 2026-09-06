@@ -33,9 +33,12 @@ keep it updated, and know what to do when something goes wrong.
    The relay obtains its certificate under that name.
 3. **Ports.** 443 open to the world; nothing else. SSH from where you
    administer, and no other service on the host if you can help it.
-4. **Install.** The README's installer (`deploy/install.sh`, or the
-   "Deploy relay" workflow) with `SILVER_DOMAIN` and `SILVER_EMAIL`, or
-   `deploy/compose.yml`. The installer sets up the service, the admin
+4. **Install.** The README's installer (`install.sh` from the release
+   page, checked against `SHA256SUMS`, or the "Deploy relay" workflow)
+   with `SILVER_DOMAIN` and `SILVER_EMAIL`, or `deploy/compose.yml`.
+   Without `SILVER_DOMAIN` the installer configures a loopback listener
+   rather than a public plaintext one; `SILVER_ALLOW_PLAINTEXT=1` is the
+   opt-in for a relay behind a TLS front of your own. The installer sets up the service, the admin
    socket, the daily backup timer and the firewall. On Debian and Ubuntu
    the release's package does the first part: `apt install
    ./silver-messenger_<version>_<arch>.deb` puts the relay in `/usr/bin`,

@@ -1,3 +1,13 @@
+# The compiler every build uses, pinned to an exact version rather than
+# "stable". A release is meant to be rebuildable byte for byte from its
+# source, and the bytes depend on the compiler: with a floating channel a
+# rebuild a month later uses a different rustc and produces different
+# binaries, and a verifier had to recover the version from workflow logs
+# that do not last. Pinned here, the tagged source says which compiler
+# built the release.
+#
+# Moved by hand, in its own commit, so the change is visible: bump this,
+# the RUST_IMAGE in deploy/Dockerfile, and run the whole gate.
 [toolchain]
-channel = "stable"
+channel = "1.98.1"
 components = ["rustfmt", "clippy"]

@@ -91,10 +91,11 @@ peers.
 
 ## Verifying what you run
 
-Release binaries are reproducible and signed; the README section
-*Verifying a release* explains how to check a download against the
-published hashes, the maintainer's signature and the build provenance, and
-how to rebuild the tagged commit and compare. Dependencies are checked
+Release binaries are reproducible and carry GitHub's build provenance;
+`SHA256SUMS` is not signed by the maintainer today, and the README
+section *Verifying a release* says so and explains how to check a
+download against the published hashes and the attestation, and how to
+rebuild the tagged commit and compare. Dependencies are checked
 against the RustSec advisory database on every push (`cargo audit`,
 `cargo deny`).
 
