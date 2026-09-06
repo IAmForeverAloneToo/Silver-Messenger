@@ -283,6 +283,30 @@ impl LogStore {
         }
     }
 
+    /// Whether the revocation logged for `user` is one of the device
+    /// statements served with the answer.
+    ///
+    /// A device revocation is logged under the device, with the kind an
+    /// identity's revocation has (section 11.2 gives them one kind), so a
+    /// lookup of a device that its account revoked shows a logged
+    /// revocation and carries the statement beside the bundle rather than
+    /// an identity revocation. Without this the log would read as if the
+    /// relay were withholding the identity's revocation, and the answer
+    /// would be refused: for a revoked device of one's own contact, and
+    /// for anyone an account named a device of its own and revoked.
+    pub fn revocation_is_device_statement(
+        &self,
+        user: &UserId,
+        served: &[silver_protocol::DeviceRevocation],
+    ) -> bool {
+        let Some(logged) = self.latest(user).and_then(|l| l.revocation) else {
+            return false;
+        };
+        served.iter().any(|r| {
+            r.device == *user && r.verify().is_ok() && r.transparency_leaf() == logged.leaf
+        })
+    }
+
     /// What a lookup showed, compared with the log as replayed up to the
     /// relay's head.
     pub fn check_lookup(

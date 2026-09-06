@@ -131,6 +131,22 @@ async fn post_evict(
     }))
 }
 
+/// Drop the device revocation held for an id, so it is refused nothing on
+/// its strength and can publish, log in and receive again.
+async fn delete_device_revocation(
+    State(a): State<AdminState>,
+    UrlPath(who): UrlPath<String>,
+) -> Result<StatusCode, Failure> {
+    let user = resolve(&a.state, &who)?;
+    match a.state.unrevoke_device(&user).map_err(internal)? {
+        true => Ok(StatusCode::NO_CONTENT),
+        false => Err((
+            StatusCode::NOT_FOUND,
+            format!("no device revocation is held for {who}"),
+        )),
+    }
+}
+
 fn target(state: &RelayState, kind: &str, key: &str) -> Result<BanTarget, Failure> {
     match kind {
         "address" => key.parse().map(BanTarget::Address).map_err(|_| {
@@ -274,6 +290,10 @@ pub fn router(state: Arc<RelayState>, tls: Option<Arc<CertStore>>) -> Router {
         .route("/status", get(get_status))
         .route("/identities", get(get_identities))
         .route("/evict/{who}", post(post_evict))
+        .route(
+            "/devices/{who}/revocation",
+            axum::routing::delete(delete_device_revocation),
+        )
         .route("/bans", get(get_bans))
         .route("/bans/{kind}/{key}", post(post_ban).delete(delete_ban))
         .route("/invite", post(post_invite).delete(delete_invite))

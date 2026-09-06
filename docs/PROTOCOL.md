@@ -1709,21 +1709,49 @@ longer its own:
 
 `signature = sign("silver-messenger/v5/device-revocation", account (32)
 || device (32) || created_at_ms (8 BE))`; one naming the account's own
-key is malformed. It carries its own signature and is trusted however it
-arrived: served in a `lookup_result` (14.3), pushed inside a message as
-the `device_revocation` content kind, or, among the owner's own devices,
+key is malformed. It carries its own signature, so it needs no
+connection to be trusted and may arrive any way: served in a
+`lookup_result` (14.3), pushed inside a message as the
+`device_revocation` content kind, or, among the owner's own devices,
 inside `sync devices` (14.5).
+
+The signature proves only that *some* key signed about *some* id, which
+is not the same as the statement being about that device. A reader acts
+on one only for a device it already knows as that account's — by the
+certificate in the device's own bundle, or by the account's signed list
+it holds — and ignores one from any other account: a stranger can sign a
+statement about anybody's device id, and a reader that acted on it would
+drop its sessions with that device and lose the messages in flight. A
+statement about a device the reader knows nothing of is ignored too; the
+device's account serves it again on the next lookup, by which time the
+reader knows whose it is.
 
 The primary sends it to the relay in a `revoke_device` frame on its
 authenticated connection. The relay takes it only from the account that
-signed it, and only for a device it knows as that account's: one on the
-account's published list, or one whose own bundle carries the account's
-certificate; otherwise any account could cut any identity off by calling
-it a device of its own. Each statement costs the address one of its
+signed it, and only for a device it knows as that account's: one whose
+own published bundle carries this account's certificate, or one on the
+account's published list that has published no bundle at all (the state
+a device is in between registering and claiming, 14.6). A key that
+published a bundle of its own naming another account, or naming none, is
+an identity in its own right and no list makes it otherwise; otherwise
+any account could cut any identity off by calling it a device of its own,
+and the victim would never log in, publish or receive again.
+
+What the statement does is bound to that claim as well. A device is
+refused a login, a publish and delivery only while the bundle it
+published carries the certificate of the account that revoked it, so a
+statement about an id that claims nobody, or claims somebody else, binds
+nothing: it is somebody's word about a key that is not theirs. A relay
+that took such a statement before this rule (or restored a database
+holding one) refuses nothing on its strength, and its operator can drop
+it.
+
+Each statement costs the address one of its
 hourly registrations (7.4), as the other lifecycle statements do; one
 for a device already revoked is answered `published` again without a
 second entry, so a client that lost the reply may repeat itself. Once
-stored, the device is cut off: its connection is closed with the reason,
+stored for a device that claims the account, the device is cut off: its
+connection is closed with the reason,
 its mailbox and its deposits of prekeys and key packages are dropped,
 its later logins and publishes are refused (`forbidden`), an envelope
 addressed to it is refused with `not_found`, and it is left out of the
@@ -1733,8 +1761,9 @@ covers, and the statement beside it. The statement is logged (14.8),
 served on every lookup of the device and of the account, and kept for
 good.
 
-A contact that sees a valid revocation for a device drops its sessions
-with it, forgets the device's bundle and stops sending to it. The
+A contact that sees a revocation for a device it knows as that account's
+drops its sessions with it, forgets the device's bundle and stops
+sending to it. The
 primary pushes the statement to contacts whose last message advertised
 `devices` (4.3), which know the kind; a client from before 0.9.0 would
 refuse the whole body. A device the relay tells it is revoked says so and
@@ -1769,9 +1798,14 @@ its own, if any.
 
 On `publish` the relay verifies `device_of` when present (the
 certificate, and that the account is one it holds a bundle for and has
-not revoked), refuses a bundle from a revoked device whatever it now
-says, and refuses a list that names a device it holds a revocation for;
-the list's own signature and its cap are checked as part of the bundle.
+not revoked), refuses a bundle from a device this account revoked
+whatever it now says, refuses a list that names a device this account
+revoked, and refuses a list that names an identity whose own bundle
+claims another account; the list's own signature and its cap are checked
+as part of the bundle. A list may name a key that has published nothing,
+or a bundle of its own that claims nobody, since that is the state a
+device is in until it claims the account (14.6) and the relay cannot
+tell it from any other key.
 A device registers like any identity: it counts against the address's
 registrations for the hour and against the relay's cap on identities,
 and needs the invite token where one is required, which the owner passes

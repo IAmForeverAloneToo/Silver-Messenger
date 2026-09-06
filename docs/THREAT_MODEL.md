@@ -191,6 +191,15 @@ Cannot:
   device's bundles and its revocation are logged under the device as an
   identity's are; a revoked device is also refused by the relay itself
   and dropped by every contact the primary's next message reaches.
+- Cut an identity off by treating it as somebody's device. An account
+  signs a list, and a list is only that account's word: a key is a device
+  of that account here when the bundle it published carries the account's
+  certificate, and a revocation refuses a login, a publish or a delivery
+  only while that is so. A relay that stored such a statement under an
+  older rule refuses nothing on its strength, and its operator can drop
+  it (`admin unrevoke-device`). Clients hold to the same rule: a
+  revocation is acted on for a device already known as that account's,
+  whoever handed it over.
 
 ### Network observer
 
@@ -240,7 +249,11 @@ your bundle they also learn how many devices you have, their ids and the
 names you gave them (the certificates are in the bundle, so a name like
 "office" is public; the client shows names to your own devices only),
 can look each up as they look you up, and can fill each device's mailbox
-as they can yours.
+as they can yours. Knowing a device's id does not let them cut it off:
+they can sign a device revocation naming it, since a signature is only
+their own word, but a client acts on one for a device it knows as that
+account's, and the relay takes one only from the account the device
+claims.
 
 ### Malicious contact
 

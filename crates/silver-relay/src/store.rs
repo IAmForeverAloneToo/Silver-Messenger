@@ -772,6 +772,29 @@ impl Store {
             .is_some())
     }
 
+    /// Drop the revocation held for `device`, so nothing is refused on its
+    /// strength any more; `true` when there was one. The log entry stays,
+    /// as an append-only log's entries do: a client compares it with the
+    /// statement served beside the bundle, and there is none after this.
+    pub fn remove_device_revocation(&self, device: &UserId) -> anyhow::Result<bool> {
+        let key = device.as_bytes();
+        let txn = self.db.begin_write()?;
+        let removed = {
+            let mut table = txn.open_table(DEVICE_REVOCATIONS)?;
+            match table.remove(key.as_slice())? {
+                Some(guard) => {
+                    let revocation: DeviceRevocation = serde_json::from_slice(guard.value())?;
+                    txn.open_table(DEVICE_REVOCATIONS_BY_ACCOUNT)?
+                        .remove((revocation.account.as_bytes().as_slice(), key.as_slice()))?;
+                    true
+                }
+                None => false,
+            }
+        };
+        txn.commit()?;
+        Ok(removed)
+    }
+
     /// Every device revocation `account` issued, in device id order.
     pub fn device_revocations_by(&self, account: &UserId) -> anyhow::Result<Vec<DeviceRevocation>> {
         let account = account.as_bytes().as_slice();

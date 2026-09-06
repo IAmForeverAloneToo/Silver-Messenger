@@ -4,6 +4,42 @@ Notable changes to Silver Messenger. Versions follow [semantic
 versioning](https://semver.org); while the major version is 0, a minor bump
 means behaviour or the wire protocol changed in a way worth reading about.
 
+## Unreleased
+
+An independent security review of the 0.10.0 line reported 76 findings;
+the report and what is done about each are in
+[docs/design/audit-response.md](docs/design/audit-response.md). This
+release carries the Critical and the High findings and the Mediums that
+share their code. Nothing on the wire changes: every fix is a stricter
+reader, a stricter relay, or a client that refuses what the protocol
+already said it refuses. What stops working for some setups is listed in
+the response note, section 5.
+
+### Security
+
+- **A device revocation is bound to the device it is about** (findings
+  SM-R-01, Critical, and SM-P-01, High). A device revocation is signed
+  by an account, and that signature proves only that some key signed
+  about some id. The relay took one for any id on the revoking account's
+  own device list, and cut that id off for good: its mailbox and prekeys
+  dropped, its logins, publishes and incoming mail refused, with no way
+  back. Anyone who could register could therefore destroy any other
+  identity's account on that relay by publishing a list naming it and
+  revoking it, and, because clients acted on a revocation by device id
+  alone, that identity's contacts dropped their sessions with it too.
+
+  The relay now takes a statement only for a key whose own published
+  bundle carries that account's certificate, or one on the list that has
+  published nothing at all, and what a statement does is bound to the
+  same claim: a login, a publish or a delivery is refused only while the
+  id's bundle carries the certificate of the account that revoked it. A
+  statement stored by an older relay refuses nothing, and
+  `silver-relay admin unrevoke-device <who>` drops it. Clients act on a
+  revocation only for a device they already know as that account's,
+  wherever it came from, and no longer take a lookup of such an id to be
+  a relay withholding an identity revocation. Protocol sections 14.2 and
+  14.3 say the rules; the threat model says what a stranger cannot do.
+
 ## 0.10.0 - 2026-09-05
 
 Phase 10 of the roadmap: what people expect of a messenger in daily use,
