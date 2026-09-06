@@ -1750,9 +1750,14 @@ is in. The list holds the linked devices only (the primary is the
 bundle's owner) and at most 8 of them. A reader refuses a list out of
 order or with a duplicate, one longer than 8, one with a certificate
 that does not verify or names another account, and one without its
-signature. The signature covers the set and is bound to the bundle by
-its Diffie–Hellman key, so a relay can serve a stale list but not one
-with a device left out or one added.
+signature. The signature covers each device's id and the time it was
+certified — not the name, and not the certificate's own signature — and
+is bound to the bundle by its Diffie–Hellman key, so a relay can serve a
+stale list but not one with a device left out or one added. Because a
+name is outside it, renaming a device issues a certificate with a later
+`created_at_ms`, which the list signature and the transparency leaf both
+follow; otherwise the old and the new certificate would be
+interchangeable under both and a relay could serve either.
 
 A **linked device's bundle** is an ordinary bundle signed by the device
 key (its own `dh_public`, prekeys and capabilities) plus
@@ -2048,7 +2053,10 @@ ciphertext  = XChaCha20-Poly1305(link_key, nonce, plaintext,
                                  aad = "silver-messenger/v5/provision" || device (32))
 ```
 
-with the plaintext at most 8 MiB, JSON:
+with the plaintext at most 8 MiB — a bound the sealing function applies
+and nothing reaches, since the whole thing rides inside a plain body
+inside a ratchet body, each base64 and each under the 32 KiB body cap of
+section 3, so what actually fits is some 18 to 24 KB. JSON:
 
 ```json
 { "account": "<user id>", "certificate": <certificate>,
@@ -2057,8 +2065,11 @@ with the plaintext at most 8 MiB, JSON:
 ```
 
 the account, its certificate for the device, the device list as it is
-published from now on (the new device on it) and the revocations it has
-issued, and the reference of the **snapshot** as a `file` content (4.5),
+published from now on (the new device on it) and the newest sixteen of
+the revocations it has issued — the rest reach the device with the next
+list the primary publishes, and sending them all would eventually leave
+an account unable to link a device at all — and the reference of the
+**snapshot** as a `file` content (4.5),
 absent when there is nothing to send. The session already hides the
 message from the relay; the layer under the link's secret keeps it from
 anyone who saw the device id and sent something under a secret of their

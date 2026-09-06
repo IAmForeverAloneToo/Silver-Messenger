@@ -253,7 +253,7 @@ routes (`/` with the source notice, `/healthz`).
 | 14.1.3 Server hardened | Met | systemd unit as in 1.2.1; relay data directory 0700 and database 0600; runs as an unprivileged user. |
 | 14.1.4 Deployment automated | Met | `deploy/` and the deploy workflow. |
 | 14.2.1 Components up to date | Partly | `cargo audit` and `cargo deny` on every push catch a vulnerable or yanked crate; routine version and action-pin updates are done by hand, so they lag. |
-| 14.2.2 Unneeded features removed | Met | Minimal feature sets (rustls without defaults, ml-kem with zeroize and getrandom only). |
+| 14.2.2 Unneeded features removed | Met | Minimal feature sets (rustls without defaults, ml-kem with zeroize and getrandom only). `ml-kem` and `x-wing` both state they have never been independently audited; the hybrid construction bounds what a flaw in either can cost (threat model, *Future quantum adversary*), and the `pq` fuzz target covers decapsulation on crafted ciphertexts. |
 | 14.2.4 Trusted repositories only | Met | `cargo deny` allows crates.io only. |
 | 14.2.5 SBOM | Met | CycloneDX per binary in every release; `cargo auditable` in the binaries. |
 | 14.3.1 Debug modes off in production | Met | Release builds; `--log-ids` and `SILVER_LOG=debug` are explicit opt-ins. |

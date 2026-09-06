@@ -215,6 +215,15 @@ impl FromStr for DeviceLink {
 /// device. The contacts and the history come separately, in the
 /// [`Snapshot`] the reference names, since a body holds 32 KiB and a
 /// pinned bundle is kilobytes.
+/// Device revocations a provisioning message carries. The whole message
+/// rides inside a plain body inside a ratchet body, each base64 and each
+/// under the 32 KiB body cap, so what actually fits is some 18 to 24 KB
+/// — not the 8 MiB the sealing function allows. An account that revoked
+/// many devices over the years would otherwise reach a point where it
+/// could no longer link one at all. The newest are the ones that matter:
+/// a device learns the rest with the next list its primary publishes.
+pub const PROVISION_REVOCATIONS: usize = 16;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Provisioning {
     pub account: UserId,
@@ -224,6 +233,8 @@ pub struct Provisioning {
     /// device on it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub devices: Vec<DeviceCertificate>,
+    /// The account's device revocations, newest first, at most
+    /// [`PROVISION_REVOCATIONS`] of them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub revoked: Vec<DeviceRevocation>,
     /// The snapshot on the blob store, when there is anything to send.

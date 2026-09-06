@@ -69,6 +69,37 @@ Section 13.1 went out in 0.10.1; this is section 13.2.
   differ from any name that verifies, so the signature fails and no leaf
   is quietly wrong.
 
+- **A rename gives a device a new certificate, not a second reading of
+  the old one** (finding SM-P-07, Low). The device list's signature and
+  its transparency leaf cover each entry's id and the time it was
+  certified, not the name; renaming re-certified under the old time, so
+  the old and the new certificate were interchangeable under both and a
+  relay could serve either for the same signed list. A rename now carries
+  a later time, which the signature and the leaf follow, and the
+  specification says what the signature actually covers.
+
+- **A provisioning message carries what fits** (finding SM-P-11,
+  Informational). The sealing function allows an 8 MiB plaintext, but the
+  message rides inside a plain body inside a ratchet body, each base64
+  and each under the 32 KiB body cap, so what fits is some 18 to 24 KB —
+  and the message carried every device revocation the account had ever
+  issued. An account with a long history would eventually have been
+  unable to link a device at all. It carries the newest sixteen; the rest
+  reach the device with the next list its primary publishes, and the
+  specification states the real limit rather than the unreachable one.
+
+- **Decapsulation is fuzzed** (finding SM-P-13, Informational). The
+  ML-KEM implementation and the group ciphersuite's hybrid on top of it
+  both come from crates that state they have never been independently
+  audited. The hybrid construction is what bounds that — a flaw in the
+  ML-KEM half cannot take a session below its classical strength — but a
+  flaw could still panic on a ciphertext someone chose, and decapsulation
+  is reachable from the wire on every handshake and every post-quantum
+  ratchet step. A `pq` fuzz target now exercises it with crafted
+  ciphertexts and with real ones damaged, in CI with the rest; the threat
+  model and the assessment say what the dependency costs and what the
+  intended replacement is.
+
 ## 0.10.1 - 2026-09-06
 
 An independent security review of the 0.10.0 line reported 76 findings.

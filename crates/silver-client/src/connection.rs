@@ -1573,7 +1573,13 @@ impl Client {
             let mut listed = d.devices().to_vec();
             listed.push(certificate.clone());
             listed.sort_by_key(|c| c.device);
-            (listed, d.revoked().to_vec())
+            // Only the newest revocations: the whole message has to fit
+            // inside one body, and the rest reach the device with the next
+            // list its primary publishes.
+            let mut revoked = d.revoked().to_vec();
+            revoked.sort_by_key(|r| std::cmp::Reverse(r.created_at_ms));
+            revoked.truncate(crate::linking::PROVISION_REVOCATIONS);
+            (listed, revoked)
         };
         let provisioning = Provisioning {
             account: self.identity.user_id(),
@@ -1621,7 +1627,7 @@ impl Client {
             .devices
             .as_ref()
             .ok_or_else(|| ClientError::Relay("this client keeps no device state".into()))?;
-        let created_at_ms = {
+        let was = {
             let d = lock(devices);
             if d.is_linked() {
                 return Err(ClientError::Relay("only the primary names devices".into()));
@@ -1632,6 +1638,14 @@ impl Client {
                 .map(|c| c.created_at_ms)
                 .ok_or_else(|| ClientError::Relay("that device is not linked".into()))?
         };
+        // The list's signature and its transparency leaf cover each entry's
+        // `(device, created_at_ms)` and not the name, so re-certifying under
+        // the old timestamp would leave the old and the new certificate
+        // interchangeable: a relay could serve either for the same signed
+        // list. A rename is a new certificate and carries a later time,
+        // which the list and the leaf both follow. Clamped upwards in case
+        // the clock went back.
+        let created_at_ms = now_ms().max(was.saturating_add(1));
         let certificate = self.identity.certify_device(&device, name, created_at_ms)?;
         lock(devices)
             .rename(certificate.clone())
