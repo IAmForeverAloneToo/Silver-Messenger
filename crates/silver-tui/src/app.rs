@@ -74,6 +74,10 @@ pub struct ChatLine {
     /// In a group: who wrote it (`None` for our own lines and for notes
     /// about the group).
     pub sender: Option<UserId>,
+    /// A note this client wrote about the conversation rather than a
+    /// message somebody sent; `None` for a line written before the flag
+    /// existed. See [`ChatLine::is_note`].
+    pub note: Option<bool>,
     /// The message this one answers, if it is a reply.
     pub reply_to: Option<String>,
     /// The text was replaced by an edit.
@@ -110,6 +114,7 @@ impl ChatLine {
             file: None,
             pending: None,
             sender: None,
+            note: Some(false),
             reply_to: None,
             edited: false,
             deleted: false,
@@ -148,6 +153,7 @@ impl ChatLine {
             file,
             pending,
             sender: h.from,
+            note: h.note,
             reply_to: h.reply_to,
             edited: h.edited,
             deleted: h.deleted,
@@ -168,10 +174,24 @@ impl ChatLine {
     }
 
     /// A note about the conversation rather than a message in it.
+    /// A note this client wrote about the conversation — someone joined,
+    /// the timer changed — rather than a message somebody sent.
+    ///
+    /// A note is dimmed, loses its author when read aloud, and is skipped
+    /// by `/reply`, `/react`, `/edit` and `/delete`, so a received
+    /// message that passed for one would be a message its sender could
+    /// dress up as the group's own voice. The flag says which it is;
+    /// only lines written before 0.11.0 fall back to the old guess, and
+    /// no new line adds to them.
     pub fn is_note(&self) -> bool {
-        self.direction == Direction::Received
-            && self.sender.is_none()
-            && self.text.starts_with("· ")
+        match self.note {
+            Some(note) => note,
+            None => {
+                self.direction == Direction::Received
+                    && self.sender.is_none()
+                    && self.text.starts_with("· ")
+            }
+        }
     }
 
     /// A file, fetched or waiting.
@@ -583,6 +603,11 @@ pub struct App {
     /// Lock after this long without a keystroke, when set and possible.
     lock_after: Option<Duration>,
     last_activity: Instant,
+    /// When the current input line was begun, and whether the line just
+    /// submitted came in faster than a person types (see
+    /// [`App::looks_pasted`]).
+    line_started: Instant,
+    pasted_line: bool,
     /// `/lock` was asked for, or the idle time ran out.
     lock_requested: bool,
     /// `/rotate` handed over to a new identity this session. The data
@@ -799,6 +824,8 @@ impl App {
             at_rest,
             lock_after,
             last_activity: Instant::now(),
+            line_started: Instant::now(),
+            pasted_line: false,
             lock_requested: false,
             rotated: false,
             next_expiry: None,
@@ -1098,7 +1125,15 @@ impl App {
 
     fn handle_terminal_event(&mut self, ev: Event) {
         match ev {
-            Event::Key(key) if key.kind != KeyEventKind::Release => self.handle_key(key),
+            Event::Key(key) if key.kind != KeyEventKind::Release => {
+                // When the line starts, so that a line that arrived
+                // faster than a person types can be told from a typed
+                // one on a terminal with no bracketed paste.
+                if self.input.is_empty() {
+                    self.line_started = Instant::now();
+                }
+                self.handle_key(key)
+            }
             Event::Paste(text) => self.insert_str(&text.replace("\r\n", "\n").replace('\r', "\n")),
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::ScrollUp if self.help_open => {
@@ -1920,11 +1955,42 @@ impl App {
         if line.is_empty() {
             return;
         }
+        self.pasted_line = self.looks_pasted(&line);
         self.remember(&line);
         match line.strip_prefix('/') {
             Some(command) => self.run_command(command),
             None => self.send_message(line),
         }
+    }
+
+    /// Whether the line just submitted arrived faster than anyone types.
+    ///
+    /// A terminal without bracketed paste — the Linux console, older
+    /// Windows consoles, some multiplexer setups — hands a paste over as
+    /// plain keystrokes, so a pasted `hello\r/revoke confirm\r` runs the
+    /// command with its confirmation on the same line. Fifteen
+    /// milliseconds a character is about four thousand words a minute:
+    /// far beyond typing, far under a paste, which arrives in one go.
+    /// Short lines are not judged, there being nothing to measure.
+    fn looks_pasted(&self, line: &str) -> bool {
+        let chars = line.chars().count() as u64;
+        chars >= 8 && self.line_started.elapsed() < Duration::from_millis(chars * 15)
+    }
+
+    /// Refuse a command that undoes an identity when the line it came on
+    /// was pasted rather than typed, and say why.
+    fn typed_it_themselves(&mut self, what: &str) -> bool {
+        if !self.pasted_line {
+            return true;
+        }
+        self.system(
+            Level::Warn,
+            format!(
+                "That line arrived faster than anyone types, so it was pasted rather than typed, and {what} is not something to do on somebody else's say-so. Type it out to go ahead."
+            ),
+        );
+        self.toast("Pasted; type it out to confirm.");
+        false
     }
 
     // --- commands ----------------------------------------------------------
@@ -2702,6 +2768,9 @@ impl App {
             self.toast("Type /revoke confirm to retire this identity.");
             return;
         }
+        if !self.typed_it_themselves("retiring your identity") {
+            return;
+        }
         let (identity, _) = match self.store.load_or_create_identity() {
             Ok(pair) => pair,
             Err(e) => {
@@ -2762,6 +2831,9 @@ impl App {
                 "This makes a new identity and hands over to it: the move is signed by both your old and new keys, so contacts re-pin to the new one without having to compare safety numbers again from scratch (though it is worth doing). Restart afterwards to run as the new identity. Run /rotate confirm to go ahead.",
             );
             self.toast("Type /rotate confirm to rotate your identity.");
+            return;
+        }
+        if !self.typed_it_themselves("handing over to a new identity") {
             return;
         }
         let (old, _) = match self.store.load_or_create_identity() {
@@ -4537,6 +4609,7 @@ impl App {
     fn record(&mut self, peer: UserId, line: ChatLine) {
         let entry = HistoryEntry {
             file: line.pending.clone(),
+            note: line.note,
             reply_to: line.reply_to.clone(),
             expire_after_s: line.expire_after_s,
             ..HistoryEntry::new(

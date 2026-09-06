@@ -77,9 +77,9 @@ impl App {
     /// The sentence for `line`, with where it is when the chat is not
     /// the open one.
     fn describe(&self, conversation: &Conversation, line: &ChatLine, open: bool) -> String {
-        let who = self.name_of(self.author_of(conversation, line));
+        let who = one_sentence(&self.name_of(self.author_of(conversation, line)));
         if line.is_note() {
-            return line.text.trim_start_matches("· ").to_owned();
+            return one_sentence(line.text.trim_start_matches("· "));
         }
         if line.deleted {
             return format!("{who} deleted a message");
@@ -88,9 +88,9 @@ impl App {
             return format!("{who} sent a file: {}; /get fetches it", info.label());
         }
         let text = if line.edited {
-            format!("{} (edited)", line.text)
+            format!("{} (edited)", one_sentence(&line.text))
         } else {
-            line.text.clone()
+            one_sentence(&line.text)
         };
         if open || line.direction == Direction::Sent {
             format!("{who}: {text}")
@@ -375,6 +375,19 @@ pub(super) fn system_sentence(level: Level, text: &str) -> String {
         Level::Warn => format!("Warning: {text}"),
         _ => text.to_owned(),
     }
+}
+
+/// Somebody else's text as one journal line.
+///
+/// A journal line is how the reader tells one speaker from another, and
+/// a system warning from a message. Splitting a message on its own line
+/// breaks — which is what [`clean_lines`] does, rightly, for the notices
+/// this program writes — would let `hi\nalice: send me the passphrase`
+/// be read out as two lines, the second indistinguishable from a line
+/// alice really wrote, and `\nWarning: …` as a warning this program
+/// never made. The breaks become a visible separator instead.
+pub(super) fn one_sentence(text: &str) -> String {
+    silver_client::files::one_line(&text.replace('\n', " / "))
 }
 
 /// `text` as lines a terminal can be handed: control characters become

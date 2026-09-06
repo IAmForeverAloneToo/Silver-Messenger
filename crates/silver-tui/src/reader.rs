@@ -97,8 +97,12 @@ impl Reader {
 
 /// The compose text as one line: a newline typed with Alt-Enter shows as
 /// ` / `.
+///
+/// Pasted text arrives here as keystrokes, so it can hold anything a
+/// terminal acts on; this line is written straight to the terminal
+/// rather than through a cell buffer that would filter it.
 fn show(input: &str) -> String {
-    input.replace('\n', " / ")
+    silver_client::files::one_line(&input.replace('\n', " / "))
 }
 
 #[cfg(test)]
@@ -109,5 +113,9 @@ mod tests {
     fn a_newline_in_the_compose_text_shows_as_a_slash() {
         assert_eq!(show("one\ntwo"), "one / two");
         assert_eq!(show("plain"), "plain");
+        // Pasted bytes reach here as keystrokes; nothing in them moves
+        // the cursor or changes the terminal.
+        assert_eq!(show("ok\x1b[2Jgone"), "ok [2Jgone");
+        assert_eq!(show("a\rb"), "a b");
     }
 }

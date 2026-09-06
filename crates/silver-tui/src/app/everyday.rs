@@ -130,6 +130,7 @@ impl App {
             Conversation::Contact(peer) => {
                 let line = ChatLine {
                     delivered: true,
+                    note: Some(true),
                     ..ChatLine::new(
                         uuid::Uuid::new_v4().to_string(),
                         Direction::Received,

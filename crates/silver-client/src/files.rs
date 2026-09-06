@@ -421,6 +421,45 @@ pub fn printable(text: &str, max_chars: usize) -> String {
         .to_owned()
 }
 
+/// `text` with everything a terminal would act on taken out, keeping line
+/// breaks.
+///
+/// The interface filters what it draws, cell by cell. This is for the
+/// paths that leave the interface: a plain-text export somebody will
+/// `cat`, the clipboard (whose contents a shell may run, and which
+/// travels to the local terminal by OSC 52 through SSH or tmux), and
+/// anything printed to a terminal that is not the interface. A message is
+/// the sender's to write, so `ok\rcurl … | sh\r` in one is the sender's
+/// choice; what it must not do is arrive somewhere it runs.
+pub fn safe_text(text: &str) -> String {
+    text.chars()
+        .filter(|c| *c == '\n' || (!c.is_control() && !is_invisible(*c)))
+        .collect()
+}
+
+/// [`safe_text`] on one line: every control character, line breaks
+/// included, becomes a space, and runs of them collapse.
+///
+/// For the places where a line is the unit and a second line would read
+/// as a message, a speaker or a warning of its own: the text export, the
+/// reader's journal, and anything printed beside text this program wrote.
+pub fn one_line(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut space = false;
+    for c in text.chars() {
+        if c.is_control() || is_invisible(c) {
+            space = !out.is_empty();
+            continue;
+        }
+        if space {
+            out.push(' ');
+            space = false;
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// Names Windows keeps for devices, judged on the part before the first
 /// dot: `CON`, `con.txt` and `COM1.tar.gz` all are.
 fn is_reserved_device_name(name: &str) -> bool {
@@ -749,6 +788,28 @@ mod tests {
         let saved = save(dir.path(), "from-the-net.txt", b"hello", None).unwrap();
         let zone = std::fs::read_to_string(format!("{}:Zone.Identifier", saved.display())).unwrap();
         assert!(zone.contains("ZoneId=3"), "{zone}");
+    }
+
+    /// Text that leaves the interface — into an export file, onto the
+    /// clipboard, out to a terminal that is not the interface — carries
+    /// nothing a terminal acts on.
+    #[test]
+    fn text_that_leaves_the_screen_moves_no_cursor() {
+        // Line breaks are meaningful on the clipboard and are kept;
+        // everything else that moves a cursor is not.
+        assert_eq!(safe_text("one\ntwo"), "one\ntwo");
+        assert_eq!(safe_text("ok\rcurl x | sh\r"), "okcurl x | sh");
+        assert_eq!(safe_text("clear\x1b[2Jme"), "clear[2Jme");
+        assert_eq!(safe_text("zero\u{200b}width"), "zerowidth");
+
+        // On one line, breaks included, with runs collapsed and no
+        // leading or trailing space.
+        assert_eq!(one_line("one\ntwo"), "one two");
+        assert_eq!(one_line("a\r\n\n\tb"), "a b");
+        assert_eq!(one_line("\n\nlead"), "lead");
+        assert_eq!(one_line("trail\n\n"), "trail");
+        assert_eq!(one_line("plain"), "plain");
+        assert_eq!(one_line(""), "");
     }
 
     #[test]

@@ -1560,6 +1560,7 @@ impl App {
             group,
             ChatLine {
                 delivered: true,
+                note: Some(true),
                 ..ChatLine::new(
                     uuid::Uuid::new_v4().to_string(),
                     Direction::Received,
@@ -1574,6 +1575,7 @@ impl App {
         let entry = HistoryEntry {
             file: line.pending.clone(),
             from: line.sender,
+            note: line.note,
             reply_to: line.reply_to.clone(),
             expire_after_s: line.expire_after_s,
             ..HistoryEntry::new(

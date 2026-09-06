@@ -327,6 +327,14 @@ the mark of the web, the plain copy `/open` makes of an encrypted
 download included, so SmartScreen, Protected View and Office's macro
 blocking apply to it; a copy that could not be marked is not handed over
 silently. What is inside the file is for you and your other software to judge.
+What they write is filtered wherever it leaves the screen as well as on
+it (0.11.0): the plain-text export, the clipboard (which OSC 52 carries
+to the local terminal through SSH or tmux), the reader's spoken lines
+and its compose echo. A line break in a message stays inside its line
+where a line is the unit, so nothing they send reads as a second
+message, as another member, or as one of this program's own warnings;
+and a conversation note is one because this client wrote it, not because
+the text starts the way a note does.
 Nothing they write picks the file that `/open` or `/files decrypt` acts
 on: where a received file went is what the download recorded, and only
 `downloads/` is reachable either way, so a message whose text is dressed

@@ -130,7 +130,11 @@ impl App {
                     },
                     Conversation::Group(group) => {
                         let name = self.group_name(&group);
-                        if entry.text.starts_with("· ") {
+                        if entry.note.unwrap_or_else(|| {
+                            entry.direction == Direction::Received
+                                && entry.from.is_none()
+                                && entry.text.starts_with("· ")
+                        }) {
                             name
                         } else if entry.direction == Direction::Sent {
                             format!("you → {name}")
