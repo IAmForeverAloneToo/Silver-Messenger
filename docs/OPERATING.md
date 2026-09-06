@@ -120,7 +120,7 @@ capitals with `SILVER_RELAY_` in front: `--max-connections` is
 | `--idle-timeout-secs` | 120 | A silent connection is closed after this | Clients ping every 30 seconds; only if a network needs longer |
 | `--sends-per-minute` | 60 | Messages one authenticated connection may submit | Bots or bulk senders |
 | `--anonymous-sends-per-minute` | 30 | Messages a connection that never logs in may submit; 0 turns anonymous submission off | See "Abuse": turning it off costs senders their anonymity towards the relay |
-| `--lookups-per-minute` | 30 | Key lookups per connection | Rarely |
+| `--lookups-per-minute` | 30 | Key lookups per connection; 0 turns them off rather than allowing one a minute | Rarely |
 | `--one-time-prekeys-per-user-per-hour` | 30 | One-time prekeys handed out for one user | Rarely; beyond it, lookups get the bundle without one |
 | `--max-mailbox-messages`, `--max-mailbox-mib` | 1000, 32 | A recipient's queue | Users who are offline for long stretches |
 | `--message-ttl-days` | 30 | How long an unacknowledged message is kept | A stricter retention policy (shorter), or long-absent users (longer) |

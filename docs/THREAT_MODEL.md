@@ -92,6 +92,13 @@ Can:
   and nothing it offers shows a message or a key. A backup taken over the
   same socket holds what the database holds and no more, and is the
   operator's to keep as private as the database.
+- Keep a per-identity record of when each publish happened: the
+  transparency log stores the time of every entry, and the log is served
+  to anyone who asks, so a permanent timeline of when an identity was
+  active is a side effect of the log being auditable at all. It is
+  inherent to key transparency rather than a choice the relay makes, and
+  it sits beside the journal's pseudonyms, which hide who is who in the
+  log file but not this.
 - Serve a *stale* key bundle for a user, or withhold one-time prekeys so a
   session starts without one. It cannot serve a forged bundle or signed
   prekey: both are signed by the user's identity key and clients verify
