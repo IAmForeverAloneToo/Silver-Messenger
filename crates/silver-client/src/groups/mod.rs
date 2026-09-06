@@ -35,12 +35,13 @@ use openmls_traits::OpenMlsProvider;
 use openmls_traits::storage::StorageProvider as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use silver_protocol::blob::{self, BlobKey, CHUNK_BYTES, MAX_FILE_BYTES, new_blob_id};
+use silver_protocol::blob::{self, BlobKey, CHUNK_BYTES, new_blob_id};
 use silver_protocol::encoding::b64_array;
 use silver_protocol::group::{
     self, BlobRef, EXTENSION_DEVICE, EXTENSION_EVERYDAY, EXTENSION_GROUP, EXTENSION_SEAL,
-    GroupBody, GroupId, GroupKind, GroupPlaintext, MAX_MEMBERS, SEQUENCER_LABEL, SilverGroup,
-    decode_seal_key, encode_seal_key,
+    GroupBody, GroupId, GroupKind, GroupPlaintext, MAX_INLINE_MLS_BYTES, MAX_MEMBERS,
+    MAX_PARKED_BYTES, MAX_PARKED_HANDSHAKE_BYTES, SEQUENCER_LABEL, SilverGroup, decode_seal_key,
+    encode_seal_key,
 };
 use silver_protocol::wire::KeyPackageDeposit;
 use silver_protocol::{
@@ -70,6 +71,13 @@ pub const SELF_UPDATE_AFTER_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 pub const TOKENS_KEPT: usize = 64;
 /// Handshake messages from a future epoch held, and for how long.
 pub const HOLD_LIMIT: usize = 16;
+/// Most bytes held for one group at a time. Nothing held has been read
+/// yet, so this is what an unauthenticated sender can make a client keep
+/// in memory and write into `groups.json`. Only a message that fitted
+/// inside its envelope is held, so the count already bounds this; saying
+/// it as bytes as well keeps the bound if either constant moves, and
+/// leaves honest commits, which are far smaller, room to cross.
+pub const HOLD_BYTES: usize = HOLD_LIMIT * MAX_INLINE_MLS_BYTES;
 pub const HOLD_FOR_MS: u64 = 10 * 60 * 1000;
 /// Message ids remembered per group, against duplicates.
 const SEEN_IDS: usize = 256;
@@ -1620,7 +1628,13 @@ impl Groups {
         if GroupBody::fits_inline(message.len()) {
             return Ok((GroupBody::inline(*group, kind, message), None));
         }
-        if message.len() as u64 > MAX_FILE_BYTES {
+        // The same bound the readers apply (protocol section 13.2), so a
+        // message that would be refused as malformed is never built.
+        let most = match kind {
+            GroupKind::Welcome | GroupKind::Handshake => MAX_PARKED_HANDSHAKE_BYTES,
+            GroupKind::Message | GroupKind::Join | GroupKind::Rejoin => MAX_PARKED_BYTES,
+        };
+        if message.len() as u64 > most {
             return Err(GroupError::Mls(
                 "message too large for the blob store".into(),
             ));
@@ -1724,19 +1738,36 @@ impl Groups {
         now_ms: u64,
     ) -> Result<Vec<GroupEvent>> {
         let previous = self.file.groups.get(&group).cloned();
+        let me = self.account();
         if let Some(record) = &previous {
-            if matches!(
-                record.state,
-                GroupState::Active | GroupState::Invited { .. }
-            ) {
-                return Ok(vec![GroupEvent::Refused {
-                    group,
-                    reason: "a Welcome to a group we are in".into(),
-                }]);
+            match record.state {
+                GroupState::Active => {
+                    return Ok(vec![GroupEvent::Refused {
+                        group,
+                        reason: "a Welcome to a group we are in".into(),
+                    }]);
+                }
+                // The client joins as the Welcome arrives so that the
+                // group stays in sync while the user decides, which takes
+                // the id: a second Welcome cannot be read without
+                // throwing the first away, and throwing it away on the
+                // word of whoever sent the second is how an id anyone can
+                // learn would decide which group this is. Declining the
+                // invitation makes room for another.
+                GroupState::Invited { from } => {
+                    return Ok(vec![GroupEvent::Refused {
+                        group,
+                        reason: format!(
+                            "another Welcome to a group {} already invited us to; decline that invitation first",
+                            from.short()
+                        ),
+                    }]);
+                }
+                // Out of sync, removed, left or broken: whatever state is
+                // left of the old membership goes; this Welcome starts
+                // afresh.
+                _ => self.drop_state(&group),
             }
-            // Out of sync, removed, left or broken: whatever state is left
-            // of the old membership goes; this Welcome starts afresh.
-            self.drop_state(&group);
         }
         let welcome = parse_welcome(mls)?;
         let staged =
@@ -1752,7 +1783,6 @@ impl Groups {
             return Err(GroupError::Mls("the Welcome names another group".into()));
         }
         let extension = extension_of(context.extensions())?;
-        let me = self.account();
         // An admin adds anyone; one's own identity's device adds one's own.
         let inviter_in = staged
             .members()
@@ -1772,9 +1802,23 @@ impl Groups {
             .joins
             .get(&group)
             .is_some_and(|via| *via == inviter.account || *via == inviter.device);
-        let expected = self.file.expected.remove(&group);
         let ours = inviter.account == me;
-        let taken = asked || expected.is_some() || ours;
+        // A group named at link time is one this account's primary said it
+        // would put this device in (section 14.7), so only the account
+        // itself fills the promise — and until it does, neither the group
+        // nor the name it was promised under is given away. The admin
+        // check above is no help here: it reads the Welcome's own
+        // extension, which whoever built the Welcome wrote, and a group
+        // id is known to anyone who ever held an invite link or was once
+        // a member. A Welcome from anyone else is an ordinary invitation,
+        // shown under the name its own author chose, waiting for the
+        // user.
+        let expected = if ours {
+            self.file.expected.remove(&group)
+        } else {
+            None
+        };
+        let taken = asked || ours;
         // Join now, so the group stays in sync while the user decides; the
         // key package that let us in is spent by this.
         let handle = staged.into_group(&self.provider).map_err(mls_err)?;
@@ -1927,6 +1971,14 @@ impl Groups {
         let our_epoch = handle.epoch().as_u64();
         if is_handshake && message_epoch > our_epoch {
             // From the future: hold it, unless the hold queue is full.
+            // Nothing has been decrypted yet — the epoch and the content
+            // type are plaintext header fields anyone can write — so what
+            // is held is unauthenticated bytes, kept in memory and written
+            // into `groups.json` on every later group event. Only a
+            // message small enough to have travelled inside its envelope
+            // is held, and the queue has a size as well as a count: a
+            // member who parks a large one in the blob store gets no
+            // room at all.
             let record = self
                 .file
                 .groups
@@ -1935,7 +1987,12 @@ impl Groups {
             record
                 .held
                 .retain(|h| h.received_at_ms + HOLD_FOR_MS > now_ms);
-            if record.held.len() >= HOLD_LIMIT || message_epoch > our_epoch + HOLD_LIMIT as u64 {
+            let bytes: usize = record.held.iter().map(|h| h.mls.len()).sum();
+            if record.held.len() >= HOLD_LIMIT
+                || message_epoch > our_epoch + HOLD_LIMIT as u64
+                || !GroupBody::fits_inline(mls.len())
+                || bytes + mls.len() > HOLD_BYTES
+            {
                 record.state = GroupState::OutOfSync { since_ms: now_ms };
                 return Ok(vec![GroupEvent::OutOfSync { group }]);
             }

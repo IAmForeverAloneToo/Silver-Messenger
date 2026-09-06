@@ -389,6 +389,12 @@ pub struct HistoryEntry {
     /// For a received file: how to fetch it, kept until it has been.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<FileInfo>,
+    /// Where a received file was written, once it has been. Written by
+    /// the download itself and never taken from the line's text, which is
+    /// the sender's: a text saying `[file] … → /path` is a claim, not a
+    /// record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved: Option<PathBuf>,
     /// In a group's history: who wrote it (absent for our own lines and
     /// for notes about the group).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -440,6 +446,7 @@ impl HistoryEntry {
             text: text.into(),
             receipt: None,
             file: None,
+            saved: None,
             from: None,
             reply_to: None,
             expire_after_s: 0,
@@ -471,11 +478,15 @@ struct ReceiptLine {
 }
 
 /// A later line that replaces the text of an earlier entry, for example
-/// once a file it announced has been fetched and saved.
+/// once a file it announced has been fetched and saved. `saved` carries
+/// where it went, so that the path is read back as data rather than
+/// parsed out of the text.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct TextLine {
     update: String,
     text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    saved: Option<PathBuf>,
 }
 
 /// Messages shown to the user, and when: a received message's timer runs
@@ -1325,10 +1336,12 @@ impl Store {
         group: &silver_protocol::GroupId,
         id: &str,
         text: &str,
+        saved: Option<&Path>,
     ) -> anyhow::Result<()> {
         let line = TextLine {
             update: id.to_owned(),
             text: text.to_owned(),
+            saved: saved.map(Path::to_path_buf),
         };
         self.append_history_line(&group_history_name(group), &serde_json::to_string(&line)?)
     }
@@ -1359,10 +1372,17 @@ impl Store {
 
     /// Replace the text of the entry `id` from now on; the original line
     /// stays in the file.
-    pub fn append_text(&self, peer: &UserId, id: &str, text: &str) -> anyhow::Result<()> {
+    pub fn append_text(
+        &self,
+        peer: &UserId,
+        id: &str,
+        text: &str,
+        saved: Option<&Path>,
+    ) -> anyhow::Result<()> {
         let line = TextLine {
             update: id.to_owned(),
             text: text.to_owned(),
+            saved: saved.map(Path::to_path_buf),
         };
         self.append_history_line(&history_name(peer), &serde_json::to_string(&line)?)
     }
@@ -1496,6 +1516,9 @@ impl Store {
                 HistoryLine::Text(update) => {
                     if let Some(entry) = revisable(&mut entries, &update.update) {
                         entry.text = update.text;
+                        if update.saved.is_some() {
+                            entry.saved = update.saved;
+                        }
                     }
                 }
                 HistoryLine::Read(read) => {
@@ -1694,6 +1717,7 @@ impl Store {
                 Ok(HistoryLine::Entry(mut entry)) if entry.id == id => {
                     entry.text.clear();
                     entry.file = None;
+                    entry.saved = None;
                     entry.reply_to = None;
                     entry.edited = false;
                     entry.previous.clear();
@@ -2214,14 +2238,20 @@ mod tests {
         for i in 0..3 {
             store.append_history(&peer, &entry(i)).unwrap();
         }
+        let saved = Path::new("/home/me/a.txt");
         store
-            .append_text(&peer, "1", "[file] a.txt → /home/me/a.txt")
+            .append_text(&peer, "1", "[file] a.txt → /home/me/a.txt", Some(saved))
             .unwrap();
-        store.append_text(&peer, "9", "nobody").unwrap(); // unknown id: ignored
+        store.append_text(&peer, "9", "nobody", None).unwrap(); // unknown id: ignored
         let history = store.load_history(&peer).unwrap();
         assert_eq!(history.len(), 3);
         assert_eq!(history[0].text, "msg 0");
         assert_eq!(history[1].text, "[file] a.txt → /home/me/a.txt");
+        assert_eq!(
+            history[1].saved.as_deref(),
+            Some(saved),
+            "where the file went is kept as data, not read back out of the text"
+        );
         assert_eq!(history[2].text, "msg 2");
         // Receipts still land on the updated entry.
         store
@@ -2230,6 +2260,7 @@ mod tests {
         let history = store.load_history(&peer).unwrap();
         assert_eq!(history[1].receipt, Some(ReceiptKind::Read));
         assert_eq!(history[1].text, "[file] a.txt → /home/me/a.txt");
+        assert_eq!(history[1].saved.as_deref(), Some(saved));
     }
 
     #[test]

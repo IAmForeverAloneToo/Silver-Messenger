@@ -160,6 +160,67 @@ the response note, section 5.
   without a session store, has to update before they can be written to;
   their own messages are still read.
 
+- **A received file is opened where the download put it, not where a
+  message says** (finding SM-C-12, Medium). Which file a line stands for
+  was recomputed at every load by reading the line's *text* for
+  `[file] name (size) → /path`. A contact writes that text, so after a
+  restart a message reading
+  `[file] notes.txt (1 KiB) → /home/you/.local/share/silver-messenger/identity.json`
+  became a line the client offered to open: `/open` would read the file,
+  recognise the data directory's own encryption, decrypt it under the
+  data key and put the plaintext where the opener could reach it, and
+  `/files decrypt` would write a permanent plain copy into `downloads/`.
+  Where a file went is now recorded by the download that wrote it and
+  kept with the history entry as data; a path parsed out of an older
+  line's text counts only if it is inside the downloads directory. On
+  top of that, `/open` and `/files decrypt` resolve the path and refuse
+  anything outside `downloads/`, whatever named it.
+
+- **A parked group message costs the group what it carries, once**
+  (finding SM-G-01, High). An MLS message too large for its envelope is
+  parked in the blob store, and every member fetches it. Nothing bounded
+  that: the reference could name up to the file limit of 16 MiB
+  whatever kind of message it was, the client fetched every parked body
+  it was told about (deduplicating by envelope id, so the same blob
+  again per envelope), for any group id, from anyone; and a handshake
+  whose plaintext header claimed a future epoch was held verbatim,
+  bounded by count and time but not by size, then written into
+  `groups.json` on every later group event. One member could therefore
+  make every other member download 16 MiB per envelope and rewrite
+  hundreds of megabytes to disk for ten minutes, without anything of it
+  being read, let alone authenticated.
+
+  A parked `welcome` or `handshake` is now capped at 1 MiB, which is
+  well above the largest either can be (a commit adding 255 members is
+  about 695 KiB), and every other kind at 64 KiB, none of which has any
+  reason to be parked; a body naming a larger one is refused as
+  malformed. A blob is fetched once, whatever names it, and only for a
+  group this client is in or as a Welcome. Only a handshake that
+  travelled inside its envelope is held, within 384 KiB per group as
+  well as the count and the ten minutes; a parked one from a future
+  epoch puts the group out of sync, which rejoins, rather than being
+  kept.
+
+- **A newly linked device joins a promised group only on its own
+  account's word** (finding SM-G-02, High). When a device is linked, the
+  primary tells it which groups it will be put in, and a Welcome for one
+  of those was taken without asking whoever sent it. The admin check
+  before it is no help: it reads the admin list inside the Welcome,
+  which whoever built the Welcome wrote. A group id is known to anyone
+  who ever held an invite link or was once a member, and the device's id
+  is public in the account's device list, so a former member could race
+  the primary and place the new device in a group of their own making,
+  under the real group's name and alias — and the primary's real Welcome
+  was then refused as "a Welcome to a group we are in".
+
+  Only the account's own identity now fills the promise; a Welcome from
+  anyone else is an ordinary invitation, waiting for the user under the
+  name its own author gave, and what the primary promised stays
+  promised. A second Welcome for a group already joined or already
+  inviting is refused rather than replacing it, since reading it would
+  mean throwing away a group already joined on the word of whoever sent
+  the second; declining the invitation makes room.
+
 ## 0.10.0 - 2026-09-05
 
 Phase 10 of the roadmap: what people expect of a messenger in daily use,

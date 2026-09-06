@@ -915,7 +915,8 @@ impl App {
                     let saved = swept
                         .entries
                         .iter()
-                        .filter(|e| saved_file_path(&e.text).is_some())
+                        // Older entries say it in their text only.
+                        .filter(|e| e.saved.is_some() || saved_file_path(&e.text).is_some())
                         .count();
                     self.remove_lines(&swept.conversation, &ids);
                     if saved > 0 {

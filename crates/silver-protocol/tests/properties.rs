@@ -253,7 +253,24 @@ fn group_body() -> impl Strategy<Value = GroupBody> {
         .prop_map(|(id, kind, inline, blob, proof)| {
             let body = match inline {
                 Some(mls) => GroupBody::inline(GroupId(id), kind, mls),
-                None => GroupBody::parked(GroupId(id), kind, blob),
+                None => {
+                    // What a parked message may weigh depends on the kind
+                    // of body carrying it, since everyone the body reaches
+                    // fetches it.
+                    let most = match kind {
+                        GroupKind::Welcome | GroupKind::Handshake => {
+                            silver_protocol::group::MAX_PARKED_HANDSHAKE_BYTES
+                        }
+                        _ => silver_protocol::group::MAX_PARKED_BYTES,
+                    };
+                    let size = blob.size.min(most);
+                    let blob = BlobRef {
+                        size,
+                        chunks: silver_protocol::blob::chunk_count(size),
+                        ..blob
+                    };
+                    GroupBody::parked(GroupId(id), kind, blob)
+                }
             };
             if kind == GroupKind::Join {
                 body.with_join_proof(proof)

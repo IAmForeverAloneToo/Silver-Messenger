@@ -111,6 +111,46 @@ routine step.
 
 ## Version notes
 
+### 0.10.1
+
+* **Upgrade the relay.** The schema stays at 3 and the backup format at
+  2, and nothing on the wire changes, but this release carries the fixes
+  for a security review's Critical and High findings, one of which lets
+  any identity that can register destroy any other identity's account on
+  the relay. Read the `Security` section of
+  [CHANGELOG.md](../CHANGELOG.md) before deciding to wait.
+* **Name the relay.** A bound login is now checked against the names the
+  relay is configured with rather than the `Host` header of the request.
+  Those names are the ACME domains, the names in a `--tls-cert`
+  certificate, and anything given with `--host` (`SILVER_RELAY_HOST`,
+  comma separated). A relay reached under a name it does not otherwise
+  know — behind a TLS front, on an onion address, by a bare address —
+  must be told that name, or bound logins from its own users fail with
+  `bad_signature`. The relay says at start which names it accepts, or
+  warns that it knows none and has only the header to go by; the
+  installer writes `SILVER_RELAY_HOST` for both TLS routes, so a relay it
+  set up needs nothing. Clients from before 0.10.1 are unaffected either
+  way, and a 0.10.1 client answers the unbound login only when started
+  with `--allow-unbound-login`.
+* **Storage.** `--mailbox-storage-mib` (`SILVER_RELAY_MAILBOX_STORAGE_MIB`)
+  caps what all mailboxes hold together, 4 GiB by default; the first
+  start after the upgrade counts what is already queued, which takes a
+  moment on a large database. Envelopes for an identity the relay holds
+  no bundle for are refused rather than queued.
+* **Device revocations stored under the older rule refuse nothing.** A
+  statement is now honoured only while the device's own published bundle
+  carries the revoking account's certificate, so what an older relay
+  stored is inert without a migration. `silver-relay admin
+  unrevoke-device <who>` drops one for good; `admin status` counts them.
+* **Clients.** History entries and their update lines gain a `saved`
+  field, where a received file was written; a 0.10.0 client ignores it
+  and falls back to reading the path out of the line's text, as before.
+  Nothing else in the data directory changes. Sending to a contact whose
+  bundle carries no forward-secrecy keys is refused rather than sent as
+  a plain v1 body, so a contact on a client older than 0.3.0, or one
+  behind a relay older than 0.3.0, has to update before you can write to
+  them.
+
 ### 0.10.0
 
 * **Nothing for the relay.** The schema stays at 3 and the backup format

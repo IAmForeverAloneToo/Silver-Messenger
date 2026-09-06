@@ -1363,8 +1363,15 @@ A body with `v: 5` carries one MLS message for one group to one member:
   a whole one), `size` is its true length, `sha256` its hash, and the
   recipient fetches and opens it before processing. Welcomes to groups
   beyond a handful of members and commits that add many take this path;
-  an application message never does. A message larger than a file may be
-  (16 MiB) cannot be sent.
+  an application message never does. How large a parked message may be
+  depends on what it is, since everyone the body reaches downloads it:
+  1 MiB for a `welcome` or a `handshake`, which is well above the
+  largest either can be (a commit adding 255 members is about 695 KiB,
+  13.10), and 64 KiB for every other kind, none of which has any reason
+  to be parked at all. A body naming a larger one is refused as
+  malformed. A client fetches a parked message once per blob id, and
+  only for a group it is in or as a `welcome`, which is how a group
+  first arrives.
 * `join` is present exactly when `kind` is `join`.
 * The body is padded to 160-byte steps like every other (section 4), so
   a short group text is the size of a short one-to-one text.
@@ -1505,9 +1512,14 @@ Envelopes reach a member in its mailbox's order, which is arrival order
 at the relay, so two committers' fan-outs can cross and the commit for
 epoch `e + 2` can arrive before the one for `e + 1`. A client holds
 handshake messages from a future epoch (at most 16, for at most ten
-minutes) and retries them after each merge. A commit further ahead than
-that, or a queue that fills, means a commit was missed for good: the
-client marks the group out of sync and asks to rejoin (13.8).
+minutes, and at most 384 KiB of them) and retries them after each merge.
+Nothing held has been read yet — the epoch and the content type are
+plaintext header fields anyone can write — so only a message that
+travelled inside its envelope is held; a parked one (13.2) never is. A
+commit further ahead than the queue reaches, a queue that fills by count
+or by size, or a parked commit from a future epoch means a commit was
+missed for good: the client marks the group out of sync and asks to
+rejoin (13.8).
 Application messages decrypt for three epochs after the one they were
 sent in; older ones are reported as unreadable, as a ratchet that moved
 on would.
@@ -2103,9 +2115,20 @@ The rules of 13.7 gain one: a committer, admin or not, may add leaves
 whose credential identity is its own and remove leaves whose credential
 identity is its own. What a commit does is read as identities, so a
 device coming or going is a refresh to everyone else, and an identity's
-last leaf going is its removal or its leave. A Welcome from a device of
-one's own identity, or for a group the primary named at link time
-(14.6), is taken without asking. Rejoin (13.8) is per leaf: a device out
+last leaf going is its removal or its leave. A Welcome is taken without
+asking only when it comes from a device of one's own identity, which is
+who puts a device of one's own in a group; the list of groups the
+primary named at link time (14.6) says which of those to expect and
+under what name, and is not a licence for anyone else to send them. A
+group id is known to whoever ever held an invite link or was once a
+member, and the admin list a Welcome carries is written by whoever built
+that Welcome, so a Welcome for an expected group from any other identity
+is an ordinary invitation: it waits for the user, under the name its own
+author gave, and what the primary promised stays promised. A client
+joins as a Welcome arrives so that the group keeps up while the user
+decides, which takes the group id: a second Welcome for a group already
+joined or already inviting is refused, and declining the invitation is
+what makes room for another. Rejoin (13.8) is per leaf: a device out
 of sync asks the admins and its identity's other devices, and any of
 them re-adds it. Leaving (13.9) is per leaf: one device's leave takes
 that leaf out, and the identity stays a member by its other devices. An

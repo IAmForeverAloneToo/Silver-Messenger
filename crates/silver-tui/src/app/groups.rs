@@ -11,7 +11,7 @@ use silver_client::groups::{
 };
 use silver_client::{ClientError, GroupError, KeyPackageStatus, SequencerAnswer};
 use silver_protocol::bundle::capability as bundle_capability;
-use silver_protocol::group::{GroupBody, GroupId};
+use silver_protocol::group::{GroupBody, GroupId, GroupKind};
 use silver_protocol::wire::feature;
 
 use super::*;
@@ -1202,7 +1202,12 @@ impl App {
                 Err(_) => line.pending = Some(info),
             }
         }
-        if let Err(e) = self.store.append_group_text(&group, &id, &text) {
+        if let Err(e) = self.store.append_group_text(
+            &group,
+            &id,
+            &text,
+            result.as_ref().ok().map(std::path::PathBuf::as_path),
+        ) {
             self.toast(format!("Could not save history: {e}"));
         }
         match result {
@@ -1225,6 +1230,18 @@ impl App {
                 self.take_group_message(from, &body, &mls);
             }
             (None, Some(reference)) => {
+                // A parked message costs a download, and the envelope
+                // naming it is cheap to repeat and cheap to address to a
+                // group id anyone can learn. So each blob is fetched at
+                // most once, and only where a parked message can belong:
+                // a group this client is in, or a Welcome, which is how a
+                // group first arrives.
+                let known =
+                    self.groups.get(&body.group).is_some() || body.kind == GroupKind::Welcome;
+                if !known || self.fetched_blobs.contains(&reference.blob) {
+                    return;
+                }
+                self.fetched_blobs.insert(reference.blob.clone());
                 let client = self.client.clone();
                 let tx = self.internal_tx.clone();
                 let reference = reference.clone();
