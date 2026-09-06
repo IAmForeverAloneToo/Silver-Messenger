@@ -55,6 +55,41 @@ const BLOCKED_FILE: &str = "blocked.json";
 const DEVICES_FILE: &str = "devices.json";
 const HISTORY_DIR: &str = "history";
 
+/// Every whole file the store keeps for the identity, and whether it is
+/// written 0600 as key material.
+///
+/// The one list the re-encryption ([`Store::recrypt_all`]) and the wipe
+/// work from, so a file added to the store cannot be remembered by one
+/// and forgotten by the other. A file the re-encryption misses stays in
+/// the clear on a directory the client calls protected, and becomes
+/// unreadable when the protection is taken off; `groups.json`,
+/// `groups.mls` and `revocation.json` were missed until 0.10.1, which
+/// left the MLS epoch secrets of every group in plaintext.
+const IDENTITY_FILES: &[(&str, bool)] = &[
+    (IDENTITY_FILE, true),
+    (REVOCATION_FILE, true),
+    (PREKEYS_FILE, true),
+    (SESSIONS_FILE, true),
+    (CONTACTS_FILE, false),
+    (OUTBOX_FILE, false),
+    (TRANSPARENCY_FILE, false),
+    (REQUESTS_FILE, false),
+    (BLOCKED_FILE, false),
+    (DEVICES_FILE, false),
+    (crate::groups::GROUPS_FILE, true),
+    (crate::groups::MLS_FILE, true),
+];
+
+/// The files the re-encryption walks: everything belonging to the
+/// identity, and the settings, which the wipe keeps but the data key
+/// covers.
+fn recrypted_files() -> impl Iterator<Item = (&'static str, bool)> {
+    IDENTITY_FILES
+        .iter()
+        .copied()
+        .chain(std::iter::once((CONFIG_FILE, false)))
+}
+
 /// Client-side configuration.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
@@ -703,6 +738,7 @@ impl Store {
             .map_err(VaultError::Other)?
             .ok_or_else(|| VaultError::Other(anyhow::anyhow!("no passphrase is set")))?;
         self.cipher = Some(Arc::new(FileCipher::unlock(&vault, passphrase)?));
+        self.seal_stragglers().map_err(VaultError::Other)?;
         Ok(())
     }
 
@@ -724,7 +760,53 @@ impl Store {
             anyhow::anyhow!("the key in the key store does not open this vault: {e}")
         })?;
         self.cipher = Some(Arc::new(cipher));
+        self.seal_stragglers()?;
         Ok(())
+    }
+
+    /// Encrypt anything a cut-short protection left in the clear.
+    ///
+    /// Protecting a directory writes the vault first and then rewrites the
+    /// files, so a crash in between leaves a directory that opens with
+    /// some files still plain (a reader takes a plain file as itself).
+    /// This finishes the job on the next unlock. It reads a few bytes of
+    /// each file to decide, and does nothing at all in the ordinary case.
+    fn seal_stragglers(&self) -> anyhow::Result<()> {
+        let Some(cipher) = self.cipher.clone() else {
+            return Ok(());
+        };
+        if !self.any_plain()? {
+            return Ok(());
+        }
+        tracing::info!("sealing files an interrupted protection left in the clear");
+        self.recrypt_all(Some(&cipher), Some(&cipher))
+    }
+
+    /// Whether any file the data key covers is lying in the clear.
+    fn any_plain(&self) -> anyhow::Result<bool> {
+        for (name, _) in recrypted_files() {
+            let path = self.root.join(name);
+            if !path.exists() {
+                continue;
+            }
+            if !FileCipher::is_encrypted(&head_of(&path)?) {
+                return Ok(true);
+            }
+        }
+        let history = self.root.join(HISTORY_DIR);
+        if history.exists() {
+            for entry in fs::read_dir(&history)? {
+                let path = entry?.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                let head = head_of(&path)?;
+                if !head.is_empty() && !head.starts_with(LINE_PREFIX.as_bytes()) {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     /// Encrypt everything under a key kept in the operating system's key
@@ -738,13 +820,18 @@ impl Store {
         let (_, cipher) = FileCipher::create_with_kek(&kek);
         let vault = cipher.wrap_under_kek(&kek, kdf);
         let cipher = Arc::new(cipher);
-        if let Err(e) = self.recrypt_all(None, Some(&cipher)) {
-            let _ = crate::keystore::delete(&vault.kdf.keystore_name());
-            return Err(e);
-        }
+        // The vault first. It holds the only copy of the data key, and a
+        // reader takes a plain file as itself, so a crash between the two
+        // steps leaves a directory that still opens and that the next
+        // unlock finishes sealing. Written last, as it was before 0.10.1,
+        // the same crash left files encrypted under a key that had never
+        // been written down: every message, contact and key lost.
         self.write_vault(&vault)?;
-        self.cipher = Some(cipher);
-        Ok(())
+        self.cipher = Some(cipher.clone());
+        self.recrypt_all(None, Some(&cipher)).context(
+            "the data directory is now protected, but not every file could be encrypted; \
+             the rest are sealed the next time it is unlocked",
+        )
     }
 
     /// Protect the directory with `passphrase`, encrypting everything in it.
@@ -774,10 +861,13 @@ impl Store {
             Protection::None => {
                 let (vault, cipher) = FileCipher::create(passphrase, kdf)?;
                 let cipher = Arc::new(cipher);
-                self.recrypt_all(None, Some(&cipher))?;
+                // The vault first; see `protect_with_keystore`.
                 self.write_vault(&vault)?;
-                self.cipher = Some(cipher);
-                Ok(())
+                self.cipher = Some(cipher.clone());
+                self.recrypt_all(None, Some(&cipher)).context(
+                    "the passphrase is set, but not every file could be encrypted; the rest \
+                     are sealed the next time the directory is unlocked",
+                )
             }
         }
     }
@@ -828,23 +918,18 @@ impl Store {
     }
 
     /// Rewrite every file from one cipher to another (`None` = plaintext).
+    ///
+    /// A file already in the state it should be in is rewritten all the
+    /// same, so this is also how a directory is tidied after a protection
+    /// that a crash cut short: `from` reads a plain file as itself, so
+    /// running it with the same cipher on both sides seals whatever was
+    /// left in the clear.
     fn recrypt_all(
         &self,
         from: Option<&FileCipher>,
         to: Option<&FileCipher>,
     ) -> anyhow::Result<()> {
-        for name in [
-            IDENTITY_FILE,
-            PREKEYS_FILE,
-            SESSIONS_FILE,
-            CONFIG_FILE,
-            CONTACTS_FILE,
-            OUTBOX_FILE,
-            TRANSPARENCY_FILE,
-            REQUESTS_FILE,
-            BLOCKED_FILE,
-            DEVICES_FILE,
-        ] {
+        for (name, private) in recrypted_files() {
             let path = self.root.join(name);
             if !path.exists() {
                 continue;
@@ -852,10 +937,32 @@ impl Store {
             let bytes = fs::read(&path)?;
             let plain = decode_file(from, name, &bytes)?;
             let out = encode_file(to, name, &plain);
-            if matches!(name, IDENTITY_FILE | PREKEYS_FILE | SESSIONS_FILE) {
+            if private {
                 write_private(&path, &out)?;
             } else {
                 write_atomic(&path, &out)?;
+            }
+        }
+        // Files received while `encrypted_downloads` was on are bound to
+        // their own name, not to a path under the data directory, and sit
+        // beside plain ones, which stay as they are. On the way out they
+        // are decrypted, since the key is about to be gone.
+        let downloads = self.downloads_dir();
+        if from.is_none() != to.is_none() && downloads.exists() {
+            for entry in fs::read_dir(&downloads)? {
+                let path = entry?.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                let bytes = fs::read(&path)?;
+                if !FileCipher::is_encrypted(&bytes) {
+                    continue;
+                }
+                let plain = decode_file(from, name, &bytes)?;
+                write_atomic(&path, &encode_file(to, name, &plain))?;
             }
         }
         for entry in fs::read_dir(self.root.join(HISTORY_DIR))? {
@@ -1106,21 +1213,11 @@ impl Store {
     /// belongs to the identity, keeping the settings and the files saved
     /// in `downloads/`: what a device does once it is unlinked.
     pub fn wipe(&self) -> anyhow::Result<()> {
-        for name in [
-            IDENTITY_FILE,
-            REVOCATION_FILE,
-            PREKEYS_FILE,
-            SESSIONS_FILE,
-            CONTACTS_FILE,
-            OUTBOX_FILE,
-            TRANSPARENCY_FILE,
-            REQUESTS_FILE,
-            BLOCKED_FILE,
-            DEVICES_FILE,
-            crate::groups::GROUPS_FILE,
-            crate::groups::MLS_FILE,
-            VAULT_FILE,
-        ] {
+        for name in IDENTITY_FILES
+            .iter()
+            .map(|(name, _)| *name)
+            .chain(std::iter::once(VAULT_FILE))
+        {
             let path = self.root.join(name);
             if path.exists() {
                 fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
@@ -1730,6 +1827,16 @@ fn encode_line(cipher: Option<&FileCipher>, name: &str, plain: &str) -> String {
     }
 }
 
+/// The first few bytes of a file, for telling an encrypted one from a
+/// plain one without reading it all.
+fn head_of(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read as _;
+    let mut file = File::open(path)?;
+    let mut head = [0u8; 8];
+    let read = file.read(&mut head)?;
+    Ok(head[..read].to_vec())
+}
+
 /// Whether `file` is empty or ends with a newline. Reads the last byte;
 /// an append goes to the end whatever the position after.
 fn ends_with_newline(file: &mut File) -> std::io::Result<bool> {
@@ -2234,6 +2341,108 @@ mod tests {
         let empty = Identity::generate().user_id();
         store.migrate_history(&empty, &new).unwrap();
         assert_eq!(store.load_history(&new).unwrap().len(), 3);
+    }
+
+    /// The audit's SM-C-02 and SM-C-08: every file the data key covers
+    /// moves with the protection, and the vault is written before them,
+    /// so a directory is never left holding files under a key that was
+    /// never written down.
+    #[test]
+    fn protecting_and_unprotecting_moves_every_file() {
+        crate::keystore::use_mock_store();
+        let (mut store, _dir) = temp_store();
+        let peer = Identity::generate().user_id();
+        // One of everything the data key covers.
+        let (identity, _) = store.load_or_create_identity().unwrap();
+        store.load_or_create_revocation(&identity, 1).unwrap();
+        store.save_config(&Config::default()).unwrap();
+        store.save_contacts(&[Contact::new(peer)]).unwrap();
+        store.save_requests(&[]).unwrap();
+        store.save_blocked(&[peer]).unwrap();
+        store
+            .save_devices(&crate::devices::DevicesFile::default())
+            .unwrap();
+        store.append_history(&peer, &entry(0)).unwrap();
+        store
+            .write_json_private(crate::groups::GROUPS_FILE, &serde_json::json!({"a": 1}))
+            .unwrap();
+        store
+            .write_private_file(crate::groups::MLS_FILE, b"mls state")
+            .unwrap();
+
+        let named: Vec<&str> = recrypted_files().map(|(name, _)| name).collect();
+        let root = store.root.clone();
+        let is_encrypted = |name: &str| {
+            let path = root.join(name);
+            path.exists() && FileCipher::is_encrypted(&fs::read(&path).unwrap())
+        };
+
+        store.protect_with_keystore().unwrap();
+        for name in &named {
+            if !root.join(name).exists() {
+                continue;
+            }
+            assert!(is_encrypted(name), "{name} was left in the clear");
+        }
+        let history = fs::read_to_string(root.join(history_name(&peer))).unwrap();
+        assert!(history.lines().all(|l| l.starts_with(LINE_PREFIX)));
+        assert_eq!(
+            store.read_private_file(crate::groups::MLS_FILE).unwrap(),
+            Some(b"mls state".to_vec())
+        );
+
+        // And back: everything readable again, nothing left encrypted
+        // under a key that is gone.
+        assert_eq!(store.remove_protection().unwrap(), Protection::None);
+        for name in &named {
+            assert!(!is_encrypted(name), "{name} is still encrypted");
+        }
+        assert_eq!(
+            store.read_private_file(crate::groups::MLS_FILE).unwrap(),
+            Some(b"mls state".to_vec())
+        );
+        assert_eq!(store.load_history(&peer).unwrap().len(), 1);
+        assert_eq!(store.load_contacts().unwrap().len(), 1);
+        assert!(store.revocation().unwrap().is_some());
+    }
+
+    /// The audit's SM-C-08: the vault holds the only copy of the data
+    /// key, so it is written before the files are encrypted under it. A
+    /// protection that fails part-way leaves a directory that still
+    /// opens, and the next unlock seals what is left.
+    #[test]
+    fn a_protection_that_fails_part_way_leaves_the_directory_readable() {
+        crate::keystore::use_mock_store();
+        let (mut store, _dir) = temp_store();
+        let (identity, _) = store.load_or_create_identity().unwrap();
+        let peer = Identity::generate().user_id();
+        store.save_contacts(&[Contact::new(peer)]).unwrap();
+        // A file that claims to be encrypted already: the re-encryption
+        // cannot read it without a key, so it fails half way through.
+        let broken = store.root.join(BLOCKED_FILE);
+        let mut bytes = crate::vault::FILE_MAGIC.to_vec();
+        bytes.extend_from_slice(b"not really");
+        write_atomic(&broken, &bytes).unwrap();
+
+        assert!(store.protect_with_keystore().is_err());
+
+        // The key is on disk, so what was rewritten before the failure is
+        // still readable: the whole point of writing the vault first.
+        // Written last, the same failure left every rewritten file under
+        // a key that had never been recorded.
+        fs::remove_file(&broken).unwrap();
+        let mut reopened = Store::open(store.root.clone()).unwrap();
+        assert_eq!(reopened.protection(), Protection::Keystore);
+        reopened.unlock_with_keystore().unwrap();
+        assert_eq!(
+            reopened.load_or_create_identity().unwrap().0.user_id(),
+            identity.user_id()
+        );
+        assert_eq!(reopened.load_contacts().unwrap().len(), 1);
+        // And the unlock sealed anything the failure had left plain.
+        reopened.save_blocked(&[peer]).unwrap();
+        reopened.unlock_with_keystore().unwrap();
+        assert!(!reopened.any_plain().unwrap());
     }
 
     #[test]

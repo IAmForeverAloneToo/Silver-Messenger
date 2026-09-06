@@ -20,7 +20,7 @@ use silver_protocol::encoding::{b64, b64_array, from_base64, to_base64};
 use zeroize::Zeroizing;
 
 const VAULT_AAD: &[u8] = b"silver-messenger/v1/vault";
-const FILE_MAGIC: &[u8; 4] = b"SMV1";
+pub(crate) const FILE_MAGIC: &[u8; 4] = b"SMV1";
 /// Prefix of an encrypted line in a line-oriented file.
 pub const LINE_PREFIX: &str = "enc:";
 /// `Kdf::algorithm` when the data key is wrapped under a random key kept

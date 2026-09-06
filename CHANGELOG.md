@@ -59,6 +59,28 @@ the response note, section 5.
   is started with `--allow-unbound-login`. Only relays from before 0.6.0
   ask for it.
 
+- **Protecting a data directory moves every file, and writes the key
+  first** (findings SM-C-02, High, and SM-C-08, Medium). The
+  re-encryption walked a list of ten file names that had not kept up with
+  the store: `groups.json`, `groups.mls` and `revocation.json` were not
+  on it, and neither were downloads kept encrypted. Adding protection to
+  an existing directory therefore left the MLS epoch secrets, leaf
+  private keys and key packages of every group lying in plaintext on a
+  directory the client called protected, and taking protection off left
+  those three files encrypted under a key that no longer existed, so
+  every group became unreadable. The list now lives in one place, shared
+  with the wipe, and a test protects and unprotects a directory holding
+  one of everything.
+
+  The vault, which holds the only copy of the data key, is now written
+  before the files are encrypted under it rather than after. A crash or
+  an error part-way through (the protection runs by itself on the first
+  start on a machine with a key store) used to leave files nobody could
+  ever read again; now the directory opens, and the next unlock seals
+  whatever was left in the clear. A directory that was unprotected by
+  0.10.0 or earlier cannot be recovered by this: those three files are
+  still ciphertext under a key that is gone.
+
 - **A relay pin names the relay's own certificate** (finding SM-C-01,
   High). A pin matched any certificate the server sent, not only the one
   it proves it holds the key for. Since the relay's certificate is public
