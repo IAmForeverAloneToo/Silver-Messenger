@@ -696,11 +696,11 @@ async fn clients_with_prekeys_talk_over_forward_secret_sessions() {
     assert!(!wire.contains("hello") && !wire.contains(&alice.user_id().to_string()));
 
     wait_for(&mut alice_ev, "alice's session", |e| {
-        matches!(e, ClientEvent::SessionEstablished { peer, initiated_by_us: true } if *peer == bob.user_id())
+        matches!(e, ClientEvent::SessionEstablished { peer, initiated_by_us: true, .. } if *peer == bob.user_id())
     })
     .await;
     wait_for(&mut bob_ev, "bob's session", |e| {
-        matches!(e, ClientEvent::SessionEstablished { peer, initiated_by_us: false } if *peer == alice.user_id())
+        matches!(e, ClientEvent::SessionEstablished { peer, initiated_by_us: false, identity_dh: Some(dh) } if *peer == alice.user_id() && *dh == alice.dh_public())
     })
     .await;
     let got = wait_for(&mut bob_ev, "bob's message", |e| message(e).is_some()).await;
@@ -1056,7 +1056,9 @@ async fn a_lost_session_store_is_reported_and_recovered_by_writing_back() {
     wait_for(&mut alice_ev, "two", |e| message(e).is_some()).await;
 
     // Bob reinstalls without his sessions: Alice's next message is
-    // unreadable, and says so.
+    // unreadable, and says so — without naming Alice. The body no longer
+    // matches a session Bob holds, so the sender it claims is nobody's
+    // word but the sender's and is not passed on (SM-C-13).
     bob_c.shutdown().await;
     let (bob_c, mut bob_ev) = Client::spawn(url.clone(), bob.clone(), with_sessions(&bob)).unwrap();
     connected(&mut bob_ev, "bob again").await;
@@ -1073,10 +1075,10 @@ async fn a_lost_session_store_is_reported_and_recovered_by_writing_back() {
         matches!(e, ClientEvent::Undecryptable { .. })
     })
     .await;
-    let ClientEvent::Undecryptable { from, reason, .. } = ev else {
+    let ClientEvent::Undecryptable { hint, reason, .. } = ev else {
         unreachable!()
     };
-    assert_eq!(from, alice.user_id());
+    assert_eq!(hint, None);
     assert!(reason.contains("session"), "{reason}");
 
     // Writing back starts a fresh session, which Alice follows.

@@ -261,6 +261,19 @@ published in every bundle, and says nothing about who was talked to. It
 prevents a third party from substituting its own `identity_dh` (and so its
 own DH1) to impersonate the sender while claiming their id.
 
+What it does not prevent, and what the *client* must therefore check: the
+signature proves that whoever built the handshake holds the sender's
+identity key, not that `identity_dh` is the key that identity published.
+Somebody who has a copy of the identity key can sign a fresh
+`identity_dh` of their own, publish nothing, and start a session that
+verifies. A receiving client compares `init.identity_dh` with the
+`dh_public` of the bundle it has pinned for that id and, when they
+differ, drops the session and says so rather than replying into it (0.11.0
+on); a client with nothing pinned for the id has nothing to compare and
+starts the session, as trust on first use always does. Binding the
+handshake to the *published* key rather than to a signature is a protocol
+change held for 1.0.
+
 ### 4.3 Capabilities
 
 `caps` lists, inside the encrypted body, what the sending client

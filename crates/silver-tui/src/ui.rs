@@ -757,6 +757,11 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
             app.theme.dim,
         ));
     }
+    // Only when it is *not* anonymous: the relay learning who sent each
+    // message is the state worth a mark, and the other is the default.
+    if app.anonymous_submission == Some(false) {
+        spans.push(Span::styled("  sender seen", app.theme.warn));
+    }
     let pending = app.pending_count();
     if pending > 0 {
         spans.push(Span::styled(format!("  {pending} queued"), app.theme.warn));

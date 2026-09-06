@@ -92,6 +92,15 @@ Can:
   and nothing it offers shows a message or a key. A backup taken over the
   same socket holds what the database holds and no more, and is the
   operator's to keep as private as the database.
+- Offer one client fewer features than another, and take back what it
+  offered before: leaving `transparency` out of one client's login turns
+  off that client's checking of the keys the relay serves, and leaving
+  out `anonymous_send` makes it submit on the authenticated connection,
+  where the relay sees which identity sent each message. From 0.11.0 the
+  client remembers what each relay host has offered and says so, with
+  what it costs, whenever something goes missing; the status line marks
+  a connection whose sends are no longer anonymous, and
+  `--require-anonymous` refuses to send at all rather than fall back.
 - Keep a per-identity record of when each publish happened: the
   transparency log stores the time of every entry, and the log is served
   to anyone who asks, so a permanent timeline of when an identity was

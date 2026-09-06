@@ -69,6 +69,51 @@ Section 13.1 went out in 0.10.1; this is section 13.2.
   differ from any name that verifies, so the signature fails and no leaf
   is quietly wrong.
 
+- **A handshake's long-term key is held against the pinned one** (finding
+  SM-C-07, Medium). A session someone else starts proves that whoever
+  built the handshake holds the sender's identity key — not that the
+  long-term X25519 key inside it is the one that identity *published*.
+  Nothing on the receive path looked at the pinned bundle, so somebody
+  with a copy of a contact's identity key could publish nothing, start a
+  session with a fresh key of their own, and have the victim's client
+  print "session started by them" and send every reply to them: no key-
+  change warning, no log entry, nothing to gossip. The client now hands
+  the key up with the event and the front end compares it with the pin.
+  On a mismatch the session is dropped, so nothing is replied into it,
+  and the user is told plainly that the message may not be from the
+  contact and to compare safety numbers over another channel.
+
+- **An unreadable message names nobody it cannot prove** (finding
+  SM-C-13, Low). For a v4 or v5 body the sender named at the
+  sealed-sender layer is not authenticated by anything, and one of the
+  ways a message fails to open — `UnknownSession` — needs no keys at
+  all. So anyone, a blocked id or the relay included, could send a few
+  bytes and have "A message from Alice could not be read … sending them
+  a message starts a fresh session" appear on the victim's screen: a way
+  to write in someone else's name, and past `/block`. A sender is now
+  named only when the failure came from a session this client actually
+  holds, whose id nobody else could know; every other failure says a
+  message arrived that could not be read and names no one. The notices
+  are gathered into one line a minute, since they cost the sender
+  nothing.
+
+- **A relay cannot quietly take back what it offered** (findings SM-C-05
+  and SM-C-16, Medium and Low). The feature list arrives on every
+  connection and is the relay's own word, different per client if it
+  likes; nothing compared it with what the same host offered before. A
+  relay that wanted to serve one client a stale or stripped bundle had
+  only to leave `transparency` out of that client's `auth_ok`, and the
+  client would check nothing, warn nothing and stop gossiping heads —
+  which cost its contacts the ability to catch a fork through it too.
+  The same for `anonymous_send`: the client fell back to submitting on
+  the authenticated connection with a `warn!` and no sign on screen, so
+  a relay learned which identity sent every message and a user routing
+  through Tor could not tell. What each host has offered is remembered
+  now, and anything withdrawn is said plainly, with what it costs, every
+  time it happens. The status line marks a connection whose sends are no
+  longer anonymous, and `--require-anonymous` refuses to send at all
+  rather than fall back.
+
 - **The data directory is the owner's alone** (finding SM-C-10, Medium).
   Only the key-bearing files were created 0600; the directory itself was
   0755 under a normal umask and `config.json`, `contacts.json`,
