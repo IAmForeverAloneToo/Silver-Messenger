@@ -171,6 +171,14 @@ pub const GROUP_IDLE_TTL: Duration = Duration::from_secs(180 * 24 * 60 * 60);
 /// deposit replaces the whole list and a client has no reason to repeat
 /// it.
 const KEY_PACKAGE_DEPOSITS_PER_MINUTE: u32 = 1;
+/// Bundle publishes one connection may make per minute. A client
+/// publishes once on connecting, and twice more when it links or renames
+/// a device; six leaves room for that and for a reconnect.
+const PUBLISHES_PER_MINUTE: u32 = 6;
+/// Acknowledgements one connection may make per minute. A client draining
+/// a full mailbox acknowledges as fast as it reads, so this is well above
+/// the per-recipient message cap.
+const ACKS_PER_MINUTE: u32 = 4000;
 
 /// Abuse controls applied per connection, plus the registration policy.
 #[derive(Clone, Debug)]
@@ -334,6 +342,16 @@ struct Conn {
     /// The client deposited key packages, so it may ask for others'.
     key_packages: bool,
     deposits: Bucket,
+    /// Bundle publishes. A publish verifies a bundle's worth of
+    /// signatures, writes three durable transactions and, when the bundle
+    /// differs from the last, appends a transparency-log entry that is
+    /// never pruned; a fresh signed prekey makes it differ every time.
+    /// Sized for what a client legitimately does: one on connecting, and
+    /// two more when it links or renames a device.
+    publishes: Bucket,
+    /// Acknowledgements, which are durable writes. Sized well above a
+    /// full mailbox drain, so an honest client never meets it.
+    acks: Bucket,
     /// The client's bundle advertises the `devices` capability, so it
     /// seals per device: its lookups get the linked devices' bundles, one
     /// prekey popped from each. A client that does not would waste them.
@@ -350,6 +368,8 @@ impl Conn {
             prekeys: false,
             key_packages: false,
             deposits: Bucket::per_minute(KEY_PACKAGE_DEPOSITS_PER_MINUTE),
+            publishes: Bucket::per_minute(PUBLISHES_PER_MINUTE),
+            acks: Bucket::per_minute(ACKS_PER_MINUTE),
             devices: false,
         }
     }
@@ -1850,6 +1870,15 @@ impl RelayState {
                 "the recipient device has been revoked by its account",
             ));
         }
+        // Somebody who has published nothing here has no mailbox here.
+        // Everyone a client legitimately seals to has a bundle: a contact,
+        // a device of theirs, a member of a group. Without this a stranger
+        // could fill the disk with envelopes for keys nobody holds, which
+        // nobody is there to acknowledge and which only go when the
+        // message lifetime runs out.
+        if self.bundle(&envelope.to).is_none() {
+            return Err((ErrorCode::NotFound, "no such recipient on this relay"));
+        }
         let outcome = self
             .store
             .enqueue(&envelope, now_ms(), self.limits)
@@ -1875,6 +1904,10 @@ impl RelayState {
             // recipient will get (or has got) the original.
             Enqueue::Duplicate => Ok(()),
             Enqueue::MailboxFull => Err((ErrorCode::MailboxFull, "recipient mailbox is full")),
+            Enqueue::StorageFull => Err((
+                ErrorCode::StorageFull,
+                "this relay is holding as much queued mail as it will",
+            )),
         }
     }
 
@@ -1961,13 +1994,38 @@ pub async fn serve(
     state: Arc<RelayState>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
-    axum::serve(
-        listener,
-        router(state).into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown)
-    .await?;
+    let handle = axum_server::Handle::new();
+    let stop = handle.clone();
+    tokio::spawn(async move {
+        shutdown.await;
+        stop.graceful_shutdown(Some(Duration::from_secs(5)));
+    });
+    let mut server = axum_server::from_tcp(listener.into_std()?)?;
+    set_http_timeouts(server.http_builder());
+    server
+        .handle(handle)
+        .serve(router(state).into_make_service_with_connect_info::<SocketAddr>())
+        .await?;
     Ok(())
+}
+
+/// How long a connection may take to send its request line and headers.
+///
+/// A WebSocket connection is counted, timed and rate-limited from the
+/// upgrade on; before that it is an HTTP request like any other. Hyper has
+/// a default for this but discards it when no timer is installed, which is
+/// what the server builders do by default, so without this a connection
+/// that says nothing holds a socket and a task until the process runs out
+/// of file descriptors, below every limit the relay counts.
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+pub(crate) fn set_http_timeouts(
+    builder: &mut hyper_util::server::conn::auto::Builder<hyper_util::rt::TokioExecutor>,
+) {
+    builder
+        .http1()
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(HEADER_READ_TIMEOUT);
 }
 
 async fn ws_handler(
@@ -2268,6 +2326,18 @@ fn handle_frame(
             "already authenticated",
         )],
         ClientFrame::Publish { bundle, invite } => {
+            // Before the signatures are verified and the writes made: a
+            // publish is the most expensive frame there is, and the only
+            // one that leaves something behind for good (a transparency
+            // entry, which a fresh signed prekey makes different every
+            // time).
+            if !conn.publishes.try_take() {
+                warn!(who = %state.who(me), "publish rate limit hit");
+                return vec![ServerFrame::error(
+                    ErrorCode::RateLimited,
+                    "too many bundle publishes; slow down",
+                )];
+            }
             let devices = bundle
                 .caps
                 .iter()
@@ -2355,6 +2425,13 @@ fn handle_frame(
         }
         ClientFrame::Send { envelope } => vec![state.submit(envelope, &mut conn.sends, Some(me))],
         ClientFrame::Ack { id } => {
+            if !conn.acks.try_take() {
+                warn!(who = %state.who(me), "ack rate limit hit");
+                return vec![ServerFrame::error(
+                    ErrorCode::RateLimited,
+                    "too many acknowledgements; slow down",
+                )];
+            }
             state.ack(me, &id);
             Vec::new()
         }

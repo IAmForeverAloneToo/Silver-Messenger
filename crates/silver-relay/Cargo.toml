@@ -28,6 +28,7 @@ subtle = { workspace = true }
 sha2 = { workspace = true }
 # Built-in TLS and ACME.
 axum-server = { workspace = true }
+hyper-util = { workspace = true }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
 rcgen = { workspace = true }

@@ -75,7 +75,7 @@ optional invite token for registration.
 | Control | Verdict | Evidence |
 | --- | --- | --- |
 | 2.1.x Password security | N/A for relay authentication | No passwords. The local passphrase has no composition rules (2.1.9), allows any length (2.1.2, up to what the terminal takes), and is never truncated (2.1.4); there is no strength meter or breach check (2.1.7, 2.1.8): the passphrase never leaves the device, and the threat model names a weak one as the remaining risk. |
-| 2.2.1 Anti-automation on authentication | Met | Per-address connection limits (16), a 10-second authentication timeout, registrations per address per hour (20), invite tokens. |
+| 2.2.1 Anti-automation on authentication | Met | Per-address connection limits (16), a 10-second timeout on the HTTP request before the WebSocket upgrade and another 10 seconds to log in after it, registrations per address per hour (20), invite tokens. Before 0.10.1 only the second timeout existed, and the first was discarded for want of a timer, so a connection that never finished its request was held for ever (finding SM-R-03). |
 | 2.2.2 Weak authenticators restricted | Met | Only Ed25519 signatures. |
 | 2.2.3 Notification on authenticator change | Partly | A changed Diffie–Hellman key is announced to every contact (sessions dropped, safety numbers); there is no notification to the owner, who has no other channel. |
 | 2.4.x Credential storage | N/A | The relay stores public keys only. |
@@ -162,7 +162,7 @@ V6 and the threat model.
 | 7.3.3 Logs protected from modification | Met | The relay logs to the journal; `silver.log` is created 0600. |
 | 7.4.1 Generic error messages to users | Met | The relay answers with an error code and a fixed short message; internal errors say "storage error" and log the detail on the relay. |
 | 7.4.2 Exception handling | Met | Rust `Result` throughout; the relay's per-connection task cannot take the process down. |
-| 7.4.3 Last-resort handler | Not met | The terminal client installs no panic hook, so a panic can leave the terminal in raw mode until `reset`. Small; noted for the next TUI pass. |
+| 7.4.3 Last-resort handler | Met | `terminal::install_panic_hook` puts the terminal back as it was (raw mode, the alternate screen, mouse, paste and focus reporting, the title) before the panic message is printed, in the full mode and in reader mode; `tests/tui/test_panic.py` drives a real panic under each terminal type. |
 
 ## V8 Data protection
 
@@ -210,7 +210,7 @@ V6 and the threat model.
 | Control | Verdict | Evidence |
 | --- | --- | --- |
 | 11.1.1 Steps in order | Met | Authentication before anything on an authenticated connection; a bundle before a lookup can find it; a file's upload completes before its message is sent. |
-| 11.1.3, 11.1.5 Limits on actions and business limits | Met | Per-connection and per-address rate limits, mailbox and storage caps, prekey deposit caps, downloads quota on the client. |
+| 11.1.3, 11.1.5 Limits on actions and business limits | Met | Per-connection and per-address rate limits on every frame that costs the relay anything, `publish` and `ack` included (both unrated before 0.10.1, findings SM-R-05 and SM-R-06); per-recipient and relay-wide mailbox caps, file storage caps, prekey deposit caps, downloads quota on the client. |
 | 11.1.4 Anti-automation | Met | As above plus invite tokens for registration. |
 | 11.1.6 TOCTOU | Met | Files are created exclusively; ratchet decryption advances state only on success; one-time prekeys are taken in one database transaction. |
 | 11.1.7 Monitoring for unusual activity | Met | Hourly counters in the relay log and a Prometheus endpoint on a private listener (`--metrics-listen`): refusals by kind, failed logins in aggregate, store usage against caps, certificate expiry (item 37). |
@@ -268,7 +268,6 @@ routes (`/` with the source notice, `/healthz`).
 | No independent review of the cryptography and the relay | 1.1.1 | Roadmap item 35: before 1.0. |
 | Plain `ws://` allowed when configured | 9.1.1 | By design for local relays; the no-downgrade rule covers the case that matters. |
 | Certificate revocation not checked | 9.2.4 | Not planned; pins and short-lived Let's Encrypt certificates are the mitigation. |
-| No panic hook in the terminal client | 7.4.3 | Next TUI pass. |
 | Received files stored unencrypted | 6.1.1 | By design, documented; a per-file "keep encrypted" option could follow if asked for. |
 | No client-side history expiry | 8.3.8 | Could follow as a setting if asked for. |
 | No `Origin` check on the WebSocket upgrade, no HTTP headers | 14.4, 14.5 | Item 36, when the relay serves more than three routes. |

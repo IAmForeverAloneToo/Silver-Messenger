@@ -312,6 +312,7 @@ silver-relay --invite-token <T>       only register new identities that present 
 silver-relay --anonymous-sends-per-minute <N>  messages an unauthenticated connection may submit per minute, default 30; 0 turns anonymous submission off (env SILVER_RELAY_ANONYMOUS_SENDS_PER_MINUTE)
 silver-relay --max-blob-mib <N>       largest encrypted file to store, default 16; 0 turns file transfer off (env SILVER_RELAY_MAX_BLOB_MIB)
 silver-relay --blob-storage-mib <N>   encrypted file bytes to keep in total, default 1024 (env SILVER_RELAY_BLOB_STORAGE_MIB)
+silver-relay --mailbox-storage-mib <N> queued message bytes to keep in total, default 4096; 0 for no cap (env SILVER_RELAY_MAILBOX_STORAGE_MIB)
 silver-relay --max-groups <N>         group sequencer entries to keep at most, default 100000; 0 for no cap (env SILVER_RELAY_MAX_GROUPS)
 silver-relay --host <NAME>            a name clients reach this relay by, which a bound login must carry; the ACME domains and the names in --tls-cert count already (env SILVER_RELAY_HOST)
 silver-relay --ephemeral              keep everything in memory only
