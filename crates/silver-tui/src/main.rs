@@ -489,7 +489,7 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
         }
-        let file = opts.open(data_dir.join("silver.log"))?;
+        let file = opts.open(data_dir.join(silver_client::LOG_FILE))?;
         tracing_subscriber::fmt()
             .with_env_filter(EnvFilter::new(filter))
             .with_writer(file)

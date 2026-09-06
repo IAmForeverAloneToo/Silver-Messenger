@@ -258,9 +258,6 @@ impl LogStore {
         self.persist();
     }
 
-    /// Forget everything, to replay the relay's log from the start: after
-    /// the relay's log went backwards or contradicted ours, which is
-    /// reported loudly before this is called.
     /// Start the replay again because the relay's chain no longer agrees
     /// with it, keeping what disagreed.
     ///
@@ -292,6 +289,18 @@ impl LogStore {
     /// oldest first. Empty in the ordinary case.
     pub fn breaks(&self) -> &[Break] {
         &self.state.breaks
+    }
+
+    /// Whether anything is held that could contradict a hash at `index`.
+    ///
+    /// Only every 256th entry is kept as a checkpoint, and only the last
+    /// few thousand of those, so a position between checkpoints — or
+    /// below the ones kept — is a position this client cannot speak to.
+    /// Saying so is the difference between "this contact saw a different
+    /// log" and "this contact has been away longer than the checkpoints
+    /// reach", which before 0.11.0 both came out as a fork.
+    pub fn can_check(&self, index: u64) -> bool {
+        index == 0 || index == self.state.head.index || self.hash_at(index).is_some()
     }
 
     /// The hash we hold for `index`: our head's, or a checkpoint's.

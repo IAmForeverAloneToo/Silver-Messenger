@@ -83,12 +83,21 @@ impl Reader {
     /// wipe says its own word after this).
     pub fn finish(&mut self, app: &mut App, quitting: bool) -> std::io::Result<()> {
         let mut out = String::from("\r\x1b[K");
-        for line in app.take_journal() {
-            out.push_str(&line);
-            out.push_str("\r\n");
-        }
         if quitting {
+            for line in app.take_journal() {
+                out.push_str(&line);
+                out.push_str("\r\n");
+            }
             out.push_str("Bye.\r\n");
+        } else {
+            // Locking: the journal that has not been read out is dropped
+            // rather than printed, and the screen and its scrollback go
+            // with it. Reader mode has no alternate screen, so without
+            // this a locked client leaves the whole conversation a scroll
+            // away from anyone at the keyboard — which is what locking is
+            // for (SM-C-27).
+            let _ = app.take_journal();
+            out.push_str("\x1b[2J\x1b[3J\x1b[H");
         }
         self.out.write_all(out.as_bytes())?;
         self.out.flush()

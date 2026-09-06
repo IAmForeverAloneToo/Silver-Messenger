@@ -3309,10 +3309,15 @@ async fn plain_received(
 type Ws = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 type WsSink = futures_util::stream::SplitSink<Ws, WsMessage>;
 
-/// Connect to a `wss://` relay once, say nothing, and report the pin of
-/// the key it presented and whether its certificate chain is trusted. For
-/// choosing a pin: what comes back is only as good as the path to the
-/// relay at that moment, so compare it with what the operator published.
+/// Connect to a `wss://` relay once and report the pin of the key it
+/// presented and whether its certificate chain is trusted. For choosing a
+/// pin: what comes back is only as good as the path to the relay at that
+/// moment, so compare it with what the operator published.
+///
+/// It makes the WebSocket upgrade request and then closes, so the relay
+/// sees a connection from this address and the `Host` this client used;
+/// it does not log in, publish, or say who is asking. (An earlier comment
+/// here said nothing was sent, which was not so.)
 pub async fn observe_relay(url: &str, options: &ConnectOptions) -> anyhow::Result<Observed> {
     if !url.trim_start().to_ascii_lowercase().starts_with("wss://") {
         anyhow::bail!("only a wss:// relay has a certificate to pin");

@@ -1092,8 +1092,14 @@ impl App {
 
     // --- notices -----------------------------------------------------------
 
+    /// A line in the System pane.
+    ///
+    /// Filtered to one line with nothing a terminal acts on: some of what
+    /// lands here is the relay's, or a peer's, and the pane is also read
+    /// aloud and written to the log. This program's own lines are single
+    /// lines of plain text, so nothing of theirs is lost.
     fn system(&mut self, level: Level, text: impl Into<String>) {
-        let text = text.into();
+        let text = silver_client::files::one_line(&text.into());
         if self.reader && level != Level::Code {
             self.say(journal::system_sentence(level, &text));
         }
@@ -1106,7 +1112,7 @@ impl App {
     }
 
     fn toast(&mut self, text: impl Into<String>) {
-        let text = text.into();
+        let text = silver_client::files::one_line(&text.into());
         self.say(text.clone());
         self.toast = Some((text, Instant::now()));
     }
@@ -2317,16 +2323,32 @@ impl App {
             return;
         }
         if let Some(relay) = their_relay.filter(|r| *r != self.relay_url) {
+            // The link's author chose this string; it is shown filtered
+            // and, when it is plain `ws://`, without a command to copy:
+            // moving to an unencrypted relay is not something to suggest
+            // in passing.
+            let relay = silver_client::files::one_line(&relay);
+            let plain = relay.to_ascii_lowercase().starts_with("ws://");
             self.system(
                 Level::Warn,
                 format!(
-                    "This invite names the relay {relay}, but you are on {}. Relays do not talk to each other yet, so messages only reach them if you both use the same one (/relay {relay}).",
-                    self.relay_url
+                    "This invite names the relay {relay}, but you are on {}. Relays do not talk to each other yet, so messages only reach them if you both use the same one{}",
+                    self.relay_url,
+                    if plain {
+                        ". That relay is reached over plain ws://, without transport encryption, so what it is told is open to anyone on the path; ask them for a wss:// address before moving."
+                    } else {
+                        " (/relay it, if you trust them and their relay)."
+                    }
                 ),
             );
             self.toast("They use a different relay; see System.");
         }
-        let alias = args.get(1).map(|s| s.to_string());
+        // The alias is the user's own text, but it is stored and shown, so
+        // it is kept to what a name can be.
+        let alias = args
+            .get(1)
+            .map(|s| silver_client::files::printable(s, 64))
+            .filter(|alias| !alias.is_empty());
         if let Some(i) = self.contact_index(&user_id) {
             if alias.is_some() {
                 self.contacts[i].alias = alias.clone();

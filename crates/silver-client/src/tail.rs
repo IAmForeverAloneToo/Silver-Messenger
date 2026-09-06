@@ -227,6 +227,15 @@ impl Tail {
                         peer: origin,
                         index: target.index,
                     }));
+                } else if !lock(&log).can_check(target.index) {
+                    // Between checkpoints, or below the ones still kept:
+                    // a head this client cannot speak to. Calling that a
+                    // fork accused a contact who had merely been away
+                    // while the log grew past the checkpoints (SM-C-27).
+                    tracing::debug!(
+                        "a peer's log head at {} is not on a checkpoint we keep; not checked",
+                        target.index
+                    );
                 } else if lock(&log).hash_at(target.index) != Some(target.hash) {
                     step.events.push(transparency(TransparencyEvent::Fork {
                         peer: origin,

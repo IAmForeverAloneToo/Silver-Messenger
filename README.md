@@ -310,7 +310,7 @@ silver --export-history <D> write every conversation to D (outside the data dire
 silver --submit-authenticated  send on the authenticated connection instead of the relay's anonymous one (env SILVER_SUBMIT_AUTHENTICATED)
 silver --require-anonymous send nothing at all to a relay that will not take anonymous submissions, rather than falling back to the authenticated connection (env SILVER_REQUIRE_ANONYMOUS)
 silver --allow-unbound-login   log in to a relay older than 0.6.0, whose login signs the challenge without the relay's name (env SILVER_ALLOW_UNBOUND_LOGIN)
-SILVER_LOG=debug silver    write logs to <data-dir>/silver.log
+SILVER_LOG=debug silver    write logs to <data-dir>/silver.log (0600, not encrypted and not rotated; at debug it records envelope ids, contact ids and the relay's errors, so turn it on to debug and off after)
 
 silver-relay --listen <ADDR>          default 0.0.0.0:7777                          (env SILVER_RELAY_LISTEN)
 silver-relay --data-dir <DIR>         database location; under systemd /var/lib/silver-relay (env SILVER_RELAY_DATA)
