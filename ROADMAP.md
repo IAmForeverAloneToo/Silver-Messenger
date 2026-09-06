@@ -475,10 +475,29 @@ those who want to pay for it (46).
 
 55. [ ] **Independent review** (L). The review of `silver-protocol` and
         the relay promised in item 35, by someone who did not write
-        them, its findings fixed and published with the report.
+        them, its findings fixed and published with the report. Under
+        way: the review of the 0.10.0 line reported 76 findings and is
+        published whole as
+        [docs/audits/2026-09-security-audit.md](docs/audits/2026-09-security-audit.md),
+        with what was found when each was checked against the code and
+        what is done about it in
+        [docs/design/audit-response.md](docs/design/audit-response.md).
+        0.10.1 carries the Critical finding, the ten Highs and the
+        Mediums that share their code; 0.11.0 carries the rest of the
+        Mediums and the Lows; item 57 carries what needs a format
+        change. Ticked when those are out.
 56. [ ] **Stable** (S). Protocol v4 frozen and documented as such, a
         support policy for what a stable release promises and for how
         long, and the first 1.0 release.
+57. [ ] **What the review left for a format change** (L). The findings
+        of the report's section 13.3, each with a design note before
+        code: a message's own id inside the authenticated body; rollback
+        protection for the key-bearing files; the identity key bound
+        into the v4 handshake, which today makes the long-term
+        Diffie–Hellman key enough to impersonate; a device's own
+        counter-signature on its certificate; history file names under
+        an HMAC rather than the contact's id. Each changes a wire or an
+        on-disk format, so each waits for the version that may.
 
 ## Continuous
 

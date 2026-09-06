@@ -11,10 +11,13 @@ it. What the relay, the network and a stolen laptop can and cannot learn is
 spelled out in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md); how the code
 measures up against the OWASP ASVS controls is in
 [docs/SECURITY_ASSESSMENT.md](docs/SECURITY_ASSESSMENT.md); how to report
-a vulnerability is in [SECURITY.md](SECURITY.md). The questions people
-ask first, with short answers, are in [docs/FAQ.md](docs/FAQ.md); how to
-build, test and propose a change is in
-[CONTRIBUTING.md](CONTRIBUTING.md).
+a vulnerability is in [SECURITY.md](SECURITY.md). An independent
+adversarial review of the 0.10.0 line is published whole in
+[docs/audits/](docs/audits/), with the answer to each of its 76 findings
+in [docs/design/audit-response.md](docs/design/audit-response.md). The
+questions people ask first, with short answers, are in
+[docs/FAQ.md](docs/FAQ.md); how to build, test and propose a change is
+in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Layout
 
