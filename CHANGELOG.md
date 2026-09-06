@@ -69,6 +69,47 @@ Section 13.1 went out in 0.10.1; this is section 13.2.
   differ from any name that verifies, so the signature fails and no leaf
   is quietly wrong.
 
+- **Smaller client items** (finding SM-C-27, Informational). Each is
+  minor on its own:
+
+  A contact whose log head was below the checkpoints still kept — every
+  256th entry, the last few thousand — was reported as a *fork*, which
+  accuses them of seeing a different log, when all that had happened was
+  that they had been away while the log grew. A position this client
+  cannot speak to is now said to be unchecked rather than contradicted.
+
+  `silver.log` is written only when `SILVER_LOG` asks for it, but it
+  survived `/devices leave`, which erases everything else the identity
+  left behind; it goes with the rest now. What it holds at `debug` — 
+  envelope ids, contact ids, the relay and its errors — is stated in the
+  README and the ASVS assessment, which claimed "sanitised aliases only"
+  and was wrong.
+
+  `observe_relay`'s comment said it says nothing to the relay; it makes
+  the WebSocket upgrade request and closes, which the comment now says.
+
+  Two clients on one data directory shared a `.tmp` name, so each could
+  write over the other's half-written file and rename the result into
+  place; the name carries the process id now. (Two clients on one
+  directory is still not a way to run: they interleave history appends
+  whatever the names are.)
+
+  An invite or group link's `relay=` was taken as given, unbounded and
+  unchecked, and offered to the user as a relay to switch to. It has to
+  look like a relay URL now — `ws://` or `wss://`, a host, at most 512
+  characters — and a `ws://` one is described as unencrypted rather than
+  offered as a command to copy. An alias given to `/add` is kept to what
+  a name can be.
+
+  Reader mode has no alternate screen, so `/lock` printed the rest of
+  the journal and left the whole conversation a scroll away from whoever
+  was at the keyboard. Locking clears the screen and its scrollback.
+
+  Everything in the System pane and every toast is filtered to one line
+  with nothing a terminal acts on: some of what lands there is the
+  relay's or a peer's, and the pane is also read aloud and written to
+  the log.
+
 - **A message that overtakes its neighbours is still a message** (finding
   SM-C-15, Low). Only the last `(epoch, seq)` from each sender was
   remembered, so anything below it was a replay: a message reported

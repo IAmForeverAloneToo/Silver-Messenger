@@ -112,7 +112,7 @@ closes it), **kept** (a design choice the note defends).
 | SM-C-24 | Low | C. | A sealed manifest of the key-bearing files checked at unlock; history binding with it. | 1.0 |
 | SM-C-25 | Low | C. | Documented now; HMAC-named files and padded lines at 1.0. | doc, 1.0 |
 | SM-C-26 | Low | C. | Done in 0.11.0: an explicit `note` flag on history lines, set by the note writers alone, with the old guess kept only for lines written before it; and a paste rule on `/revoke`, `/rotate` and `/devices leave`, which refuse a confirmation that arrived faster than anyone types. |  0.11.0 |
-| SM-C-27 | Info | C, with two corrections: the false-fork trigger is a peer head ahead of ours while the log is more than 4 096 entries behind, which a relay can arrange; `silver.log` records full ids at `warn`, not only at `debug`. | Each bullet fixed: the fork check verifies instead of accusing; the log gets short ids and filtered relay strings and is wiped with the directory; an instance lock; link relays validated; the reader screen cleared on lock; relay strings filtered; `/add` aliases sanitised. | 0.11.0 |
+| SM-C-27 | Info | C. | Done in 0.11.0: a head between checkpoints is unchecked rather than a fork; `silver.log` goes with the wipe and what it holds is stated in the README and the assessment; `observe_relay`'s comment corrected; per-process temp names; link `relay=` validated and a `ws://` one not offered as a command; `/add`'s alias kept to what a name can be; the reader clears the screen on lock; every System line and toast filtered. |  0.11.0 |
 
 ### 3.4 Groups, devices and linking
 

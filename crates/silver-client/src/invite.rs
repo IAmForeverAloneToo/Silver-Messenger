@@ -71,9 +71,32 @@ impl FromStr for InviteLink {
             .filter_map(|pair| pair.split_once('='))
             .find(|(key, _)| *key == "relay")
             .map(|(_, value)| percent_decode(value))
-            .filter(|relay| !relay.is_empty());
+            // Whoever wrote the link chose this string, and the client
+            // offers it to the user as a relay to use. It has to look
+            // like one: a WebSocket URL, and short enough to read.
+            .filter(|relay| is_relay_url(relay));
         Ok(Self { user_id, relay })
     }
+}
+
+/// Longest relay URL a link may carry.
+const MAX_RELAY_URL: usize = 512;
+
+/// Whether `url` is something this client would talk to a relay over: a
+/// `ws://` or `wss://` URL with a host, and not longer than a URL is.
+pub fn is_relay_url(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    if url.len() > MAX_RELAY_URL || url.trim() != url {
+        return false;
+    }
+    let Some(rest) = lower
+        .strip_prefix("wss://")
+        .or_else(|| lower.strip_prefix("ws://"))
+    else {
+        return false;
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    !host.is_empty() && !host.contains(char::is_whitespace)
 }
 
 pub(crate) fn percent_encode(text: &str) -> String {

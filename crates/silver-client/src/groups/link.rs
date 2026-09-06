@@ -95,8 +95,11 @@ impl FromStr for GroupLink {
                     key = Some(<[u8; 16]>::try_from(bytes).map_err(|_| InviteError::BadUserId)?);
                 }
                 "relay" => {
+                    // The link's author chose this string and the client
+                    // offers it as a relay to use; it has to look like
+                    // one (`crate::invite::is_relay_url`).
                     let decoded = crate::invite::percent_decode(value);
-                    if !decoded.is_empty() {
+                    if crate::invite::is_relay_url(&decoded) {
                         relay = Some(decoded);
                     }
                 }

@@ -43,6 +43,9 @@ use crate::sessions::{PrekeyFile, SessionsFile};
 use crate::vault::{FileCipher, Kdf, LINE_PREFIX, VaultError, VaultFile};
 
 const VAULT_FILE: &str = "vault.json";
+/// Where `SILVER_LOG` writes, when it is set. Not under the data key: it
+/// is opened before the directory is unlocked.
+pub const LOG_FILE: &str = "silver.log";
 const IDENTITY_FILE: &str = "identity.json";
 const REVOCATION_FILE: &str = "revocation.json";
 const PREKEYS_FILE: &str = "prekeys.json";
@@ -1338,11 +1341,12 @@ impl Store {
     /// belongs to the identity, keeping the settings and the files saved
     /// in `downloads/`: what a device does once it is unlinked.
     pub fn wipe(&self) -> anyhow::Result<()> {
-        for name in IDENTITY_FILES
-            .iter()
-            .copied()
-            .chain(std::iter::once(VAULT_FILE))
-        {
+        // `silver.log` goes with the rest. It is written only when
+        // SILVER_LOG asks for it, it is outside the data key, and at
+        // `debug` it names envelope ids, contact ids and the relay: a
+        // device that has just erased its keys should not be left holding
+        // a record of who it talked to.
+        for name in IDENTITY_FILES.iter().copied().chain([VAULT_FILE, LOG_FILE]) {
             let path = self.root.join(name);
             if path.exists() {
                 fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
@@ -2067,7 +2071,13 @@ pub(crate) fn create_private_dir(path: &Path, guard: Option<&str>) -> anyhow::Re
 /// file, the temp file synced first so the name never points at an empty
 /// one after a power loss, and created owner-only.
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
-    let tmp = path.with_extension("tmp");
+    // The temp file's name carries this process's id. Two clients on one
+    // data directory is not a supported way to run — they interleave
+    // history appends whatever the names are — but with a shared `.tmp`
+    // they also write over each other's half-written file and rename the
+    // result into place, which turns "the two disagree" into "the file is
+    // neither one's".
+    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
     let mut file = create_private(&tmp)?;
     file.write_all(bytes)
         .with_context(|| format!("writing {}", tmp.display()))?;
