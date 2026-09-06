@@ -119,12 +119,22 @@ impl ChatLine {
         }
     }
 
-    /// A line as the history keeps it.
-    fn from_history(h: HistoryEntry, delivered: bool) -> Self {
-        let file = match h.direction {
-            Direction::Received => saved_file_path(&h.text),
-            Direction::Sent => None,
-        };
+    /// A line as the history keeps it. `downloads` is where received
+    /// files are written, which is the only place a saved file can be.
+    fn from_history(h: HistoryEntry, delivered: bool, downloads: &std::path::Path) -> Self {
+        // The saved path is data the download wrote. Older histories have
+        // it only inside the text, which is the sender's, so a path
+        // parsed out of one counts only where a received file could
+        // actually be: `[file] x → /home/me/.local/…/identity.json` in a
+        // message body is a claim about somebody else's file. A path from
+        // a sibling device's snapshot names that device's directory, and
+        // is left alone here for the same reason.
+        let file = match (&h.saved, h.direction) {
+            (Some(saved), _) => Some(saved.clone()),
+            (None, Direction::Received) => saved_file_path(&h.text),
+            (None, Direction::Sent) => None,
+        }
+        .filter(|p| p.starts_with(downloads));
         // A file still waits until its line says where it went.
         let pending = h.file.filter(|_| file.is_none());
         Self {
@@ -284,6 +294,10 @@ const MAX_HELD_CHARS: usize = 4000;
 const MAX_ALIAS_CHARS: usize = 40;
 /// Message ids remembered for de-duplication.
 const KNOWN_IDS_CAP: usize = 20_000;
+/// Blob ids of parked group messages already fetched, remembered so that
+/// a member cannot make everyone else download one blob again per
+/// envelope that names it.
+const FETCHED_BLOBS_CAP: usize = 4_000;
 /// How far ahead of this clock a peer's claimed send time may be.
 const FUTURE_SLACK_MS: u64 = 2 * 60 * 1000;
 
@@ -323,6 +337,11 @@ impl RecentIds {
 
     pub fn contains(&self, id: &str) -> bool {
         self.set.contains(id)
+    }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.set.len()
     }
 }
 
@@ -481,6 +500,8 @@ pub struct App {
     key_packages_due: Option<Instant>,
     last_group_maintenance: Instant,
     known_ids: RecentIds,
+    /// Blob ids of parked group messages already fetched.
+    fetched_blobs: RecentIds,
     /// The note that the Requests pane is full has been made.
     requests_full_noted: bool,
     /// Receipts waiting to go out.
@@ -661,6 +682,7 @@ impl App {
         // Every id is known, so nothing is shown twice; the newest window
         // of lines is kept, the file has the rest.
         let mut has_older = HashSet::new();
+        let downloads = store.downloads_dir();
         for contact in &contacts {
             let mut entries = store.load_history(&contact.user_id)?;
             for h in &entries {
@@ -674,7 +696,7 @@ impl App {
                 .into_iter()
                 .map(|h| {
                     let delivered = !pending.contains(&h.id);
-                    ChatLine::from_history(h, delivered)
+                    ChatLine::from_history(h, delivered, &downloads)
                 })
                 .collect();
             threads.insert(contact.user_id, lines);
@@ -692,7 +714,7 @@ impl App {
             }
             let lines: Vec<ChatLine> = entries
                 .into_iter()
-                .map(|h| ChatLine::from_history(h, true))
+                .map(|h| ChatLine::from_history(h, true, &downloads))
                 .collect();
             group_threads.insert(*id, lines);
         }
@@ -724,6 +746,7 @@ impl App {
             key_packages_due: None,
             last_group_maintenance: Instant::now(),
             known_ids,
+            fetched_blobs: RecentIds::new(FETCHED_BLOBS_CAP),
             requests_full_noted: false,
             receipts: ReceiptQueue::default(),
             read_receipts,
@@ -3099,7 +3122,12 @@ impl App {
                     ),
                 };
                 self.set_line_text(&peer, &id, text.clone());
-                if let Err(e) = self.store.append_text(&peer, &id, &text) {
+                if let Err(e) = self.store.append_text(
+                    &peer,
+                    &id,
+                    &text,
+                    result.as_ref().ok().map(PathBuf::as_path),
+                ) {
                     self.toast(format!("Could not save history: {e}"));
                 }
                 match result {
@@ -3700,11 +3728,33 @@ impl App {
         }
     }
 
+    /// `path`, resolved, if it is a received file: inside the downloads
+    /// directory and nowhere else. Every path that reaches the opener or
+    /// the decrypter goes through here, because the cipher that reads a
+    /// received file reads `identity.json` just as well, and a line's
+    /// text is the sender's to write.
+    fn received_file(&self, path: &std::path::Path) -> anyhow::Result<PathBuf> {
+        use anyhow::Context;
+        let dir = self.store.downloads_dir();
+        let dir = dir.canonicalize().unwrap_or(dir);
+        let real = path
+            .canonicalize()
+            .with_context(|| format!("{} is not there", path.display()))?;
+        anyhow::ensure!(
+            real.starts_with(&dir),
+            "{} is not a received file: only what is under {} can be opened here",
+            real.display(),
+            dir.display()
+        );
+        Ok(real)
+    }
+
     /// `path` itself for a plain file; for one written under the data
     /// key, a private plain copy under `downloads/.open/`, which is
     /// removed at exit and at the next start.
     fn plain_copy_for_opening(&self, path: &std::path::Path) -> anyhow::Result<PathBuf> {
         use anyhow::Context;
+        let path = &self.received_file(path)?;
         let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
         if !silver_client::FileCipher::is_encrypted(&bytes) {
             return Ok(path.to_path_buf());
@@ -3806,6 +3856,7 @@ impl App {
             .unwrap_or_default();
         let result = (|| -> anyhow::Result<PathBuf> {
             use anyhow::Context;
+            let path = self.received_file(&path)?;
             let bytes = std::fs::read(&path)?;
             if !silver_client::FileCipher::is_encrypted(&bytes) {
                 anyhow::bail!("{name} is a plain file already");
@@ -3843,6 +3894,13 @@ impl App {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
+        let path = &match self.received_file(path) {
+            Ok(path) => path,
+            Err(e) => {
+                self.toast(format!("Not opening {name}: {e}"));
+                return;
+            }
+        };
         if let Some(why) = silver_client::files::refuse_to_open(path) {
             self.toast(format!("Not opening {name}: {why}."));
             return;
@@ -4924,5 +4982,100 @@ mod tests {
         app.cmd_sidebar(&["wide"]);
         assert!(app.toast.as_ref().unwrap().0.starts_with("Usage"));
         assert_eq!(app.sidebar_width, 60);
+    }
+
+    #[tokio::test]
+    async fn a_parked_group_message_is_fetched_once_and_only_where_it_could_belong() {
+        use silver_protocol::blob::{BlobKey, chunk_count};
+        use silver_protocol::group::{BlobRef, GroupBody, GroupId, GroupKind};
+
+        let (mut app, _dir) = app();
+        let stranger = Identity::generate().user_id();
+        let size = 40_000;
+        let reference = BlobRef {
+            blob: "00112233445566778899aabbccddeeff".into(),
+            key: BlobKey::from_parts([1; 32], [2; 24]),
+            chunks: chunk_count(size),
+            size,
+            sha256: [3; 32],
+        };
+        let group = GroupId::generate();
+        let parked = |kind, n: u32| {
+            (
+                format!("m{n}"),
+                Box::new(GroupBody::parked(group, kind, reference.clone())),
+            )
+        };
+
+        // A group id is public, and an envelope naming one costs its
+        // sender nothing: a handshake for a group this client is not in
+        // is not worth a download.
+        let (id, body) = parked(GroupKind::Handshake, 1);
+        app.on_group_body(stranger, id, body);
+        assert!(!app.fetched_blobs.contains(&reference.blob));
+
+        // A Welcome is how a group first arrives, so that one is fetched
+        // — once. Every later envelope naming the same blob is free for
+        // its sender and would not be for the reader.
+        let (id, body) = parked(GroupKind::Welcome, 2);
+        app.on_group_body(stranger, id, body);
+        assert!(app.fetched_blobs.contains(&reference.blob));
+        let (id, body) = parked(GroupKind::Welcome, 3);
+        app.on_group_body(stranger, id, body);
+        assert_eq!(
+            app.fetched_blobs.len(),
+            1,
+            "the same blob, not fetched again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_file_line_names_a_saved_file_only_where_a_saved_file_can_be() {
+        let (app, dir) = app();
+        let downloads = app.store.downloads_dir();
+        std::fs::create_dir_all(&downloads).unwrap();
+        let identity = dir.path().join("identity.json");
+
+        // A contact writes their own message text, so a line that reads
+        // like a saved file is a claim about a path they chose.
+        let crafted = HistoryEntry::new(
+            "1",
+            Direction::Received,
+            1,
+            format!("[file] notes.txt (1 KiB) → {}", identity.display()),
+        );
+        let line = ChatLine::from_history(crafted, true, &downloads);
+        assert_eq!(line.file, None, "a path they named is not a saved file");
+
+        // What the download itself wrote is taken, from the field and
+        // from the text of a history written before the field existed.
+        let saved = downloads.join("notes.txt");
+        let mut fetched = HistoryEntry::new("2", Direction::Received, 1, "[file] notes.txt");
+        fetched.saved = Some(saved.clone());
+        let line = ChatLine::from_history(fetched, true, &downloads);
+        assert_eq!(line.file, Some(saved.clone()));
+        let older = HistoryEntry::new(
+            "3",
+            Direction::Received,
+            1,
+            format!("[file] notes.txt (1 KiB) → {}", saved.display()),
+        );
+        let line = ChatLine::from_history(older, true, &downloads);
+        assert_eq!(line.file, Some(saved.clone()));
+
+        // And whatever a line says, opening and decrypting reach nothing
+        // outside the downloads directory: the cipher that reads a
+        // received file reads the identity file just as well.
+        std::fs::write(&saved, b"hello").unwrap();
+        std::fs::write(&identity, b"{}").unwrap();
+        assert_eq!(
+            app.received_file(&saved).unwrap(),
+            saved.canonicalize().unwrap()
+        );
+        let refused = app.received_file(&identity).unwrap_err().to_string();
+        assert!(refused.contains("not a received file"), "{refused}");
+        let escape = downloads.join("..").join("identity.json");
+        let refused = app.received_file(&escape).unwrap_err().to_string();
+        assert!(refused.contains("not a received file"), "{refused}");
     }
 }

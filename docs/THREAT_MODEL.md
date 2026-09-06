@@ -291,6 +291,11 @@ the file system raw; a file is fetched only when you ask (or you told the
 client to fetch that contact's files as they arrive), never overwrites,
 and is refused for opening if the system would run it rather than show
 it. What is inside the file is for you and your other software to judge.
+Nothing they write picks the file that `/open` or `/files decrypt` acts
+on: where a received file went is what the download recorded, and only
+`downloads/` is reachable either way, so a message whose text is dressed
+up as a saved file (`[file] notes.txt → …/identity.json`) opens nothing
+and decrypts nothing.
 They learn when their messages reached your client and, unless you turn
 read receipts off, roughly when you looked at them, which says when you
 are at the keyboard. Cannot forge messages from someone else. Cannot learn
@@ -328,9 +333,32 @@ any group, and learns the member list, which is what a group is. A
 contact who invites you to a group makes your client join it in MLS
 terms at once (the key package is spent; nothing is shown until you say
 yes); a stranger's invitation waits in the Requests pane, a blocked
-sender's is declined unseen. A member who turns hostile can send a
-commit that breaks the group's rules (an add or a removal by a
-non-admin, a group left without admins, a changed ciphersuite); every
+sender's is declined unseen. Because joining takes the group id, a
+second Welcome for a group already joined or already inviting is
+refused, and declining is what makes room for another: whoever sends the
+first Welcome for an id cannot be allowed to decide what that id is,
+since a group id is known to whoever ever held an invite link or was
+once a member, and the admin list inside a Welcome is written by whoever
+built it. For the same reason a newly linked device takes a group
+without asking only from its own account, which is who puts a device of
+yours in a group; a Welcome from anyone else for a group your primary
+named at link time is an ordinary invitation, shown under the name its
+own author gave.
+
+A member's messages cost the others only what they carry. A commit or a
+Welcome too large for its envelope is parked on the relay and fetched by
+everyone it reaches, so it is capped at 1 MiB (a commit adding 255
+members is about 695 KiB) rather than at the file limit, fetched once
+per blob whatever names it, and fetched at all only for a group the
+client is in or as a Welcome, which is how a group first arrives. A
+handshake from a future epoch, which nothing has read yet, is kept only
+when it travelled inside its envelope, and within a size (384 KiB per
+group) as well as a count; anything else puts the group out of sync,
+which rejoins.
+
+A member who turns hostile can send a commit that breaks the group's
+rules (an add or a removal by a non-admin, a group left without admins,
+a changed ciphersuite); every
 honest client refuses it, marks the group broken naming the sender, and
 stops there, so the rogue member can wedge the group, which an admin
 then makes anew without them, but cannot get an intruder's keys accepted
@@ -359,7 +387,12 @@ as ordinary files so other programs can open them, unless `/files
 encrypt on` was chosen (0.10.0), which writes them under the data key
 like the rest; `/open` then hands the opener a private plain copy under
 `downloads/.open/`, removed when the client exits and at its next start,
-and `/files decrypt` writes a plain copy on request. Messages that ran
+and `/files decrypt` writes a plain copy on request. Both act on
+`downloads/` and nothing else: where a received file went is recorded by
+the download that wrote it, not read back out of the line's text, which
+is the sender's to write, and a path outside that directory is refused
+whatever names it — the key that reads a file kept as ciphertext reads
+every other file of the directory too. Messages that ran
 out (a timer) or were deleted are rewritten out of the history files
 rather than marked, so the directory does not hold them; the placeholder
 of a message its author deleted for everyone stays, without the text.

@@ -173,6 +173,8 @@ Sent messages carry a mark: `⋯` waiting for the relay, `✓` accepted by the
 relay, `✓✓` delivered to the contact's device, `✓✓` in colour read, `✗`
 refused. Received files are saved under their own name in
 `<data-dir>/downloads` (never overwriting) and the chat line says where.
+`/open` and `/files decrypt` reach that directory and nothing else, so a
+message dressed up to look like a saved file elsewhere opens nothing.
 
 ### Commands and keys
 

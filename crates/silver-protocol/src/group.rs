@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::ProtocolError;
-use crate::blob::{BlobKey, MAX_CHUNKS, MAX_FILE_BYTES, chunk_count, is_valid_blob_id};
+use crate::blob::{BlobKey, MAX_CHUNKS, chunk_count, is_valid_blob_id};
 use crate::encoding::b64_array;
 use crate::envelope::{Content, MAX_BODY_BYTES};
 use crate::identity::{DhPublic, UserId};
@@ -27,6 +27,16 @@ pub const BODY_VERSION: u32 = 5;
 /// An MLS message up to this size rides inside the envelope; a larger one
 /// is parked in the blob store and the body carries its [`BlobRef`].
 pub const MAX_INLINE_MLS_BYTES: usize = 24 * 1024;
+/// Largest parked commit or Welcome. The biggest either can be is the
+/// one that adds 255 members at once, about 695 KiB (section 13.10);
+/// this leaves room to grow and is far below what the blob store would
+/// otherwise take, which every member of the group downloads.
+pub const MAX_PARKED_HANDSHAKE_BYTES: u64 = 1024 * 1024;
+/// Largest parked message of any other kind. An application message
+/// carries a text or a reference to a file, never the file, and a key
+/// package is a few kilobytes, so none of them should be parked at all;
+/// this is slack, not a budget.
+pub const MAX_PARKED_BYTES: u64 = 64 * 1024;
 /// Most members a client will put in, or stay in, a group.
 pub const MAX_MEMBERS: usize = 256;
 /// Longest group name, in bytes of UTF-8.
@@ -159,11 +169,13 @@ pub struct BlobRef {
 }
 
 impl BlobRef {
-    fn validate(&self) -> Result<(), ProtocolError> {
+    /// Check the reference, with `most` the largest the parked message
+    /// may be for the kind of body carrying it.
+    fn validate(&self, most: u64) -> Result<(), ProtocolError> {
         if !is_valid_blob_id(&self.blob) {
             return Err(ProtocolError::Malformed("bad blob id".into()));
         }
-        if self.size == 0 || self.size > MAX_FILE_BYTES {
+        if self.size == 0 || self.size > most {
             return Err(ProtocolError::Malformed("bad blob size".into()));
         }
         if self.chunks == 0 || self.chunks > MAX_CHUNKS || self.chunks != chunk_count(self.size) {
@@ -257,7 +269,13 @@ impl GroupBody {
                     return Err(ProtocolError::TooLarge(mls.len()));
                 }
             }
-            (None, Some(blob)) => blob.validate()?,
+            // A parked message is fetched by everyone the body reaches,
+            // so what it may weigh depends on what it can be: a commit
+            // or a Welcome for a group of 256, or nothing much at all.
+            (None, Some(blob)) => blob.validate(match self.kind {
+                GroupKind::Welcome | GroupKind::Handshake => MAX_PARKED_HANDSHAKE_BYTES,
+                GroupKind::Message | GroupKind::Join | GroupKind::Rejoin => MAX_PARKED_BYTES,
+            })?,
             _ => return malformed("exactly one of mls and blob"),
         }
         if (self.kind == GroupKind::Join) != self.join.is_some() {
@@ -706,6 +724,7 @@ mod tests {
         assert!(rejoin.validate().is_ok());
 
         // Blob references are checked like a file's.
+        use crate::blob::MAX_FILE_BYTES;
         for bad in [
             BlobRef {
                 blob: "../x".into(),
@@ -730,6 +749,41 @@ mod tests {
                 GroupBody::parked(group, GroupKind::Welcome, bad)
                     .validate()
                     .is_err()
+            );
+        }
+
+        // What a parked message may weigh depends on what it is. Every
+        // member of the group fetches it, so a commit or a Welcome is
+        // allowed what the largest of them takes and nothing else is
+        // allowed even that.
+        let big = |size: u64| BlobRef {
+            size,
+            chunks: crate::blob::chunk_count(size),
+            ..blob.clone()
+        };
+        for kind in [GroupKind::Welcome, GroupKind::Handshake] {
+            assert!(
+                GroupBody::parked(group, kind, big(MAX_PARKED_HANDSHAKE_BYTES))
+                    .validate()
+                    .is_ok()
+            );
+            assert!(
+                GroupBody::parked(group, kind, big(MAX_PARKED_HANDSHAKE_BYTES + 1))
+                    .validate()
+                    .is_err()
+            );
+        }
+        for kind in [GroupKind::Message, GroupKind::Rejoin] {
+            assert!(
+                GroupBody::parked(group, kind, big(MAX_PARKED_BYTES))
+                    .validate()
+                    .is_ok()
+            );
+            assert!(
+                GroupBody::parked(group, kind, big(MAX_PARKED_BYTES + 1))
+                    .validate()
+                    .is_err(),
+                "{kind:?} has no reason to be parked at all"
             );
         }
         assert!(GroupBody::fits_inline(MAX_INLINE_MLS_BYTES));

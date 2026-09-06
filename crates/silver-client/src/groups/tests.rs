@@ -1014,6 +1014,55 @@ fn a_large_group_parks_its_welcome_in_the_blob_store() {
         .unwrap();
     assert!(out.uploads.is_empty());
     assert_eq!(out.envelopes.len(), 20);
+
+    // A commit that had to be parked is never held for a later epoch.
+    // Holding keeps bytes nothing has read yet — the epoch and the
+    // content type are plaintext header fields anyone can write — in
+    // memory and in `groups.json`, so only what fitted inside its
+    // envelope is worth keeping. A member that missed the epoch between
+    // goes out of sync instead and rejoins.
+    let behind_id = others[0].id();
+    let to_behind = move |out: &Outgoing| Outgoing {
+        id: None,
+        envelopes: out
+            .envelopes
+            .iter()
+            .filter(|e| e.to == behind_id)
+            .cloned()
+            .collect(),
+        uploads: out.uploads.clone(),
+    };
+    let staged = alice.groups.stage_rename(&group, "crowd again").unwrap();
+    seq.commit(staged).unwrap();
+    let _missed = alice.groups.commit_staged(&group, now_ms()).unwrap();
+    let mut newcomers: Vec<Party> = (0..20).map(|_| Party::new()).collect();
+    let packages: Vec<Vec<u8>> = newcomers
+        .iter_mut()
+        .map(|p| {
+            let kp = p.key_package();
+            alice
+                .groups
+                .verify_key_package(&p.id(), &kp, now_ms())
+                .unwrap()
+        })
+        .collect();
+    let staged = alice.groups.stage_add(&group, &packages).unwrap();
+    seq.commit(staged).unwrap();
+    let big = alice.groups.commit_staged(&group, now_ms()).unwrap();
+    assert_eq!(
+        big.uploads.len(),
+        2,
+        "a commit adding 20 to 21, and its Welcome, are both parked"
+    );
+    deliver(to_behind(&big), &mut [&mut others[0]], &mut blobs);
+    assert_eq!(
+        others[0].drain(&blobs),
+        vec![GroupEvent::OutOfSync { group }]
+    );
+    assert!(
+        others[0].groups.get(&group).unwrap().held.is_empty(),
+        "nothing of it is kept"
+    );
 }
 
 #[test]
@@ -1446,6 +1495,89 @@ fn a_device_out_of_sync_is_re_added_by_its_identitys_other_device() {
             [GroupEvent::Message { from, .. }] if *from == bob_id
         ));
     }
+}
+
+#[test]
+fn a_group_named_at_link_time_is_taken_without_asking_only_from_our_own_account() {
+    let mut seq = Sequencer::default();
+    let mut blobs = HashMap::new();
+    // A group id is known to anyone who ever held an invite link or was
+    // once a member, and the "is an admin" claim inside a Welcome is
+    // written by whoever built the Welcome. So mallory can send one for
+    // the group a newly linked device is waiting for.
+    let mut mallory = Party::new();
+    let bob = Party::new();
+    let mut phone = Party::device_of(&bob, "phone");
+    let created = mallory.groups.create("the papers", now_ms()).unwrap();
+    seq.create(created);
+    let group = created.group;
+    phone
+        .groups
+        .expect_groups([(
+            group,
+            ExpectedGroup {
+                name: "the papers".into(),
+                alias: Some("work".into()),
+            },
+        )])
+        .unwrap();
+    // A device's key package is credentialed to its account, and its
+    // certificate is public, so anyone can take it and add the device.
+    let package = mallory
+        .groups
+        .verify_key_package(&bob.id(), &phone.key_package(), now_ms())
+        .unwrap();
+    let staged = mallory.groups.stage_add(&group, &[package]).unwrap();
+    assert_eq!(seq.commit(staged), Ok(1));
+    let out = mallory.groups.commit_staged(&group, now_ms()).unwrap();
+    let welcome = out
+        .envelopes
+        .iter()
+        .find(|e| e.to == phone.id())
+        .expect("a Welcome for the phone")
+        .clone();
+    deliver(out, &mut [&mut phone], &mut blobs);
+
+    // It waits for the user like any other invitation, and does not spend
+    // what the primary promised: only the account's own Welcome does that
+    // (section 14.7).
+    assert!(matches!(
+        phone.drain(&blobs).as_slice(),
+        [GroupEvent::Invited { held }] if held.group == group && held.from == mallory.id()
+    ));
+    let record = phone.groups.get(&group).unwrap();
+    assert_eq!(
+        record.state,
+        GroupState::Invited { from: mallory.id() },
+        "not joined on a stranger's say-so"
+    );
+    assert_eq!(
+        record.alias, None,
+        "and not shown under the name the primary promised"
+    );
+    assert!(
+        phone.groups.expected(&group).is_some(),
+        "the primary's own Welcome is still awaited"
+    );
+
+    // A second Welcome for the same id does not quietly take the first
+    // one's place: reading it would mean throwing away a group already
+    // joined, on the word of whoever sent the second.
+    phone.inbox.push(welcome);
+    assert!(matches!(
+        phone.drain(&blobs).as_slice(),
+        [GroupEvent::Refused { group: g, .. }] if *g == group
+    ));
+    assert_eq!(
+        phone.groups.get(&group).unwrap().state,
+        GroupState::Invited { from: mallory.id() }
+    );
+
+    // Declining makes room, and what the primary promised is still there
+    // to be filled.
+    phone.groups.decline_welcome(&group).unwrap();
+    assert!(phone.groups.get(&group).is_none());
+    assert!(phone.groups.expected(&group).is_some());
 }
 
 #[test]
