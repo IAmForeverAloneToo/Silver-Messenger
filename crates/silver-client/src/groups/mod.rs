@@ -39,9 +39,8 @@ use silver_protocol::blob::{self, BlobKey, CHUNK_BYTES, new_blob_id};
 use silver_protocol::encoding::b64_array;
 use silver_protocol::group::{
     self, BlobRef, EXTENSION_DEVICE, EXTENSION_EVERYDAY, EXTENSION_GROUP, EXTENSION_SEAL,
-    GroupBody, GroupId, GroupKind, GroupPlaintext, MAX_INLINE_MLS_BYTES, MAX_MEMBERS,
-    MAX_PARKED_BYTES, MAX_PARKED_HANDSHAKE_BYTES, SEQUENCER_LABEL, SilverGroup, decode_seal_key,
-    encode_seal_key,
+    GroupBody, GroupId, GroupKind, GroupPlaintext, MAX_MEMBERS, MAX_PARKED_BYTES,
+    MAX_PARKED_HANDSHAKE_BYTES, SEQUENCER_LABEL, SilverGroup, decode_seal_key, encode_seal_key,
 };
 use silver_protocol::wire::KeyPackageDeposit;
 use silver_protocol::{
@@ -76,8 +75,9 @@ pub const HOLD_LIMIT: usize = 16;
 /// in memory and write into `groups.json`. Only a message that fitted
 /// inside its envelope is held, so the count already bounds this; saying
 /// it as bytes as well keeps the bound if either constant moves, and
-/// leaves honest commits, which are far smaller, room to cross.
-pub const HOLD_BYTES: usize = HOLD_LIMIT * MAX_INLINE_MLS_BYTES;
+/// leaves honest commits, which are far smaller, room to cross. Sixteen
+/// of the largest message that fits an envelope is a little under this.
+pub const HOLD_BYTES: usize = 384 * 1024;
 pub const HOLD_FOR_MS: u64 = 10 * 60 * 1000;
 /// Message ids remembered per group, against duplicates.
 const SEEN_IDS: usize = 256;
@@ -416,12 +416,16 @@ pub struct Created {
 }
 
 struct StagedCommitData {
-    commit: Vec<u8>,
-    welcome: Option<Vec<u8>>,
-    /// Members before the commit, to fan the commit out to.
-    recipients: Vec<MemberInfo>,
-    /// Members the commit adds, to send the Welcome to.
-    added: Vec<MemberInfo>,
+    /// What the commit fans out, framed and sealed while it was staged.
+    ///
+    /// Everything that can fail does so here, before the caller takes the
+    /// staged commit to the sequencer: framing refuses a message too large
+    /// to encode, and sealing refuses a member whose leaf carries a key
+    /// nothing can be sealed to. Doing either after the sequencer has
+    /// moved would leave the group at an epoch whose commit no member ever
+    /// receives — every later commit refused as stale, waiting for one
+    /// that does not exist.
+    outgoing: Outgoing,
     change: Change,
 }
 
@@ -1374,16 +1378,22 @@ impl Groups {
             .map(|w| w.tls_serialize_detached())
             .transpose()
             .map_err(mls_err)?;
-        self.staged.insert(
-            *group,
-            StagedCommitData {
-                commit,
-                welcome,
-                recipients,
-                added,
-                change,
-            },
-        );
+        // Frame and seal now, while nothing has moved: the sequencer has
+        // not been asked and the commit is not merged, so a failure here
+        // is a staged commit the caller discards and nothing else.
+        let mut outgoing = Outgoing::default();
+        if !recipients.is_empty() {
+            let (body, upload) = self.frame(group, GroupKind::Handshake, commit)?;
+            outgoing.uploads.extend(upload);
+            outgoing.envelopes.extend(self.seal_to(&recipients, &body)?);
+        }
+        if let (Some(welcome), false) = (welcome, added.is_empty()) {
+            let (body, upload) = self.frame(group, GroupKind::Welcome, welcome)?;
+            outgoing.uploads.extend(upload);
+            outgoing.envelopes.extend(self.seal_to(&added, &body)?);
+        }
+        self.staged
+            .insert(*group, StagedCommitData { outgoing, change });
         self.persist()?;
         Ok(Staged {
             group: *group,
@@ -1414,21 +1424,8 @@ impl Groups {
         if let Change::Renamed(name) = &data.change {
             record.name = name.clone();
         }
-        let mut outgoing = Outgoing::default();
-        if !data.recipients.is_empty() {
-            let (body, upload) = self.frame(group, GroupKind::Handshake, data.commit)?;
-            outgoing.uploads.extend(upload);
-            outgoing
-                .envelopes
-                .extend(self.seal_to(&data.recipients, &body)?);
-        }
-        if let (Some(welcome), false) = (data.welcome, data.added.is_empty()) {
-            let (body, upload) = self.frame(group, GroupKind::Welcome, welcome)?;
-            outgoing.uploads.extend(upload);
-            outgoing.envelopes.extend(self.seal_to(&data.added, &body)?);
-        }
         self.persist()?;
-        Ok(outgoing)
+        Ok(data.outgoing)
     }
 
     /// The sequencer refused: throw the staged commit away.

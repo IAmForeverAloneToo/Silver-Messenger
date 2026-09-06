@@ -69,6 +69,34 @@ Section 13.1 went out in 0.10.1; this is section 13.2.
   differ from any name that verifies, so the signature fails and no leaf
   is quietly wrong.
 
+- **A commit is framed and sealed before anything moves** (finding
+  SM-P-05, Medium, and one more the review did not name). Committing went:
+  ask the relay's sequencer, merge the commit, then frame it into a body
+  and seal it to each member. Both of the last two steps can fail, and by
+  then the sequencer had moved to the next epoch — so every other member's
+  next commit was refused as stale, waiting for a commit that no one ever
+  received, and the committer's own state reverted on restart. The group
+  was wedged with no way back but to make it anew.
+
+  Two things could make it fail. The inline threshold allowed a message of
+  24 576 bytes, but the body is JSON with the message base64 inside it,
+  padded to 160-byte steps, under a cap applied after the padding, so
+  anything past about 24 411 bytes does not encode; a joiner has some say
+  over the size of the commit that adds it, through its device name and
+  its capabilities. And a member whose leaf carried a small-order X25519
+  sealing key made the sealing fail for everyone — one member able to stop
+  the whole group from sending, which the review did not name and which
+  turned up while checking the first.
+
+  Framing and sealing now happen while the commit is staged, before the
+  sequencer is asked and before the commit is merged, so a failure is a
+  staged commit that the caller discards and nothing else. The threshold
+  is 24 360 bytes, which encodes for every kind of body, and a test says
+  so; a reader still takes any inline message the body cap allows, so a
+  sender with the older threshold is not cut off. A leaf whose sealing key
+  is of small order is refused where leaves are read, so such a member
+  never joins.
+
 - **A rename gives a device a new certificate, not a second reading of
   the old one** (finding SM-P-07, Low). The device list's signature and
   its transparency leaf cover each entry's id and the time it was

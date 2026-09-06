@@ -1301,10 +1301,14 @@ of this section is ever sent to a client that does not advertise it.
   every leaf a commit adds.
 * **Leaf node extension `0xF001`** (`silver_seal`, private use): the
   member's sealed-layer X25519 public key (`dh_public` of its bundle), 32
-  raw bytes. Every key package and leaf carries it; a leaf without it is
-  refused. It is what lets a member seal envelopes to every other member
-  from the tree alone, without a lookup and without the relay in the
-  loop, verified by the identity that signed the leaf.
+  raw bytes. Every key package and leaf carries it; a leaf without it, or
+  one whose key is of small order, is refused. It is what lets a member
+  seal envelopes to every other member from the tree alone, without a
+  lookup and without the relay in the loop, verified by the identity that
+  signed the leaf. A small-order key would make every sealing to that
+  member fail, and since one message is sealed to each member, that is
+  one member stopping the group from sending; it is refused where the
+  leaf is read, so such a member never gets in.
 * **Leaf node extension `0xF002`** (`silver_device`, private use): a
   linked device's certificate as bytes (14.1), by which a leaf whose
   signature key is a device key verifies from the tree alone (14.7).
@@ -1367,7 +1371,7 @@ A body with `v: 5` carries one MLS message for one group to one member:
   someone presenting an invite link, with `join`, 13.7), `rejoin` (a
   `KeyPackage` from a member that fell out of sync, 13.8).
 * Exactly one of `mls` and `blob` is present. `mls` when the message is
-  at most 24 576 bytes; otherwise the message is parked in the blob
+  at most 24 360 bytes; otherwise the message is parked in the blob
   store (7.5) exactly as a padded file is (4.5: a fresh key, 64 KiB
   chunks bound to the blob id, index and count, the last chunk padded to
   a whole one), `size` is its true length, `sha256` its hash, and the
@@ -1381,7 +1385,13 @@ A body with `v: 5` carries one MLS message for one group to one member:
   to be parked at all. A body naming a larger one is refused as
   malformed. A client fetches a parked message once per blob id, and
   only for a group it is in or as a `welcome`, which is how a group
-  first arrives.
+  first arrives. The inline threshold is the sender's, and it is what
+  encodes: with base64 and the fixed JSON around it, a body carrying more
+  than about 24 411 bytes of message does not fit the pre-padding maximum
+  of section 3, and the exact figure depends on the kind's name. A reader
+  applies no threshold of its own — the body cap has already bounded what
+  reached it — so a message from a sender with an older, higher threshold
+  still reads.
 * `join` is present exactly when `kind` is `join`.
 * The body is padded to 160-byte steps like every other (section 4), so
   a short group text is the size of a short one-to-one text.

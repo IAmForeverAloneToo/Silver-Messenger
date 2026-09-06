@@ -26,7 +26,22 @@ use crate::transparency::LogHead;
 pub const BODY_VERSION: u32 = 5;
 /// An MLS message up to this size rides inside the envelope; a larger one
 /// is parked in the blob store and the body carries its [`BlobRef`].
-pub const MAX_INLINE_MLS_BYTES: usize = 24 * 1024;
+///
+/// This is the *sender's* threshold, and it is what encodes rather than a
+/// round number. The body is JSON with the message base64 inside it,
+/// padded to 160-byte steps, and the 32 768-byte cap of section 3 falls
+/// after the padding, so the most a body can carry before padding is
+/// 32 640: with base64's four bytes per three and the fixed JSON around
+/// it, the largest message that encodes is a little over 24 411 bytes,
+/// and the exact figure depends on the kind's name. A threshold above
+/// that let a commit through `fits_inline` and then fail to encode, which
+/// wedged the group; 24 360 is below it for every kind and divides by
+/// three, so the base64 comes out whole.
+///
+/// A reader applies no such limit: it takes any inline message the body
+/// cap allows, so a message from a sender with an older, higher threshold
+/// still reads.
+pub const MAX_INLINE_MLS_BYTES: usize = 24_360;
 /// Largest parked commit or Welcome. The biggest either can be is the
 /// one that adds 255 members at once, about 695 KiB (section 13.10);
 /// this leaves room to grow and is far below what the blob store would
@@ -544,6 +559,20 @@ pub fn decode_seal_key(bytes: &[u8]) -> Result<DhPublic, ProtocolError> {
     let key: [u8; 32] = bytes
         .try_into()
         .map_err(|_| ProtocolError::Malformed("seal extension is not 32 bytes".into()))?;
+    // A key of small order makes every Diffie-Hellman with it come out
+    // zero, so sealing to it fails. Every group message is sealed to every
+    // member, one envelope each, and a member is not free to break the
+    // others: a leaf carrying such a key is refused here, where a leaf is
+    // verified, rather than at the point where somebody tries to send.
+    // A trial exchange decides it, which is exactly the question sealing
+    // will ask later.
+    let trial = x25519_dalek::StaticSecret::from([1u8; 32]);
+    if !trial
+        .diffie_hellman(&x25519_dalek::PublicKey::from(key))
+        .was_contributory()
+    {
+        return Err(ProtocolError::WeakKey);
+    }
     Ok(DhPublic(key))
 }
 
@@ -834,6 +863,30 @@ mod tests {
                 "{kind:?} has no reason to be parked at all"
             );
         }
+        // The threshold is a size that encodes, not a round number: the
+        // body is JSON with the message base64 inside it, padded to
+        // 160-byte steps, under a cap that falls after the padding. A
+        // threshold above what encodes let a commit through here and then
+        // fail to encode, which wedged the group it was for.
+        for kind in [
+            GroupKind::Handshake,
+            GroupKind::Welcome,
+            GroupKind::Message,
+            GroupKind::Join,
+            GroupKind::Rejoin,
+        ] {
+            let body = GroupBody::inline(group, kind, vec![7; MAX_INLINE_MLS_BYTES]);
+            let body = if kind == GroupKind::Join {
+                body.with_join_proof([7; 32])
+            } else {
+                body
+            };
+            assert!(
+                crate::envelope::Body::Group(body).encode().is_ok(),
+                "the largest message this client sends inline encodes as {kind:?}"
+            );
+        }
+
         assert!(GroupBody::fits_inline(MAX_INLINE_MLS_BYTES));
         assert!(!GroupBody::fits_inline(MAX_INLINE_MLS_BYTES + 1));
     }
@@ -886,6 +939,39 @@ mod tests {
         assert_eq!(bytes.len(), 32);
         assert_eq!(decode_seal_key(&bytes).unwrap(), id.dh_public());
         assert!(decode_seal_key(&bytes[..31]).is_err());
+
+        // Every group message is sealed to every member, so a member whose
+        // leaf carries a key of small order would make sending fail for
+        // everyone. The canonical small-order encodings, and the two
+        // non-canonical ones, are refused where the leaf is read.
+        let low_order: [[u8; 32]; 5] = [
+            [0; 32],
+            {
+                let mut k = [0; 32];
+                k[0] = 1;
+                k
+            },
+            [
+                224, 235, 122, 124, 59, 65, 184, 174, 22, 86, 227, 250, 241, 159, 196, 106, 218, 9,
+                141, 235, 156, 50, 177, 253, 134, 98, 5, 22, 95, 73, 184, 0,
+            ],
+            [
+                95, 156, 149, 188, 163, 80, 140, 36, 177, 208, 177, 85, 156, 131, 239, 91, 4, 68,
+                92, 196, 88, 28, 142, 134, 216, 34, 78, 221, 208, 159, 17, 87,
+            ],
+            {
+                let mut k = [0xff; 32];
+                k[0] = 0xec;
+                k[31] = 0x7f;
+                k
+            },
+        ];
+        for key in low_order {
+            assert!(
+                decode_seal_key(&key).is_err(),
+                "a small-order seal key is refused: {key:?}"
+            );
+        }
     }
 
     #[test]
