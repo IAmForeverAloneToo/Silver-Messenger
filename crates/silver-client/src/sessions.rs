@@ -38,8 +38,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use silver_protocol::prekey::Prekeys;
 use silver_protocol::{
-    Identity, InitHeader, KeyBundle, PqPrekeySecret, PrekeySecret, ProtocolError, RatchetBody,
-    Session, UserId,
+    DhPublic, Identity, InitHeader, KeyBundle, PqPrekeySecret, PrekeySecret, ProtocolError,
+    RatchetBody, Session, UserId,
 };
 use zeroize::Zeroizing;
 
@@ -80,8 +80,27 @@ pub enum SessionError {
     SessionMismatch,
     #[error(transparent)]
     Protocol(#[from] ProtocolError),
+    /// A message that belonged to a session this client holds, and that
+    /// the session could not read: the two ratchets have come apart.
+    ///
+    /// Kept apart from the rest because it is the one failure that says
+    /// something about *who* sent the message. A session id is random and
+    /// known only to the two sides, so a body naming one this client holds
+    /// for that peer came from that peer; every other failure here needs
+    /// no keys and no knowledge at all, so the sender named in it is
+    /// nobody's word but the sender's.
+    #[error(transparent)]
+    InSession(ProtocolError),
     #[error("could not save session state: {0}")]
     Storage(#[from] anyhow::Error),
+}
+
+impl SessionError {
+    /// Whether the message came from a session this client already had,
+    /// which makes the sender the envelope names worth repeating.
+    pub fn from_a_known_session(&self) -> bool {
+        matches!(self, Self::InSession(_))
+    }
 }
 
 /// A one-time key on deposit at the relay.
@@ -437,17 +456,20 @@ impl SessionStore {
         from: UserId,
         body: &RatchetBody,
         now_ms: u64,
-    ) -> Result<(Zeroizing<Vec<u8>>, bool), SessionError> {
+    ) -> Result<(Zeroizing<Vec<u8>>, Option<DhPublic>), SessionError> {
         if let Some(existing) = self.peers.get_mut(&from).and_then(|p| {
             p.sessions
                 .iter_mut()
                 .find(|s| *s.session.id() == body.session)
         }) {
-            let plaintext = existing.session.decrypt(&body.message)?;
+            let plaintext = existing
+                .session
+                .decrypt(&body.message)
+                .map_err(SessionError::InSession)?;
             existing.last_used_ms = now_ms;
             existing.pending_init = None;
             self.persist_sessions()?;
-            return Ok((plaintext, false));
+            return Ok((plaintext, None));
         }
 
         let init = body.init.as_ref().ok_or(SessionError::UnknownSession)?;
@@ -531,7 +553,13 @@ impl SessionStore {
         });
         Self::prune(entry);
         self.persist_sessions()?;
-        Ok((plaintext, true))
+        // The key the initiator claimed as its own. It is signed by the
+        // sender's identity key (v4) or covered by the sealed layer's
+        // signature (v2), which proves whoever built the handshake holds
+        // that key — not that this is the key the peer published. The
+        // caller, which has the peer's pinned bundle, is the one that can
+        // tell (`docs/PROTOCOL.md` section 5).
+        Ok((plaintext, Some(init.identity_dh)))
     }
 
     /// Drop every session with `peer`, for example because their identity
@@ -691,12 +719,21 @@ mod tests {
                 .unwrap()
         }
 
+        /// A body carrying somebody else's session id and no handshake:
+        /// what a stranger, a blocked id or the relay can put together
+        /// without any key at all.
+        fn clone_body_without_init(&self, body: &RatchetBody) -> RatchetBody {
+            let mut forged = body.clone();
+            forged.init = None;
+            forged
+        }
+
         fn recv(&mut self, from: &Party, body: &RatchetBody, now: u64) -> (String, bool) {
             let (bytes, established) = self
                 .sessions
                 .decrypt(&self.identity, from.identity.user_id(), body, now)
                 .unwrap();
-            (text_of(&bytes), established)
+            (text_of(&bytes), established.is_some())
         }
     }
 
@@ -894,6 +931,42 @@ mod tests {
         assert!(!pq(&carol, &alice));
     }
 
+    /// The handshake that starts an inbound session hands back the
+    /// long-term key the initiator claimed, so the caller can hold it
+    /// against the one the peer published; a message in an established
+    /// session hands back nothing, there being no new claim to check.
+    /// And a body for a session this client does not hold says nothing
+    /// about who sent it (SM-C-07, SM-C-13).
+    #[test]
+    fn a_handshake_hands_back_the_key_it_claims() {
+        let (mut alice, mut bob) = (Party::new(), Party::new());
+        let bundle = bob.bundle(0);
+        let first = alice.send(&bundle, "hello", 1);
+        let (_, claimed) = bob
+            .sessions
+            .decrypt(&bob.identity, alice.identity.user_id(), &first, 2)
+            .unwrap();
+        assert_eq!(claimed, Some(alice.identity.dh_public()));
+
+        let second = alice.send(&bundle, "again", 3);
+        let (_, claimed) = bob
+            .sessions
+            .decrypt(&bob.identity, alice.identity.user_id(), &second, 4)
+            .unwrap();
+        assert_eq!(claimed, None);
+
+        // A body naming a session Bob does not hold: no keys were needed
+        // to make it, so the sender it names is the sender's own word.
+        let stranger = Party::new();
+        let forged = stranger.clone_body_without_init(&second);
+        let refusal = bob
+            .sessions
+            .decrypt(&bob.identity, stranger.identity.user_id(), &forged, 5)
+            .unwrap_err();
+        assert!(matches!(refusal, SessionError::UnknownSession));
+        assert!(!refusal.from_a_known_session());
+    }
+
     #[test]
     fn a_stale_signed_prekey_starts_no_session() {
         let mut alice = Party::new();
@@ -952,12 +1025,18 @@ mod tests {
         assert!(m3.init.is_none());
         assert_eq!(bob.recv(&alice, &m3, 8), ("good".into(), false));
 
-        // A replayed handshake message finds the session and fails cleanly.
+        // A replayed handshake message finds the session and fails
+        // cleanly. It failed *inside* a session this client holds, which
+        // is the one failure that says who sent it (SM-C-13).
+        let replayed = bob
+            .sessions
+            .decrypt(&bob.identity, alice.identity.user_id(), &m1, 9)
+            .unwrap_err();
         assert!(matches!(
-            bob.sessions
-                .decrypt(&bob.identity, alice.identity.user_id(), &m1, 9),
-            Err(SessionError::Protocol(ProtocolError::DecryptFailed))
+            replayed,
+            SessionError::InSession(ProtocolError::DecryptFailed)
         ));
+        assert!(replayed.from_a_known_session());
     }
 
     #[test]

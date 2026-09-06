@@ -308,6 +308,7 @@ silver --import-backup <F> restore identity and contacts from F; add --force to 
 SILVER_BACKUP_PASSPHRASE=… supplies the backup passphrase non-interactively
 silver --export-history <D> write every conversation to D (outside the data directory), a text file each, or JSON lines with --format json; deleted and expired messages are not there, nothing is overwritten
 silver --submit-authenticated  send on the authenticated connection instead of the relay's anonymous one (env SILVER_SUBMIT_AUTHENTICATED)
+silver --require-anonymous send nothing at all to a relay that will not take anonymous submissions, rather than falling back to the authenticated connection (env SILVER_REQUIRE_ANONYMOUS)
 silver --allow-unbound-login   log in to a relay older than 0.6.0, whose login signs the challenge without the relay's name (env SILVER_ALLOW_UNBOUND_LOGIN)
 SILVER_LOG=debug silver    write logs to <data-dir>/silver.log
 

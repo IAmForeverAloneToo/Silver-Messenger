@@ -499,6 +499,14 @@ pub struct App {
     /// When to put key packages on deposit again.
     key_packages_due: Option<Instant>,
     last_group_maintenance: Instant,
+    /// When the last "could not be read" notice was made, and how many
+    /// have arrived since: a stranger, a blocked id or the relay can make
+    /// these at will, so they are gathered up rather than each getting a
+    /// line of its own.
+    unreadable: (Option<Instant>, usize),
+    /// Whether messages are going out on the relay's anonymous submission
+    /// connection. `None` until the relay says.
+    pub anonymous_submission: Option<bool>,
     known_ids: RecentIds,
     /// Blob ids of parked group messages already fetched.
     fetched_blobs: RecentIds,
@@ -745,6 +753,8 @@ impl App {
             group_outstanding: HashMap::new(),
             key_packages_due: None,
             last_group_maintenance: Instant::now(),
+            unreadable: (None, 0),
+            anonymous_submission: None,
             known_ids,
             fetched_blobs: RecentIds::new(FETCHED_BLOBS_CAP),
             requests_full_noted: false,
@@ -3370,8 +3380,33 @@ impl App {
             ClientEvent::SessionEstablished {
                 peer,
                 initiated_by_us,
+                identity_dh,
             } => {
                 let name = self.contact_name(&peer);
+                // A session they started carries the long-term key their
+                // handshake claimed. Whoever built it holds their identity
+                // key, which is not the same as it being the key they
+                // published: somebody with a copy of the identity key can
+                // sign a fresh one, and nothing else on this path would
+                // have noticed. Against the pinned bundle it shows.
+                let mismatch = identity_dh.is_some_and(|used| {
+                    self.contact_index(&peer)
+                        .and_then(|i| self.contacts[i].bundle.as_ref())
+                        .is_some_and(|pinned| pinned.dh_public != used)
+                });
+                if mismatch {
+                    // Nothing is replied into it: the next message to them
+                    // starts a session against the key they published.
+                    self.client.forget_sessions(&peer);
+                    self.system(
+                        Level::Warn,
+                        format!(
+                            "A message from {name} started a session with a long-term key that is not the one pinned for them. Somebody holding their identity key can do that, and the message may not be from {name}; the session has been dropped, so nothing you send goes into it. Compare safety numbers with {name} over another channel before trusting the message, and /remove and re-add them if their key really did change."
+                        ),
+                    );
+                    self.toast(format!("{name}'s key does not match the pin; see System."));
+                    return;
+                }
                 let info = self.client.session_info(&peer);
                 let note = match info {
                     Some(s) if s.pq_ratchet => {
@@ -3390,15 +3425,23 @@ impl App {
                     ),
                 );
             }
-            ClientEvent::Undecryptable { from, reason, .. } => {
-                let name = self.contact_name(&from);
-                self.system(
-                    Level::Warn,
-                    format!(
-                        "A message from {name} could not be read: {reason}. It is lost; sending them a message starts a fresh session so the next ones get through."
-                    ),
-                );
-                self.toast(format!("Unreadable message from {name}; see System."));
+            ClientEvent::Undecryptable { hint, reason, .. } => {
+                self.on_undecryptable(hint, reason);
+            }
+            ClientEvent::RelayFeatures {
+                relay_url,
+                features,
+            } => self.on_relay_features(&relay_url, &features),
+            ClientEvent::AnonymousSubmission { on } => {
+                if self.anonymous_submission != Some(on) {
+                    self.anonymous_submission = Some(on);
+                    if !on {
+                        self.system(
+                            Level::Warn,
+                            "Messages are going out on the authenticated connection: this relay is not taking anonymous submissions, so it sees which identity sent each one (it still cannot read any of them). --require-anonymous refuses to send at all rather than fall back.".to_owned(),
+                        );
+                    }
+                }
             }
             ClientEvent::PeerRevoked { revocation } => self.handle_peer_revoked(revocation),
             ClientEvent::PeerSucceeded { succession } => self.handle_peer_succeeded(succession),
@@ -3433,6 +3476,101 @@ impl App {
     /// a message; the client checked the signature first). If it names a
     /// contact we have pinned, retire that contact: mark it revoked, drop the
     /// sessions and warn. A revocation for someone we do not know is ignored.
+    /// What the relay says it can do, on every connection.
+    ///
+    /// The list is the relay's own word, and it can differ per client and
+    /// per connection. What matters is what a host offered *before*: a
+    /// relay that stops offering `transparency` turns off the checking of
+    /// the keys it serves, and one that stops offering `anonymous_send`
+    /// learns which identity sent every message. Both are downgrades a
+    /// relay can make for one client alone, and neither shows unless
+    /// somebody remembers. The client remembers, and says so every time
+    /// it happens, until the relay offers the feature again.
+    fn on_relay_features(&mut self, relay_url: &str, features: &[String]) {
+        let mut config = self.store.load_config().unwrap_or_default();
+        let withdrawn = config.note_features(relay_url, features);
+        if let Err(e) = self.store.save_config(&config) {
+            tracing::warn!("could not remember the relay's features: {e:#}");
+        }
+        for feature in &withdrawn {
+            let costs = match feature.as_str() {
+                silver_protocol::wire::feature::TRANSPARENCY => {
+                    "the keys it serves for your contacts are no longer checked against its published log, which is what would catch it serving you a different key"
+                }
+                silver_protocol::wire::feature::ANONYMOUS_SEND => {
+                    "your messages now go out on the authenticated connection, so it learns which identity sent each one"
+                }
+                silver_protocol::wire::feature::PREKEYS
+                | silver_protocol::wire::feature::PQ_PREKEYS => {
+                    "new conversations with it lose forward secrecy, or its post-quantum half"
+                }
+                silver_protocol::wire::feature::DEVICES => {
+                    "your linked devices are no longer served to your contacts, so messages stop reaching them"
+                }
+                silver_protocol::wire::feature::GROUPS => "groups stop working through it",
+                silver_protocol::wire::feature::BLOBS => "files cannot be sent through it",
+                _ => "what it did with that feature is no longer done",
+            };
+            self.system(
+                Level::Warn,
+                format!(
+                    "This relay used to offer `{feature}` and no longer says it does: {costs}. A relay that wanted to do exactly that would look like this. If the operator did not say they were changing it, treat the relay as untrusted and check with them."
+                ),
+            );
+        }
+        if !withdrawn.is_empty() {
+            self.toast("The relay withdrew something it offered before; see System.");
+        }
+    }
+
+    /// A message opened at the sealed-sender layer but could not be read.
+    ///
+    /// `hint` names the sender only when the failure came from a session
+    /// this client holds, which no one but that peer could have produced.
+    /// Every other failure — `UnknownSession` above all, which needs no
+    /// keys at all — carries a sender that is the sender's own claim, so
+    /// nobody is named: rendering it as a contact would be a way to write
+    /// on screen in someone else's name, and past `/block`.
+    ///
+    /// The notices are gathered: one line, then a count, for a minute.
+    fn on_undecryptable(&mut self, hint: Option<UserId>, reason: String) {
+        const EVERY: Duration = Duration::from_secs(60);
+        let now = Instant::now();
+        let quiet = self.unreadable.0.is_some_and(|at| now < at + EVERY);
+        if quiet {
+            self.unreadable.1 += 1;
+            return;
+        }
+        let more = std::mem::take(&mut self.unreadable.1);
+        self.unreadable.0 = Some(now);
+        let also = if more > 0 {
+            format!(" ({more} more since the last notice.)")
+        } else {
+            String::new()
+        };
+        match hint {
+            Some(peer) => {
+                let name = self.contact_name(&peer);
+                self.system(
+                    Level::Warn,
+                    format!(
+                        "A message from {name} could not be read: {reason}. It is lost; sending them a message starts a fresh session so the next ones get through.{also}"
+                    ),
+                );
+                self.toast(format!("Unreadable message from {name}; see System."));
+            }
+            None => {
+                self.system(
+                    Level::Warn,
+                    format!(
+                        "A message arrived that could not be read: {reason}. Who sent it is not confirmed — a message this client cannot open names its sender without proving it — so nobody is named here. If a contact says their messages are not arriving, send them one: that starts a fresh session.{also}"
+                    ),
+                );
+                self.toast("An unreadable message arrived; see System.");
+            }
+        }
+    }
+
     fn handle_peer_revoked(&mut self, revocation: silver_protocol::Revocation) {
         let Some(index) = self.contact_index(&revocation.identity) else {
             return; // not a contact of ours

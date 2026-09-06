@@ -24,7 +24,7 @@
 //! written before the passphrase was set are recognised as plaintext and
 //! re-encrypted when the passphrase is set.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -112,6 +112,18 @@ pub struct Config {
     /// URL cannot quietly strip the transport encryption.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secure_hosts: Vec<String>,
+    /// What each relay host has told this client it can do, remembered as
+    /// the union of everything it has ever offered.
+    ///
+    /// The features come from the relay on every connection and are the
+    /// relay's own word. A relay that stops offering `transparency` turns
+    /// off the checking of the keys it serves; one that stops offering
+    /// `anonymous_send` learns which identity submitted every message.
+    /// Both are downgrades a relay can make for one client at a time,
+    /// silently, and neither is visible unless somebody remembers what was
+    /// offered before. This is that memory (`docs/PROTOCOL.md` 7.3).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub relay_features: BTreeMap<String, Vec<String>>,
     /// Random value identifying this installation's message numbering; see
     /// [`silver_protocol::Sequence`].
     #[serde(default)]
@@ -190,6 +202,32 @@ impl Config {
         true
     }
 
+    /// Record what the relay at `url` offers, and say which of the things
+    /// it offered before are missing now.
+    ///
+    /// The record is the union of everything the host has ever offered,
+    /// so a feature added later is remembered too and a relay cannot
+    /// quietly take back what it once gave. A returned list is a
+    /// downgrade for the user to hear about.
+    pub fn note_features(&mut self, url: &str, offered: &[String]) -> Vec<String> {
+        let Some(host) = url_host(url) else {
+            return Vec::new();
+        };
+        let known = self.relay_features.entry(host).or_default();
+        let withdrawn: Vec<String> = known
+            .iter()
+            .filter(|f| !offered.contains(f))
+            .cloned()
+            .collect();
+        for feature in offered {
+            if !known.contains(feature) {
+                known.push(feature.clone());
+            }
+        }
+        known.sort();
+        withdrawn
+    }
+
     /// The host of `url` when `url` is plain `ws://` to a host this client
     /// has reached over `wss://` before: such a URL must not be used.
     pub fn downgrade(&self, url: &str) -> Option<String> {
@@ -229,6 +267,7 @@ impl Default for Config {
             proxy: None,
             relay_pins: Vec::new(),
             secure_hosts: Vec::new(),
+            relay_features: BTreeMap::new(),
             send_epoch: None,
             invite_token: None,
             read_receipts: true,
@@ -2717,6 +2756,64 @@ mod tests {
         let loaded = store.load_config().unwrap();
         assert_eq!(loaded.secure_hosts, config.secure_hosts);
         assert!(loaded.downgrade("ws://relay.example/ws").is_some());
+    }
+
+    /// A relay's features are its own word and it can say something
+    /// different to each client on each connection. What a host offered
+    /// before is remembered, so taking it back shows.
+    #[test]
+    fn a_relay_cannot_quietly_take_back_what_it_offered() {
+        let mut config = Config::default();
+        let all: Vec<String> = ["prekeys", "transparency", "anonymous_send"]
+            .iter()
+            .map(|f| (*f).to_owned())
+            .collect();
+        assert!(
+            config
+                .note_features("wss://relay.example/ws", &all)
+                .is_empty()
+        );
+        // The same again says nothing, and the host is matched as the
+        // downgrade rule matches it.
+        assert!(
+            config
+                .note_features("wss://Relay.Example:443/ws", &all)
+                .is_empty()
+        );
+        // A feature added later joins the record rather than replacing it.
+        let more: Vec<String> = ["prekeys", "transparency", "anonymous_send", "groups"]
+            .iter()
+            .map(|f| (*f).to_owned())
+            .collect();
+        assert!(
+            config
+                .note_features("wss://relay.example/ws", &more)
+                .is_empty()
+        );
+
+        // Two taken away at once, both reported.
+        let fewer = vec!["prekeys".to_owned(), "groups".to_owned()];
+        let mut gone = config.note_features("wss://relay.example/ws", &fewer);
+        gone.sort();
+        assert_eq!(gone, vec!["anonymous_send", "transparency"]);
+        // The record is unchanged by the withdrawal, so it is reported
+        // again on the next connection and not forgotten quietly.
+        let again = config.note_features("wss://relay.example/ws", &fewer);
+        assert_eq!(again.len(), 2);
+        // Another relay's word is its own.
+        assert!(
+            config
+                .note_features("wss://other.example/ws", &fewer)
+                .is_empty()
+        );
+
+        let (store, _dir) = temp_store();
+        store.save_config(&config).unwrap();
+        let mut loaded = store.load_config().unwrap();
+        assert_eq!(
+            loaded.note_features("wss://relay.example/ws", &fewer).len(),
+            2
+        );
     }
 
     #[test]

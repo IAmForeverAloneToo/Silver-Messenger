@@ -50,6 +50,13 @@ pub struct ConnectOptions {
     /// Refuse to use the relay's anonymous submission connection even when
     /// it offers one, and submit on the authenticated connection instead.
     pub submit_authenticated: bool,
+    /// Send nothing at all to a relay that will not take anonymous
+    /// submissions. Without this the client falls back to the
+    /// authenticated connection, which tells the relay which identity
+    /// sent every message; with it, a relay that does not offer
+    /// `anonymous_send`, or that stops taking them mid-connection, is
+    /// disconnected from instead.
+    pub require_anonymous: bool,
     /// Log in to a relay that offers only the older login, which signs the
     /// challenge without the relay's host (`docs/PROTOCOL.md` section
     /// 7.1). Off by default: such a signature is worth the same at every
@@ -87,6 +94,7 @@ impl std::fmt::Debug for ConnectOptions {
             .field("sessions", &self.sessions.is_some())
             .field("devices", &self.devices.is_some())
             .field("submit_authenticated", &self.submit_authenticated)
+            .field("require_anonymous", &self.require_anonymous)
             .field("groups", &self.groups)
             .finish()
     }

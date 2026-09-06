@@ -156,6 +156,19 @@ struct Args {
     #[arg(long, env = "SILVER_SUBMIT_AUTHENTICATED")]
     submit_authenticated: bool,
 
+    /// Send nothing at all to a relay that will not take anonymous
+    /// submissions. Without this the client falls back to the
+    /// authenticated connection, which tells the relay which identity
+    /// sent every message; with it, such a relay is disconnected from and
+    /// the reason said. Not with --submit-authenticated, which asks for
+    /// the opposite.
+    #[arg(
+        long,
+        env = "SILVER_REQUIRE_ANONYMOUS",
+        conflicts_with = "submit_authenticated"
+    )]
+    require_anonymous: bool,
+
     /// Log in to a relay older than 0.6.0, which asks for a login that
     /// signs the challenge without the relay's name. Such a signature is
     /// worth the same at every relay, so a hostile relay in the middle can
@@ -511,6 +524,7 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
                     .shared(),
             ),
             submit_authenticated: args.submit_authenticated,
+            require_anonymous: args.require_anonymous,
             allow_unbound_login: args.allow_unbound_login,
             groups: true,
             transparency: Some(

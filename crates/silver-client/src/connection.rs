@@ -59,18 +59,55 @@ const FILE_CIPHER_OVERHEAD: u64 = 64;
 pub enum ClientEvent {
     /// Authenticated and our key bundle is published.
     Connected { relay_url: String },
+    /// What the relay says it can do, on every connection.
+    ///
+    /// The list is the relay's own word and it can be different for each
+    /// client and each connection. The front end remembers what a host has
+    /// offered before ([`Config::note_features`]) and says so when
+    /// something goes missing: a relay that stops offering `transparency`
+    /// turns off the checking of the keys it serves, and one that stops
+    /// offering `anonymous_send` learns which identity sent every message.
+    RelayFeatures {
+        relay_url: String,
+        features: Vec<String>,
+    },
+    /// Whether messages are going out on the relay's anonymous submission
+    /// connection, which hides the sender from it, or on the
+    /// authenticated one, which does not. Raised whenever it changes, and
+    /// once on every connection.
+    AnonymousSubmission { on: bool },
     /// The connection dropped or could not be made; another attempt follows
     /// after `retry_in`.
     Disconnected { reason: String, retry_in: Duration },
     /// A decrypted, signature-verified incoming message.
     Message(Box<Message>),
     /// A forward-secret session with `peer` came into being.
-    SessionEstablished { peer: UserId, initiated_by_us: bool },
-    /// An envelope from `from` was authentic but its session-encrypted body
-    /// could not be read, usually because one side lost its session state.
-    /// Sending them a message starts a fresh session.
+    /// A forward-secret session with `peer` now exists.
+    ///
+    /// For one they started, `identity_dh` is the long-term X25519 key
+    /// their handshake claimed as their own. Whoever built the handshake
+    /// holds the identity key it is signed with, but that is not the same
+    /// as it being the key the peer *published*: somebody with a copy of
+    /// the identity key can sign a fresh one. The front end, which holds
+    /// the pinned bundle, compares the two and says so when they differ
+    /// (`docs/PROTOCOL.md` section 5).
+    SessionEstablished {
+        peer: UserId,
+        initiated_by_us: bool,
+        identity_dh: Option<silver_protocol::DhPublic>,
+    },
+    /// An envelope opened at the sealed-sender layer but its body could
+    /// not be read, usually because one side lost its session state.
+    ///
+    /// `hint` is the sender the envelope *claims*, and for a v4 or v5 body
+    /// that claim is not authenticated by anything: the failure can be
+    /// `UnknownSession`, which needs no keys at all, so anybody — a
+    /// stranger, an id the user blocked, the relay itself — can put a
+    /// contact's id there. It is a hint for the log and nothing more; a
+    /// front end must not render it as that contact, or it becomes a way
+    /// to write in someone else's name and past `/block`.
     Undecryptable {
-        from: UserId,
+        hint: Option<UserId>,
         id: String,
         reason: String,
     },
@@ -607,6 +644,7 @@ impl Client {
                 invite_token: options.invite_token.clone(),
                 sessions: options.sessions,
                 submit_authenticated: options.submit_authenticated,
+                require_anonymous: options.require_anonymous,
                 allow_unbound_login: options.allow_unbound_login,
                 relay_features,
                 log: options.transparency,
@@ -1104,6 +1142,7 @@ impl Client {
                                 .send(ClientEvent::SessionEstablished {
                                     peer: to.user_id,
                                     initiated_by_us: true,
+                                    identity_dh: None,
                                 })
                                 .await;
                         }
@@ -1815,6 +1854,7 @@ struct Setup {
     invite_token: Option<String>,
     sessions: Option<SharedSessions>,
     submit_authenticated: bool,
+    require_anonymous: bool,
     allow_unbound_login: bool,
     relay_features: Arc<Mutex<Vec<String>>>,
     log: Option<SharedLog>,
@@ -2068,6 +2108,22 @@ async fn session(
         .map_err(|_| anyhow::anyhow!("handshake timed out"))??;
     let keeps_log = features.iter().any(|f| f == feature::TRANSPARENCY);
     let anonymous_offered = features.iter().any(|f| f == feature::ANONYMOUS_SEND);
+    if setup.require_anonymous && !anonymous_offered {
+        // The user asked for the sender to be hidden from the relay and
+        // this relay will not do it. Falling back would be exactly the
+        // thing they said not to do, so nothing is sent at all.
+        return Ok(Exit::Disconnected(
+            "this relay does not offer anonymous submission, and --require-anonymous was given: \
+             nothing will be sent to it"
+                .into(),
+        ));
+    }
+    let _ = ev_tx
+        .send(ClientEvent::RelayFeatures {
+            relay_url: relay_url.to_owned(),
+            features: features.clone(),
+        })
+        .await;
     *setup
         .relay_features
         .lock()
@@ -2263,6 +2319,16 @@ async fn session(
                 Some(SubmitEvent::Refused) | None => {
                     warn!("submitting on the authenticated connection instead");
                     submission = Submission::Authenticated;
+                    if setup.require_anonymous {
+                        return Ok(Exit::Disconnected(
+                            "the relay stopped taking anonymous submissions, and \
+                             --require-anonymous was given: nothing more will be sent to it"
+                                .into(),
+                        ));
+                    }
+                    let _ = ev_tx
+                        .send(ClientEvent::AnonymousSubmission { on: false })
+                        .await;
                     if !flush_outbox(&mut sink, &mut submission, outbox).await
                         || !resume_transfers(&mut sink, &mut submission, uploads, downloads).await
                     {
@@ -2417,6 +2483,11 @@ async fn session(
                                     setup.proxy.clone(),
                                 ));
                             }
+                            let _ = ev_tx
+                                .send(ClientEvent::AnonymousSubmission {
+                                    on: matches!(submission, Submission::Anonymous(_)),
+                                })
+                                .await;
                             // Resend everything the relay has not accepted
                             // yet; it ignores ids it already holds. Transfers
                             // that waited for this connection start now (or
@@ -2922,7 +2993,7 @@ async fn deliver(
             let Some(sessions) = &setup.sessions else {
                 let _ = ev_tx
                     .send(ClientEvent::Undecryptable {
-                        from,
+                        hint: None,
                         id,
                         reason:
                             "it was sent under a forward-secret session but this client keeps none"
@@ -2939,21 +3010,26 @@ async fn deliver(
             );
             match result {
                 Ok((plain, established)) => {
-                    if established {
+                    if let Some(identity_dh) = established {
                         let _ = ev_tx
                             .send(ClientEvent::SessionEstablished {
                                 peer: from,
                                 initiated_by_us: false,
+                                identity_dh: Some(identity_dh),
                             })
                             .await;
                     }
                     (plain, true)
                 }
                 Err(e) => {
-                    warn!("undecryptable session message {id} from {from}: {e}");
+                    // Only a failure inside a session this client holds
+                    // says who wrote the message; anything else takes the
+                    // sender's word for the sender.
+                    let hint = e.from_a_known_session().then_some(from);
+                    warn!("undecryptable session message {id} claiming to be from {from}: {e}");
                     let _ = ev_tx
                         .send(ClientEvent::Undecryptable {
-                            from,
+                            hint,
                             id,
                             reason: e.to_string(),
                         })
