@@ -100,10 +100,10 @@ fn write(
         Some(c) => c.encrypt(OUTBOX_NAME, &plain),
         None => plain,
     };
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, out).with_context(|| format!("writing {}", tmp.display()))?;
-    fs::rename(&tmp, path).with_context(|| format!("renaming into {}", path.display()))?;
-    Ok(())
+    // Owner-only and synced: the outbox holds sealed envelopes waiting to
+    // go, and a power loss between the write and the rename must not leave
+    // the name pointing at an empty file.
+    crate::store::write_atomic(path, &out)
 }
 
 #[cfg(test)]

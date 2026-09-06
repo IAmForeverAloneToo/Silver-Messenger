@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, bail};
+use anyhow::bail;
 use chrono::{Local, TimeZone};
 use serde::Serialize;
 use silver_protocol::UserId;
@@ -63,7 +63,9 @@ pub fn export_history(
     format: Format,
     now_ms: u64,
 ) -> anyhow::Result<Vec<PathBuf>> {
-    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    // An export is the whole conversation in the clear; it goes into a
+    // directory of the owner's own, and `files::save` writes 0600.
+    crate::store::create_private_dir(dir, None)?;
     let root = store.root().canonicalize()?;
     let target = dir.canonicalize()?;
     if target.starts_with(&root) {

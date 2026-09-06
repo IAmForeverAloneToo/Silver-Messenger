@@ -3783,6 +3783,13 @@ impl App {
             .open(&copy)
             .with_context(|| format!("creating {}", copy.display()))?;
         std::io::Write::write_all(&mut file, &plain)?;
+        drop(file);
+        // The same mark the download itself carries. Without it a file
+        // opened out of an encrypted download misses SmartScreen,
+        // Protected View and Office's macro blocking, which the plain
+        // file beside it gets.
+        silver_client::files::mark_of_the_web(&copy)
+            .with_context(|| format!("marking {} as a download", copy.display()))?;
         Ok(copy)
     }
 

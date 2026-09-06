@@ -90,8 +90,12 @@ pub fn export_backup_with(
         kdf,
         ciphertext,
     };
-    fs::write(path, serde_json::to_string_pretty(&file)?)
+    // Owner-only: the file is encrypted under the passphrase, and an
+    // offline guess at one is easier the more copies there are of it.
+    let mut out = crate::store::create_private(path)?;
+    std::io::Write::write_all(&mut out, serde_json::to_string_pretty(&file)?.as_bytes())
         .with_context(|| format!("writing {}", path.display()))?;
+    out.sync_all()?;
     Ok(())
 }
 
