@@ -37,6 +37,12 @@ until a fixed version is available, or 90 days have passed, whichever
 comes first. Advisories are published as GitHub Security Advisories on
 this repository and noted in [CHANGELOG.md](CHANGELOG.md).
 
+Reviews done of the project are published the same way, whole, once
+their findings are fixed or scheduled: [docs/audits/](docs/audits/)
+holds the reports, and the answer to each finding — what the code was
+found to do, what is done about it, in which release — is the design
+note beside it.
+
 ## What is in scope
 
 Everything this repository ships: `silver` (the terminal client),
