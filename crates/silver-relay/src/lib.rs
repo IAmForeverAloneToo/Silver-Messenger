@@ -219,6 +219,17 @@ pub struct Policy {
     /// hostile relay could collect and replay here. Off, both kinds are
     /// accepted so clients from before 0.6.0 can still connect.
     pub require_bound_auth: bool,
+    /// The names this relay answers to, normalised as `normalize_host`
+    /// leaves them: its ACME domains, the names in its certificate, and
+    /// whatever `--host` adds. A bound login (7.1) is accepted only for a
+    /// name in this list.
+    ///
+    /// Empty means the relay has no idea what it is called, and falls back
+    /// to comparing the signed host with the `Host` header of the upgrade
+    /// request. Whoever connects chooses that header, so the fallback does
+    /// not stop a relay in the middle from collecting a login under its own
+    /// name and presenting it here; the relay says so at start.
+    pub hosts: Vec<String>,
     /// One-time prekeys handed out for one user per hour, at most; lookups
     /// beyond that get the bundle without one, so nobody can drain a
     /// deposit by looking someone up in a loop. Key packages share the
@@ -247,6 +258,7 @@ impl Default for Policy {
             trusted_proxies: Vec::new(),
             log_ids: false,
             require_bound_auth: false,
+            hosts: Vec::new(),
             one_time_prekeys_per_user_per_hour: 30,
             max_groups: 100_000,
         }
@@ -1243,6 +1255,26 @@ impl RelayState {
         self.store.remove_device_revocation(device)
     }
 
+    /// Whether `host`, as the client signed it, is a name this relay
+    /// answers to.
+    ///
+    /// The point of the bound login (`docs/PROTOCOL.md` section 7.1) is
+    /// that a relay in the middle cannot forward this relay's challenge
+    /// under its own name and use the answer here. So the name must be
+    /// checked against what this relay *is*, from its configuration, and
+    /// not against the `Host` header of the upgrade request, which
+    /// whoever connects writes: with the header alone the attacker's own
+    /// name matches on both sides and the login travels. With no names
+    /// configured there is nothing else to compare with, so the header
+    /// stands in and the relay says at start that logins are not really
+    /// bound.
+    fn host_is_ours(&self, host: &str, reached_as: Option<&str>) -> bool {
+        if self.policy.hosts.is_empty() {
+            return reached_as == Some(host);
+        }
+        self.policy.hosts.iter().any(|ours| ours == host)
+    }
+
     /// The account whose device `user` is here: the certificate in the
     /// bundle it published, which the account signed and which was checked
     /// on publish. An identity that published no claim is nobody's device,
@@ -2003,10 +2035,10 @@ async fn handle_socket(
                 // client reached us as, and that host must be ours.
                 Some(host) => {
                     let host = normalize_host(&host);
-                    if our_host.as_deref() != Some(host.as_str()) {
+                    if !state.host_is_ours(&host, our_host.as_deref()) {
                         Err((
                             ErrorCode::BadSignature,
-                            "the login names a host this relay was not reached as",
+                            "the login names a host this relay does not answer to",
                         ))
                     } else {
                         verify_auth_bound(&user_id, &host, &nonce, &signature)

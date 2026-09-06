@@ -185,6 +185,9 @@ if [ -n "$DOMAIN" ] && [ "$SILVER_TLS" = builtin ]; then
     set_env SILVER_DOMAIN "$DOMAIN"
     set_env SILVER_RELAY_LISTEN 0.0.0.0:443
     set_env SILVER_RELAY_ACME_DOMAIN "$DOMAIN"
+    # The name a bound login must carry. The ACME domain gives the same
+    # answer, but saying it here keeps it right if the domain moves.
+    set_env SILVER_RELAY_HOST "$DOMAIN"
     if [ -n "${SILVER_EMAIL:-}" ]; then
         set_env SILVER_RELAY_ACME_EMAIL "$SILVER_EMAIL"
     fi
@@ -211,6 +214,10 @@ elif [ -n "$DOMAIN" ]; then
     # The relay listens only locally; Caddy terminates TLS and proxies the WebSocket.
     set_env SILVER_RELAY_LISTEN 127.0.0.1:7777
     set_env SILVER_DOMAIN "$DOMAIN"
+    # Behind a front the relay obtains no certificate, so this is the only
+    # place it learns the name clients reach it by; a bound login (protocol
+    # section 7.1) is checked against it.
+    set_env SILVER_RELAY_HOST "$DOMAIN"
     unset_env SILVER_RELAY_ACME_DOMAIN
     unset_env SILVER_RELAY_ACME_EMAIL
     unset_env SILVER_TLS

@@ -130,6 +130,7 @@ capitals with `SILVER_RELAY_` in front: `--max-connections` is
 | `--max-groups` | 100000 | Groups with an epoch sequencer entry (one counter and one hash each; idle ones go after 180 days); 0 for no cap | A small relay, with room: a group costs the relay almost nothing, so this is a guard against a loop making entries, not a sizing knob |
 | `--trusted-proxy` | loopback | Whose `X-Forwarded-For` names the client | A TLS front on another host |
 | `--require-bound-auth` | off | Refuse the login of clients before 0.6.0 | Once everyone has updated |
+| `--host` | the ACME domains and the names in `--tls-cert` | The names clients reach this relay by, which a bound login must name | A TLS front, an onion address, or an address clients use literally: without the name, a login collected by another relay under that name is taken here (protocol section 7.1). The relay says at start which names it takes, or that it knows none |
 
 A limit that says no is counted (`silver_relay_refused_total` by reason in
 the metrics, and the hourly line in the log), so you see when one bites

@@ -298,6 +298,7 @@ silver --import-backup <F> restore identity and contacts from F; add --force to 
 SILVER_BACKUP_PASSPHRASE=… supplies the backup passphrase non-interactively
 silver --export-history <D> write every conversation to D (outside the data directory), a text file each, or JSON lines with --format json; deleted and expired messages are not there, nothing is overwritten
 silver --submit-authenticated  send on the authenticated connection instead of the relay's anonymous one (env SILVER_SUBMIT_AUTHENTICATED)
+silver --allow-unbound-login   log in to a relay older than 0.6.0, whose login signs the challenge without the relay's name (env SILVER_ALLOW_UNBOUND_LOGIN)
 SILVER_LOG=debug silver    write logs to <data-dir>/silver.log
 
 silver-relay --listen <ADDR>          default 0.0.0.0:7777                          (env SILVER_RELAY_LISTEN)
@@ -312,6 +313,7 @@ silver-relay --anonymous-sends-per-minute <N>  messages an unauthenticated conne
 silver-relay --max-blob-mib <N>       largest encrypted file to store, default 16; 0 turns file transfer off (env SILVER_RELAY_MAX_BLOB_MIB)
 silver-relay --blob-storage-mib <N>   encrypted file bytes to keep in total, default 1024 (env SILVER_RELAY_BLOB_STORAGE_MIB)
 silver-relay --max-groups <N>         group sequencer entries to keep at most, default 100000; 0 for no cap (env SILVER_RELAY_MAX_GROUPS)
+silver-relay --host <NAME>            a name clients reach this relay by, which a bound login must carry; the ACME domains and the names in --tls-cert count already (env SILVER_RELAY_HOST)
 silver-relay --ephemeral              keep everything in memory only
 RUST_LOG=debug silver-relay           relay log level
 ```

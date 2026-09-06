@@ -115,6 +115,17 @@ struct Args {
     #[arg(long, env = "SILVER_RELAY_REQUIRE_BOUND_AUTH")]
     require_bound_auth: bool,
 
+    /// A name clients reach this relay by, for the bound login: the
+    /// signature must name one of these. May be given more than once, or
+    /// comma-separated. The ACME domains and the names in --tls-cert are
+    /// added on their own, so this is for anything else the relay answers
+    /// to: the name in front of a TLS front, an onion address, an
+    /// address clients use literally. With no name known the relay can
+    /// only compare with the request's own Host header, which whoever
+    /// connects writes, and says so at start.
+    #[arg(long, env = "SILVER_RELAY_HOST", value_delimiter = ',')]
+    host: Vec<String>,
+
     /// One-time prekeys handed out for one user per hour, at most; lookups
     /// beyond that get the bundle without one.
     #[arg(long, env = "SILVER_RELAY_ONE_TIME_PREKEYS_PER_USER_PER_HOUR", default_value_t = Policy::default().one_time_prekeys_per_user_per_hour)]
@@ -561,6 +572,33 @@ enum LogFormat {
     Json,
 }
 
+/// The names this relay answers to, for the bound login (`--host`, the
+/// ACME domains, the names in a certificate given as files), normalised
+/// the way a login's host is and deduplicated. A certificate that will
+/// not load contributes nothing here; serving it fails later with the
+/// error.
+fn relay_hosts(args: &Args, transport: &Transport) -> Vec<String> {
+    use silver_protocol::wire::normalize_host;
+    let mut names: Vec<String> = args.host.iter().map(|h| normalize_host(h)).collect();
+    match transport {
+        Transport::Plain => {}
+        Transport::Files { cert, key } => {
+            if let Ok(loaded) = tls::load_pem(cert, key)
+                && let Some(leaf) = loaded.cert.first()
+            {
+                names.extend(tls::dns_names(leaf).iter().map(|n| normalize_host(n)));
+            }
+        }
+        Transport::Acme(config) => {
+            names.extend(config.domains.iter().map(|d| normalize_host(d)));
+        }
+    }
+    names.retain(|h| !h.is_empty());
+    names.sort();
+    names.dedup();
+    names
+}
+
 /// How the relay's listener is protected.
 enum Transport {
     Plain,
@@ -645,6 +683,10 @@ async fn main() -> anyhow::Result<()> {
         max_messages: args.max_mailbox_messages,
         max_bytes: args.max_mailbox_mib * 1024 * 1024,
     };
+    // Before the policy: the transport says which names this relay
+    // answers to, which the bound login is checked against.
+    let data_dir = (!args.ephemeral).then(|| data_dir(args.data_dir.clone()));
+    let transport = Transport::from_args(&args, data_dir.as_ref())?;
     let policy = Policy {
         sends_per_minute: args.sends_per_minute,
         lookups_per_minute: args.lookups_per_minute,
@@ -661,12 +703,20 @@ async fn main() -> anyhow::Result<()> {
         trusted_proxies: args.trusted_proxy.clone(),
         log_ids: args.log_ids,
         require_bound_auth: args.require_bound_auth,
+        hosts: relay_hosts(&args, &transport),
         one_time_prekeys_per_user_per_hour: args.one_time_prekeys_per_user_per_hour,
         max_groups: args.max_groups,
         ..Policy::default()
     };
     if policy.require_bound_auth {
         info!("only the bound login is accepted; clients before 0.6.0 cannot connect");
+    }
+    if policy.hosts.is_empty() {
+        info!(
+            "no host name is known for this relay, so a bound login is checked against the request's own Host header: pass --host <name> (or use --acme-domain or --tls-cert) so a login collected by another relay cannot be used here"
+        );
+    } else {
+        info!("bound logins are accepted for {}", policy.hosts.join(", "));
     }
     if policy.log_ids {
         info!("user ids are written to the log as they are (--log-ids)");
@@ -686,8 +736,6 @@ async fn main() -> anyhow::Result<()> {
     if policy.anonymous_sends_per_minute == 0 {
         info!("anonymous submission is off; senders submit on their own connection");
     }
-    let data_dir = (!args.ephemeral).then(|| data_dir(args.data_dir.clone()));
-    let transport = Transport::from_args(&args, data_dir.as_ref())?;
     let state = if args.ephemeral {
         info!("running with in-memory state; nothing is persisted");
         RelayState::with_store_and_policy(silver_relay::Store::in_memory()?, limits, policy.clone())

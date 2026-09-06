@@ -164,9 +164,15 @@ Cannot:
   without it, and finds exactly that attack.
 - Impersonate a user to the relay, or to another relay: authentication is
   a signature over a fresh nonce and the relay's own host name, so a login
-  collected by one relay is worthless at another. (The older login without
-  the host is still accepted from older clients unless the operator turns
-  it off with `--require-bound-auth`.)
+  collected by one relay is worthless at another. The receiving relay
+  compares that name with the names it is configured with, not with the
+  header of the request it was reached by, which the party connecting
+  writes; an operator whose relay is reached under a name it does not
+  otherwise know gives it with `--host`, and one that knows no name says
+  so at start. A client answers the older login, which signs the nonce
+  alone and would be worth the same anywhere, only when started with
+  `--allow-unbound-login`; relays still take it from clients that offer
+  it unless the operator turns it off with `--require-bound-auth`.
 - Re-address an envelope to a different recipient: the recipient id is bound
   into both the associated data and the signature.
 - Replay an old envelope to its recipient undetected: envelope ids are
