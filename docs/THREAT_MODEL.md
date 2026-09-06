@@ -284,8 +284,11 @@ claims.
 ### Malicious contact
 
 Can send you anything, including messages that claim any timestamp, and
-files with any name and content. The client bounds all of it: messages are
-cut at 4000 characters, a claimed send time at most two minutes ahead;
+files with any name and content. The client bounds all of it: a message
+held from a stranger, before you accept them, is cut at 4000 characters,
+and every message of any kind is bounded by the 32 KiB body it travels in
+(`PROTOCOL.md` section 3); a claimed send time is at most two minutes
+ahead;
 names are sanitised so that nothing they contain reaches the terminal or
 the file system raw; a file is fetched only when you ask (or you told the
 client to fetch that contact's files as they arrive), never overwrites,

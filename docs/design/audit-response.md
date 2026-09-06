@@ -146,10 +146,12 @@ closes it), **kept** (a design choice the note defends).
 | SM-S-08 | Info | C; a corpus cannot live in a branch under this repository's rules. | The corpus cached per target; a scheduled longer run. | 0.11.0 |
 | SM-S-09 | Info | C; the pull-request exposure is theoretical here. | A `release` environment restricted to `main` and `v*`; `update.sh` verifies the signature once the key exists. | 0.11.0 |
 
-The rows of the report's section 12 with no finding id (the stale
-panic-hook row of the assessment, the "4000 characters" sentence, the
-metrics `login` reason, `auth.host` normalisation, the body cap) are all
-confirmed and corrected in the documentation pass of 0.10.1.
+The rows of the report's section 12 with no finding id are all
+confirmed. The stale panic-hook row of the assessment went with the
+0.10.1 fixes it sat among; the other four — the "4000 characters"
+sentence, the metrics `login` reason, `auth.host` normalisation and the
+body cap — are corrected in 0.11.0's documentation pass, which is where
+this note said 0.10.1 would carry them and was wrong.
 
 ## 4. Order of work
 

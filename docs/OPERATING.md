@@ -183,7 +183,7 @@ say:
 | `silver_relay_uptime_seconds` | Since the last start |
 | `silver_relay_connections_open`, `silver_relay_connections_limit` | Open WebSocket connections against the cap |
 | `silver_relay_connected_addresses` | Distinct client addresses connected |
-| `silver_relay_refused_total{reason}` | Refusals by kind: `connection`, `registration`, `upload`, `login` |
+| `silver_relay_refused_total{reason}` | Refusals by kind: `connection`, `registration`, `upload`. Refused logins are not one of these; they are `silver_relay_auth_failures_total` below |
 | `silver_relay_idle_closed_total` | Connections closed for silence |
 | `silver_relay_anonymous_submissions_total` | Messages submitted on connections that never logged in |
 | `silver_relay_auth_failures_total`, `silver_relay_auth_failure_addresses`, `silver_relay_auth_failures_max_per_address` | Failed logins in total, addresses that failed in the last hour, the most from one of them (the address itself is in the log, never here) |

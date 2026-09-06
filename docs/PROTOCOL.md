@@ -150,7 +150,10 @@ replayed as a different envelope; because the sender id is inside the
 ciphertext, the relay never learns it.
 
 Limits: `body` at most 32 768 bytes; `ciphertext` at most 33 904 bytes;
-a WebSocket frame at most 131 072 bytes.
+a WebSocket frame at most 131 072 bytes. The `body` limit is on the bytes
+after padding (section 4), which round up to a multiple of 160, so the
+most a body can carry before padding is 32 640 bytes; an encoded body
+between the two is refused as too large rather than truncated.
 
 ## 4. Body
 
@@ -607,7 +610,7 @@ first.
 
 | `type` | Fields | Notes |
 | --- | --- | --- |
-| `auth` | `user_id`, `signature`, `host`? | With `host` (the relay's host name as the client connected to it, lower case, without port or IPv6 brackets): `signature = sign("silver-messenger/v2/relay-auth", host \|\| nonce)`, the bound login. Without: `sign("silver-messenger/v1/relay-auth", nonce)`, which a hostile relay could collect and present to another; accepted only while `--require-bound-auth` is off. |
+| `auth` | `user_id`, `signature`, `host`? | With `host` (the relay's host name as the client connected to it, lower case, without surrounding whitespace, without a trailing dot, and without port or IPv6 brackets): `signature = sign("silver-messenger/v2/relay-auth", host \|\| nonce)`, the bound login. Without: `sign("silver-messenger/v1/relay-auth", nonce)`, which a hostile relay could collect and present to another; accepted only while `--require-bound-auth` is off. |
 | `publish` | `bundle`, `invite`? | The client's own bundle (section 2). `invite` is a token for relays that only register invited identities. |
 | `lookup` | `user_id` | |
 | `send` | `envelope` | |
