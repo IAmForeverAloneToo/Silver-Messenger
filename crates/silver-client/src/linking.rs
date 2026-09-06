@@ -173,6 +173,12 @@ impl FromStr for DeviceLink {
         {
             match key {
                 "secret" => {
+                    // Base58 decoding costs time quadratic in the input,
+                    // so the length is checked first; a 16-byte secret is
+                    // 22 characters at most.
+                    if value.len() > 22 {
+                        return Err(LinkError::BadSecret);
+                    }
                     let bytes = bs58::decode(value)
                         .into_vec()
                         .map_err(|_| LinkError::BadSecret)?;

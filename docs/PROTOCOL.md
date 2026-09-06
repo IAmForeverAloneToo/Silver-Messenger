@@ -42,6 +42,13 @@ without the terminating byte.
 Every X25519 output is rejected if it is all zero (a non-contributory
 low-order point).
 
+A user id and a group id are 32 bytes, so their base58 form is 44
+characters at most. A reader refuses longer text as malformed *before*
+decoding it: base58 decoding is a big-integer conversion whose cost
+grows with the square of the length, and ids are parsed from frame
+fields that a relay reads before it has authenticated anybody and that a
+client reads from whatever the relay sends.
+
 ## 2. Key bundle
 
 What a relay stores for a user and serves on lookup:
@@ -750,6 +757,12 @@ do; a lookup of an account with devices takes one prekey of each kind
 from each device's deposit, under the device's own hand-out budget.
 Relay operators can change all of these and can require an invite token
 for first registrations.
+
+The client bounds what it reads as well: a WebSocket message from the
+relay is at most ten frames' worth (a lookup answer carries a bundle for
+the account and one for each of its devices), and a blob chunk larger
+than a chunk can be fails the download. A relay that sends more than
+that is talking to the wrong client.
 
 ### 7.5 Blob storage
 

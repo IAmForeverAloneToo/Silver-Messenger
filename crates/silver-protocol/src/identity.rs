@@ -15,6 +15,11 @@ use crate::bundle::{BUNDLE_DOMAIN, KeyBundle};
 use crate::encoding::{b64_array, to_base64};
 use crate::prekey::Prekeys;
 
+/// The most base58 characters a 32-byte id can take: 44. Longer text is
+/// refused before it is decoded, since decoding costs time quadratic in
+/// the length ([`UserId::from_str`], [`crate::group::GroupId::from_str`]).
+pub const MAX_ID_CHARS: usize = 44;
+
 /// A user's public identity: the raw Ed25519 verifying key.
 ///
 /// Displayed and parsed as base58, e.g. `9sX2...`. Because the id *is* the
@@ -73,7 +78,16 @@ impl FromStr for UserId {
     type Err = ProtocolError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let v = bs58::decode(s.trim())
+        let s = s.trim();
+        // The length first: base58 decoding is a big-integer conversion,
+        // quadratic in the input, and this runs on every frame field that
+        // carries an id, before a relay has authenticated anyone. A
+        // 32-byte value is at most 44 characters, so nothing longer can
+        // be an id and none of it needs decoding.
+        if s.len() > MAX_ID_CHARS {
+            return Err(ProtocolError::InvalidKey);
+        }
+        let v = bs58::decode(s)
             .into_vec()
             .map_err(|_| ProtocolError::InvalidKey)?;
         let bytes: [u8; 32] = v.try_into().map_err(|_| ProtocolError::InvalidKey)?;
@@ -211,6 +225,30 @@ fn domain_tagged(domain: &[u8], message: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    /// Base58 decoding is a big-integer conversion, quadratic in the
+    /// input, and an id is parsed on every frame field that carries one,
+    /// before a relay has authenticated anybody. The length is checked
+    /// first, so a frame full of base58 characters costs nothing.
+    #[test]
+    fn an_overlong_id_costs_nothing_to_refuse() {
+        use std::time::{Duration, Instant};
+        let long = "z".repeat(128 * 1024);
+        let started = Instant::now();
+        assert!(long.parse::<UserId>().is_err());
+        assert!(
+            "z".repeat(MAX_ID_CHARS + 1).parse::<UserId>().is_err(),
+            "one character past what an id can be"
+        );
+        let took = started.elapsed();
+        assert!(
+            took < Duration::from_secs(1),
+            "refused in {took:?}: the length is not being checked before the decoding"
+        );
+        // What an id really is still parses.
+        let id = super::Identity::generate().user_id();
+        assert_eq!(id.to_string().parse::<UserId>().unwrap(), id);
+    }
+
     use super::*;
 
     #[test]

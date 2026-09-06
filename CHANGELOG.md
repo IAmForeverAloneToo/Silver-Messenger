@@ -59,6 +59,19 @@ the response note, section 5.
   is started with `--allow-unbound-login`. Only relays from before 0.6.0
   ask for it.
 
+- **An identifier is measured before it is decoded** (findings SM-P-02,
+  High, and SM-C-17, Low). Base58 decoding is a big-integer conversion
+  whose cost grows with the square of the input, and user and group ids
+  were decoded from frame fields before any length check: on the relay
+  that happens before the rate limits and before authentication, so a
+  single 128 KiB frame of base58 characters cost about four and a half
+  seconds of one core, and a handful of connections could keep a small
+  relay busy. Text longer than the 44 characters an id can take is now
+  refused without being decoded, in ids and in the secrets an invite or
+  device link carries. The client also caps what it will read from a
+  relay in one WebSocket message, where the library's 64 MiB default
+  stood before, and refuses a blob chunk larger than a chunk can be.
+
 ## 0.10.0 - 2026-09-05
 
 Phase 10 of the roadmap: what people expect of a messenger in daily use,
