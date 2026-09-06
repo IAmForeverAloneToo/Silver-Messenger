@@ -15,7 +15,8 @@ problem is in [SECURITY.md](../SECURITY.md).
   A keylogger or a screen recorder defeats everything below.
 - The Rust toolchain and the crates the program is built from do what they
   say. What is done to make a tampered build detectable is under
-  *Supply chain*.
+  *Supply chain*, which also says plainly what the release signature is
+  and is not today.
 - The relay operator is trusted for availability and, to the extent the
   sections below describe, for metadata. Never for content.
 - Users can compare safety numbers out of band when it matters. Without
@@ -576,9 +577,10 @@ is the intended replacement once one API serves both paths.
 Can put a tampered binary on a mirror, or a poisoned crate in the
 dependency tree, or a bad step in the build. What stops each is under
 *Supply chain* below; the short version is that a release can be
-rebuilt bit for bit from its tag, carries GitHub's provenance and the
-maintainer's signature, and embeds the exact dependency tree, so a
-tampered download or build is detectable by anyone who checks. What is
+rebuilt bit for bit from its tag, carries GitHub's provenance (a
+maintainer's signature is designed for and not published yet), and
+embeds the exact dependency tree, so a tampered download or build is
+detectable by anyone who checks. What is
 not detectable this way is a compromised toolchain or runner (the
 provenance would then be honestly issued for a dishonest build); an
 independent rebuild is the answer to that.
@@ -714,24 +716,55 @@ protection above. What is done about that, from 0.6.0:
   tagged commit gives the same bytes; CI rebuilds the Linux binaries twice
   on every push and fails if they differ. The README says how to repeat
   the build and compare.
-- **Provenance and signatures.** Every release file carries a SLSA build
-  provenance attestation issued by GitHub for the workflow run that built
-  it (`gh attestation verify`), and `SHA256SUMS` is signed with the
-  project's minisign key once that key is set up (`minisign.pub` in the
-  repository). The attestation says *which workflow built what from which
-  commit*; the signature says *the maintainer published this*. Together
-  they leave a hostile mirror, a swapped download, or a compromised GitHub
-  account without the signing key nothing to offer that checks out.
+- **Provenance, and a signature that is not there yet.** Every release
+  file carries a SLSA build provenance attestation issued by GitHub for
+  the workflow run that built it (`gh attestation verify`): it says
+  *which workflow built what from which commit*, and GitHub's
+  transparency log holds the record. That is what a download can be
+  checked against today, and it defeats a hostile mirror or a swapped
+  file. It does not defeat GitHub, or whoever holds the maintainer's
+  account: an attestation issued for a workflow run they started is
+  honestly issued.
+
+  A maintainer's signature over `SHA256SUMS` would be the independent
+  root, and there is none: the repository publishes no `minisign.pub`, so
+  every release so far is unsigned by the maintainer and the run says so.
+  When one is set up it is set up off this platform — generated and kept
+  on a machine the maintainer holds, `SHA256SUMS` signed there after each
+  release and the signature attached by hand. The release workflow does
+  not sign and holds no signing key, on purpose: a key it could use would
+  live where the build lives, so a compromised account or a workflow run
+  with access to secrets could sign with it, and it would say exactly
+  what the attestation says. Until the key exists, the attestation is the
+  whole of it, and this section is to be read that way.
 - **What is inside.** Binaries are built with `cargo auditable`, so the
   exact dependency versions are embedded and `cargo audit bin` can check
   a binary against the advisory database years later; a CycloneDX SBOM
   is published next to each binary.
 - **The build itself.** Every GitHub Action is pinned to a commit hash,
-  workflow tokens can only read except where publishing needs to write,
-  `cargo deny` refuses advisories, unexpected licences and unknown
-  sources, and the OpenSSF Scorecard reports on the repository's
-  practices in public. Pins are moved by hand; `cargo audit` on every
-  push is what catches a vulnerable crate in the meantime.
+  every container image the build and the tests use is pinned by digest,
+  and the compiler is pinned to an exact version in `rust-toolchain.toml`
+  rather than floating on "stable", so a rebuild a year later uses the
+  compiler the release used and a verifier reads it off the tag instead
+  of out of expiring workflow logs. Workflow tokens can only read except
+  where publishing needs to write, `cargo deny` refuses advisories,
+  unexpected licences and unknown sources, and the OpenSSF Scorecard
+  reports on the repository's practices in public. Pins are moved by
+  hand; `cargo audit` on every push is what catches a vulnerable crate in
+  the meantime. Anyone who can run a workflow in this repository can
+  publish a release from any commit — standard GitHub behaviour, and a
+  reason the account itself is the thing to protect.
+
+  What is in the tree is worth stating too. `cargo audit` reports no
+  vulnerability; it reports one unmaintained crate, `proc-macro-error2`,
+  a build-time procedural-macro helper reached through the verified
+  cryptography crates under OpenMLS, which is not in the binary. Several
+  dependencies appear in two major versions at once (`curve25519-dalek`,
+  `x25519-dalek`, `rand`, `getrandom`, `hkdf`/`hmac`/`sha2`,
+  `tokio-tungstenite`) because upstreams have not converged; each
+  duplicate is more code in the binary and more advisories to track, and
+  `cargo deny` warns about them on every run rather than failing, since
+  the fix is upstream and not here.
 - **Updates are never automatic.** `silver --check-release` asks the
   releases page once, on request, and prints the answer; nothing is
   downloaded or run.
@@ -750,8 +783,9 @@ protection above. What is done about that, from 0.6.0:
 
 Not addressed: a compromised Rust toolchain or GitHub-hosted runner (the
 attestation would then be honestly issued for a dishonest build; the
-reproducible-build check by an independent party is the answer), and a
-maintainer's account plus signing key both being taken.
+reproducible-build check by an independent party is the answer), and,
+while the release signature is the workflow's own or absent, a
+maintainer's GitHub account being taken.
 
 ## What backs these claims
 

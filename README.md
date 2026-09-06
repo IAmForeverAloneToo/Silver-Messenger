@@ -84,21 +84,33 @@ installs the relay's systemd unit without enabling it;
 
 ### Verifying a release
 
-Every release page carries, next to the archives, a `SHA256SUMS` file,
-its signature `SHA256SUMS.minisig`, and a CycloneDX SBOM per binary; every
-file has a build provenance attestation from GitHub. To check a download:
+Every release page carries, next to the archives, a `SHA256SUMS` file, a
+CycloneDX SBOM per binary and a `BUILD-INFO.txt` per target naming the
+compiler and the flags the binaries were built with; every file has a
+build provenance attestation from GitHub. To check a download:
 
 ```sh
 sha256sum -c SHA256SUMS --ignore-missing          # the archive is what was published
-minisign -Vm SHA256SUMS -p minisign.pub           # ...by the maintainer (key: minisign.pub in this repository)
 gh attestation verify silver-messenger-*.tar.gz --owner IAmForeverAloneToo   # ...by the release workflow, from the tagged commit
 cargo audit bin silver                            # the dependencies inside the binary, against the advisory database
 ```
 
+The attestation is what says the file came from this project: it names
+the repository, the tagged commit and the workflow that built it, and
+GitHub's transparency log holds the record. **There is no maintainer
+signature today** — the repository publishes no `minisign.pub`, so
+`SHA256SUMS` goes out unsigned and the workflow says so on the release
+page. When a release does carry `SHA256SUMS.minisig`, `minisign -Vm
+SHA256SUMS -p minisign.pub` checks it against the key in this repository,
+and that is a second, separate root of trust only when the key is held
+outside GitHub (see "Signing releases" below).
+
 The binaries are reproducible: build the tagged commit yourself and the
 bytes match (CI does this twice on every push for Linux and fails when
-they differ). From a fresh clone at the tag, with the same stable
-toolchain as the release (see the workflow run), on Linux:
+they differ). The compiler is part of that, so it is pinned in
+`rust-toolchain.toml` at the tag and named in the release's
+`BUILD-INFO.txt`; rustup picks it up from the file on its own. From a
+fresh clone at the tag, on Linux:
 
 ```sh
 SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" \
@@ -369,25 +381,38 @@ disk never holds any.
 
 **From GitHub Actions** (works for a private repository): add the secrets
 `VPS_HOST` and `VPS_SSH_KEY` (a private key whose public half is in the
-server's `authorized_keys`; `VPS_USER` optionally, default `root`) and run
-the **Deploy relay** workflow. It builds a static binary on the runner and
-installs it over SSH, so the server needs neither Rust nor access to the
-repository. The same workflow can show status and logs or restart the relay.
+server's `authorized_keys`; `VPS_USER` optionally, default `root`), put
+the server's own SSH host key in the repository *variable* `VPS_HOST_KEY`
+(what `ssh-keyscan <host>` prints, read once from somewhere you trust —
+the workflow will not fetch it itself, since that would trust whoever
+answers), and run the **Deploy relay** workflow. It builds a static
+binary on the runner and installs it over SSH, so the server needs
+neither Rust nor access to the repository. The same workflow can show
+status and logs or restart the relay.
 
-**By hand**, on a Debian/Ubuntu or Fedora server as root, if the repository
-is public:
+**By hand**, on a Debian/Ubuntu or Fedora server as root. The installer
+is a release asset listed in `SHA256SUMS`, so it can be checked before it
+is run — which is worth doing for a script that installs software as
+root, and is why it is not offered as a pipe from a branch into a shell:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/IAmForeverAloneToo/Silver-Messenger/main/deploy/install.sh | bash
+curl -fsSLO https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/latest/download/install.sh
+curl -fsSLO https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/latest/download/SHA256SUMS
+grep ' install.sh$' SHA256SUMS | sha256sum -c -
+SILVER_DOMAIN=relay.example.org SILVER_EMAIL=you@example.org bash install.sh
 ```
 
-This installs build tools and Rust, clones the repository into
-`/opt/silver-messenger`, and builds the relay on the server. Re-running it
-updates to the latest `main`. With a `silver-relay` binary and
-`silver-relay.service` placed next to it, the same script installs those
-instead and needs no compiler.
+This installs build tools and Rust (`rustup-init` from the Rust
+project's own host, checked against the SHA-256 published next to it),
+clones the repository into `/opt/silver-messenger`, and builds the relay
+on the server. Re-running it updates to the latest `main`. With a
+`silver-relay` binary and `silver-relay.service` placed next to it, the
+same script installs those instead and needs no compiler.
 
-Clients then start with `silver --relay ws://<server-ip>:7777/ws`.
+Without `SILVER_DOMAIN` the relay listens on `127.0.0.1:7777` — a public
+port with no TLS is not something to get by accident. Behind a TLS front
+you run yourself, `SILVER_ALLOW_PLAINTEXT=1` opens it to `0.0.0.0:7777`,
+and clients then start with `silver --relay ws://<server-ip>:7777/ws`.
 
 **HTTPS / port 443.** Plain WebSocket on port 7777 is safe for message
 content (everything is end-to-end encrypted before it leaves the client) but
@@ -742,25 +767,48 @@ cargo audit
 
 CI runs the same checks on every push, plus the test suite on Linux, macOS
 and Windows, the terminal tests below under two terminal types, a minute
-of fuzzing per parser, the relay's ACME client against Pebble (Let's
-Encrypt's test server), and a reproducibility check that builds the Linux
-binaries twice from scratch and compares them. Every GitHub Action is
-pinned to a commit hash; the OpenSSF Scorecard runs weekly.
+of fuzzing per parser against a corpus that carries over between runs
+(half an hour a parser once a week), the relay's ACME client against
+Pebble (Let's Encrypt's test server), and a reproducibility check that
+builds the Linux binaries twice from scratch and compares them. Every
+GitHub Action is pinned to a commit hash, every container image by
+digest, and the compiler to an exact version; the OpenSSF Scorecard runs
+weekly.
 
 Pushing a `v*` tag (or running the release workflow with a tag) builds
 the archives for all platforms with `cargo auditable`, attaches a CycloneDX
-SBOM per binary, writes `SHA256SUMS`, signs it, attests the build
-provenance, and publishes it all on the releases page.
+SBOM per binary, writes `SHA256SUMS` and a `BUILD-INFO.txt` per target, attests the build
+provenance, and publishes it all on the releases page, together with the
+relay's installer so operators can check it before running it.
 
-**Signing releases** is the one step that needs a maintainer's key, kept
-outside the build: once, run `minisign -G -W -p minisign.pub -s
-minisign.key`, commit `minisign.pub` at the repository root, and put the
-contents of `minisign.key` in the repository secret `MINISIGN_SECRET_KEY`
-(the key is generated unencrypted so the workflow can use it; the secret
-store protects it). Until then the workflow says so and publishes
-`SHA256SUMS` unsigned; the provenance attestation is there either way.
-The executables themselves are signed the same way, when the secrets
-exist: on Windows with Authenticode from `AUTHENTICODE_PFX` (the PKCS#12
+**Signing releases.** There is no maintainer signature at the moment: the
+repository publishes no `minisign.pub`, so every release so far carries
+`SHA256SUMS` unsigned and the run says so. The provenance attestation is
+there either way, and it is what a download is checked against today.
+
+When a key is set up it is set up *off this platform*, because a key the
+release workflow could use would live where the build lives: anyone who
+can run a workflow with secrets, and anyone holding the maintainer's
+GitHub account, could sign with it, and it would say exactly what the
+attestation already says. So: `minisign -G -p minisign.pub -s
+minisign.key` on a machine the maintainer holds (or a hardware key),
+commit `minisign.pub` at the repository root, and after each release
+download `SHA256SUMS`, sign it there —
+
+```sh
+minisign -Sm SHA256SUMS -t "Silver Messenger v0.0.0"
+```
+
+— and attach `SHA256SUMS.minisig` to the release. The signature and the
+attestation are then two independent things, and `minisign -Vm
+SHA256SUMS -p minisign.pub` checks the first without asking GitHub
+anything.
+
+The executables themselves are signed *in* the workflow, when the
+platform secrets exist — a code-signing certificate says the platform's
+own checker can name the signer, which is a different claim from the one
+above and only useful where the platform makes it: on Windows with
+Authenticode from `AUTHENTICODE_PFX` (the PKCS#12
 file, base64) and `AUTHENTICODE_PASSWORD`; on macOS with a Developer ID
 Application certificate from `APPLE_CERTIFICATE_P12` (base64) and
 `APPLE_CERTIFICATE_PASSWORD`, then notarised under `APPLE_ID`,

@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
 # The relay in a container: a static binary and a CA bundle on an empty
 # base, run as an unprivileged user, the database on a volume, the admin
 # socket in /run/silver-relay.
@@ -20,16 +20,21 @@
 # option, the image is reproducible layer for layer.
 
 ARG BINARY_FROM=source
-ARG RUST_IMAGE=rust:1.94-alpine
+# Pinned by digest, not by tag: a tag can be moved, and "a rebuild of the
+# same release gives the same layers" only holds while the base resolves
+# to the same image (SM-S-05). The Rust image matches the compiler
+# rust-toolchain.toml pins; both are moved by hand.
+ARG RUST_IMAGE=rust:1.98-alpine@sha256:a10e64dd139b7387337c7fbe8aca31b959b57b2fd4c8ae20a02cf1d6ea424dce
+ARG ALPINE_IMAGE=alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
 
 # The CA bundle the ACME client needs to reach the certificate authority,
 # and the two directories the relay writes to, owned by its user.
-FROM --platform=$BUILDPLATFORM alpine:3.22 AS base
+FROM --platform=$BUILDPLATFORM ${ALPINE_IMAGE} AS base
 RUN apk add --no-cache ca-certificates \
     && mkdir -p -m 700 /out/var/lib/silver-relay /out/run/silver-relay
 
 # A binary built elsewhere, chosen by the target architecture.
-FROM --platform=$BUILDPLATFORM alpine:3.22 AS prebuilt
+FROM --platform=$BUILDPLATFORM ${ALPINE_IMAGE} AS prebuilt
 ARG TARGETARCH
 COPY prebuilt/ /prebuilt/
 RUN install -D -m 755 "/prebuilt/linux/${TARGETARCH}/silver-relay" /out/silver-relay

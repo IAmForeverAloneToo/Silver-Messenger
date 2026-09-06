@@ -9,7 +9,7 @@ and the code later disagree, the code wins and this note is corrected.
 | Question | Decision |
 | --- | --- |
 | What every channel installs | The binaries the release workflow already builds, verifies and attests: the same archives, by checksum, on every channel. No channel builds its own. A package is a wrapper around bytes that `SHA256SUMS` and the provenance attestation already cover, so what `brew`, `winget`, `pacman` or `apt` install is what a person downloading the archive by hand would get. |
-| Windows | Authenticode over both executables, in the build job, with `signtool` and a certificate from the repository's secrets (`AUTHENTICODE_PFX`, base64 of the PKCS#12, and `AUTHENTICODE_PASSWORD`), timestamped. Without the secrets the step says so and the release is published unsigned, as the minisign step does; nothing else changes. The certificate is the maintainer's to obtain (a code-signing certificate from a CA, or a free one for open-source projects from SignPath). |
+| Windows | Authenticode over both executables, in the build job, with `signtool` and a certificate from the repository's secrets (`AUTHENTICODE_PFX`, base64 of the PKCS#12, and `AUTHENTICODE_PASSWORD`), timestamped. Without the secrets the step says so and the release is published unsigned; nothing else changes. The certificate is the maintainer's to obtain (a code-signing certificate from a CA, or a free one for open-source projects from SignPath). |
 | macOS | `codesign` with a Developer ID Application identity from the secrets (`APPLE_CERTIFICATE_P12`, `APPLE_CERTIFICATE_PASSWORD`), hardened runtime and a timestamp, then `notarytool submit --wait` under `APPLE_ID`, `APPLE_TEAM_ID` and `APPLE_APP_PASSWORD`. A bare executable takes a signature but not a stapled ticket (stapling is for bundles, disk images and installer packages), so Gatekeeper checks the ticket online the first time; that is how every command-line tool distributed outside the App Store behaves. Without the secrets the step says so and README keeps the `xattr -d com.apple.quarantine` instruction. The Apple Developer Program membership is the maintainer's to take out. |
 | Reproducibility and signatures | A signature is bytes added to the executable, so a signed release differs from a rebuild by exactly the signature. The archives stay the reproducible artefact: CI compares unsigned builds as before, and README says how to compare a signed download (strip the signature with `osslsigncode remove-signature` or `codesign --remove-signature`, then compare). The Linux archives, the Debian packages and the container image carry no embedded signature and reproduce byte for byte. |
 | Homebrew | A tap in this repository: `HomebrewFormula/silver-messenger.rb`, which Homebrew finds when the repository is tapped by URL (`brew tap iamforeveralonetoo/silver https://github.com/IAmForeverAloneToo/Silver-Messenger`). The formula points at the release archives for macOS (Apple Silicon and Intel) and Linux (x86_64 and aarch64) with their checksums, installs both binaries and the documents, and tests `silver --version`. A separate `homebrew-silver` repository would be the usual shape; one repository is enough for a tap, keeps the formula next to the code it installs, and needs no second set of permissions. |
@@ -63,6 +63,37 @@ notice names them and the README section on signing; with some but not
 all, the step fails, since a half-configured secret is a mistake rather
 than a choice.
 
+**What the minisign step is worth** (SM-S-01). The `SHA256SUMS`
+signature is designed to be made by the workflow from
+`MINISIGN_SECRET_KEY`, which means the key lives where the build lives:
+anyone who can run a workflow with secrets, and anyone holding the
+maintainer's GitHub account, can sign with it, and it therefore says
+what the provenance attestation already says. It is convenient — a
+download can be checked with `minisign` alone, no call to GitHub's
+attestation API — and that is its whole value. The independent root is
+the same key generated and kept on a maintainer's machine, `SHA256SUMS`
+downloaded after each release, signed there, and `SHA256SUMS.minisig`
+attached by hand. Neither is set up today: no `minisign.pub` is
+published, so every release so far is unsigned by the maintainer, and
+the README and the threat model say so rather than describing a
+signature that does not exist.
+
+**How a release is published** (SM-S-09). `workflow_dispatch` with a
+`tag` input creates the tag on the selected branch and publishes from
+it, so anyone who may run workflows here may publish a release from any
+commit: standard GitHub behaviour, worth narrowing with an environment
+protection rule on the release job if this ever has more than one
+maintainer. The notes are the tag's `CHANGELOG.md` section alone;
+GitHub's generated notes are off, because they list pull request titles
+written by whoever opened them and those would reach every reader
+unreviewed. `packaging/update.sh` reads `SHA256SUMS` to decide what the
+Homebrew formula, the PKGBUILD and the winget manifests install, so when
+the release is signed and the checkout has `minisign.pub` it checks the
+signature before reading the file. The Homebrew CI job installs the
+formula from the *live* release it names, so that job depends on GitHub
+serving the previous release's archives — deliberate, since it tests
+what a person actually gets.
+
 ## 4. The Debian package
 
 `packaging/deb/build.sh <version> <amd64|arm64> <dir with the binaries>
@@ -115,6 +146,8 @@ packaging archive:
 | winget | Manifests for 0.10.1 in the repository, valid against the schemas; not submitted to `winget-pkgs` (a pull request the maintainer makes). Not yet tried with `winget install --manifest`. |
 | Authenticode | No certificate in the secrets; the 0.10.1 run printed the notice and the Windows executables went out unsigned. |
 | Notarisation | No Apple membership in the secrets; the 0.10.1 run printed the notice and the macOS executables went out unsigned. |
+| minisign | No `minisign.pub` in the repository; every release so far carries `SHA256SUMS` unsigned, and the run says so. Section 3 says what the two ways of setting it up are worth. |
+| Installer | From 0.11.0 `install.sh` is a release asset covered by `SHA256SUMS`, so an operator checks it before running it as root instead of piping a branch into a shell. |
 
 The release's `silver-messenger-v0.10.0-packaging.tar.gz` holds, byte
 for byte, the files `packaging/update.sh 0.10.0` wrote into the

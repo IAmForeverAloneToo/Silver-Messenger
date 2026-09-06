@@ -10,13 +10,23 @@
 #
 #   * From source: with nothing next to it, the script installs Rust, clones
 #     the repository and builds the relay. The repository must be reachable
-#     from the server (public, or SILVER_REPO carrying credentials):
-#       curl -fsSL https://raw.githubusercontent.com/IAmForeverAloneToo/Silver-Messenger/main/deploy/install.sh | bash
+#     from the server (public, or SILVER_REPO carrying credentials).
+#
+#     Download it, check it against the release's SHA256SUMS, then run it,
+#     rather than piping it from the network into a shell:
+#       curl -fsSLO https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/latest/download/install.sh
+#       curl -fsSLO https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/latest/download/SHA256SUMS
+#       grep ' install.sh$' SHA256SUMS | sha256sum -c -
+#       sudo bash install.sh
 #
 # Re-running it updates the relay and restarts the service.
 #
 # Environment overrides:
-#   SILVER_RELAY_LISTEN  address:port to listen on   (default 0.0.0.0:7777; only used on first install)
+#   SILVER_RELAY_LISTEN  address:port to listen on (only used on first install).
+#                        The default is 0.0.0.0:7777 with SILVER_DOMAIN set or
+#                        SILVER_ALLOW_PLAINTEXT=1, and 127.0.0.1:7777 without
+#                        either: a public port with no TLS is not something to
+#                        get by accident.
 #   SILVER_DOMAIN        hostname that points at this server. The relay then
 #                        serves TLS on port 443 itself, with a Let's Encrypt
 #                        certificate it obtains and renews, so clients use
@@ -31,12 +41,25 @@
 #   SILVER_BRANCH        git branch to deploy         (default main)
 #   SILVER_REPO          git repository URL
 #   SILVER_SRC_DIR       where the source is checked out (default /opt/silver-messenger)
+#   SILVER_ALLOW_PLAINTEXT=1
+#                        allow a listener on a public address without TLS. Set
+#                        SILVER_DOMAIN instead unless the relay sits behind a
+#                        TLS front you run yourself; without a domain and
+#                        without this the listener is 127.0.0.1.
+#   SILVER_PUBLIC_IP     the address to print in the "clients connect with"
+#                        line. Without it the script uses the machine's own
+#                        first address and does not ask anyone on the internet.
+#
+# A private repository: SILVER_REPO=https://<token>@github.com/<owner>/<repo>.git
+# works, but git writes that URL into $SILVER_SRC_DIR/.git/config, so the
+# token sits in a file on the server for as long as the checkout does. A
+# deploy key or the "Deploy relay" workflow leaves nothing behind.
 set -euo pipefail
 
 REPO_URL="${SILVER_REPO:-https://github.com/IAmForeverAloneToo/Silver-Messenger.git}"
 BRANCH="${SILVER_BRANCH:-main}"
 SRC_DIR="${SILVER_SRC_DIR:-/opt/silver-messenger}"
-LISTEN="${SILVER_RELAY_LISTEN:-0.0.0.0:7777}"
+LISTEN="${SILVER_RELAY_LISTEN:-}"
 SERVICE_USER=silver
 BIN=/usr/local/bin/silver-relay
 UNIT=/etc/systemd/system/silver-relay.service
@@ -52,6 +75,27 @@ PREBUILT="${SILVER_BINARY:-${HERE:+$HERE/silver-relay}}"
 
 log() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+# What to listen on when nothing says. With a domain the relay serves TLS on
+# 443 itself (section 7 rewrites this). Without one, a public address would
+# be plaintext WebSocket, which the README does not offer as a default and
+# which nobody should get by accident: loopback unless the operator asks for
+# more (SM-S-03).
+if [ -z "$LISTEN" ]; then
+    if [ -n "${SILVER_DOMAIN:-}" ] || [ "${SILVER_ALLOW_PLAINTEXT:-}" = 1 ]; then
+        LISTEN=0.0.0.0:7777
+    else
+        LISTEN=127.0.0.1:7777
+    fi
+fi
+case "$LISTEN" in
+    127.0.0.1:* | localhost:* | '[::1]':*) ;;
+    *)
+        if [ -z "${SILVER_DOMAIN:-}" ] && [ "${SILVER_ALLOW_PLAINTEXT:-}" != 1 ]; then
+            die "SILVER_RELAY_LISTEN=$LISTEN is a public address with no TLS. Set SILVER_DOMAIN=<hostname> so the relay serves wss:// itself, or SILVER_ALLOW_PLAINTEXT=1 if something in front of it terminates TLS."
+        fi
+        ;;
+esac
 
 [ "$(id -u)" -eq 0 ] || die "run this script as root"
 command -v systemctl >/dev/null || die "this script expects a systemd-based distribution"
@@ -95,7 +139,25 @@ else
     export PATH="$CARGO_HOME/bin:$PATH"
     if ! command -v cargo >/dev/null; then
         log "Installing Rust (rustup, minimal profile)"
-        curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --no-modify-path
+        # rustup-init itself, from the Rust project's own host, checked
+        # against the SHA-256 it publishes next to it, rather than piping
+        # sh.rustup.rs into a shell unchecked (SM-S-03).
+        case "$(uname -m)" in
+            x86_64)          rust_triple=x86_64-unknown-linux-gnu ;;
+            aarch64 | arm64) rust_triple=aarch64-unknown-linux-gnu ;;
+            *) die "no rustup build for $(uname -m); install Rust yourself and re-run" ;;
+        esac
+        rust_url="https://static.rust-lang.org/rustup/dist/$rust_triple/rustup-init"
+        tmp=$(mktemp -d)
+        curl -fsSL --proto '=https' --tlsv1.2 -o "$tmp/rustup-init" "$rust_url"
+        curl -fsSL --proto '=https' --tlsv1.2 -o "$tmp/rustup-init.sha256" "$rust_url.sha256"
+        # The published file is "<hash>  rustup-init"; check it where the
+        # download is, whatever path it names.
+        (cd "$tmp" && printf '%s  rustup-init\n' "$(cut -d' ' -f1 rustup-init.sha256)" | sha256sum -c -) ||
+            die "rustup-init does not match the checksum static.rust-lang.org publishes for it"
+        chmod +x "$tmp/rustup-init"
+        "$tmp/rustup-init" -y --profile minimal --no-modify-path
+        rm -rf "$tmp"
     fi
 
     # ---- 4. source ----------------------------------------------------------------
@@ -168,8 +230,15 @@ if [ -z "${SILVER_TLS:-}" ]; then
     fi
 fi
 set_env() { # set_env KEY VALUE: set or replace KEY in the relay's environment file
+    # Written with awk rather than sed: a value is operator-supplied and a
+    # sed replacement reads & and the delimiter, so a domain with one in it
+    # corrupted the file (SM-S-03).
     if grep -q "^$1=" "$ENV_FILE"; then
-        sed -i "s|^$1=.*|$1=$2|" "$ENV_FILE"
+        awk -v key="$1" -v value="$2" \
+            'index($0, key "=") == 1 { print key "=" value; next } { print }' \
+            "$ENV_FILE" >"$ENV_FILE.new"
+        cat "$ENV_FILE.new" >"$ENV_FILE"   # keep the mode and the group
+        rm -f "$ENV_FILE.new"
     else
         echo "$1=$2" >>"$ENV_FILE"
     fi
@@ -315,7 +384,10 @@ WARN
     fi
     extra="  tls:      $tls_log"
 else
-    public_ip=$(curl -fsS -4 --max-time 5 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
+    # The machine's own address. Asking a third party what it is would tell
+    # that third party this host runs a relay, which is nobody's business
+    # (SM-S-03); SILVER_PUBLIC_IP says it outright behind NAT.
+    public_ip="${SILVER_PUBLIC_IP:-$(hostname -I | awk '{print $1}')}"
     relay_url="ws://$public_ip:$port/ws"
     extra=""
     reach="$port/tcp"

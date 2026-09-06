@@ -1,0 +1,44 @@
+name: Rust toolchain
+description: >
+  Install the exact compiler rust-toolchain.toml pins, so every job and
+  every verifier builds with the one the release was built with.
+
+# The workflows used to ask for "stable", which overrides the file and
+# floats: two runs a month apart could use different compilers, and the
+# reproducible-build job compares two builds minutes apart, which never
+# notices. This reads the pin instead, so there is one place to bump.
+
+inputs:
+  targets:
+    description: Comma-separated target triples to install as well.
+    required: false
+    default: ""
+  components:
+    description: Comma-separated components to install as well.
+    required: false
+    default: ""
+
+outputs:
+  channel:
+    description: The version installed.
+    value: ${{ steps.pin.outputs.channel }}
+
+runs:
+  using: composite
+  steps:
+    - id: pin
+      shell: bash
+      run: |
+        channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+        case "$channel" in
+          "" | stable | beta | nightly | *-* )
+            echo "::error::rust-toolchain.toml must pin an exact version; it says '${channel:-nothing}'"
+            exit 1 ;;
+        esac
+        echo "channel=$channel" >> "$GITHUB_OUTPUT"
+        echo "building with Rust $channel"
+    - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
+      with:
+        toolchain: ${{ steps.pin.outputs.channel }}
+        targets: ${{ inputs.targets }}
+        components: ${{ inputs.components }}

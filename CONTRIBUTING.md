@@ -11,8 +11,11 @@ the documents are as much the product as the code.
 
 ## Building
 
-A Rust toolchain from https://rustup.rs; `rust-toolchain.toml` picks the
-version. Then, from the repository root:
+A Rust toolchain from https://rustup.rs; `rust-toolchain.toml` pins the
+exact version, which rustup installs on the first build, and which every
+CI job and the release use as well, so a release can be rebuilt byte for
+byte later. Bumping it is its own commit, together with the Rust image
+`deploy/Dockerfile` names. Then, from the repository root:
 
 ```sh
 cargo build --workspace            # the client (silver) and the relay (silver-relay)

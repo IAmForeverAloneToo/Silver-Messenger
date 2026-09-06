@@ -34,8 +34,51 @@ allow = [
 ]
 
 [bans]
-multiple-versions = "warn"
+# A crate in the tree twice is more code in the binary and one more thing
+# to track advisories for. Every duplicate below is upstream's to
+# converge — a dependency of OpenMLS, axum or rcgen pinning an older
+# generation of the same crate — so each is skipped by name rather than
+# by version, and the versions move without touching this file. What the
+# deny catches is a *new* name joining the list: that is a duplicate this
+# repository introduced, and it wants a look before it is accepted
+# (SM-S-07). `cargo deny check bans` lists what each entry stands for.
+multiple-versions = "deny"
 wildcards = "allow"
+skip = [
+{ name = "base64" },
+{ name = "block-buffer" },
+{ name = "chacha20" },
+{ name = "const-oid" },
+{ name = "cpufeatures" },
+{ name = "crypto-common" },
+{ name = "curve25519-dalek" },
+{ name = "der" },
+{ name = "digest" },
+{ name = "foldhash" },
+{ name = "getrandom" },
+{ name = "hashbrown" },
+{ name = "hkdf" },
+{ name = "hmac" },
+{ name = "nom" },
+{ name = "pkcs8" },
+{ name = "rand" },
+{ name = "rand_chacha" },
+{ name = "rand_core" },
+{ name = "sha1" },
+{ name = "sha2" },
+{ name = "sha3" },
+{ name = "signature" },
+{ name = "spki" },
+{ name = "syn" },
+{ name = "tokio-tungstenite" },
+{ name = "tungstenite" },
+{ name = "webpki-roots" },
+{ name = "windows-sys" },
+{ name = "windows-targets" },
+{ name = "windows_x86_64_gnu" },
+{ name = "windows_x86_64_msvc" },
+{ name = "x25519-dalek" },
+]
 
 [sources]
 unknown-registry = "deny"

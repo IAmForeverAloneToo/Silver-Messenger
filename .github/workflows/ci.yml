@@ -7,12 +7,20 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Sunday at 04:17 UTC: the fuzz targets get a long run against the corpus
+  # they have grown, which a minute a push never reaches.
+  schedule:
+    - cron: "17 4 * * 0"
   workflow_dispatch:
     inputs:
       soak_minutes:
         description: How long the soak runs, in minutes (up to 360)
         required: false
         default: "3"
+      fuzz_seconds:
+        description: How long each fuzz target runs, in seconds
+        required: false
+        default: "60"
 
 permissions:
   contents: read
@@ -26,9 +34,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
+      - uses: ./.github/actions/rust
         with:
-          toolchain: stable
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo fmt --all -- --check
@@ -52,6 +59,10 @@ jobs:
         with:
           tool: cargo-audit@0.22.2
       - run: cargo audit --file Cargo.lock
+      # The fuzz targets have their own lockfile and their own tree; it is
+      # not in a release, but a vulnerability there is still worth knowing
+      # about (SM-S-07).
+      - run: cargo audit --file fuzz/Cargo.lock
 
   test:
     name: test (${{ matrix.os }})
@@ -62,9 +73,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
-        with:
-          toolchain: stable
+      - uses: ./.github/actions/rust
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo build --workspace --all-targets --locked
       - run: cargo test --workspace --locked
@@ -78,9 +87,7 @@ jobs:
         term: [xterm-256color, linux]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
-        with:
-          toolchain: stable
+      - uses: ./.github/actions/rust
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: sudo apt-get update && sudo apt-get install -y tmux
       - run: pip install pyte==0.8.2 || pip install --break-system-packages pyte==0.8.2
@@ -92,9 +99,7 @@ jobs:
     timeout-minutes: 400
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
-        with:
-          toolchain: stable
+      - uses: ./.github/actions/rust
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: pip install pyte==0.8.2 || pip install --break-system-packages pyte==0.8.2
       - run: cargo build --workspace --locked
@@ -106,13 +111,13 @@ jobs:
     # from the debug binaries and installed in a container, the PKGBUILD
     # and its .SRCINFO in an Arch container, the winget manifests against
     # their schemas. The formula has its own job on macOS.
+    # The container images below are pinned by digest, as the relay's own
+    # base images are: a tag can be moved (SM-S-05). Moved by hand.
     name: packages (Debian, Arch, winget)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
-        with:
-          toolchain: stable
+      - uses: ./.github/actions/rust
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # Static binaries, as the release's are, so lintian sees the same
       # shape of package; a debug build is not stripped, so that is done
@@ -129,7 +134,7 @@ jobs:
         run: |
           packaging/deb/build.sh "0.0.0~dev.${GITHUB_SHA::7}" amd64 bins out
           lintian --fail-on error --tag-display-limit 0 out/*.deb
-          docker run --rm -v "$PWD/out:/pkg:ro" debian:stable-slim sh -ec '
+          docker run --rm -v "$PWD/out:/pkg:ro" debian:stable-slim@sha256:04634311a8d5fc442b6eb06d792293c4f3e2268652ca7634e00ce8ef5cc0a28a sh -ec '
             apt-get update -qq >/dev/null
             apt-get install -y -qq /pkg/*.deb >/dev/null
             silver --version
@@ -140,7 +145,7 @@ jobs:
             test ! -e /usr/bin/silver'
       - name: Arch package, its .SRCINFO current and namcap clean of errors
         run: |
-          docker run --rm -v "$PWD/packaging/aur:/aur:ro" archlinux:base-devel sh -ec '
+          docker run --rm -v "$PWD/packaging/aur:/aur:ro" archlinux:base-devel@sha256:84cd9ef000b3cff245ec028e87965b84724f4bf1cc63fc2741ba927b88515ed6 sh -ec '
             pacman -Sy --noconfirm --needed namcap >/dev/null
             useradd -m builder
             cp -r /aur /build && chown -R builder /build && cd /build
@@ -179,9 +184,8 @@ jobs:
       CARGO_INCREMENTAL: 0
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
+      - uses: ./.github/actions/rust
         with:
-          toolchain: stable
           targets: x86_64-unknown-linux-musl
       - run: |
           sudo apt-get update -qq
@@ -219,9 +223,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
-        with:
-          toolchain: stable
+      - uses: ./.github/actions/rust
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: go install github.com/letsencrypt/pebble/v2/cmd/pebble@v2.10.1
       - run: SILVER_PEBBLE="$HOME/go/bin/pebble" cargo test -p silver-relay --test acme -- --nocapture
@@ -272,9 +274,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
-        with:
-          toolchain: stable
+      - uses: ./.github/actions/rust
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-bin: true
@@ -284,6 +284,12 @@ jobs:
   fuzz:
     name: fuzz (${{ matrix.target }})
     runs-on: ubuntu-latest
+    # A minute from an empty corpus explores very little, so each target's
+    # corpus is carried between runs in the actions cache and every run
+    # starts from what the last one found (SM-S-08). The weekly run gets
+    # half an hour a target on top of that; a cache entry no run has
+    # restored for a week is evicted, and the corpus then starts from
+    # nothing again, which costs coverage but never correctness.
     # The repository pins the stable toolchain in rust-toolchain.toml, which
     # would override the nightly installed below for cargo-fuzz's own build
     # and make its -Z sanitizer flags fail. RUSTUP_TOOLCHAIN wins over the
@@ -297,7 +303,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [frames, envelope, blob_chunk, session, invite_link, file_name, stored, group_body, device, pq]
+        target: [frames, envelope, blob_chunk, session, invite_link, file_name, stored, group_body, device, pq, identifier]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
@@ -309,7 +315,25 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: fuzz
-      - run: cargo fuzz run --target $FUZZ_TARGET_TRIPLE ${{ matrix.target }} -- -max_total_time=60 -max_len=4096
+      # The inputs earlier runs found. The key carries the run number so
+      # every run saves a new entry, and the prefix restores the newest
+      # matching one; libfuzzer minimises the directory as it goes, so it
+      # does not grow without bound.
+      - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+      - name: Fuzz
+        env:
+          # The identifier target is about what a long input costs to
+          # parse, so it gets the frame size the relay actually accepts.
+          MAX_LEN: ${{ matrix.target == 'identifier' && 131072 || 4096 }}
+          SECONDS_PER_TARGET: ${{ inputs.fuzz_seconds || (github.event_name == 'schedule' && 1800 || 60) }}
+        run: |
+          mkdir -p fuzz/corpus/${{ matrix.target }}
+          cargo fuzz run --target "$FUZZ_TARGET_TRIPLE" ${{ matrix.target }} \
+            -- -max_total_time="$SECONDS_PER_TARGET" -max_len="$MAX_LEN"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: failure()
         with:
