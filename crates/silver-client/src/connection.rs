@@ -585,6 +585,7 @@ impl Client {
                 invite_token: options.invite_token.clone(),
                 sessions: options.sessions,
                 submit_authenticated: options.submit_authenticated,
+                allow_unbound_login: options.allow_unbound_login,
                 relay_features,
                 log: options.transparency,
                 groups,
@@ -1758,6 +1759,7 @@ struct Setup {
     invite_token: Option<String>,
     sessions: Option<SharedSessions>,
     submit_authenticated: bool,
+    allow_unbound_login: bool,
     relay_features: Arc<Mutex<Vec<String>>>,
     log: Option<SharedLog>,
     groups: Arc<AtomicBool>,
@@ -1974,8 +1976,19 @@ async fn session(
             other => anyhow::bail!("expected challenge, got {other:?}"),
         };
         // A relay that understands the bound login gets one: the signature
-        // covers its host, so it cannot be presented to another relay.
+        // covers its host, so it cannot be presented to another relay. One
+        // that asks for the older login is refused unless the caller said
+        // otherwise: a signature over the nonce alone is worth the same
+        // everywhere, so answering it hands a relay in the middle a login
+        // for the relay it forwarded the challenge from.
         let host = bound.then(|| url_host(relay_url)).flatten();
+        if host.is_none() && !setup.allow_unbound_login {
+            anyhow::bail!(
+                "this relay asks for the login from before 0.6.0, which signs the challenge \
+                 without the relay's name, so the answer would be worth the same at any relay; \
+                 pass --allow-unbound-login to log in anyway"
+            );
+        }
         let signature = match &host {
             Some(host) => auth_signature_bound(identity, host, &nonce),
             None => auth_signature(identity, &nonce),

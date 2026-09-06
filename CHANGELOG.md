@@ -40,6 +40,25 @@ the response note, section 5.
   a relay withholding an identity revocation. Protocol sections 14.2 and
   14.3 say the rules; the threat model says what a stranger cannot do.
 
+- **A bound login is checked against the relay's own names** (findings
+  SM-R-02, High, and SM-C-04, Medium). The login signs the relay's host
+  so that a relay in the middle cannot forward another relay's challenge
+  and use the answer there. The receiving relay compared the signed name
+  with the `Host` header of the request, which whoever connects writes,
+  so the attacker's own name matched on both sides and the login
+  travelled: a hostile relay could read, acknowledge and delete its
+  users' mail at the real relay. It now compares with the names it is
+  configured with (the ACME domains, the names in `--tls-cert`, and
+  `--host`), and says at start which they are, or that it knows none and
+  has only the header to go by. Operators behind a TLS front, on an onion
+  address, or reached by a bare address give `--host`; the installer
+  writes it.
+
+  The client no longer answers the older login, which signs the challenge
+  without a name and is therefore worth the same at any relay, unless it
+  is started with `--allow-unbound-login`. Only relays from before 0.6.0
+  ask for it.
+
 ## 0.10.0 - 2026-09-05
 
 Phase 10 of the roadmap: what people expect of a messenger in daily use,

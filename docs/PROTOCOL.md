@@ -651,13 +651,25 @@ Error codes: `unauthenticated`, `bad_signature`, `malformed`, `too_large`,
 as soon as `auth` succeeds, so they may arrive before `published`. A newer
 connection for the same user replaces the older one, which is closed.
 
-With the bound login the relay checks that `host` is the host it was
-reached as (the `Host` header of the upgrade request, which a TLS front
-passes through, normalised the same way) before verifying the signature,
-so a relay in the middle cannot forward a challenge from another relay and
-use the answer there. The v1 login remains accepted for clients from before
-0.6.0 unless the operator turns it off; a later version will refuse it by
-default.
+With the bound login the relay checks, before verifying the signature,
+that `host` is one of the names it answers to, and it takes those names
+from its own configuration: the domains it obtains a certificate for, the
+names in the certificate it was given, and whatever else the operator
+passes (`--host`). The `Host` header of the upgrade request is not a
+name the relay knows itself by: whoever connects writes it, so a relay in
+the middle can send its own name in the header and have both sides agree
+on it. A relay configured with no name at all can only compare with the
+header, which leaves the login as good as unbound; it says so at start,
+and an operator behind a TLS front, on an onion address, or reached by a
+bare address gives `--host` so that a login collected elsewhere is
+refused here.
+
+A client answers the older login only when it is told to
+(`--allow-unbound-login`). A signature over the nonce alone is worth the
+same at every relay, so answering one hands whoever asked a login for
+any relay that will take it; only a relay from before 0.6.0 asks. Relays
+still accept it from clients that offer it, unless the operator turns it
+off (`--require-bound-auth`); a later version will refuse it by default.
 
 On `publish` with prekeys the relay stores the signed prekey with the
 bundle and the one-time keys separately. It keeps, per user, the ids it

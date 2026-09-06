@@ -145,6 +145,13 @@ struct Args {
     #[arg(long, env = "SILVER_SUBMIT_AUTHENTICATED")]
     submit_authenticated: bool,
 
+    /// Log in to a relay older than 0.6.0, which asks for a login that
+    /// signs the challenge without the relay's name. Such a signature is
+    /// worth the same at every relay, so a hostile relay in the middle can
+    /// pass another relay's challenge on and log in there as you.
+    #[arg(long, env = "SILVER_ALLOW_UNBOUND_LOGIN")]
+    allow_unbound_login: bool,
+
     /// Leave the mouse to the terminal (no wheel scrolling in the chat, but
     /// text can be selected without holding Shift).
     #[arg(long, env = "SILVER_NO_MOUSE")]
@@ -467,6 +474,7 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
                     .shared(),
             ),
             submit_authenticated: args.submit_authenticated,
+            allow_unbound_login: args.allow_unbound_login,
             groups: true,
             transparency: Some(
                 silver_client::LogStore::load(Some(store.transparency_path()), store.cipher())

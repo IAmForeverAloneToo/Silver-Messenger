@@ -371,6 +371,42 @@ async fn uploads_per_address_are_limited() {
     ));
 }
 
+/// The audit's SM-R-02: the host a bound login names is checked against
+/// the names the relay is configured with, not against the request's own
+/// `Host` header. Whoever connects writes that header, so a relay in the
+/// middle would otherwise pass the real relay's challenge on under its
+/// own name, take the answer, and present it at the real relay.
+#[tokio::test]
+async fn a_bound_login_is_checked_against_the_relays_own_names() {
+    let (url, _) = start(Policy {
+        hosts: vec!["relay.example".to_owned()],
+        ..Policy::default()
+    })
+    .await;
+    let identity = Identity::generate();
+    // What a relay in the middle has: a login signed for its own name,
+    // and a connection it makes with that name in the header.
+    let mut request = url.as_str().into_client_request().unwrap();
+    request
+        .headers_mut()
+        .insert("host", "other.example".parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    assert!(is_refusal(
+        &login(&mut ws, &identity, Some("other.example")).await,
+        ErrorCode::BadSignature
+    ));
+    // A name the relay answers to is taken, whatever the header says.
+    let mut request = url.as_str().into_client_request().unwrap();
+    request
+        .headers_mut()
+        .insert("host", "anything.example".parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    assert!(matches!(
+        login(&mut ws, &identity, Some("relay.example")).await,
+        Some(ServerFrame::AuthOk { .. })
+    ));
+}
+
 #[tokio::test]
 async fn a_login_holds_only_for_the_relay_it_was_made_for() {
     let (url, _) = start(Policy::default()).await;

@@ -50,6 +50,13 @@ pub struct ConnectOptions {
     /// Refuse to use the relay's anonymous submission connection even when
     /// it offers one, and submit on the authenticated connection instead.
     pub submit_authenticated: bool,
+    /// Log in to a relay that offers only the older login, which signs the
+    /// challenge without the relay's host (`docs/PROTOCOL.md` section
+    /// 7.1). Off by default: such a signature is worth the same at every
+    /// relay, so a relay in the middle can forward another relay's
+    /// challenge, take the answer and log in there as this client. Only a
+    /// relay from before 0.6.0 asks for it.
+    pub allow_unbound_login: bool,
     /// The relay's transparency log as this client has replayed it. With
     /// one, and a relay that keeps a log, every lookup is checked against
     /// the log and heads are exchanged with contacts; without one nothing
