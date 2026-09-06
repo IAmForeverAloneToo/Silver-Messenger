@@ -1630,3 +1630,158 @@ fn groups_named_at_link_time_are_kept_until_their_welcome() {
     assert_eq!(again.expected_groups().count(), 2);
     assert!(store.has_groups().unwrap());
 }
+
+/// A link is a key, not a ticket: everyone who holds it presents the same
+/// proof, and each valid one costs the admin a commit and a Welcome to
+/// every member. So a member's own devices spend none of its uses, and it
+/// is answered only so many times before the admin has to make a new one.
+#[test]
+fn one_invite_link_is_answered_only_so_many_times() {
+    let mut seq = Sequencer::default();
+    let mut blobs = HashMap::new();
+    let (mut alice, bob, _carol, group) = three(&mut seq, &mut blobs);
+    let link = alice.groups.invite_link(&group, None).unwrap();
+
+    // Bob is in already. A further device of his is brought in by his own
+    // primary, so its ask is answered with nothing and costs no use.
+    let mut phone = Party::device_of(&bob, "phone");
+    let out = phone
+        .groups
+        .join_request(&link, (alice.id(), alice.identity.dh_public()), now_ms())
+        .unwrap();
+    deliver(out, &mut [&mut alice], &mut blobs);
+    assert_eq!(alice.drain(&blobs), Vec::new());
+    assert!(alice.groups.get(&group).unwrap().link_uses.is_none());
+
+    // Strangers spend the uses one each.
+    let ask = |alice: &mut Party, blobs: &mut HashMap<String, Vec<Vec<u8>>>| {
+        let mut stranger = Party::new();
+        let out = stranger
+            .groups
+            .join_request(&link, (alice.id(), alice.identity.dh_public()), now_ms())
+            .unwrap();
+        deliver(out, &mut [alice], blobs);
+        alice.drain(blobs)
+    };
+    for _ in 0..MAX_LINK_JOINS {
+        assert!(matches!(
+            ask(&mut alice, &mut blobs).as_slice(),
+            [GroupEvent::JoinRequest { .. }]
+        ));
+    }
+    assert_eq!(
+        alice
+            .groups
+            .get(&group)
+            .unwrap()
+            .link_uses
+            .as_ref()
+            .unwrap()
+            .used,
+        MAX_LINK_JOINS
+    );
+    let events = ask(&mut alice, &mut blobs);
+    let [GroupEvent::Refused { reason, .. }] = events.as_slice() else {
+        panic!("{events:?}");
+    };
+    assert!(reason.contains("invite link"), "{reason}");
+
+    // A new link starts the count again.
+    let staged = alice.groups.stage_link_reset(&group).unwrap();
+    assert_eq!(seq.commit(staged), Ok(2));
+    let out = alice.groups.commit_staged(&group, now_ms()).unwrap();
+    let _ = out;
+    let link = alice.groups.invite_link(&group, None).unwrap();
+    let mut stranger = Party::new();
+    let out = stranger
+        .groups
+        .join_request(&link, (alice.id(), alice.identity.dh_public()), now_ms())
+        .unwrap();
+    deliver(out, &mut [&mut alice], &mut blobs);
+    assert!(matches!(
+        alice.drain(&blobs).as_slice(),
+        [GroupEvent::JoinRequest { .. }]
+    ));
+    assert_eq!(
+        alice
+            .groups
+            .get(&group)
+            .unwrap()
+            .link_uses
+            .as_ref()
+            .unwrap()
+            .used,
+        1
+    );
+}
+
+/// A gossiped log head is checked against our own chain and can say the
+/// relay is showing two views of it. An invitation nobody has accepted is
+/// a stranger's Welcome, so what its messages claim about the log counts
+/// for nothing until the user is in the group.
+#[test]
+fn a_log_head_counts_only_from_a_group_one_is_actually_in() {
+    let mut seq = Sequencer::default();
+    let mut blobs = HashMap::new();
+    let mut alice = Party::new();
+    let mut dave = Party::new();
+    let created = alice.groups.create("the papers", now_ms()).unwrap();
+    seq.create(created);
+    let group = created.group;
+    let kp = alice
+        .groups
+        .verify_key_package(&dave.id(), &dave.key_package(), now_ms())
+        .unwrap();
+    let staged = alice.groups.stage_add(&group, &[kp]).unwrap();
+    assert_eq!(seq.commit(staged), Ok(1));
+    let out = alice.groups.commit_staged(&group, now_ms()).unwrap();
+    deliver(out, &mut [&mut dave], &mut blobs);
+    assert!(matches!(
+        dave.drain(&blobs).as_slice(),
+        [GroupEvent::Invited { .. }]
+    ));
+
+    let head = LogHead {
+        index: 9,
+        hash: [7; 32],
+    };
+    let out = alice
+        .groups
+        .send(&group, text("hello"), Some(head), now_ms())
+        .unwrap();
+    deliver(out, &mut [&mut dave], &mut blobs);
+    let events = dave.drain(&blobs);
+    assert!(
+        !events.iter().any(|e| matches!(e, GroupEvent::Head { .. })),
+        "{events:?}"
+    );
+
+    // Once the invitation is accepted, the same gossip counts.
+    dave.groups.accept_welcome(&group).unwrap();
+    let out = alice
+        .groups
+        .send(&group, text("again"), Some(head), now_ms())
+        .unwrap();
+    deliver(out, &mut [&mut dave], &mut blobs);
+    let events = dave.drain(&blobs);
+    assert!(
+        events.iter().any(
+            |e| matches!(e, GroupEvent::Head { from, head: h } if *from == alice.id() && *h == head)
+        ),
+        "{events:?}"
+    );
+}
+
+/// The out-of-order tolerance the design note states, on the groups this
+/// client makes and on the ones it is invited to alike: a relay drains a
+/// mailbox in whatever order it was filled.
+#[test]
+fn messages_from_one_sender_may_arrive_well_out_of_order() {
+    let ratchet = sender_ratchet();
+    assert_eq!(ratchet.out_of_order_tolerance(), 64);
+    assert_eq!(ratchet.maximum_forward_distance(), 1000);
+    assert_eq!(
+        Groups::join_config().sender_ratchet_configuration(),
+        &ratchet
+    );
+}

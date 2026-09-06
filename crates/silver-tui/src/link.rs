@@ -25,12 +25,42 @@ use crate::qr;
 /// can be printed.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Put the account an answer claims to whoever is at the new device.
+///
+/// The link carries a key and a device id, not an account, so whoever
+/// sees the QR code within its ten minutes can answer it with an account
+/// of their own — everything then checks out, the device joins *their*
+/// account, and the real primary is told the device belongs to an account
+/// already (SM-G-07). Nobody but the person holding both machines can
+/// tell the difference, so they are asked.
+fn ask_account(offered: silver_protocol::UserId) -> bool {
+    use std::io::{IsTerminal, Write};
+    println!();
+    println!("An answer came, from the account:");
+    println!("  {offered}");
+    if !std::io::stdin().is_terminal() {
+        eprintln!(
+            "Nobody is at this terminal to confirm it, and the link does not say which account \
+             it belongs to. Run silver --link --account <id> to say in advance. Ignored."
+        );
+        return false;
+    }
+    print!("Is that your account? Compare it with /me on your primary. [y/N] ");
+    let _ = std::io::stdout().flush();
+    let mut answer = String::new();
+    if std::io::stdin().read_line(&mut answer).is_err() {
+        return false;
+    }
+    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
 pub async fn run(
     store: Store,
     identity: Identity,
     relay_url: String,
     options: ConnectOptions,
     name: Option<String>,
+    account: Option<silver_protocol::UserId>,
 ) -> anyhow::Result<()> {
     if !store.is_unused()? {
         bail!(
@@ -67,9 +97,31 @@ pub async fn run(
         "The link is good for ten minutes and one use; it is the key to this device, so hand it \
          to your own primary alone."
     );
+    if account.is_none() {
+        println!(
+            "When an answer comes, this device will show whose account it is and ask you to \
+             confirm: the link is not bound to an account, so whoever sees it within its ten \
+             minutes could answer with one of their own. Compare what it shows with the id your \
+             primary prints for /me. (--account <id> answers in advance, for a run nobody is \
+             sitting at.)"
+        );
+    }
     println!("Waiting for the primary…");
     let deadline = tokio::time::Instant::now() + LINK_LIFETIME;
-    let taken = match take_link(&client, &mut events, &link, deadline).await {
+    let confirm = move |offered: silver_protocol::UserId| match account {
+        // Answered in advance: anyone else is turned down without a word
+        // to whoever is (or is not) at the keyboard.
+        Some(expected) => {
+            if offered != expected {
+                eprintln!(
+                    "An answer came from {offered}, not the account given with --account; ignored."
+                );
+            }
+            offered == expected
+        }
+        None => ask_account(offered),
+    };
+    let taken = match take_link(&client, &mut events, &link, deadline, &confirm).await {
         Ok(taken) => taken,
         Err(LinkError::Expired) => {
             client.shutdown().await;

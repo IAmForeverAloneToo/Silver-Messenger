@@ -407,8 +407,15 @@ and a rotated invite key voids every link.
 generates a key package for the purpose, and sends a `join` body to the
 admin with `join.proof = HMAC-SHA256(key, "silver-messenger/v1/group-join" || group_id || joiner id)`.
 The admin's client verifies the proof against its current invite key,
-checks the joiner is not blocked and not already a member, and adds it as
-in 7.2; members see "X joined by link". The joiner's client remembers
+checks the joiner is not blocked and not already a member (an identity:
+a member's further device is put in the group by its own primary, not by
+the link), and adds it as
+in 7.2; members see "X joined by link". A link is a key rather than a
+ticket, so every holder presents the same proof and each valid one costs
+the admin a commit and a Welcome sealed to every member; an admin's
+client answers at most 32 asks for one invite key and then says the link
+wants resetting, so a link that leaks past the room it was meant for is
+not a stranger's switch for the admin's client. The joiner's client remembers
 which admin it asked for which group, and takes that admin's Welcome
 without asking the user again: the request was the yes. A Welcome for
 the group from anyone else is an invitation as in 7.2. A link names one admin; if that

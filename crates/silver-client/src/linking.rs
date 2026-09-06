@@ -654,18 +654,31 @@ pub struct Taken {
     pub snapshot: Option<FileInfo>,
 }
 
+/// Whether to take a provisioning message claiming to be from `account`.
+///
+/// The link is not bound to an account: it is a key and a device id, and
+/// whoever sees the QR code or the link within its ten minutes can send a
+/// provisioning message under it. Their certificate is signed by *their*
+/// account and everything checks out, so the device joins the wrong
+/// account and every message typed on it goes there, while the real
+/// primary is told the device "belongs to an account already". So the
+/// account is put to whoever is at the new device before it is taken
+/// (SM-G-07).
+pub type ConfirmAccount<'a> = &'a (dyn Fn(UserId) -> bool + Send + Sync);
+
 /// On the device that printed `link`: wait for the primary's provisioning
 /// message until `deadline`, ignoring everything else that arrives
 /// (including messages sealed under another secret, from whoever saw the
-/// device id), take it, and publish this device's bundle as the account's.
-/// The device is linked once this returns; the snapshot is fetched
-/// separately ([`fetch_snapshot`]), so a snapshot that cannot be had
-/// leaves the link standing.
+/// device id) and everything `confirm` turns down, take it, and publish
+/// this device's bundle as the account's. The device is linked once this
+/// returns; the snapshot is fetched separately ([`fetch_snapshot`]), so a
+/// snapshot that cannot be had leaves the link standing.
 pub async fn take_link(
     client: &Client,
     events: &mut mpsc::Receiver<ClientEvent>,
     link: &DeviceLink,
     deadline: tokio::time::Instant,
+    confirm: ConfirmAccount<'_>,
 ) -> Result<Taken, LinkError> {
     let devices = client.devices().ok_or(LinkError::NoDeviceState)?.clone();
     let provisioning = loop {
@@ -676,7 +689,18 @@ pub async fn take_link(
         match event {
             ClientEvent::Provision { from, provision } => {
                 match Provisioning::open(link, &from, &provision) {
-                    Ok(provisioning) => break provisioning,
+                    Ok(provisioning) => {
+                        if confirm(provisioning.account) {
+                            break provisioning;
+                        }
+                        // Not the account this device is meant to join.
+                        // The link stands until it expires, so the right
+                        // primary can still answer it.
+                        warn!(
+                            "a provisioning message from {}… was turned down at this device",
+                            provisioning.account.short()
+                        );
+                    }
                     Err(e) => debug!("a provisioning message from {}… ignored: {e}", from.short()),
                 }
             }

@@ -36,10 +36,11 @@ use openmls_traits::storage::StorageProvider as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use silver_protocol::blob::{self, BlobKey, CHUNK_BYTES, new_blob_id};
+use silver_protocol::device::MAX_DEVICES;
 use silver_protocol::encoding::b64_array;
 use silver_protocol::group::{
     self, BlobRef, EXTENSION_DEVICE, EXTENSION_EVERYDAY, EXTENSION_GROUP, EXTENSION_SEAL,
-    GroupBody, GroupId, GroupKind, GroupPlaintext, MAX_MEMBERS, MAX_PARKED_BYTES,
+    GroupBody, GroupId, GroupKind, GroupPlaintext, MAX_KEY_PACKAGES, MAX_MEMBERS, MAX_PARKED_BYTES,
     MAX_PARKED_HANDSHAKE_BYTES, SEQUENCER_LABEL, SilverGroup, decode_seal_key, encode_seal_key,
 };
 use silver_protocol::wire::KeyPackageDeposit;
@@ -68,6 +69,16 @@ pub const LAST_RESORT_ROTATION_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 pub const SELF_UPDATE_AFTER_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 /// Sequencer tokens of past epochs kept, for catching a rewound relay up.
 pub const TOKENS_KEPT: usize = 64;
+/// Invitations waiting for an answer at once.
+///
+/// A Welcome needs no permission from the person it invites, and the
+/// last-resort key package is reusable, so a stranger can send as many as
+/// it likes for group ids it invents. Each one is a full MLS tree on
+/// disk. Beyond this many, another is refused until one is answered.
+pub const MAX_INVITATIONS: usize = 20;
+/// Join requests one invite link is answered for before the admin has to
+/// reset it ([`LinkUses`]).
+pub const MAX_LINK_JOINS: u32 = 32;
 /// Handshake messages from a future epoch held, and for how long.
 pub const HOLD_LIMIT: usize = 16;
 /// Most bytes held for one group at a time. Nothing held has been read
@@ -83,6 +94,20 @@ pub const HOLD_FOR_MS: u64 = 10 * 60 * 1000;
 const SEEN_IDS: usize = 256;
 /// Application messages from this many past epochs still decrypt.
 const PAST_EPOCHS: usize = 3;
+/// How far out of order one sender's application messages may arrive and
+/// still be read, and how many of theirs may be skipped.
+///
+/// A relay drains a mailbox in whatever order it was filled and a client
+/// may fetch two of them at once, so messages from one sender do overtake
+/// each other; OpenMLS's default tolerance of five generations is well
+/// under what that produces in a busy group, and past it a message is
+/// reported unreadable rather than late. Sixty-four matches the ratchet's
+/// window for one-to-one conversations (`docs/design/groups.md` section
+/// 4.2). The cost is that a decryption secret is kept until it is used or
+/// the window passes it, so forward secrecy within an epoch lags by up to
+/// that many messages from the same sender.
+const OUT_OF_ORDER: u32 = 64;
+const FORWARD_DISTANCE: u32 = 1000;
 
 pub(crate) const GROUPS_FILE: &str = "groups.json";
 pub(crate) const MLS_FILE: &str = "groups.mls";
@@ -183,6 +208,41 @@ pub struct GroupRecord {
     /// Set by an admin's `timer` message (`docs/design/everyday.md`).
     #[serde(default)]
     pub expire_after_s: u64,
+    /// This account was named an admin by the Welcome that brought it in,
+    /// rather than by a commit somebody made after it joined.
+    ///
+    /// A Welcome's `silver_group` extension is written by whoever built
+    /// the Welcome, so "you are an admin here" is the inviter's own word.
+    /// A hostile contact can therefore hand somebody a group in which
+    /// they are an admin, and every automatic thing an admin's client
+    /// does — answering a join request with a commit and a Welcome,
+    /// re-adding a member who says it is out of sync — becomes work the
+    /// inviter can ask for at will (SM-G-06). Such a group does the
+    /// admin's work only when the user asks for it.
+    #[serde(default)]
+    pub conferred_admin: bool,
+    /// How often the group's current invite link has been answered, and
+    /// which link that was; see [`LinkUses`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_uses: Option<LinkUses>,
+}
+
+/// What one invite link has cost this admin so far.
+///
+/// A link is a key, not a ticket: everyone who holds it presents the same
+/// proof, and each valid one an admin sees is a commit and a Welcome
+/// sealed to every member. Left unbounded, a link that leaks — posted in
+/// a channel, forwarded past the room it was meant for — is a stranger's
+/// switch for the admin's client, up to the group's whole capacity
+/// (SM-G-13). So the uses are counted, and past [`MAX_LINK_JOINS`] the
+/// admin is asked to reset the link rather than the requests being
+/// answered. The count is against the link it was for, so
+/// `/group link reset` starts it again.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LinkUses {
+    #[serde(with = "b64_array")]
+    pub link: [u8; 16],
+    pub used: u32,
 }
 
 impl GroupRecord {
@@ -723,6 +783,15 @@ impl Groups {
     }
 
     /// Drop the MLS state of a group we are no longer in.
+    /// Invitations waiting for the user to accept or decline.
+    fn invitations_held(&self) -> usize {
+        self.file
+            .groups
+            .values()
+            .filter(|r| matches!(r.state, GroupState::Invited { .. }))
+            .count()
+    }
+
     fn drop_state(&mut self, group: &GroupId) {
         if let Some(mut handle) = self.handles.remove(group) {
             let _ = handle.delete(self.provider.storage());
@@ -831,6 +900,24 @@ impl Groups {
                 self.file.key_packages.push(package);
             }
         }
+        // Join and rejoin requests each add a package to this list, and
+        // the relay refuses a deposit above its cap *whole*: past the cap
+        // nothing was deposited at all, and a member who drove a victim
+        // out of sync a dozen times left it unable to deposit until the
+        // packages expired, up to ninety days later. The oldest go, their
+        // secrets with them (SM-G-11).
+        while self.file.key_packages.len() > MAX_KEY_PACKAGES {
+            let oldest = self
+                .file
+                .key_packages
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, p)| p.created_at_ms)
+                .map(|(i, _)| i);
+            let Some(index) = oldest else { break };
+            let package = self.file.key_packages.remove(index);
+            self.delete_key_package_secret(&package);
+        }
         let rotate = match &self.file.last_resort {
             Some(last) => {
                 last.created_at_ms + LAST_RESORT_ROTATION_MS <= now_ms
@@ -927,6 +1014,7 @@ impl Groups {
             .use_ratchet_tree_extension(true)
             .wire_format_policy(PURE_CIPHERTEXT_WIRE_FORMAT_POLICY)
             .max_past_epochs(PAST_EPOCHS)
+            .sender_ratchet_configuration(sender_ratchet())
             .with_group_context_extensions(context)
             .capabilities(self.capabilities())
             .with_leaf_node_extensions(self.leaf_extensions())
@@ -939,6 +1027,7 @@ impl Groups {
             .use_ratchet_tree_extension(true)
             .wire_format_policy(PURE_CIPHERTEXT_WIRE_FORMAT_POLICY)
             .max_past_epochs(PAST_EPOCHS)
+            .sender_ratchet_configuration(sender_ratchet())
             .build()
     }
 
@@ -979,6 +1068,9 @@ impl Groups {
                 muted: false,
                 seen: VecDeque::new(),
                 expire_after_s: 0,
+                // The creator's own group: admin because it made it.
+                conferred_admin: false,
+                link_uses: None,
             },
         );
         self.persist()?;
@@ -1283,10 +1375,21 @@ impl Groups {
 
     /// Stage a commit that only refreshes our own leaf.
     pub fn stage_self_update(&mut self, group: &GroupId) -> Result<Staged> {
-        self.active(group)?;
+        let admin = self.active(group)?.is_admin(&self.account());
         self.stage(
             group,
-            |builder| Ok(builder.force_self_update(true)),
+            // A non-admin's refresh leaves the stored proposal queue
+            // alone. OpenMLS consumes it by default, so a leaver's Remove
+            // sitting in this client's queue rode along in a weekly
+            // refresh nobody asked for — and every receiver then saw a
+            // non-admin removing a member, marked the group broken, and
+            // named the honest refresher (SM-G-03). Committing a leave is
+            // an admin's job, which is where the queue is consumed.
+            move |builder| {
+                Ok(builder
+                    .force_self_update(true)
+                    .consume_proposal_store(admin))
+            },
             Vec::new(),
             Change::Updated,
         )
@@ -1718,15 +1821,20 @@ impl Groups {
     ) -> Result<Vec<GroupEvent>> {
         let group = body.group;
         let events = match body.kind {
-            GroupKind::Welcome => self.receive_welcome(group, from, mls, now_ms)?,
+            GroupKind::Welcome => self.receive_welcome(group, from, mls, now_ms),
             GroupKind::Handshake | GroupKind::Message => {
-                self.receive_protocol_message(group, from, mls, now_ms)?
+                self.receive_protocol_message(group, from, mls, now_ms)
             }
-            GroupKind::Join => self.receive_join(group, body, mls, now_ms)?,
-            GroupKind::Rejoin => self.receive_rejoin(group, mls, now_ms)?,
+            GroupKind::Join => self.receive_join(group, body, mls, now_ms),
+            GroupKind::Rejoin => self.receive_rejoin(group, mls, now_ms),
         };
+        // Persisted whatever happened. A commit merged, or a message key
+        // consumed, and then something afterwards failing used to leave
+        // the MLS state advanced in memory and not on disk: a crash then
+        // restored a state before the commit, or one in which a
+        // ciphertext already read would decrypt again (SM-G-12).
         self.persist()?;
-        Ok(events)
+        events
     }
 
     fn receive_welcome(
@@ -1736,6 +1844,12 @@ impl Groups {
         mls: &[u8],
         now_ms: u64,
     ) -> Result<Vec<GroupEvent>> {
+        // Read before anything is given up. A body that is not a Welcome
+        // at all used to be enough to delete an out-of-sync member's
+        // state — which might still have recovered from held messages —
+        // and a group id is known to anyone who was ever in the group or
+        // held an invite link (SM-G-10).
+        let welcome = parse_welcome(mls)?;
         let previous = self.file.groups.get(&group).cloned();
         let me = self.account();
         if let Some(record) = &previous {
@@ -1764,11 +1878,14 @@ impl Groups {
                 }
                 // Out of sync, removed, left or broken: whatever state is
                 // left of the old membership goes; this Welcome starts
-                // afresh.
+                // afresh. It has parsed by now, so nonsense costs
+                // nothing; a well-formed Welcome still costs the state
+                // even when the checks below turn it down, because
+                // OpenMLS takes the group id as the staged Welcome is
+                // read and the old group has to be out of the way first.
                 _ => self.drop_state(&group),
             }
         }
-        let welcome = parse_welcome(mls)?;
         let staged =
             StagedWelcome::new_from_welcome(&self.provider, &Self::join_config(), welcome, None)
                 .map_err(mls_err)?;
@@ -1818,12 +1935,41 @@ impl Groups {
             None
         };
         let taken = asked || ours;
+        // Invitations nobody has answered are a stranger's to make: a
+        // Welcome needs no permission, and the last-resort key package is
+        // reusable, so without a cap one sender could leave this client
+        // holding a full MLS tree per invented group id, each rewritten
+        // to disk on every group event (SM-G-05).
+        if !taken && self.invitations_held() >= MAX_INVITATIONS {
+            return Ok(vec![GroupEvent::Refused {
+                group,
+                reason: format!(
+                    "{MAX_INVITATIONS} invitations are already waiting; answer one before another arrives"
+                ),
+            }]);
+        }
         // Join now, so the group stays in sync while the user decides; the
         // key package that let us in is spent by this.
-        let handle = staged.into_group(&self.provider).map_err(mls_err)?;
-        let members = members_of(&handle, &extension)?;
+        let mut handle = staged.into_group(&self.provider).map_err(mls_err)?;
+        // Everything from here either finishes or takes the group's
+        // storage with it: `into_group` persists the tree, and a failure
+        // after it used to leave those entries behind for good, with no
+        // record naming them (SM-G-05).
+        let members = match members_of(&handle, &extension) {
+            Ok(members) => members,
+            Err(e) => {
+                let _ = handle.delete(self.provider.storage());
+                return Err(e);
+            }
+        };
         let epoch = handle.epoch().as_u64();
-        let token = token_of(&handle, &group, self.provider.crypto())?;
+        let token = match token_of(&handle, &group, self.provider.crypto()) {
+            Ok(token) => token,
+            Err(e) => {
+                let _ = handle.delete(self.provider.storage());
+                return Err(e);
+            }
+        };
         self.forget_spent_key_packages();
         self.handles.insert(group, handle);
         let record = GroupRecord {
@@ -1850,6 +1996,11 @@ impl Groups {
             // group's timer by whoever added it.
             expire_after_s: previous.as_ref().map_or(0, |r| r.expire_after_s),
             seen: previous.map(|r| r.seen).unwrap_or_default(),
+            // Admin because the Welcome said so, and the Welcome is the
+            // inviter's to write. Not so when this account added itself.
+            conferred_admin: !ours && extension.is_admin(&me),
+            // Nothing has been asked of this device's copy of the link.
+            link_uses: None,
         };
         self.file.groups.insert(group, record);
         if taken {
@@ -2005,6 +2156,29 @@ impl Groups {
         let processed = match handle.process_message(&self.provider, protocol) {
             Ok(processed) => processed,
             Err(e) => {
+                // A commit at our own epoch that will not stage — one
+                // referencing a proposal this client never received, say
+                // — means the group has moved on without us. Refusing it
+                // and saying nothing left the group stuck for good; going
+                // out of sync starts the recovery that is already there
+                // (SM-G-03).
+                if is_handshake && message_epoch >= our_epoch {
+                    let record = self
+                        .file
+                        .groups
+                        .get_mut(&group)
+                        .ok_or(GroupError::NoSuchGroup)?;
+                    if matches!(record.state, GroupState::Active) {
+                        record.state = GroupState::OutOfSync { since_ms: now_ms };
+                        return Ok(vec![
+                            GroupEvent::Refused {
+                                group,
+                                reason: format!("a change to the group could not be applied: {e}"),
+                            },
+                            GroupEvent::OutOfSync { group },
+                        ]);
+                    }
+                }
                 return Ok(vec![GroupEvent::Refused {
                     group,
                     reason: format!("could not read a group message: {e}"),
@@ -2040,7 +2214,15 @@ impl Groups {
                     record.seen.pop_front();
                 }
                 let mut events = Vec::new();
-                if let Some(head) = plain.head {
+                // A gossiped log head is checked against our own chain and
+                // can raise a fork alarm, so it counts only from a group
+                // the user is actually in: an invitation nobody has
+                // accepted is a stranger's Welcome, and its messages are
+                // not a reason to tell the user their relay is showing two
+                // views of the log (SM-G-13).
+                if let Some(head) = plain.head
+                    && matches!(record.state, GroupState::Active)
+                {
                     events.push(GroupEvent::Head { from: sender, head });
                 }
                 if let Content::Timer { seconds } = plain.content {
@@ -2154,7 +2336,32 @@ impl Groups {
                         }
                         let epoch = handle.epoch().as_u64();
                         let token = token_of(handle, &group, crypto)?;
-                        let members = members_of(handle, &extension_after)?;
+                        // The tree after the commit must still read. If it
+                        // does not, the commit that made it is the fault
+                        // and its committer is named: returning an error
+                        // here left the group in a state where every
+                        // later commit failed and the *next* committer,
+                        // an honest one, was blamed (SM-G-04).
+                        let members = match members_of(handle, &extension_after) {
+                            Ok(members) => members,
+                            Err(e) => {
+                                let reason = format!("the tree it left cannot be read: {e}");
+                                let record = self
+                                    .file
+                                    .groups
+                                    .get_mut(&group)
+                                    .ok_or(GroupError::NoSuchGroup)?;
+                                record.state = GroupState::Broken {
+                                    by: sender,
+                                    reason: reason.clone(),
+                                };
+                                return Ok(vec![GroupEvent::Broken {
+                                    group,
+                                    by: sender,
+                                    reason,
+                                }]);
+                            }
+                        };
                         let record = self
                             .file
                             .groups
@@ -2219,11 +2426,38 @@ impl Groups {
                 reason: format!("{} presented a link that is not valid", joiner.short()),
             }]);
         }
-        // A device already in asks for nothing; an identity's further
-        // device may join by the link like anyone.
-        if record.members.iter().any(|m| m.device == leaf.device) {
+        // A member asks for nothing, whichever of its devices presents the
+        // link (`docs/PROTOCOL.md` section 13.7). A member's further
+        // device is brought in by its own primary, not by the link, so
+        // answering one here would only spend the link's uses on people
+        // already in.
+        if record.members.iter().any(|m| m.user == joiner) {
             return Ok(Vec::new());
         }
+        // What this link has cost so far. Anyone holding it can ask, and
+        // each ask is a commit and a Welcome to every member, so a link
+        // that has done its round is spent until the admin resets it.
+        let link = group::link_key(&extension.invite_key, &group);
+        let uses = self
+            .file
+            .groups
+            .get_mut(&group)
+            .ok_or(GroupError::NoSuchGroup)?
+            .link_uses
+            .get_or_insert(LinkUses { link, used: 0 });
+        if uses.link != link {
+            *uses = LinkUses { link, used: 0 };
+        }
+        if uses.used >= MAX_LINK_JOINS {
+            return Ok(vec![GroupEvent::Refused {
+                group,
+                reason: format!(
+                    "{} presented the invite link, which has been used {MAX_LINK_JOINS} times already: /group link reset makes a new one",
+                    joiner.short()
+                ),
+            }]);
+        }
+        uses.used += 1;
         let _ = now_ms;
         Ok(vec![GroupEvent::JoinRequest {
             group,
@@ -2325,6 +2559,13 @@ impl Groups {
 }
 
 // --- helpers -------------------------------------------------------------------
+
+/// How far out of order application messages from one sender are read.
+/// Set on both the create and the join config, so it holds whether we made
+/// the group or were invited to it.
+fn sender_ratchet() -> SenderRatchetConfiguration {
+    SenderRatchetConfiguration::new(OUT_OF_ORDER, FORWARD_DISTANCE)
+}
 
 fn mls_id(group: &GroupId) -> MlsGroupId {
     MlsGroupId::from_slice(group.as_bytes())
@@ -2563,7 +2804,16 @@ fn check_commit(
             committer.short()
         ));
     }
-    if !admin && removed.iter().any(|(who, _)| who != committer) {
+    // A member's own Remove is the honest way to leave, and OpenMLS's
+    // commit builder consumes the stored proposal queue, so whoever
+    // commits next carries it whether they meant to or not. Refusing
+    // that made a non-admin's weekly self-update break the group and
+    // blame the non-admin (SM-G-03).
+    if !admin
+        && removed
+            .iter()
+            .any(|(who, by_self)| who != committer && !by_self)
+    {
         return Err(format!(
             "{} removed members without being an admin",
             committer.short()
@@ -2610,11 +2860,85 @@ fn check_commit(
             ids_after.push(leaf.account);
         }
     }
-    if after.admins.iter().any(|a| !ids_after.contains(a)) {
+    // Whose every leaf went by its own proposal: they left. An admin who
+    // leaves is still named in the extension until an admin's commit
+    // takes them out, and the co-admin's next self-update does not touch
+    // the extension — so requiring every admin to be a member broke the
+    // group and blamed the honest co-admin (SM-G-03).
+    let left_by_self: Vec<UserId> = removed
+        .iter()
+        .filter(|(_, by_self)| *by_self)
+        .map(|(who, _)| *who)
+        .filter(|who| {
+            removed
+                .iter()
+                .filter(|(other, _)| other == who)
+                .all(|(_, by_self)| *by_self)
+        })
+        .collect();
+    if after
+        .admins
+        .iter()
+        .any(|a| !ids_after.contains(a) && !left_by_self.contains(a))
+    {
         return Err("the commit names an admin who is not a member".into());
     }
     if ids_after.len() > MAX_MEMBERS {
         return Err("the commit makes the group too large".into());
+    }
+    // Every leaf in the tree after this commit, and how many each
+    // identity has. A member could otherwise fill the tree with
+    // self-certified "device" leaves of its own: the cap on identities
+    // did not cap leaves, and every leaf costs every member a sealed
+    // envelope per message and a place in every commit and Welcome
+    // (SM-G-08).
+    let leaves_after = leaves
+        .iter()
+        .filter(|(index, _)| !removed_indices.contains(index))
+        .map(|(_, leaf)| leaf.account)
+        .chain(adds.iter().map(|leaf| leaf.account));
+    let mut per_identity: HashMap<UserId, usize> = HashMap::new();
+    let mut total = 0usize;
+    for account in leaves_after {
+        *per_identity.entry(account).or_default() += 1;
+        total += 1;
+    }
+    if let Some((who, count)) = per_identity.iter().find(|(_, n)| **n > MAX_DEVICES) {
+        return Err(format!(
+            "the commit gives {} {count} leaves, more than the {MAX_DEVICES} an account may link",
+            who.short()
+        ));
+    }
+    if total > MAX_MEMBERS * MAX_DEVICES {
+        return Err("the commit puts more leaves in the tree than the group allows".into());
+    }
+    // The committer's own new leaf, and any leaf an Update proposal
+    // carries, go through the same rule as an added one: without this a
+    // member could self-update to a leaf with no sealing key (which makes
+    // every later `leaves_of` fail, wedging the group and blaming the
+    // next committer) or to a credential naming another identity it holds
+    // (SM-G-04).
+    let mut updated: Vec<(LeafNode, Option<UserId>)> = Vec::new();
+    if let Some(leaf) = staged.update_path_leaf_node() {
+        updated.push((leaf.clone(), Some(*committer)));
+    }
+    for proposal in staged.update_proposals() {
+        updated.push((proposal.update_proposal().leaf_node().clone(), None));
+    }
+    for (leaf, expected) in &updated {
+        let fresh = verify_leaf(leaf, expected.as_ref())
+            .map_err(|e| format!("an updated leaf is not valid: {e}"))?;
+        // And it stays the leaf it was: a leaf may be refreshed, not
+        // handed to another identity or another device of one.
+        let same = leaves
+            .iter()
+            .any(|(_, old)| old.account == fresh.account && old.device == fresh.device);
+        if !same {
+            return Err(format!(
+                "the commit changes a leaf's identity to {}",
+                fresh.account.short()
+            ));
+        }
     }
     let added: Vec<UserId> = ids_after
         .iter()

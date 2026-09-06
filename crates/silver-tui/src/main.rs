@@ -133,6 +133,14 @@ struct Args {
     #[arg(long, value_name = "NAME", env = "SILVER_DEVICE_NAME")]
     device_name: Option<String>,
 
+    /// With --link: the id of the account this device is to join. The
+    /// link carries no account, so an answer from any other is ignored
+    /// rather than put to whoever is at the terminal. For a run nobody is
+    /// sitting at; without it the device shows the account that answered
+    /// and asks.
+    #[arg(long, value_name = "ID", env = "SILVER_ACCOUNT")]
+    account: Option<silver_protocol::UserId>,
+
     /// Ask the releases page once whether a newer version exists, print
     /// the answer, and exit. Never happens by itself: the request shows
     /// GitHub this computer's address. It goes through the proxy and the
@@ -542,7 +550,15 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
 
     if link {
         let options = connect_options(&store, &identity)?;
-        return link::run(store, identity, relay_url, options, args.device_name).await;
+        return link::run(
+            store,
+            identity,
+            relay_url,
+            options,
+            args.device_name,
+            args.account,
+        )
+        .await;
     }
 
     // Reader mode for this run, or from the config for good.
