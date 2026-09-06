@@ -147,7 +147,7 @@ pub const MAX_REACTION_BYTES: usize = 32;
 /// invisible ones that reorder or hide what is around them. The zero
 /// width joiner (U+200D) is not among them, since emoji sequences are
 /// built with it.
-fn is_invisible(c: char) -> bool {
+pub(crate) fn is_invisible(c: char) -> bool {
     matches!(
         c,
         '\u{200B}'

@@ -941,6 +941,7 @@ impl Groups {
     /// Make a group with ourselves as the only member and admin. The caller
     /// registers the returned entry with the relay's sequencer.
     pub fn create(&mut self, name: &str, now_ms: u64) -> Result<Created> {
+        group::check_new_name(name)?;
         let me = self.account();
         let extension = SilverGroup::new(name, me, now_ms)?;
         let id = GroupId::generate();
@@ -1202,6 +1203,7 @@ impl Groups {
 
     /// Stage a commit that changes the group's name.
     pub fn stage_rename(&mut self, group: &GroupId, name: &str) -> Result<Staged> {
+        group::check_new_name(name)?;
         self.stage_extension_change(
             group,
             |extension| {

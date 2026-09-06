@@ -89,6 +89,19 @@ impl KeyBundle {
         v
     }
 
+    /// Whether a capability name is one the join above can encode without
+    /// ambiguity. Names are `[a-z0-9_]`, so no name can contain the
+    /// separator and `["a", "b"]` cannot be re-serialised as `["a\nb"]`,
+    /// which signs the same bytes and advertises nothing. A name outside
+    /// the set is refused rather than ignored: a bundle carrying one was
+    /// not written by a client of this protocol.
+    fn is_capability_name(cap: &str) -> bool {
+        !cap.is_empty()
+            && cap
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    }
+
     /// Check that `dh_public`, the signed prekey (if any), the capabilities
     /// (if any) and the device list (if any) were really signed by
     /// `user_id`, and that a `device_of` certificate names this key and
@@ -100,6 +113,11 @@ impl KeyBundle {
             prekeys.verify(&self.user_id)?;
         }
         if !self.caps.is_empty() {
+            if !self.caps.iter().all(|c| Self::is_capability_name(c)) {
+                return Err(ProtocolError::Malformed(
+                    "a capability name outside [a-z0-9_]".into(),
+                ));
+            }
             let signature = self.caps_signature.ok_or(ProtocolError::InvalidSignature)?;
             self.user_id.verify(
                 BUNDLE_CAPS_DOMAIN,
@@ -242,6 +260,45 @@ mod tests {
         assert!(!json.contains("prekeys"));
         let back: KeyBundle = serde_json::from_str(&json).unwrap();
         assert_eq!(back, bundle);
+    }
+
+    #[test]
+    fn a_capability_list_cannot_be_merged_into_one_name() {
+        let id = Identity::generate();
+        let caps = vec![
+            capability::PQ_RATCHET.to_owned(),
+            capability::GROUPS.to_owned(),
+            capability::DEVICES.to_owned(),
+        ];
+        let bundle = id.key_bundle().with_caps(&id, caps.clone());
+        assert!(bundle.verify().is_ok());
+        assert!(bundle.advertises(capability::GROUPS));
+
+        // The signed bytes join the names with a newline, so a relay that
+        // re-serialises the three as one string signs the same bytes --
+        // and `advertises` is an exact match, so the bundle would verify
+        // and offer nothing. A name is refused for holding the separator,
+        // which is what makes the join injective.
+        let merged = KeyBundle {
+            caps: vec![caps.join("\n")],
+            ..bundle.clone()
+        };
+        assert_eq!(
+            KeyBundle::caps_signed_bytes(&merged.dh_public, &merged.caps),
+            KeyBundle::caps_signed_bytes(&bundle.dh_public, &bundle.caps),
+            "the two lists really do sign the same bytes"
+        );
+        assert!(merged.verify().is_err(), "so the name must be refused");
+        assert!(!merged.advertises(capability::GROUPS));
+
+        for bad in ["", "Groups", "pq ratchet", "groups\u{0}", "gröups"] {
+            let odd = KeyBundle {
+                caps: vec![bad.to_owned()],
+                ..bundle.clone()
+            }
+            .with_caps(&id, vec![bad.to_owned()]);
+            assert!(odd.verify().is_err(), "{bad:?} is not a capability name");
+        }
     }
 
     #[test]

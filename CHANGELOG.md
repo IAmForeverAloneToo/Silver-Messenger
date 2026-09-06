@@ -4,6 +4,71 @@ Notable changes to Silver Messenger. Versions follow [semantic
 versioning](https://semver.org); while the major version is 0, a minor bump
 means behaviour or the wire protocol changed in a way worth reading about.
 
+## Unreleased
+
+The security review's Medium and Low findings, in the order the response
+note sets out ([docs/design/audit-response.md](docs/design/audit-response.md)).
+Section 13.1 went out in 0.10.1; this is section 13.2.
+
+### Security
+
+- **A capability list cannot be merged into one name** (finding SM-P-03,
+  Medium). The bytes an identity signs for its capabilities are the
+  names joined with newlines, and nothing said a name could not contain
+  one. So `["pq_ratchet", "groups", "devices"]` and the single name
+  `"pq_ratchet\ngroups\ndevices"` sign the same bytes, and since a
+  client matches a capability by exact string, a relay could re-serialise
+  the three into one, keep the signature valid, and serve a bundle that
+  advertises nothing — forcing a classical, non-deniable session and
+  hiding that the owner does groups and devices at all. A name is now one
+  or more of `[a-z0-9_]`, which makes the join unambiguous, and a bundle
+  carrying anything else is refused rather than read as advertising
+  nothing.
+
+- **A ratchet header takes only the ML-KEM lengths it may** (finding
+  SM-P-06, Low). The associated data lays the ML-KEM public key and
+  ciphertext end to end with no length in front, and the fixed lengths
+  were checked only where the fields were used, so a header carrying one
+  2272-byte key and no ciphertext covered the same bytes as one carrying
+  a 1184-byte key and a 1088-byte ciphertext. Nothing followed from it —
+  the root key derived from the two differs, so the message key does and
+  the AEAD fails — but the encoding should not lean on that. The lengths
+  are checked before the associated data is built.
+
+- **Group and device names are chosen without invisible characters**
+  (finding SM-P-08, Low). Both checks refused control characters only,
+  while a reaction already refused the zero-width spaces, the bidi
+  embeddings and overrides, the word joiners and the byte-order mark. A
+  group called `Team<U+202E>` or a device padded with zero-width spaces
+  reached the sidebar, the "joined" lines and the device list. Those
+  characters are refused where a name is chosen — creating or renaming a
+  group, certifying a device. They are not refused where a name is read:
+  the signature covers the bytes as they were written, and a group made
+  or a device linked by an older version would otherwise stop verifying.
+
+- **A group message id follows the rule a one-to-one id follows**
+  (finding SM-P-09, Low). An id inside a group's application message was
+  checked for length alone, while a one-to-one id must be printable
+  ASCII. Since edits, deletions and reactions name ids, a newline or an
+  escape sequence in one travelled into the history and the screen. Both
+  now follow the same rule, and the specification's two sections agree.
+
+- **An id is the canonical encoding of its key** (finding SM-P-10,
+  Informational). Ed25519 decompression reduces the `y` coordinate
+  modulo the field prime, so a handful of points had a second encoding
+  that decompressed to the same key: two ids for one identity. None has a
+  usable private key and strict verification refuses them anyway, but an
+  id *is* a public key written down and there is one way to write each.
+  A non-canonical encoding is refused.
+
+- **A device certificate cannot encode a length it never checked**
+  (finding SM-P-12, Informational). The name length goes into one byte,
+  and the encoder was reachable through the transparency leaf on a bundle
+  nothing had verified, so a name longer than 255 bytes was silently
+  encoded wrong. The length is clamped instead, which makes the bytes
+  differ from any name that verifies, so the signature fails and no leaf
+  is quietly wrong.
+
 ## 0.10.1 - 2026-09-06
 
 An independent security review of the 0.10.0 line reported 76 findings.

@@ -57,6 +57,24 @@ pub struct DeviceCertificate {
     pub signature: [u8; 64],
 }
 
+/// The check a name must pass when a device is named for the first time.
+/// Stricter than [`check_name`], which every reader applies: the invisible
+/// characters a reaction already refuses (zero-width spaces, the bidi
+/// embeddings and overrides, word joiners, the byte-order mark) are
+/// refused here too, since a device name is shown in the device list and
+/// beside every message. It is not refused on the reading side: a name
+/// certified by an older version would stop verifying, and the signature
+/// covers the bytes as they were written.
+pub fn check_new_name(name: &str) -> Result<(), ProtocolError> {
+    check_name(name)?;
+    if name.chars().any(crate::envelope::is_invisible) {
+        return Err(ProtocolError::Malformed(
+            "invisible character in device name".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn check_name(name: &str) -> Result<(), ProtocolError> {
     if name.len() > MAX_DEVICE_NAME_BYTES {
         return Err(ProtocolError::Malformed("device name too long".into()));
@@ -72,11 +90,18 @@ fn check_name(name: &str) -> Result<(), ProtocolError> {
 impl DeviceCertificate {
     /// `account (32) || device (32) || created_at_ms (8 BE) || name length (1) || name`.
     fn signed_bytes(account: &UserId, device: &UserId, created_at_ms: u64, name: &str) -> Vec<u8> {
+        // The length goes in one byte, and a name is at most
+        // `MAX_DEVICE_NAME_BYTES`. `encode` is reachable from
+        // `transparency_leaf` on a bundle nothing has verified yet, so
+        // rather than truncate a name that cannot legally be this long,
+        // the length is clamped: the bytes then differ from any name that
+        // verifies, the signature fails, and no leaf is quietly wrong.
+        let len = u8::try_from(name.len()).unwrap_or(u8::MAX);
         let mut v = Vec::with_capacity(73 + name.len());
         v.extend_from_slice(account.as_bytes());
         v.extend_from_slice(device.as_bytes());
         v.extend_from_slice(&created_at_ms.to_be_bytes());
-        v.push(name.len() as u8);
+        v.push(len);
         v.extend_from_slice(name.as_bytes());
         v
     }
@@ -197,7 +222,7 @@ impl Identity {
         name: &str,
         created_at_ms: u64,
     ) -> Result<DeviceCertificate, ProtocolError> {
-        check_name(name)?;
+        check_new_name(name)?;
         let account = self.user_id();
         if account == *device {
             return Err(ProtocolError::Malformed(
@@ -458,6 +483,30 @@ pub enum ContactAction {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_device_is_named_without_invisible_characters() {
+        let account = Identity::generate();
+        let device = Identity::generate().user_id();
+        // A name shown in the device list and beside every message: the
+        // characters that would let one pretend to be another are refused
+        // when the name is chosen.
+        for bad in ["laptop\u{200B}", "\u{202E}potpal", "a\u{FEFF}b"] {
+            assert!(
+                account.certify_device(&device, bad, 1).is_err(),
+                "{bad:?} names a device"
+            );
+        }
+        assert!(account.certify_device(&device, "laptop", 1).is_ok());
+
+        // A certificate written by an older version still verifies: the
+        // signature covers the bytes as they were, and refusing it on the
+        // reading side would cut off a device already linked.
+        let mut old = account.certify_device(&device, "laptop", 1).unwrap();
+        old.name = "laptop\u{200B}".into();
+        assert!(check_name(&old.name).is_ok(), "the reader's rule is looser");
+        assert!(check_new_name(&old.name).is_err());
+    }
     use super::*;
 
     #[test]

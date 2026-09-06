@@ -33,7 +33,9 @@ use crate::ProtocolError;
 use crate::bundle::KeyBundle;
 use crate::encoding::{b64, b64_array, b64_opt};
 use crate::identity::{DhPublic, Identity, UserId};
-use crate::pq::{KEM_SECRET_LEN, KemPublic, KemRatchetKey, PqPrekeySecret};
+use crate::pq::{
+    KEM_CIPHERTEXT_LEN, KEM_PUBLIC_LEN, KEM_SECRET_LEN, KemPublic, KemRatchetKey, PqPrekeySecret,
+};
 use crate::prekey::PrekeySecret;
 
 const X3DH_INFO: &[u8] = b"silver-messenger/v2/x3dh";
@@ -118,6 +120,35 @@ pub struct RatchetHeader {
 }
 
 impl RatchetHeader {
+    /// Check that the variable-length fields are the only lengths they may
+    /// be. The associated data below concatenates them without a length
+    /// prefix, so without this a header carrying one 2272-byte `kem` and
+    /// no `kem_ct` has the same associated data as one carrying a 1184-byte
+    /// `kem` and a 1088-byte `kem_ct`. Nothing is known to follow from that
+    /// today — the root key derived from the two differs, so the message
+    /// key does and the AEAD fails — but the encoding should not need the
+    /// accident. A length prefix goes in at the next domain bump; until
+    /// then the lengths are fixed, so refusing anything else is enough.
+    fn check_lengths(&self) -> Result<(), ProtocolError> {
+        if self
+            .kem
+            .as_ref()
+            .is_some_and(|k| k.0.len() != KEM_PUBLIC_LEN)
+        {
+            return Err(ProtocolError::Malformed("bad ML-KEM key length".into()));
+        }
+        if self
+            .kem_ct
+            .as_ref()
+            .is_some_and(|ct| ct.len() != KEM_CIPHERTEXT_LEN)
+        {
+            return Err(ProtocolError::Malformed(
+                "bad ML-KEM ciphertext length".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// The header as associated data: the fixed 40 bytes, then the ML-KEM
     /// public key and ciphertext when present, so both are bound into the
     /// message's AEAD and cannot be swapped by the relay.
@@ -485,6 +516,7 @@ impl Session {
         rng: &mut R,
     ) -> Result<Zeroizing<Vec<u8>>, ProtocolError> {
         let header = &message.header;
+        header.check_lengths()?;
         let aad = self.aad(header);
         if let Some(key) = self.take_skipped(header) {
             return aead_decrypt(&key, &message.ciphertext, &aad);
@@ -1127,6 +1159,45 @@ mod tests {
         let mut bad_ct = r.clone();
         bad_ct.header.kem_ct.as_mut().unwrap()[10] ^= 0x01;
         assert!(a.clone().decrypt(&bad_ct).is_err());
+        // The real one still reads, on the untouched session.
+        assert_eq!(a.decrypt(&r).unwrap().as_slice(), b"reply");
+    }
+
+    #[test]
+    fn a_ratchet_header_takes_only_the_ml_kem_lengths_it_may() {
+        let (mut a, mut b) = handshake_pq_ratchet(true);
+        let m1 = a.encrypt(b"hi").unwrap();
+        b.decrypt(&m1).unwrap();
+        let r = b.encrypt(b"reply").unwrap();
+        assert_eq!(r.header.kem.as_ref().unwrap().0.len(), KEM_PUBLIC_LEN);
+        assert_eq!(r.header.kem_ct.as_ref().unwrap().len(), KEM_CIPHERTEXT_LEN);
+
+        // The associated data lays the two fields end to end with no length
+        // in front, so a header carrying one long `kem` and no `kem_ct`
+        // covers the same bytes as this one. The key derived from it differs,
+        // so the AEAD would fail anyway; the header is refused for its
+        // lengths first, and the ambiguity never arises.
+        let mut merged = r.clone();
+        let mut both = merged.header.kem.as_ref().unwrap().0.clone();
+        both.extend_from_slice(merged.header.kem_ct.as_ref().unwrap());
+        merged.header.kem = Some(KemPublic(both));
+        merged.header.kem_ct = None;
+        assert_eq!(
+            merged.header.bytes(),
+            r.header.bytes(),
+            "the two headers really do cover the same bytes"
+        );
+        assert!(a.clone().decrypt(&merged).is_err());
+
+        for (kem, ct) in [
+            (KEM_PUBLIC_LEN + 1, KEM_CIPHERTEXT_LEN),
+            (KEM_PUBLIC_LEN, 0),
+        ] {
+            let mut odd = r.clone();
+            odd.header.kem = Some(KemPublic(vec![7; kem]));
+            odd.header.kem_ct = Some(vec![7; ct]);
+            assert!(a.clone().decrypt(&odd).is_err());
+        }
         // The real one still reads, on the untouched session.
         assert_eq!(a.decrypt(&r).unwrap().as_slice(), b"reply");
     }

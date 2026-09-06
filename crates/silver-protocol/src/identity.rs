@@ -28,9 +28,36 @@ pub const MAX_ID_CHARS: usize = 44;
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct UserId([u8; 32]);
 
+/// Whether the `y` coordinate of a compressed Edwards point is written
+/// canonically: less than the field prime 2^255 - 19, with the sign bit
+/// (the top bit of the last byte) not part of the number.
+fn is_canonical_y(bytes: &[u8; 32]) -> bool {
+    // p, little-endian, without the sign bit.
+    let mut p = [0xffu8; 32];
+    p[0] = 0xed;
+    p[31] = 0x7f;
+    let mut y = *bytes;
+    y[31] &= 0x7f;
+    for i in (0..32).rev() {
+        if y[i] != p[i] {
+            return y[i] < p[i];
+        }
+    }
+    false // y == p is not less than p
+}
+
 impl UserId {
     /// Wrap raw key bytes, rejecting anything that is not a valid Ed25519 point.
     pub fn from_bytes(bytes: [u8; 32]) -> Result<Self, ProtocolError> {
+        // Decompression reduces `y` modulo the field prime, so a handful
+        // of points (those with `y` below 19) have a second encoding,
+        // `y + p`, that decompresses to the same key: two ids for one
+        // identity. None of them has a usable private key and
+        // `verify_strict` refuses the small-order points anyway, but an id
+        // is a public key written down and there is one way to write each.
+        if !is_canonical_y(&bytes) {
+            return Err(ProtocolError::InvalidKey);
+        }
         VerifyingKey::from_bytes(&bytes).map_err(|_| ProtocolError::InvalidKey)?;
         Ok(Self(bytes))
     }
@@ -225,6 +252,38 @@ fn domain_tagged(domain: &[u8], message: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn an_id_is_the_canonical_encoding_of_its_key() {
+        // A real id round-trips.
+        let id = Identity::generate().user_id();
+        assert!(UserId::from_bytes(*id.as_bytes()).is_ok());
+
+        // y = p decompresses to the same point as y = 0, so it would be a
+        // second id for one key. p, little-endian, sign bit clear.
+        let mut alias = [0xffu8; 32];
+        alias[0] = 0xed;
+        alias[31] = 0x7f;
+        assert!(
+            ed25519_dalek::VerifyingKey::from_bytes(&alias).is_ok(),
+            "the curve accepts it, which is why the check is here"
+        );
+        assert!(UserId::from_bytes(alias).is_err());
+
+        // The same value with the sign bit set is the other alias.
+        let mut signed = alias;
+        signed[31] |= 0x80;
+        assert!(UserId::from_bytes(signed).is_err());
+
+        // One below p is canonical, whether or not it is on the curve.
+        let mut below = alias;
+        below[0] = 0xec;
+        assert_eq!(
+            UserId::from_bytes(below).is_ok(),
+            ed25519_dalek::VerifyingKey::from_bytes(&below).is_ok(),
+            "canonical: the curve alone decides"
+        );
+    }
     /// Base58 decoding is a big-integer conversion, quadratic in the
     /// input, and an id is parsed on every frame field that carries one,
     /// before a relay has authenticated anybody. The length is checked
