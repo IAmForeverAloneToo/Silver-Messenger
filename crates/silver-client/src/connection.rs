@@ -2648,6 +2648,16 @@ async fn handle_blob_frame(
                 }
                 return true;
             }
+            // A chunk is a fixed size plus its tag; anything larger is not
+            // a chunk of this file, whatever the relay says.
+            if data.len() > silver_protocol::blob::MAX_CHUNK_CIPHERTEXT {
+                if let Some(download) = downloads.remove(&blob) {
+                    let _ = download.reply.send(Err(ClientError::Blob(
+                        "the relay sent a chunk larger than a chunk can be".into(),
+                    )));
+                }
+                return true;
+            }
             let slot = &mut download.chunks[index as usize];
             if slot.is_none() {
                 *slot = Some(data);
@@ -3197,9 +3207,10 @@ pub(crate) async fn open_websocket(
     connector: Connector,
     proxy: Option<&Proxy>,
 ) -> anyhow::Result<Ws> {
+    let config = Some(relay_frame_limits());
     let Some(proxy) = proxy else {
         let (ws, _) =
-            tokio_tungstenite::connect_async_tls_with_config(url, None, false, Some(connector))
+            tokio_tungstenite::connect_async_tls_with_config(url, config, false, Some(connector))
                 .await
                 .map_err(describe_connect_error)?;
         return Ok(ws);
@@ -3220,10 +3231,25 @@ pub(crate) async fn open_websocket(
     );
     let stream = proxy.connect(&host, port).await?;
     let (ws, _) =
-        tokio_tungstenite::client_async_tls_with_config(request, stream, None, Some(connector))
+        tokio_tungstenite::client_async_tls_with_config(request, stream, config, Some(connector))
             .await
             .map_err(describe_connect_error)?;
     Ok(ws)
+}
+
+/// What the client will read in one WebSocket message.
+///
+/// Without this the library's default of 64 MiB stands, and a hostile
+/// relay can make the client buffer that much per frame. The relay's own
+/// frames are capped at `MAX_FRAME_BYTES`, but an answer to a lookup
+/// carries the account's bundle and one for each of its devices, so the
+/// client allows a handful of frames' worth rather than exactly one.
+pub(crate) fn relay_frame_limits() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+    const FRAMES: usize = silver_protocol::device::MAX_DEVICES + 2;
+    const CAP: usize = FRAMES * silver_protocol::wire::MAX_FRAME_BYTES;
+    tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(Some(CAP))
+        .max_frame_size(Some(CAP))
 }
 
 /// Turn a failed WebSocket connect into a message a person can act on. An

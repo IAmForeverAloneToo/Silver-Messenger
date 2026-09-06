@@ -111,6 +111,11 @@ impl std::str::FromStr for GroupId {
     type Err = ProtocolError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // The length before the decoding, which is quadratic in it; see
+        // [`crate::identity::MAX_ID_CHARS`].
+        if s.len() > crate::identity::MAX_ID_CHARS {
+            return Err(ProtocolError::Malformed("group id is too long".into()));
+        }
         let bytes = bs58::decode(s)
             .into_vec()
             .map_err(|_| ProtocolError::Malformed("group id is not base58".into()))?;
@@ -545,6 +550,22 @@ pub fn token_hash(token: &[u8; 32]) -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
+    /// As for a user id: the length before the quadratic decoding.
+    #[test]
+    fn an_overlong_group_id_costs_nothing_to_refuse() {
+        use std::time::{Duration, Instant};
+        let long = "z".repeat(128 * 1024);
+        let started = Instant::now();
+        assert!(long.parse::<GroupId>().is_err());
+        let took = started.elapsed();
+        assert!(
+            took < Duration::from_secs(1),
+            "refused in {took:?}: the length is not being checked before the decoding"
+        );
+        let id = GroupId::generate();
+        assert_eq!(id.to_string().parse::<GroupId>().unwrap(), id);
+    }
+
     use super::*;
     use crate::identity::Identity;
 

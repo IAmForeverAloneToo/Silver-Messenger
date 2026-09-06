@@ -84,6 +84,11 @@ impl FromStr for GroupLink {
                     )
                 }
                 "key" => {
+                    // The length before the decoding, which is quadratic
+                    // in it; a 16-byte key is 22 characters at most.
+                    if value.len() > 22 {
+                        return Err(InviteError::BadUserId);
+                    }
                     let bytes = bs58::decode(value)
                         .into_vec()
                         .map_err(|_| InviteError::BadUserId)?;
