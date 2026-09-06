@@ -118,7 +118,12 @@ fn parse_response(bytes: &[u8]) -> anyhow::Result<Release> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
     if status != 200 {
-        bail!("the releases page answered: {status_line}");
+        // The status line is the server's, and this error reaches a
+        // terminal that is not the interface.
+        bail!(
+            "the releases page answered: {}",
+            crate::files::one_line(status_line)
+        );
     }
     let body: serde_json::Value =
         serde_json::from_slice(&bytes[split + 4..]).context("the answer is not JSON")?;
@@ -131,9 +136,12 @@ fn parse_response(bytes: &[u8]) -> anyhow::Result<Release> {
         .get("html_url")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
+    // The tag and the URL are whatever the server put in the JSON, and
+    // both are printed straight to a terminal. Filtered here, once, so
+    // no caller has to remember.
     Ok(Release {
-        tag: tag.to_owned(),
-        url: url.to_owned(),
+        tag: crate::files::one_line(tag),
+        url: crate::files::one_line(url),
     })
 }
 

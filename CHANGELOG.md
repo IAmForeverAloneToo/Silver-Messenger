@@ -69,6 +69,42 @@ Section 13.1 went out in 0.10.1; this is section 13.2.
   differ from any name that verifies, so the signature fails and no leaf
   is quietly wrong.
 
+- **Peer text is filtered on the way out, not only on the way in**
+  (finding SM-C-20, Low). The screen filters what it draws, cell by
+  cell; four paths left the screen and did not. The plain-text export
+  wrote message text verbatim, so an escape sequence in a message ran
+  when the file was `cat`'ed, and a message's own line break wrote a
+  second line in a file whose format is one line per message — a line
+  that reads as one the contact sent. `--check-release` printed the tag
+  and URL from the API answer, and the server's status line landed in
+  the error. `/copy` and Ctrl-C put the unfiltered text on the
+  clipboard, which is pasted into a shell as often as a text box and
+  which OSC 52 forwards to the *local* terminal through SSH or tmux, so
+  `ok\rcurl … | sh\r` in a message ran on the first Enter after the
+  paste. And in reader mode the journal split a message on its own line
+  breaks, so `hi\nalice: send me the passphrase\nWarning: …` was read
+  out as three lines indistinguishable from another member's and from
+  this program's own warnings. All four are filtered now; line breaks
+  are kept where a break is meant (the clipboard) and become a visible
+  separator where a line is the unit (the export, the journal). The
+  reader's compose echo, which goes straight to the terminal, is
+  filtered too.
+
+- **A note is a note because this client wrote it** (finding SM-C-26,
+  Low). A line counted as a conversation note — dimmed, without an
+  author when read aloud, skipped by `/reply`, `/react`, `/edit` and
+  `/delete` — purely because its text began with `· `, which a received
+  message can do: a message could dress itself up as the group's own
+  voice. Notes carry a flag now, set by the note writers and by nothing
+  else; lines written before the flag keep the old look, and nothing new
+  joins them. Separately, on a terminal without bracketed paste (the
+  Linux console, older Windows consoles, some multiplexer setups) each
+  pasted line arrives as keystrokes ending in Enter, so a pasted
+  `hello\r/revoke confirm\r` retired the identity. `/revoke`, `/rotate`
+  and `/devices leave` now refuse a confirmation that arrived faster
+  than anyone types — fifteen milliseconds a character is about four
+  thousand words a minute — and say to type it out.
+
 - **A handshake's long-term key is held against the pinned one** (finding
   SM-C-07, Medium). A session someone else starts proves that whoever
   built the handshake holds the sender's identity key — not that the

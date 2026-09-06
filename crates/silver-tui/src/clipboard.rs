@@ -50,7 +50,16 @@ impl Clipboard {
     }
 
     /// Put `text` on the clipboard.
+    ///
+    /// Filtered first: a message is the sender's to write, and what goes
+    /// on the clipboard is pasted into a shell as often as into a text
+    /// box. Without this a message reading `ok\rcurl … | sh\r`, copied
+    /// with /copy or Ctrl-C, runs on the first Enter after the paste —
+    /// and by OSC 52 it reaches the *local* terminal through SSH or tmux,
+    /// which is a machine this program is not even running on. Line
+    /// breaks are kept; nothing else that moves a cursor is.
     pub fn set(&mut self, text: &str) -> Copied {
+        let text = &silver_client::files::safe_text(text);
         if let Some(system) = &mut self.system
             && system.set_text(text.to_owned()).is_ok()
         {

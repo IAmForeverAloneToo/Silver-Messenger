@@ -597,6 +597,9 @@ impl App {
             self.toast("Type /devices leave confirm to unlink this device.");
             return;
         }
+        if !self.typed_it_themselves("unlinking this device") {
+            return;
+        }
         if self.leaving.is_some() {
             return;
         }

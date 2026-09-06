@@ -127,6 +127,12 @@ pub fn export_history(
 }
 
 /// The text form of one entry, with a newline; two lines for a reply.
+///
+/// Everything that came from somebody else — the message, the quote, the
+/// names — goes through [`files::one_line`] first. The file is meant to
+/// be read with `cat` or `less`, which act on escape sequences the
+/// interface would have filtered, and a message carrying a newline would
+/// otherwise write a second line of its own in the file's own format.
 fn text_lines(
     entry: &HistoryEntry,
     who: &str,
@@ -141,8 +147,8 @@ fn text_lines(
             Some(t) if t.deleted => "a deleted message".to_owned(),
             Some(t) => format!(
                 "{}: {}",
-                who_of(t),
-                t.text.lines().next().unwrap_or_default()
+                files::one_line(&who_of(t)),
+                files::one_line(t.text.lines().next().unwrap_or_default())
             ),
             None => "a message not here".to_owned(),
         };
@@ -152,7 +158,9 @@ fn text_lines(
         out.push_str(&format!("{stamp}  {who} deleted a message\n"));
         return out;
     }
-    let mut text = entry.text.clone();
+    let who = files::one_line(who);
+    let who = who.as_str();
+    let mut text = files::one_line(&entry.text);
     if entry.edited {
         text.push_str(" (edited)");
     }
@@ -163,9 +171,9 @@ fn text_lines(
             .map(|r| {
                 let by = match r.from {
                     None => "you".to_owned(),
-                    Some(user) => name_of(&user),
+                    Some(user) => files::one_line(&name_of(&user)),
                 };
-                format!("{} {by}", r.emoji)
+                format!("{} {by}", files::one_line(&r.emoji))
             })
             .collect();
         text.push_str(&format!(" [{}]", reactions.join(", ")));
@@ -209,7 +217,8 @@ mod tests {
                 &HistoryEntry::new("1", Direction::Sent, 1_000, "hello"),
             )
             .unwrap();
-        let mut reply = HistoryEntry::new("2", Direction::Received, 61_000, "hi\nsecond line");
+        let mut reply =
+            HistoryEntry::new("2", Direction::Received, 61_000, "hi\nsecond line\x1b[2J");
         reply.reply_to = Some("1".into());
         store.append_history(&bob, &reply).unwrap();
         store
@@ -241,9 +250,16 @@ mod tests {
             "{bob_file}"
         );
         assert!(lines[1].ends_with("  > you: hello there"), "{bob_file}");
-        assert!(lines[2].ends_with("  bob: hi"), "{bob_file}");
-        assert_eq!(lines[3], "second line [👍 you]");
-        assert!(lines[4].ends_with("  bob deleted a message"), "{bob_file}");
+        // A message's own line break stays inside its line: the file is
+        // one line per message, and a second line would read as one bob
+        // did not send. Nothing a message carries reaches a terminal
+        // that would act on it either (SM-C-20).
+        assert!(
+            lines[2].ends_with("  bob: hi second line [2J [👍 you]"),
+            "{bob_file}"
+        );
+        assert!(lines[3].ends_with("  bob deleted a message"), "{bob_file}");
+        assert!(!bob_file.contains('\x1b'), "{bob_file:?}");
         assert!(
             !bob_file.contains("ran out"),
             "an expired line is not exported"

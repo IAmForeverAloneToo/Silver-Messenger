@@ -601,7 +601,10 @@ fn lines_rows(
                 Span::raw(": "),
             ]
         };
-        let style = if line.text.starts_with("· ") {
+        // Dimmed only when this client wrote it: a received message that
+        // began with the note prefix used to be dimmed like one, which
+        // let a sender dress a message up as the conversation's own voice.
+        let style = if line.is_note() {
             app.theme.dim
         } else {
             Style::default()

@@ -438,6 +438,18 @@ pub struct HistoryEntry {
     /// for notes about the group).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<UserId>,
+    /// This line is a note this client wrote about the conversation
+    /// rather than a message somebody sent.
+    ///
+    /// Set by the note writers and by nothing else. Before 0.11.0 a note
+    /// was told from a message by its text starting with `· `, which a
+    /// received message could imitate — and a message treated as a note
+    /// is dimmed, loses its author when read aloud, and is skipped by
+    /// `/reply`, `/react`, `/edit` and `/delete`. `None` means a line
+    /// written before the flag existed, where the old guess is all there
+    /// is; every line written from 0.11.0 on says which it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<bool>,
     /// The message this one answers (`docs/PROTOCOL.md` section 4.7), if
     /// it is a reply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -487,6 +499,7 @@ impl HistoryEntry {
             file: None,
             saved: None,
             from: None,
+            note: Some(false),
             reply_to: None,
             expire_after_s: 0,
             read_at_ms: None,
