@@ -195,5 +195,31 @@ confirmed and corrected in the documentation pass of 0.10.1.
 | 0.11.0 | The rest of the Mediums and the Lows, and the documentation rows of the report's section 12 | Next |
 | 1.0 | The report's section 13.3, each with a design note; the roadmap lists them under Phase 11 | Planned |
 
-Advisories: one per Critical and High finding, on the repository's
-Security tab, crediting the independent review the report names.
+No separate security advisories were filed for these. The project has
+one user, its own maintainer, and the report, this note and the
+changelog's `Security` section already say what each finding was and
+what was done about it; an advisory would be a fourth copy addressed to
+nobody. What an advisory would have carried and these did not is the
+range each finding affects, so that is here instead. A report from
+someone else is still handled as [SECURITY.md](../../SECURITY.md) says.
+
+| Finding | Severity | Affected | Fixed in |
+| --- | --- | --- | --- |
+| SM-R-01 | Critical | 0.9.0 to 0.10.0 (device revocations arrived in 0.9.0) | 0.10.1 |
+| SM-P-01 | High | 0.9.0 to 0.10.0 | 0.10.1 |
+| SM-P-02 | High | every version to 0.10.0 | 0.10.1 |
+| SM-R-02 | High | 0.6.0 to 0.10.0 (the bound login arrived in 0.6.0) | 0.10.1 |
+| SM-R-03 | High | every version to 0.10.0 | 0.10.1 |
+| SM-R-04 | High | every version to 0.10.0 | 0.10.1 |
+| SM-R-05 | High | 0.8.0 to 0.10.0 (the transparency log arrived in 0.8.0) | 0.10.1 |
+| SM-C-01 | High | 0.6.0 to 0.10.0 (`--pin` arrived in 0.6.0) | 0.10.1 |
+| SM-C-02 | High | 0.8.0 to 0.10.0 (`revocation.json` from 0.8.0, the group files from 0.9.0) | 0.10.1 |
+| SM-G-01 | High | 0.9.0 to 0.10.0 (groups arrived in 0.9.0) | 0.10.1 |
+| SM-G-02 | High | 0.9.0 to 0.10.0 (device linking arrived in 0.9.0) | 0.10.1 |
+
+Two of these leave something behind that upgrading does not undo. A data
+directory unprotected by 0.10.0 or earlier has `groups.json`,
+`groups.mls` and `revocation.json` still encrypted under a key that is
+gone (SM-C-02); and a relay that stored a device revocation under the
+old rule keeps the record, inert, until an operator drops it with
+`silver-relay admin unrevoke-device` (SM-R-01).
