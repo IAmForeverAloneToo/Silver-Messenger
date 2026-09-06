@@ -4,16 +4,24 @@ Notable changes to Silver Messenger. Versions follow [semantic
 versioning](https://semver.org); while the major version is 0, a minor bump
 means behaviour or the wire protocol changed in a way worth reading about.
 
-## Unreleased
+## 0.10.1 - 2026-09-06
 
-An independent security review of the 0.10.0 line reported 76 findings;
-the report and what is done about each are in
+An independent security review of the 0.10.0 line reported 76 findings.
+The report is published whole as
+[docs/audits/2026-09-security-audit.md](docs/audits/2026-09-security-audit.md),
+and what was found when each finding was checked against the code, what
+is done about it and in which release are in
 [docs/design/audit-response.md](docs/design/audit-response.md). This
-release carries the Critical and the High findings and the Mediums that
-share their code. Nothing on the wire changes: every fix is a stricter
-reader, a stricter relay, or a client that refuses what the protocol
-already said it refuses. What stops working for some setups is listed in
-the response note, section 5.
+release carries the one Critical finding, all ten High ones, and the
+Mediums that share their code. Nothing on the wire changes: every fix is
+a stricter reader, a stricter relay, or a client that refuses what the
+protocol already said it refuses. A 0.10.1 client works with a 0.10.0
+relay and the other way round, with the exceptions the response note
+lists in its section 5; **relay operators should upgrade**, since one of
+these lets any identity that can register destroy any other identity's
+account. [UPGRADING.md](docs/UPGRADING.md) says what an operator has to
+set. The remaining findings are for 0.11.0 and, where they need a
+format change, for 1.0.
 
 ### Security
 
