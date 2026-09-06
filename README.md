@@ -569,8 +569,10 @@ it does not, is in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
   exists, `forward secret, post-quantum` when ML-KEM is in play; `/session`
   explains the state, including whether the ratchet is post-quantum and
   whether the messages are deniable. A recipient without prekeys (a client
-  older than 0.3.0, or anyone behind an older relay) is sent the plain v1
-  body instead (signed, not deniable, and on its way out); one without
+  older than 0.3.0, or anyone behind an older relay) cannot be written to
+  at all: the plain v1 body that used to reach them has no forward secrecy
+  and stays readable by whoever holds their long-term key, so it is
+  refused and they have to update; one without
   ML-KEM keys gets the classical handshake; and one whose relay predates
   0.8.0 gets the v2 ratchet, so everyone keeps talking during the upgrade.
 * **Anonymous submission**: a relay from 0.3.0 on accepts messages on
@@ -776,7 +778,8 @@ The end-to-end tests in `crates/silver-client/tests/e2e.rs` start a relay
 on a random port, connect two clients, and check both directions, offline
 queueing, reconnection after the relay goes away, forward-secret sessions
 (including handshakes that wait in the mailbox, restarts, a peer that lost
-its session state, and a peer without prekeys), anonymous submission,
+its session state, and a peer without prekeys, whom nothing is sent to),
+anonymous submission,
 capabilities and receipts, file transfer (chunking, progress, a missing
 blob, a tampered hash, a relay without file storage), groups, and
 devices (`tests/devices.rs`: a device linked by its link, a message

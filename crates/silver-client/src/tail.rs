@@ -503,6 +503,25 @@ fn settle(answer: Answer, step: &mut Step) {
 }
 
 fn refuse(answer: Answer, reason: &str, step: &mut Step) {
+    // A lifecycle statement carried by a refused answer is still the
+    // owner's own signature, and it is the one thing in the answer a
+    // hostile relay would rather the reader did not see: a revocation
+    // says stop writing to this key. It is raised whatever became of the
+    // rest of the answer.
+    if let Some(revocation) = &answer.revocation
+        && revocation.verify().is_ok()
+    {
+        step.events.push(ClientEvent::PeerRevoked {
+            revocation: revocation.clone(),
+        });
+    }
+    if let Some(succession) = &answer.succession
+        && succession.verify().is_ok()
+    {
+        step.events.push(ClientEvent::PeerSucceeded {
+            succession: succession.clone(),
+        });
+    }
     for reply in answer.replies {
         let _ = reply.send(Err(ClientError::Transparency(reason.to_owned())));
     }
@@ -822,6 +841,78 @@ mod tests {
             got.iter().any(
                 |e| matches!(e, ClientEvent::PeerRevoked { revocation: r } if *r == revocation)
             )
+        );
+    }
+
+    #[test]
+    fn a_refused_answer_still_raises_a_revocation_that_verifies() {
+        let mut relay = Relay::new();
+        let alice = Identity::generate();
+        let old = bundle_of(&alice, 1);
+        relay.log_bundle(&old);
+        let current = bundle_of(&alice, 2);
+        relay.log_bundle(&current);
+        let revocation = alice.revocation(3);
+        relay.log(
+            &alice.user_id(),
+            EntryKind::Revocation,
+            revocation.transparency_leaf(),
+        );
+        let log = LogStore::ephemeral().shared();
+        let mut tail = Tail::new(Some(log));
+        // Catch up first, so the answer below is judged on the spot.
+        let step = tail.on_relay_head(relay.head());
+        drive(&mut tail, &relay, step, 10);
+
+        // A relay hiding a revocation would rather the answer failed than
+        // hand it over: here it serves a bundle that is not the latest
+        // logged, which is refused, with the revocation still attached.
+        // The revocation is alice's own signature and stands on its own.
+        let (tx, rx) = oneshot::channel();
+        let step = tail.on_answer(Answer {
+            user_id: alice.user_id(),
+            bundle: Some(old.clone()),
+            revocation: Some(revocation.clone()),
+            succession: None,
+            head: Some(relay.head()),
+            logged: relay.latest(&alice.user_id()),
+            device_bundles: Vec::new(),
+            device_revocations: Vec::new(),
+            replies: vec![tx],
+        });
+        assert!(matches!(
+            rx.blocking_recv().unwrap().unwrap_err(),
+            ClientError::Transparency(_)
+        ));
+        assert!(
+            step.events.iter().any(
+                |e| matches!(e, ClientEvent::PeerRevoked { revocation: r } if *r == revocation)
+            ),
+            "the revocation is raised even though the answer was thrown away"
+        );
+
+        // A statement that does not verify is not raised: it is only the
+        // owner's signature that makes one worth acting on.
+        let (tx, rx) = oneshot::channel();
+        let mut forged = alice.revocation(4);
+        forged.identity = Identity::generate().user_id();
+        let step = tail.on_answer(Answer {
+            user_id: alice.user_id(),
+            bundle: Some(old),
+            revocation: Some(forged),
+            succession: None,
+            head: Some(relay.head()),
+            logged: relay.latest(&alice.user_id()),
+            device_bundles: Vec::new(),
+            device_revocations: Vec::new(),
+            replies: vec![tx],
+        });
+        assert!(rx.blocking_recv().unwrap().is_err());
+        assert!(
+            !step
+                .events
+                .iter()
+                .any(|e| matches!(e, ClientEvent::PeerRevoked { .. }))
         );
     }
 

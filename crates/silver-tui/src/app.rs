@@ -1002,9 +1002,9 @@ impl App {
             .is_some_and(|b| !b.supports_sessions())
         {
             if self.relay_supports_prekeys() {
-                Some("their client has no forward secrecy yet")
+                Some("no forward secrecy: cannot be messaged")
             } else {
-                Some("relay too old for forward secrecy")
+                Some("relay too old: cannot be messaged")
             }
         } else {
             None
@@ -2466,10 +2466,10 @@ impl App {
             ),
             None => match &contact.bundle {
                 Some(b) if !b.supports_sessions() && !self.relay_supports_prekeys() => format!(
-                    "Messages with {name} are encrypted to their long-term key only: the relay is older than 0.3.0 and does not keep prekeys. Forward secrecy starts by itself once it is updated."
+                    "Nothing can be sent to {name}: the relay is older than 0.3.0 and does not keep forward-secrecy keys, so the only message it could carry would stay readable by whoever holds their long-term key. Sending starts by itself once the relay is updated."
                 ),
                 Some(b) if !b.supports_sessions() => format!(
-                    "Messages with {name} are encrypted to their long-term key only: their client does not publish prekeys yet (it is older than 0.3.0). Forward secrecy starts by itself once it does."
+                    "Nothing can be sent to {name}: their client publishes no forward-secrecy keys (it is older than 0.3.0), so the only message it could read would stay readable by whoever holds their long-term key. Sending starts by itself once they update."
                 ),
                 Some(_) => format!(
                     "No session with {name} yet; the next message you send starts a forward-secret one."

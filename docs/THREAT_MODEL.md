@@ -206,6 +206,22 @@ Cannot:
   it (`admin unrevoke-device`). Clients hold to the same rule: a
   revocation is acted on for a device already known as that account's,
   whoever handed it over.
+- Have a message sent without forward secrecy by taking every prekey out
+  of the bundle it serves. Prekeys are optional, so a stripped bundle's
+  signature still checks out and only the client's own memory tells the
+  two apart: a client that already holds a bundle with prekeys for that
+  contact keeps it, says the relay is now serving them without, and
+  starts the session from the keys it knows; a client that holds nothing
+  refuses to send rather than fall back to the old plain body, which
+  whoever later holds the recipient's identity key could read. What the
+  relay can still do is serve a *stale* bundle, and a signed prekey older
+  than three weeks is not used at all (above).
+- Bury a revocation by making the answer that carries it fail. A
+  revocation or a succession is signed by its own subject, so one that
+  verifies is raised to the user even when the transparency check refuses
+  the answer around it. A refusal also stops the send that asked for the
+  lookup: nothing goes out under a bundle already held while the log and
+  what the relay serves disagree.
 
 ### Network observer
 
@@ -505,9 +521,10 @@ independent rebuild is the answer to that.
 - **Deniability** (0.8.0 on, protocol v4): a v4 session message carries no
   signature at the sealed layer, so the recipient cannot prove to anyone
   else who wrote it. The session's AEAD authenticates it to the recipient,
-  and the handshake is deniable. A v1 body (no prekeys) and a v2 session
-  (an older peer or relay) are still signed; the client shows which a
-  session is.
+  and the handshake is deniable. A v2 session (an older peer or relay) is
+  still signed, as is a v1 body, which from 0.10.1 is sent only by a
+  client built without a session store and where a peer's prekeys are too
+  old to start a session; the client shows which a session is.
 - **Relay auth**: the relay sends a 32-byte random nonce; the client signs it
   together with the relay's host name under a domain-separated prefix. Only
   the holder of an identity key can read that identity's mailbox.
@@ -702,7 +719,7 @@ maintainer's account plus signing key both being taken.
 
 | Gap | Status |
 | --- | --- |
-| Deniability: a recipient can prove who wrote what | Closed for v4 sessions (0.8.0): a v4 body carries no sealed-layer signature (`PROTOCOL.md` section 9). Still open for v1 bodies (no prekeys) and v2 sessions (older peer or relay), which stay signed until v1 is retired. |
+| Deniability: a recipient can prove who wrote what | Closed for v4 sessions (0.8.0): a v4 body carries no sealed-layer signature (`PROTOCOL.md` section 9). Still open for v2 sessions (older peer or relay), which stay signed, and for the v1 body, no longer sent to a peer without prekeys (0.10.1) but still sent where their prekeys are too old to start a session. |
 | Cover traffic: the relay and the network see when messages travel and roughly how big they are | Closed as far as it goes (0.8.0, roadmap item 46, opt-in): two contacts who both turn it on send meaningless messages to each other at random moments while both clients run, so the relay cannot tell when they really talk or, for short and medium messages, which message is real. What remains: it shows the two are in contact, bursts and long messages stand out, files are visible, connecting and disconnecting are visible, and nothing covers contacts who did not opt in or are not around. It is off by default because it costs bandwidth. |
 | Post-quantum ratchet steps: after the hybrid handshake the ratchet is X25519 only | Closed for v4 sessions (0.8.0, roadmap item 41): every ratchet step does an ML-KEM step. A v2 session (older peer or relay) is still X25519-only after the handshake. |
 | Identity revocation | Closed (0.8.0, roadmap item 43): a pre-signed revocation certificate kept in the data directory and the backup, and a cross-signed succession for a planned rotation, served by the relay and verified by contacts (`PROTOCOL.md` section 10). A revocation is final. What remains is the race on a succession an attacker holding a compromised key issued before its owner revoked it. |
