@@ -134,6 +134,32 @@ the response note, section 5.
   relay in one WebSocket message, where the library's 64 MiB default
   stood before, and refuses a blob chunk larger than a chunk can be.
 
+- **A refused answer stops the send, and nothing goes out without
+  forward secrecy** (findings SM-C-06 and SM-C-03, both Medium). When
+  the transparency log said the relay was serving something other than
+  what it logged, or withholding a statement it had logged, the client
+  reported the refusal, told the user nothing was sent, and then sent the
+  message under the bundle it already held. The one case that matters
+  most is the one it got wrong: the log holds a contact's revocation, the
+  relay withholds it, and the message goes to the revoked key. A refusal
+  now fails the send that asked for the lookup. A revocation or a
+  succession inside a refused answer is signed by its own subject, so one
+  that verifies is raised to the user even though the answer around it
+  was thrown away.
+
+  Sending to a contact whose bundle carries no forward-secrecy keys is
+  refused, as protocol section 8 has said since 0.8.0 that it would be:
+  the plain v1 body it used to fall back to has no forward secrecy and no
+  deniability, and stays readable ever after by whoever holds the
+  recipient's identity key. Because prekeys are optional, a bundle with
+  them taken out carries just as good a signature as one with them, so a
+  relay could bring the fallback about at will; a client that already
+  holds prekeys for that contact now keeps them, says the relay is
+  serving the contact without, and starts the session from the keys it
+  knows. A contact still running a client from before 0.3.0, or one built
+  without a session store, has to update before they can be written to;
+  their own messages are still read.
+
 ## 0.10.0 - 2026-09-05
 
 Phase 10 of the roadmap: what people expect of a messenger in daily use,

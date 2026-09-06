@@ -213,6 +213,16 @@ pub enum ClientError {
     /// answer was refused. See [`ClientEvent::Transparency`].
     #[error("refused: {0}")]
     Transparency(String),
+    /// The recipient's bundle carries no prekeys, so the only body that
+    /// would reach them is a v1 one: no forward secrecy, no deniability,
+    /// readable ever after by whoever holds their long-term key. Either
+    /// their client predates prekeys, or a relay took the prekeys out of
+    /// the bundle it served.
+    #[error(
+        "{0} publishes no forward-secrecy keys, so nothing can be sent to them that stays \
+         unreadable if their key is taken later; ask them to update their client, and /refresh"
+    )]
+    NoForwardSecrecy(silver_protocol::UserId),
 }
 
 enum Command {
@@ -534,6 +544,18 @@ impl WeakClient {
 
 fn lock<T>(shared: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     shared.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Whether a freshly served bundle has dropped the forward-secrecy keys the
+/// bundle already known for that contact carries. Prekeys are optional, so
+/// both bundles carry a good signature either way and only the comparison
+/// tells them apart. Losing them is a downgrade to a v1 body, which
+/// [`Client::seal_for`] refuses, so it is worth saying out loud.
+fn prekeys_vanished(pinned: Option<&KeyBundle>, fresh: Option<&KeyBundle>) -> bool {
+    match (pinned, fresh) {
+        (Some(pinned), Some(fresh)) => pinned.supports_sessions() && !fresh.supports_sessions(),
+        _ => false,
+    }
 }
 
 impl Client {
@@ -1106,19 +1128,18 @@ impl Client {
                     Err(e) => return Err(e.into()),
                 }
             }
-            _ => {
-                // A peer without prekeys gets a plain, signed v1 body: not
-                // forward secret and not deniable. The v1 body is on its way
-                // out (PROTOCOL.md section 9); until then this is the only
-                // way to reach a client that predates prekeys.
-                if !to.supports_sessions() {
-                    debug!(
-                        "{}… publishes no prekeys; sending a plain v1 body (no forward secrecy, not deniable)",
-                        to.user_id.short()
-                    );
-                }
-                plain
+            // This client keeps sessions but the recipient publishes no
+            // prekeys. A v1 body would go out with no forward secrecy and
+            // no deniability, readable ever after by whoever holds their
+            // long-term key, and a relay can bring this about by serving a
+            // bundle with the prekeys taken out. The specification says
+            // 0.10.0 refuses to send one (section 8), and now it does.
+            Some(_) => {
+                return Err(ClientError::NoForwardSecrecy(to.user_id));
             }
+            // This client keeps no sessions at all: it speaks v1 by
+            // construction, and says so wherever it is set up.
+            None => plain,
         };
         let envelope = if deniable {
             seal_bytes_unsigned(&self.identity, to, &body)?
@@ -1190,11 +1211,32 @@ impl Client {
         if needs_fresh {
             match self.lookup_full(peer).await {
                 Ok(fresh) => {
-                    if fresh.bundle.is_some() {
+                    if prekeys_vanished(pinned.as_ref(), fresh.bundle.as_ref()) {
+                        // A bundle without prekeys verifies as well as one
+                        // with them, so a relay can take them out of what it
+                        // serves and no signature says otherwise. The pinned
+                        // bundle is the peer's own and it has prekeys, so it
+                        // is kept: the message still goes out forward secret,
+                        // and the served one is not written over the pin.
+                        let _ = self
+                            .ev_tx
+                            .send(ClientEvent::Error(format!(
+                                "the relay now serves {}… without forward-secrecy keys, which their bundle had before; keeping the keys already known for them. If this lasts, the relay may be taking them out.",
+                                peer.short()
+                            )))
+                            .await;
+                    } else if fresh.bundle.is_some() {
                         bundle = fresh.bundle.clone();
                     }
                     lookup = fresh;
                 }
+                // A refused answer is not a relay that cannot be reached:
+                // the log says the relay is serving something other than
+                // what it logged, or withholding a statement it logged.
+                // Nothing goes out under a key in that state, which is
+                // what the specification (section 11.4) and the message
+                // on screen both say happens.
+                Err(e @ ClientError::Transparency(_)) => return Err(e),
                 Err(e) if bundle.is_none() => return Err(e),
                 Err(e) => debug!("using the pinned bundle for {peer}: lookup failed: {e}"),
             }

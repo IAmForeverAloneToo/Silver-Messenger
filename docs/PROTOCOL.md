@@ -798,8 +798,10 @@ without the key from the same message.
 ## 8. Client behaviour that affects interoperability
 
 * **Choosing the body version.** A client with a session store sends a
-  ratchet body when the recipient's bundle carries prekeys, and a plain v1
-  body otherwise. Among ratchet bodies it sends **v4** when the bundle both
+  ratchet body when the recipient's bundle carries prekeys, and refuses to
+  send at all when it does not (see *Retiring v1*). A client without a
+  session store sends a plain v1 body, which is the whole of what it
+  speaks. Among ratchet bodies it sends **v4** when the bundle both
   carries `pq_signed` and advertises the `pq_ratchet` capability (section
   2); otherwise **v2**, whose handshake is still PQXDH when the bundle
   carries `pq_signed`. It must accept every kind from anyone, and a
@@ -810,9 +812,13 @@ without the key from the same message.
   (not deniable); it survives only to reach clients from before prekeys.
   It is scheduled to go: 0.8.0 and 0.9.0 still send it to a peer with no
   prekeys and log that it is neither forward secret nor deniable, and
-  0.10.0 refuses to send it (a peer without prekeys is then unreachable
+  0.10.1 refuses to send it (a peer without prekeys is then unreachable
   until it updates). Receiving a v1 body stays supported longer, for
-  stored history.
+  stored history. Since prekeys are optional, a bundle stripped of them
+  verifies as well as one with them, so a relay can bring the refusal
+  about: a client that already holds a bundle with prekeys for that
+  contact keeps it rather than the served one, says so, and sends under
+  the keys it knows.
 * **Starting a session.** A fresh lookup precedes the first message of a
   session, so the handshake uses a current signed prekey and a one-time key
   that has not been handed out before. A pinned bundle is used only when
@@ -908,7 +914,10 @@ way Signal's messages are deniable.
 
 Two things still carry a signature. A **v1 body** has nothing else to
 authenticate it, so it stays signed; it is being retired (section 8), and
-a message to a peer with no prekeys is the only place it is still sent. A
+the only places it is still sent are a client built without a session
+store, which speaks nothing else, and a session whose prekeys are too old
+to start one (section 8, *Starting a session*), where the user is told
+what the message went without. A
 **v2 body** (a session with a peer or relay that predates v4) keeps the
 sealed-layer signature too; those sessions are not deniable, and a client
 shows which a session is (`/session`). As v1 goes and v4 becomes the norm,
@@ -1142,7 +1151,12 @@ refused: a stale prekey is the attack); `logged` must be the position the
 client replayed; a logged revocation must be in the answer, as must a
 logged succession when no revocation is logged, and a statement served must
 be the logged one. A refused answer reaches the front end as a refusal
-naming the problem, and nothing is sent with the key.
+naming the problem, and nothing is sent with the key: a send that asked
+for the lookup fails with the refusal rather than falling back to a bundle
+it already held. A revocation or a succession carried by a refused answer
+is still the owner's own signature, so one that verifies is raised even
+though the answer around it was thrown away; a hostile relay does not get
+to bury a revocation by making the rest of its answer fail.
 
 **Gossip.** Every body carries the sender's verified head (4.1). On
 receipt: at the same index the hashes must match; at a lower index the

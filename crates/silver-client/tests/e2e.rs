@@ -828,7 +828,7 @@ async fn everyday_kinds_travel_under_a_session_and_advertise_what_they_need() {
 }
 
 #[tokio::test]
-async fn a_peer_without_prekeys_is_sent_v1_and_understood() {
+async fn a_peer_without_prekeys_is_refused_and_their_v1_still_read() {
     let (url, _state) = start_relay().await;
     let alice = Arc::new(Identity::generate());
     let bob = Arc::new(Identity::generate());
@@ -840,7 +840,10 @@ async fn a_peer_without_prekeys_is_sent_v1_and_understood() {
     connected(&mut alice_ev, "alice").await;
     connected(&mut bob_ev, "bob").await;
 
-    let delivery = alice_c
+    // A v1 body has no forward secrecy and no deniability, and a relay can
+    // bring one about by serving a bundle with the prekeys taken out, so
+    // nothing is sent (protocol section 8).
+    let refused = alice_c
         .send_message(
             bob.user_id(),
             None,
@@ -848,14 +851,14 @@ async fn a_peer_without_prekeys_is_sent_v1_and_understood() {
             Sequence::default(),
         )
         .await
-        .unwrap();
-    assert!(!delivery.forward_secret);
-    assert!(!delivery.bundle.supports_sessions());
-    let got = wait_for(&mut bob_ev, "bob's message", |e| message(e).is_some()).await;
-    assert_eq!(body(&got).unwrap().1, "plain for bob");
-    assert!(!message(&got).unwrap().forward_secret);
+        .unwrap_err();
+    assert!(
+        matches!(refused, ClientError::NoForwardSecrecy(who) if who == bob.user_id()),
+        "{refused:?}"
+    );
 
-    // Bob's v1 reply to Alice's v2 bundle is read as plain too.
+    // Bob's own v1 message is still read: refusing to send one does not
+    // make an older client's messages unreadable.
     let alice_bundle = bob_c.lookup(alice.user_id()).await.unwrap().unwrap();
     assert!(alice_bundle.supports_sessions());
     bob_c
@@ -866,6 +869,57 @@ async fn a_peer_without_prekeys_is_sent_v1_and_understood() {
     assert_eq!(body(&got).unwrap().1, "plain back");
     assert!(!message(&got).unwrap().forward_secret);
     assert!(alice_c.session_info(&bob.user_id()).is_none());
+}
+
+#[tokio::test]
+async fn prekeys_taken_out_of_a_served_bundle_do_not_replace_the_ones_already_held() {
+    let (url, state) = start_relay().await;
+    let alice = Arc::new(Identity::generate());
+    let bob = Arc::new(Identity::generate());
+    let (alice_c, mut alice_ev) =
+        Client::spawn(url.clone(), alice.clone(), with_sessions(&alice)).unwrap();
+    let (bob_c, mut bob_ev) = Client::spawn(url.clone(), bob.clone(), with_sessions(&bob)).unwrap();
+    connected(&mut alice_ev, "alice").await;
+    connected(&mut bob_ev, "bob").await;
+
+    // Alice pins Bob's bundle while the relay is still honest.
+    let pinned = alice_c.lookup(bob.user_id()).await.unwrap().unwrap();
+    assert!(pinned.supports_sessions());
+
+    // The relay now serves Bob without prekeys, which is a downgrade to a
+    // v1 body and carries just as good a signature. Alice keeps the keys
+    // she already has, says so, and the message goes out forward secret.
+    state.store().put_bundle(&bob.key_bundle()).unwrap();
+    let delivery = alice_c
+        .send_message(
+            bob.user_id(),
+            Some(pinned.clone()),
+            "still forward secret".into(),
+            Sequence::default(),
+        )
+        .await
+        .unwrap();
+    assert!(delivery.forward_secret);
+    assert!(
+        delivery.bundle.supports_sessions(),
+        "the stripped bundle is not written over the pin"
+    );
+    let complaint = wait_for(
+        &mut alice_ev,
+        "alice's complaint",
+        |e| matches!(e, ClientEvent::Error(t) if t.contains("forward-secrecy keys")),
+    )
+    .await;
+    let ClientEvent::Error(text) = complaint else {
+        unreachable!()
+    };
+    assert!(text.contains(&bob.user_id().short()), "{text}");
+    let got = wait_for(&mut bob_ev, "bob's message", |e| message(e).is_some()).await;
+    assert_eq!(body(&got).unwrap().1, "still forward secret");
+    assert!(message(&got).unwrap().forward_secret);
+
+    alice_c.shutdown().await;
+    bob_c.shutdown().await;
 }
 
 #[tokio::test]
@@ -1619,4 +1673,46 @@ async fn a_key_the_relay_did_not_log_is_refused() {
     alice_c.shutdown().await;
     bob_c.shutdown().await;
     plain_c.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_refused_answer_stops_the_send_rather_than_falling_back_to_the_pin() {
+    let (url, state) = start_relay().await;
+    let alice = Arc::new(Identity::generate());
+    let bob = Arc::new(Identity::generate());
+    let (alice_c, mut alice_ev) =
+        Client::spawn(url.clone(), alice.clone(), with_log(&alice)).unwrap();
+    let (bob_c, mut bob_ev) = Client::spawn(url.clone(), bob.clone(), with_log(&bob)).unwrap();
+    connected(&mut alice_ev, "alice").await;
+    connected(&mut bob_ev, "bob").await;
+
+    // Bob pins Alice's bundle while the relay is still honest.
+    let pinned = bob_c.lookup(alice.user_id()).await.unwrap().unwrap();
+
+    // Now the relay serves a bundle it did not log. Bob's send asks for a
+    // fresh bundle (he has no session yet), the answer is refused, and the
+    // send fails instead of going out under the pin: were the withheld
+    // thing a revocation, the pin would be the revoked key.
+    state
+        .store()
+        .put_bundle_unlogged(&alice.key_bundle())
+        .unwrap();
+    let err = bob_c
+        .send_message(
+            alice.user_id(),
+            Some(pinned),
+            "under a pin the log disowns".into(),
+            Sequence::default(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ClientError::Transparency(_)), "{err}");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    while let Ok(ev) = alice_ev.try_recv() {
+        assert!(!matches!(ev, ClientEvent::Message(_)), "nothing was sent");
+    }
+    assert_eq!(bob_c.pending_count(), 0, "nothing is queued either");
+
+    alice_c.shutdown().await;
+    bob_c.shutdown().await;
 }
