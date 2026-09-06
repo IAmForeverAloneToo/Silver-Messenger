@@ -508,6 +508,19 @@ X25519 alone and opens to such an adversary as every sealed layer does,
 revealing the sender of each envelope and nothing of the MLS ciphertext
 inside.
 
+What this rests on is worth naming. The ML-KEM implementation comes from
+`ml-kem`, and the group ciphersuite's from `x-wing` on top of it; both
+crates say of themselves that they have never been independently
+audited. The hybrid construction is the answer to that: every key that
+uses ML-KEM combines it with X25519, so a flaw in the ML-KEM half cannot
+take a session below the classical strength it would have had without
+it. What a flaw could still do is panic on a ciphertext someone chose,
+since decapsulation is reachable from the wire on every handshake and
+every post-quantum ratchet step; the `pq` fuzz target exercises exactly
+that, with crafted ciphertexts and with real ones damaged. A formally
+verified backend (`libcrux-ml-kem`, already in the tree under `hpke-rs`)
+is the intended replacement once one API serves both paths.
+
 ### Supply-chain attacker
 
 Can put a tampered binary on a mirror, or a poisoned crate in the
