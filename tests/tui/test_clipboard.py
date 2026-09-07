@@ -15,10 +15,10 @@ def main():
     a.take_raw()
     a.type("/copy id\r")
     assert a.wait("Handed your id to the terminal"), "copy id"
-    assert osc52(a.take_raw()) == [my_id], "OSC 52 carries the id"
+    assert wait_osc52(a) == [my_id], "OSC 52 carries the id"
     a.type("/invite copy\r")
     assert a.wait("Handed your invite link"), "invite copy"
-    assert osc52(a.take_raw()) == [link], "OSC 52 carries the link"
+    assert wait_osc52(a) == [link], "OSC 52 carries the link"
     a.type("/copy\r")
     assert a.wait("Select a chat first"), "/copy needs a chat"
     a.key(CTRL_V)

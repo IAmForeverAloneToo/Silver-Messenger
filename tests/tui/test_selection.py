@@ -8,7 +8,7 @@ def copied(t):
     t.take_raw()
     t.key(CTRL_C)
     assert t.wait("to the terminal's clipboard"), "copy toast"
-    got = osc52(t.take_raw())
+    got = wait_osc52(t)
     assert len(got) == 1, got
     return got[0]
 

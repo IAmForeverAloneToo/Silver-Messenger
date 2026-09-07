@@ -287,6 +287,25 @@ SHIFT_UP, SHIFT_DOWN, SHIFT_INSERT = b"\x1b[1;2A", b"\x1b[1;2B", b"\x1b[2;2~"
 FOCUS_IN, FOCUS_OUT = b"\x1b[I", b"\x1b[O"
 
 
+def wait_osc52(t, timeout=5):
+    """Texts handed to the terminal's clipboard, waited for.
+
+    A copy writes two things: the toast the test sees on the screen, and
+    the OSC 52 escape carrying the text. They are separate writes, so the
+    toast arriving says nothing about the escape having arrived -- under a
+    loaded runner the second trails the first, which is what made the
+    selection test flake in CI. Drain until it turns up.
+    """
+    raw, deadline = b"", time.time() + timeout
+    while time.time() < deadline:
+        raw += t.take_raw()
+        got = osc52(raw)
+        if got:
+            return got
+        time.sleep(0.1)
+    return osc52(raw)
+
+
 def osc52(raw):
     """Texts handed to the terminal's clipboard in `raw` output."""
     out, i = [], 0

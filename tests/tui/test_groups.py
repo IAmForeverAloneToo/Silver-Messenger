@@ -73,7 +73,7 @@ def main():
     a.take_raw()
     a.type("/group invite copy\r")
     assert a.wait("Handed the invite link for team"), "link copied"
-    links = osc52(a.take_raw())
+    links = wait_osc52(a)
     assert links and links[-1].startswith("silver://group/"), links
     link = links[-1]
     d_dir = fresh_dir("groups-dave")
