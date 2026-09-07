@@ -783,9 +783,11 @@ protection above. What is done about that, from 0.6.0:
 
 Not addressed: a compromised Rust toolchain or GitHub-hosted runner (the
 attestation would then be honestly issued for a dishonest build; the
-reproducible-build check by an independent party is the answer), and,
-while the release signature is the workflow's own or absent, a
-maintainer's GitHub account being taken.
+reproducible-build check by an independent party is the answer), and a
+maintainer's GitHub account being taken — from 0.12.0 the release
+signature is made in the workflow from a repository secret, so whoever
+can run a workflow can sign, and only a key kept off this platform would
+change that.
 
 ## What backs these claims
 

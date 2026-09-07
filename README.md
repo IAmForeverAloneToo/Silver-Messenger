@@ -781,28 +781,44 @@ SBOM per binary, writes `SHA256SUMS` and a `BUILD-INFO.txt` per target, attests 
 provenance, and publishes it all on the releases page, together with the
 relay's installer so operators can check it before running it.
 
-**Signing releases.** There is no maintainer signature at the moment: the
-repository publishes no `minisign.pub`, so every release so far carries
-`SHA256SUMS` unsigned and the run says so. The provenance attestation is
-there either way, and it is what a download is checked against today.
+**Signing releases.** `SHA256SUMS` is signed with the project's minisign
+key, whose public half is `minisign.pub` at the repository root. Check a
+download against it with
 
-When a key is set up it is set up *off this platform*, because a key the
-release workflow could use would live where the build lives: anyone who
-can run a workflow with secrets, and anyone holding the maintainer's
-GitHub account, could sign with it, and it would say exactly what the
-attestation already says. So: `minisign -G -p minisign.pub -s
-minisign.key` on a machine the maintainer holds (or a hardware key),
-commit `minisign.pub` at the repository root, and after each release
-download `SHA256SUMS`, sign it there —
+```sh
+minisign -Vm SHA256SUMS -p minisign.pub
+```
+
+which asks GitHub nothing: the signature and the provenance attestation
+are two separate things to check, and the `SHA256SUMS` you just verified
+covers every file in the release.
+
+Releases before 0.12.0 carry no signature; the attestation is what those
+are checked against.
+
+The signing itself happens in the release workflow, from the
+`MINISIGN_SECRET_KEY` secret, and the workflow verifies its own signature
+against `minisign.pub` before publishing, so a secret that is not the
+published key fails the release rather than shipping something nobody can
+check. **Actions → Signing key check** runs those two commands on their
+own, without building anything, for after the secret is set or the key
+rotated.
+
+Signing from a secret is weaker than signing on a machine the maintainer
+holds — whoever can run a workflow with secrets can sign — and stronger
+than not signing, since the secret store and the release assets are
+separate systems, so tampering with the published files alone does not
+survive it. Moving the key offline later changes one workflow step and
+nothing else: clients and `minisign -V` check against `minisign.pub`
+either way. `packaging/new-signing-key.sh --by-hand` (or
+`new-signing-key.ps1 -ByHand` on Windows) makes such a key, and the
+release is then signed with
 
 ```sh
 minisign -Sm SHA256SUMS -t "Silver Messenger v0.0.0"
 ```
 
-— and attach `SHA256SUMS.minisig` to the release. The signature and the
-attestation are then two independent things, and `minisign -Vm
-SHA256SUMS -p minisign.pub` checks the first without asking GitHub
-anything.
+with `SHA256SUMS.minisig` attached to the release by hand.
 
 The executables themselves are signed *in* the workflow, when the
 platform secrets exist — a code-signing certificate says the platform's
