@@ -782,11 +782,12 @@ protection above. What is done about that, from 0.6.0:
   the relay connection uses, so a client on Tor does not step outside it
   to ask about updates.
 - **Packages add convenience, not trust** (0.10.0 on). The Debian
-  package is built by the release workflow from the Linux archives, so
+  package is built by the release workflow from the release binaries, so
   it carries the same bytes, and it is listed in `SHA256SUMS`, signed
-  and attested with them; the Homebrew tap, the Arch package and the
-  winget manifests install the release archives by their checksums and
-  nothing else. A code signature on the Windows or macOS executable,
+  and attested with them; the Homebrew tap installs those binaries by
+  their checksums and nothing else. Those two are what the project
+  publishes; anything else that packages it is somebody else's, and
+  `silver update` refuses to replace a binary a package manager owns. A code signature on the Windows or macOS executable,
   when the maintainer's certificate or Apple membership is in the
   repository's secrets, says the platform's own checker can name the
   signer; it adds no bytes the attestation does not cover, and a signed

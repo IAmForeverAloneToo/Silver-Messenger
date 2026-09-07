@@ -81,11 +81,14 @@ fn who_owns_with(
         };
     }
 
-    // winget unpacks into the user's Packages directory.
+    // winget unpacks into the user's Packages directory. This project
+    // publishes no winget manifest, so a binary sitting there was
+    // packaged by somebody else and is theirs to update -- which is all
+    // the more reason not to replace it from here.
     if path.contains("/WinGet/Packages/") || path.contains("/Microsoft/WinGet/") {
         return Owner::Managed {
             manager: "winget",
-            command: "winget upgrade IAmForeverAloneToo.SilverMessenger".into(),
+            command: "winget upgrade silver-messenger".into(),
         };
     }
 
@@ -132,7 +135,7 @@ fn system_package(exe: &Path) -> Option<Owner> {
     if run("pacman", &["-Qo", exe]).is_some() {
         return Some(Owner::Managed {
             manager: "the Arch package",
-            command: "makepkg -si  # in the silver-messenger PKGBUILD directory".into(),
+            command: "pacman -Syu  # or however that package is kept up to date".into(),
         });
     }
     None

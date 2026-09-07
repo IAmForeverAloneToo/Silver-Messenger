@@ -21,11 +21,20 @@ means behaviour or the wire protocol changed in a way worth reading about.
   they ride on the workflow run rather than the release page. The
   packaging archive does too -- it is a maintainer's working file. The
   per-file provenance attestation still covers everything published.
-- The Homebrew formula, the AUR package and the winget manifest install
-  the binaries rather than unpacking an archive: one file for winget,
-  a download and a resource for Homebrew, two sources for Arch, with the
-  readme and the licence taken from the tag as the systemd unit already
-  was.
+- The Homebrew formula installs the binaries rather than unpacking an
+  archive: the client as its download, the relay as a resource beside it.
+- The AUR package and the winget manifests are gone. Both were written,
+  linted on every push and regenerated at every release, and neither was
+  ever installable by anyone: the AUR needs a push to
+  `aur.archlinux.org` from the maintainer's account and winget a pull
+  request to `microsoft/winget-pkgs` per release, and neither had been
+  done. They were upkeep producing nothing. An Arch or Windows user takes
+  the one file for their platform from the release page, which is the
+  whole client; `silver update` keeps it current from there. What the
+  client does when it finds a binary a package manager owns is unchanged,
+  and now covers managers this project does not publish to: it refuses to
+  replace it, because a binary somebody else packaged is even less this
+  client's to touch.
 - `deploy/install.sh` is no longer a release asset. It stays in the
   repository and is read before it is run; the shorter path for an
   operator is now the relay binary from the release page, checked against

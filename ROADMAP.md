@@ -456,14 +456,17 @@ those who want to pay for it (46).
         every push; an hour run by hand with memory flat, recorded in
         docs/design/robustness.md; the day-long run is still to be made).
 53. [x] **Distribution** (M). Authenticode on Windows and notarisation on
-        macOS, a Homebrew tap, winget, an AUR package and a Debian
-        package, each built from the same reproducible release. Shipped:
-        a Debian package built in the release workflow from the Linux
-        archives, a Homebrew tap in this repository, a PKGBUILD and
-        winget manifests written from each release's checksums, and the
-        signing and notarising steps, which run once the maintainer's
-        certificate and Apple membership are in the secrets; pushing to
-        the AUR and submitting to winget-pkgs are the maintainer's, and
+        macOS, a Homebrew tap and a Debian package, each built from the
+        same reproducible release. Shipped: a Debian package built in the
+        release workflow from the release binaries, a Homebrew tap in
+        this repository that works the moment the formula is committed,
+        and the signing and notarising steps, which run once the
+        maintainer's certificate and Apple membership are in the secrets.
+        A PKGBUILD and winget manifests were written too and removed
+        again in 0.12.2: both needed a push to somebody else's index
+        before anyone could install anything, neither had been pushed,
+        and each cost a regenerated file per release for nothing. Both
+        platforms take the one file for them from the release page.
         docs/design/distribution.md says where each channel stands.
 54. [x] **Contributor guide and FAQ** (S). How to build, test and propose
         a change; a FAQ for people who are not developers, written from
