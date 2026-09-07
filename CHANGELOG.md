@@ -4,6 +4,34 @@ Notable changes to Silver Messenger. Versions follow [semantic
 versioning](https://semver.org); while the major version is 0, a minor bump
 means behaviour or the wire protocol changed in a way worth reading about.
 
+## 0.12.2 - 2026-09-07
+
+### Changed
+
+- A release page carries the program and nothing else. It had grown to
+  thirty-six files, of which twenty were machinery -- ten SBOMs, five
+  build records, five archives -- and the answer to "which one do I
+  download" was somewhere among them. What is published now is fourteen
+  files: `silver` and `silver-relay` for each of the five targets, one
+  file each; the two Debian packages; and `SHA256SUMS` with its
+  signature, which is not the program but is the only way to tell that
+  what arrived is. The release notes lead with a table saying which file
+  to take.
+- The SBOMs and the build record are still made, attested and checked;
+  they ride on the workflow run rather than the release page. The
+  packaging archive does too -- it is a maintainer's working file. The
+  per-file provenance attestation still covers everything published.
+- The Homebrew formula, the AUR package and the winget manifest install
+  the binaries rather than unpacking an archive: one file for winget,
+  a download and a resource for Homebrew, two sources for Arch, with the
+  readme and the licence taken from the tag as the systemd unit already
+  was.
+- `deploy/install.sh` is no longer a release asset. It stays in the
+  repository and is read before it is run; the shorter path for an
+  operator is now the relay binary from the release page, checked against
+  the signed `SHA256SUMS`, beside the unit from the repository -- fewer
+  moving parts than a script, and better checked.
+
 ## 0.12.1 - 2026-09-07
 
 ### Fixed
