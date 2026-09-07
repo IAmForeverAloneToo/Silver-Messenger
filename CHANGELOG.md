@@ -4,6 +4,20 @@ Notable changes to Silver Messenger. Versions follow [semantic
 versioning](https://semver.org); while the major version is 0, a minor bump
 means behaviour or the wire protocol changed in a way worth reading about.
 
+## 0.12.3 - 2026-09-07
+
+### Fixed
+
+- The release notes named two files 0.12.2 had stopped publishing. The
+  table told anyone running a relay to take `install.sh`, which left the
+  release page in that same release, and a line below it described the
+  archives, which left with it. The table now names the relay binary,
+  which is what a relay operator actually takes, and the systemd unit and
+  the installer are pointed at in the repository where they live. Written
+  before the decision to publish only the program, and not read again
+  after it -- which is the whole failure the fourteen-file release page
+  was meant to end.
+
 ## 0.12.2 - 2026-09-07
 
 ### Changed
