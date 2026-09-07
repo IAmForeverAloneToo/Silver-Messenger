@@ -139,22 +139,21 @@ warning; the `--help` of each is the reference for now.
 
 ## 6. Status
 
-As of 0.11.0, the third release with the Debian packages and the
-packaging archive:
+As of 0.12.1:
 
 | Channel | State |
 | --- | --- |
-| Debian package | `silver-messenger_0.11.0_amd64.deb` and `_arm64.deb` are on the release page, built by the release workflow from the Linux archives. The amd64 package was downloaded here for 0.10.0, matched `SHA256SUMS`, installed with `dpkg` on this machine (both binaries reported the release), and purged cleanly; `lintian` reports no errors. Not yet installed on a Debian machine with systemd running. |
-| Homebrew tap | Live for 0.11.0: the formula in this repository names the 0.11.0 archives, and CI taps the repository on macOS, audits the formula, installs it from the release and runs its test on every push. Not yet tried by hand on a Mac. |
-| AUR | The PKGBUILD and `.SRCINFO` for 0.11.0 are in the repository and pass `namcap` and the `.SRCINFO` check in CI's Arch container; not pushed to the AUR (the maintainer's account). Not yet built with `makepkg -si` by hand. |
-| winget | Manifests for 0.11.0 in the repository, valid against the schemas; not submitted to `winget-pkgs` (a pull request the maintainer makes). Not yet tried with `winget install --manifest`. |
-| Authenticode | No certificate in the secrets; the 0.11.0 run printed the notice and the Windows executables went out unsigned. |
-| Notarisation | No Apple membership in the secrets; the 0.11.0 run printed the notice and the macOS executables went out unsigned. |
-| minisign | Set up as of 0.12.0: `minisign.pub` is at the repository root, `MINISIGN_SECRET_KEY` is in the repository's secrets, and the "Signing key check" workflow has confirmed the secret signs and that the published key verifies what it signed. Releases up to 0.11.0 carry `SHA256SUMS` unsigned. Section 3 says what this way is worth against the offline one. |
+| Debian package | `silver-messenger_0.12.1_amd64.deb` and `_arm64.deb` are on the release page, built by the release workflow from the Linux archives. The amd64 package was downloaded here for 0.10.0, matched `SHA256SUMS`, installed with `dpkg` on this machine (both binaries reported the release), and purged cleanly; `lintian` reports no errors. Not yet installed on a Debian machine with systemd running. |
+| Homebrew tap | Live for 0.12.1: the formula in this repository names the 0.12.1 archives, and CI taps the repository on macOS, audits the formula, installs it from the release and runs its test on every push. Not yet tried by hand on a Mac. |
+| AUR | The PKGBUILD and `.SRCINFO` for 0.12.1 are in the repository and pass `namcap` and the `.SRCINFO` check in CI's Arch container; not pushed to the AUR (the maintainer's account). Not yet built with `makepkg -si` by hand. |
+| winget | Manifests for 0.12.1 in the repository, valid against the schemas; not submitted to `winget-pkgs` (a pull request the maintainer makes). Not yet tried with `winget install --manifest`. |
+| Authenticode | No certificate in the secrets; the 0.12.1 run printed the notice and the Windows executables went out unsigned. |
+| Notarisation | No Apple membership in the secrets; the 0.12.1 run printed the notice and the macOS executables went out unsigned. |
+| minisign | Set up as of 0.12.0, and every release since is signed: `minisign.pub` is at the repository root, `MINISIGN_SECRET_KEY` is in the repository's secrets, and the "Signing key check" workflow has confirmed the secret signs and that the published key verifies what it signed. Releases up to 0.11.0 carry `SHA256SUMS` unsigned. `packaging/update.sh` checks the signature before it reads a checksum, so the packages cannot be built from a list nobody signed. Section 3 says what this way is worth against the offline one. |
 | Installer | From 0.11.0 `install.sh` is a release asset covered by `SHA256SUMS`, so an operator checks it before running it as root instead of piping a branch into a shell. |
 
-The release's `silver-messenger-v0.11.0-packaging.tar.gz` holds, byte
-for byte, the files `packaging/update.sh 0.11.0` wrote into the
+The release's `silver-messenger-v0.12.1-packaging.tar.gz` holds, byte
+for byte, the files `packaging/update.sh 0.12.1` wrote into the
 repository in the packaging commit after the release — checked by
 unpacking the published archive and diffing it against the checkout.
 
