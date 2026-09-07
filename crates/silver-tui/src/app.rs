@@ -990,6 +990,32 @@ impl App {
     }
 
     /// `/lock`: drop the keys and ask for the passphrase again.
+    /// A line for the System pane from before the interface opened.
+    pub(crate) fn announce(&mut self, text: impl Into<String>) {
+        self.system(Level::Info, text);
+    }
+
+    /// `/update`: say where this client stands, and leave installing to
+    /// the shell.
+    ///
+    /// The interface holds an unlocked data directory, ratchet state in
+    /// memory and open sessions. Replacing the binary under it buys
+    /// nothing -- a running process keeps its inode either way -- and
+    /// adds a way for a half-finished update to land in the middle of a
+    /// write, so this reports and stops (docs/design/updates.md, s. 6).
+    fn cmd_update(&mut self) {
+        let current = env!("CARGO_PKG_VERSION");
+        self.system(Level::Info, format!("This is Silver Messenger {current}."));
+        self.system(
+            Level::Info,
+            "Quit and run `silver update` to fetch, check and install the newest release.",
+        );
+        self.system(
+            Level::Info,
+            "`silver update --check` says what is available without changing anything.",
+        );
+    }
+
     fn cmd_lock(&mut self) {
         if self.can_lock() {
             self.lock_requested = true;
@@ -2074,6 +2100,7 @@ impl App {
             "rotate" => self.cmd_rotate(&rest),
             "log" | "keylog" => self.cmd_log(),
             "lock" => self.cmd_lock(),
+            "update" => self.cmd_update(),
             "quit" | "q" | "exit" => self.should_quit = true,
             other => match commands::closest(other) {
                 Some(meant) => self.toast(format!(

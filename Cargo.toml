@@ -46,6 +46,13 @@ axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
 # request must not hold a socket for ever).
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 
+# Checking the release signature in `silver update`: Ed25519 over
+# BLAKE2b, the minisign format, from minisign's own author. No
+# dependencies of its own, and small enough to read in one sitting --
+# which is the point, for the one crate that decides whether a downloaded
+# binary is allowed to replace the running one.
+minisign-verify = "0.2"
+
 # serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
