@@ -52,9 +52,12 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 /// A working release, which each test then spoils in one way.
 fn good_page(version: &str) -> Page {
-    // A "binary" that is not one; the tests here stop before anything is
-    // run, so its contents only have to hash.
-    let binary = format!("this is silver {version}").into_bytes();
+    // A "binary" that really runs: a script that prints a version the way
+    // the client does. The download has to be runnable by the time the
+    // caller asks it its version, and a fake that is never executed
+    // cannot show that -- which is how a download left at 0644 shipped in
+    // 0.12.0 and made every update fail at that step.
+    let binary = format!("#!/bin/sh\necho 'silver {version}'\n").into_bytes();
     let digest = sha256_hex(&binary);
     let name = client_asset_name(version);
     Page {
@@ -206,7 +209,28 @@ async fn a_good_release_is_fetched_and_checked() {
     assert_eq!(got.sha256, want);
     assert!(!got.signature_checked);
     assert!(got.path.exists());
-    assert_eq!(std::fs::read(&got.path).unwrap().len(), 21);
+
+    // The download must be runnable where it lands: the last check before
+    // a swap is running it, and that happens before anything copies the
+    // replaced binary's mode over it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&got.path).unwrap().permissions().mode();
+        assert!(mode & 0o100 != 0, "the download is not runnable: {mode:o}");
+        assert!(
+            mode & 0o077 == 0,
+            "the download is readable by others: {mode:o}"
+        );
+    }
+    let out = std::process::Command::new(&got.path)
+        .arg("--version")
+        .output();
+    let out = out.expect("the download runs");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("9.9.9"),
+        "the download reports its version: {out:?}"
+    );
 }
 
 #[tokio::test]

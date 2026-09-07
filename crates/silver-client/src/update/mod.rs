@@ -489,6 +489,16 @@ pub async fn download_client(
         anyhow::anyhow!("the download did not finish within {DOWNLOAD_TIMEOUT:?}")
     })??;
 
+    // A downloaded file is not executable, and the last check before a
+    // swap is running it. Done here, where the file is made, rather than
+    // left to the swap, which happens after that check: the mode the
+    // binary finally keeps is the replaced one's, which `install::swap`
+    // copies over this.
+    if let Err(e) = make_runnable(&path) {
+        let _ = std::fs::remove_file(&path);
+        return Err(e);
+    }
+
     // From here on a failure must not leave the download lying about.
     let checked = verify(release, options, asset, &sha256).await;
     match checked {
@@ -502,6 +512,26 @@ pub async fn download_client(
             Err(e)
         }
     }
+}
+
+/// Let the downloaded file be run, so it can be asked its version.
+///
+/// Only the owner: this sits in the directory the binary will replace,
+/// which may be a shared one, and it is there for seconds.
+fn make_runnable(path: &Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut mode = std::fs::metadata(path)
+            .with_context(|| format!("reading {}", path.display()))?
+            .permissions();
+        mode.set_mode(0o700);
+        std::fs::set_permissions(path, mode)
+            .with_context(|| format!("making {} runnable", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 /// The three checks that do not involve running anything.
@@ -742,6 +772,30 @@ mod tests {
         assert!(!release_host("notgithub.com"));
         assert!(!release_host("githubusercontent.com.evil.test"));
         assert!(!release_host("evil.test"));
+    }
+
+    #[test]
+    fn a_download_is_made_runnable_by_its_owner_alone() {
+        // The last check before a swap runs the downloaded file, and that
+        // happens before anything copies the replaced binary's mode over
+        // it. A download left as it was created is not runnable, which is
+        // how `silver update` shipped in 0.12.0 unable to install
+        // anything.
+        let dir = std::env::temp_dir().join(format!("silver-runnable-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("download");
+        std::fs::write(&path, b"#!/bin/sh\ntrue\n").unwrap();
+        make_runnable(&path).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert!(mode & 0o100 != 0, "not runnable by its owner: {mode:o}");
+            // It sits in the directory the binary will replace, which may
+            // be shared, so nobody else gets to read or run it.
+            assert_eq!(mode & 0o077, 0, "readable by others: {mode:o}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
