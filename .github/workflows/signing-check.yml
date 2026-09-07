@@ -1,0 +1,63 @@
+name: Signing key check
+
+# Is the release signing key configured, and is it the key people verify
+# with? Run by hand, from the Actions page. It signs a throwaway string
+# with MINISIGN_SECRET_KEY and verifies the result against the
+# repository's minisign.pub -- the same two commands the release workflow
+# runs, without building or publishing anything.
+#
+# Worth running after setting the secret for the first time, after
+# rotating the key, and before a release if either has changed: a key
+# that does not match minisign.pub fails a release late, once the
+# binaries are already built.
+#
+# It never prints the secret. What it prints is the public key id, which
+# is public.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Can the release be signed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Sign a test file and verify it against minisign.pub
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+        run: |
+          if [ ! -f minisign.pub ]; then
+            echo "::error::the repository has no minisign.pub, so nothing can be verified against it (packaging/new-signing-key.sh, or the .ps1 on Windows)"
+            exit 1
+          fi
+          echo "The repository's public key:"
+          sed 's/^/  /' minisign.pub
+          if [ -z "$MINISIGN_SECRET_KEY" ]; then
+            echo "::error::MINISIGN_SECRET_KEY is not set, so releases would go out unsigned while minisign.pub says they should be signed"
+            exit 1
+          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq minisign
+          umask 077
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$RUNNER_TEMP/minisign.key"
+          printf 'signing key check\n' > "$RUNNER_TEMP/check.txt"
+          # Exactly what the release workflow does: the password branch for a
+          # key that has one, -W for a key that does not.
+          if [ -n "${MINISIGN_PASSWORD:-}" ]; then
+            printf '%s\n' "$MINISIGN_PASSWORD" | minisign -S -s "$RUNNER_TEMP/minisign.key" -m "$RUNNER_TEMP/check.txt" -t "signing key check"
+          else
+            minisign -S -W -s "$RUNNER_TEMP/minisign.key" -m "$RUNNER_TEMP/check.txt" -t "signing key check"
+          fi
+          rm -f "$RUNNER_TEMP/minisign.key"
+          # The whole point: the secret must be the key minisign.pub names,
+          # or a release would carry a signature nobody can check.
+          minisign -Vm "$RUNNER_TEMP/check.txt" -p minisign.pub
+          echo
+          echo "The secret signs, and the repository's minisign.pub verifies what it signed."
+          echo "Releases from here on will carry SHA256SUMS.minisig."
