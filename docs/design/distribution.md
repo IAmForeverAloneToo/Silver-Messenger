@@ -70,13 +70,17 @@ anyone who can run a workflow with secrets, and anyone holding the
 maintainer's GitHub account, can sign with it, and it therefore says
 what the provenance attestation already says. It is convenient — a
 download can be checked with `minisign` alone, no call to GitHub's
-attestation API — and that is its whole value. The independent root is
-the same key generated and kept on a maintainer's machine, `SHA256SUMS`
-downloaded after each release, signed there, and `SHA256SUMS.minisig`
-attached by hand. Neither is set up today: no `minisign.pub` is
-published, so every release so far is unsigned by the maintainer, and
-the README and the threat model say so rather than describing a
-signature that does not exist.
+attestation API — and it is a separate store from the release assets, so
+tampering with the published files alone does not survive it. The
+independent root is the same key generated and kept on a maintainer's
+machine, `SHA256SUMS` downloaded after each release, signed there, and
+`SHA256SUMS.minisig` attached by hand. The first is set up as of 0.12.0:
+`minisign.pub` is at the repository root and `MINISIGN_SECRET_KEY` is in
+the repository's secrets, so the workflow signs each release and checks
+its own signature against the published key before publishing.
+`packaging/new-signing-key.sh`, and `.ps1` for Windows, make a key either
+way; the second way changes that one workflow step and nothing a
+verifier does, since both are checked against the same `minisign.pub`.
 
 **How a release is published** (SM-S-09). `workflow_dispatch` with a
 `tag` input creates the tag on the selected branch and publishes from
@@ -146,7 +150,7 @@ packaging archive:
 | winget | Manifests for 0.11.0 in the repository, valid against the schemas; not submitted to `winget-pkgs` (a pull request the maintainer makes). Not yet tried with `winget install --manifest`. |
 | Authenticode | No certificate in the secrets; the 0.11.0 run printed the notice and the Windows executables went out unsigned. |
 | Notarisation | No Apple membership in the secrets; the 0.11.0 run printed the notice and the macOS executables went out unsigned. |
-| minisign | No `minisign.pub` in the repository; every release so far carries `SHA256SUMS` unsigned, and the run says so. Section 3 says what the two ways of setting it up are worth. |
+| minisign | Set up as of 0.12.0: `minisign.pub` is at the repository root, `MINISIGN_SECRET_KEY` is in the repository's secrets, and the "Signing key check" workflow has confirmed the secret signs and that the published key verifies what it signed. Releases up to 0.11.0 carry `SHA256SUMS` unsigned. Section 3 says what this way is worth against the offline one. |
 | Installer | From 0.11.0 `install.sh` is a release asset covered by `SHA256SUMS`, so an operator checks it before running it as root instead of piping a branch into a shell. |
 
 The release's `silver-messenger-v0.11.0-packaging.tar.gz` holds, byte
