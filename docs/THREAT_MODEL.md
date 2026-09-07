@@ -765,9 +765,22 @@ protection above. What is done about that, from 0.6.0:
   duplicate is more code in the binary and more advisories to track, and
   `cargo deny` warns about them on every run rather than failing, since
   the fix is upstream and not here.
-- **Updates are never automatic.** `silver --check-release` asks the
-  releases page once, on request, and prints the answer; nothing is
-  downloaded or run.
+- **Updates are never automatic** (0.12.0 on). `silver update` downloads
+  and installs, and it runs only when a person runs it: the interface's
+  `/update` reports and installs nothing, and the `update_check` setting
+  -- off unless turned on -- asks the releases page once a day and prints
+  a line, never downloading. What an update is checked against before the
+  running binary is touched: the SHA-256 the release API reports, which
+  arrives from a different origin than the bytes; the same hash in
+  `SHA256SUMS`; the project's signature over `SHA256SUMS`, against the
+  key compiled into the client from `minisign.pub`, so the key is not
+  something the network can substitute; and the downloaded file reporting
+  the version expected of it. A release the signature does not cover is
+  refused. What this does not defend against is the release host itself,
+  and the account that can run the signing workflow -- the same limit as
+  the signature it rests on, above. Every request goes through the proxy
+  the relay connection uses, so a client on Tor does not step outside it
+  to ask about updates.
 - **Packages add convenience, not trust** (0.10.0 on). The Debian
   package is built by the release workflow from the Linux archives, so
   it carries the same bytes, and it is listed in `SHA256SUMS`, signed

@@ -138,13 +138,28 @@ at rest) or link the new computer as a device and remove the old one.
 
 ## How do I update, and what breaks?
 
-Releases are on the releases page and through the package managers the
-README lists; each carries checksums, a signature and a provenance
-attestation you can check. Clients and relays of different versions
-talk to each other with what both understand, and a feature that needs
-a newer relay says so in the client (groups and devices need a relay on
-0.9.0 or later). `docs/UPGRADING.md` says what each version changes for
-someone running a relay, and what a rollback leaves behind.
+`silver update` does it: it fetches the client for your platform, checks
+it against the checksum the releases page reports, against `SHA256SUMS`,
+against the project's signature, and by running it to see that it reports
+the version expected -- and only then puts it in place. If anything
+disagrees, your working client is left alone. The one it replaced is kept
+beside it, so `silver update --rollback` undoes it. If you installed
+through a package manager, `silver update` says so and prints that
+manager's own command instead of fighting it.
+
+Nothing updates on its own. `/update` inside the client tells you where
+you stand and installs nothing; `update_check` in `config.json` will ask
+once a day at start and print a line, and it is off unless you turn it
+on, because a check on a timer tells the release host your address and
+when you use the program.
+
+Releases are also on the releases page and through the package managers
+the README lists; each carries checksums, a signature and a provenance
+attestation you can check by hand. Clients and relays of different
+versions talk to each other with what both understand, and a feature that
+needs a newer relay says so in the client (groups and devices need a
+relay on 0.9.0 or later). `docs/UPGRADING.md` says what each version
+changes for someone running a relay, and what a rollback leaves behind.
 
 ## Something is wrong. Where do I say so?
 
