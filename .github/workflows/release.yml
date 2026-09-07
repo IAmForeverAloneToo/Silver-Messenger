@@ -417,13 +417,15 @@ jobs:
           | **macOS**, Intel | \`silver-v${version}-x86_64-apple-darwin\` |
           | **Windows** | \`silver-v${version}-x86_64-pc-windows-msvc.exe\` |
           | **Debian or Ubuntu** | \`silver-messenger_${version}_amd64.deb\` (or \`_arm64\`) |
-          | **Running a relay** | \`install.sh\`, and the operator's guide |
+          | **Running a relay** | \`silver-relay-v${version}-<your target>\` |
 
-          That one file is the whole client: make it executable and run it.
+          That one file is the whole program: make it executable and run it.
           Already on 0.12.0 or later? \`silver update\` does all of this for you.
 
-          The \`silver-messenger-v${version}-*\` archives hold the same client
-          with the relay, the SBOMs, the changelog and the licence beside it.
+          A relay also wants \`deploy/silver-relay.service\` from the repository,
+          or \`deploy/install.sh\` there, which sets up the service, the admin
+          socket, the backup timer and the firewall. The operator's guide is
+          \`docs/OPERATING.md\`.
 
           <details><summary>Checking what you downloaded</summary>
 

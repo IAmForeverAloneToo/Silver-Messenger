@@ -73,7 +73,7 @@ checksum, so what arrives is what the release page carries.
 ```sh
 brew tap iamforeveralonetoo/silver https://github.com/IAmForeverAloneToo/Silver-Messenger
 brew install silver-messenger                          # macOS and Linux (Homebrew)
-sudo apt install ./silver-messenger_0.12.2_amd64.deb   # Debian and Ubuntu, amd64 or arm64
+sudo apt install ./silver-messenger_0.12.3_amd64.deb   # Debian and Ubuntu, amd64 or arm64
 ```
 
 On Windows, on Arch, and anywhere else, take the one file for your
@@ -449,7 +449,7 @@ shorter path now that the relay is one file on it, and the better
 checked one, since the binary is covered by a list the project signs:
 
 ```sh
-v=0.12.2; t=x86_64-unknown-linux-musl
+v=0.12.3; t=x86_64-unknown-linux-musl
 base=https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/download/v$v
 curl -fsSLO "$base/silver-relay-v$v-$t" -O "$base/SHA256SUMS" -O "$base/SHA256SUMS.minisig"
 minisign -Vm SHA256SUMS -p minisign.pub          # the list is the project's
