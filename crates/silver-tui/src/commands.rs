@@ -258,6 +258,12 @@ pub const COMMANDS: &[CommandInfo] = &[
         "",
         "forget the keys until the passphrase is typed again (needs one; lock_after_minutes in config.json does it by itself)",
     ),
+    cmd(
+        "update",
+        &[],
+        "",
+        "whether a newer release exists (asks the releases page; installing is `silver update` from a shell)",
+    ),
     cmd("quit", &["q", "exit"], "", "exit"),
 ];
 

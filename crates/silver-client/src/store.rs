@@ -135,6 +135,21 @@ pub struct Config {
     /// Invite token for relays that only register invited identities.
     #[serde(default)]
     pub invite_token: Option<String>,
+    /// Ask the releases page, once a day at start, whether something newer
+    /// exists, and say so in the System pane.
+    ///
+    /// Off unless turned on. A check on a timer tells the release host
+    /// this computer's address, that it runs Silver Messenger, and when it
+    /// is used -- a usage pattern, which is what the rest of the client
+    /// works to withhold. On, it goes through the same proxy the relay
+    /// connection uses, and nothing is ever downloaded by it: it prints,
+    /// and `silver update` installs.
+    #[serde(default)]
+    pub update_check: bool,
+    /// The day the last such check was made, `YYYY-MM-DD`, so a client
+    /// started ten times in a day asks once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_checked_on: Option<String>,
     /// Tell contacts when their messages have been shown. Delivery receipts
     /// are always sent.
     #[serde(default = "default_true")]
@@ -274,6 +289,8 @@ impl Default for Config {
             relay_features: BTreeMap::new(),
             send_epoch: None,
             invite_token: None,
+            update_check: false,
+            update_checked_on: None,
             read_receipts: true,
             cover: false,
             notify: default_notify(),

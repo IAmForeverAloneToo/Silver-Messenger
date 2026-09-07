@@ -12,6 +12,7 @@ mod reader;
 mod terminal;
 mod theme;
 mod ui;
+mod update;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -33,6 +34,9 @@ use crate::app::{AtRest, Exit};
 #[derive(Parser, Debug)]
 #[command(name = "silver", version, about)]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Relay WebSocket URL, e.g. ws://relay.example.org:7777/ws. Remembered
     /// for later runs.
     #[arg(long, env = "SILVER_RELAY")]
@@ -146,7 +150,8 @@ struct Args {
     /// GitHub this computer's address. It goes through the proxy and the
     /// extra roots this data directory remembers, as the relay connection
     /// does, unless --proxy is given here; a protected directory asks for
-    /// its passphrase so that they can be read.
+    /// its passphrase so that they can be read. The same as
+    /// `silver update --check`.
     #[arg(long)]
     check_release: bool,
 
@@ -227,6 +232,40 @@ struct EnvSecrets {
     keep: bool,
 }
 
+/// What `silver` can be asked to do besides open the interface.
+#[derive(clap::Subcommand, Debug, Clone)]
+enum Command {
+    /// Replace this binary with the newest release.
+    ///
+    /// Downloads the client for this platform, checks it against the
+    /// checksum the releases page gives, against SHA256SUMS, and against
+    /// the project's signature, makes the downloaded file report the
+    /// version expected of it, and only then renames it over this one.
+    /// The binary it replaces is kept beside it for --rollback.
+    ///
+    /// The request goes through the proxy and extra roots this data
+    /// directory remembers, as the relay connection does.
+    Update {
+        /// Say what is available and change nothing.
+        #[arg(long)]
+        check: bool,
+
+        /// Put back the binary the last update replaced.
+        #[arg(long, conflicts_with_all = ["check", "to"])]
+        rollback: bool,
+
+        /// Install this version rather than the newest. Going backwards
+        /// needs this, and an older client may not read what a newer one
+        /// has written in the data directory.
+        #[arg(long, value_name = "VERSION")]
+        to: Option<String>,
+
+        /// Do it without asking.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+}
+
 impl EnvSecrets {
     #[allow(unsafe_code)]
     fn take() -> Self {
@@ -284,6 +323,9 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
     let args = Args::parse();
     let mut secrets = secrets;
     secrets.keep = args.keep_passphrase;
+    // Kept for the release check further down: settling the relay
+    // settings below consumes these fields.
+    let (cli_proxy, cli_ca_cert) = (args.proxy.clone(), args.ca_cert.clone());
 
     if args.data_dir.is_none() {
         Store::migrate_legacy_dir();
@@ -294,6 +336,15 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
         .or_else(Store::default_dir)
         .context("could not determine a data directory; pass --data-dir")?;
 
+    if let Some(Command::Update {
+        check,
+        rollback,
+        to,
+        yes,
+    }) = args.command.clone()
+    {
+        return update::run(&args, &data_dir, &mut secrets, check, rollback, to, yes).await;
+    }
     if args.check_release {
         return check_release(&args, &data_dir, &mut secrets).await;
     }
@@ -561,6 +612,25 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
         .await;
     }
 
+    // The once-a-day release check, when it is turned on. Off by
+    // default: see Config::update_check for why. It happens here, before
+    // the terminal is entered, so a slow answer delays a start rather
+    // than appearing over a conversation -- and it is capped short,
+    // because nobody turned this on to wait for it.
+    let update_line = if config.update_check {
+        let options = release_options(cli_proxy, cli_ca_cert, &data_dir, &mut secrets)?;
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            update::daily_check(&store, &options, &today),
+        )
+        .await
+        .ok()
+        .flatten()
+    } else {
+        None
+    };
+
     // Reader mode for this run, or from the config for good.
     let reader = args.reader || config.reader;
     // A panic leaves the terminal as it was, then prints.
@@ -581,6 +651,9 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
             theme::Theme::named(theme),
             at_rest.clone(),
         )?;
+        if let Some(line) = &update_line {
+            app.announce(line.clone());
+        }
 
         // Debug builds only: a panic on request, for the terminal test.
         #[cfg(debug_assertions)]
@@ -619,6 +692,42 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
     }
 }
 
+/// How a request to the releases page is made: the way the relay
+/// connection is made, the remembered proxy included.
+///
+/// Reaching the release host directly from a machine whose relay traffic
+/// is routed through Tor would say plainly, to the host and to anyone on
+/// the path, that this address runs Silver Messenger -- which is the one
+/// thing the proxy is there to prevent. When the settings name a proxy
+/// and the directory cannot be read to find out (it is locked), the
+/// request is refused rather than made in the clear.
+pub(crate) fn release_options(
+    proxy: Option<String>,
+    ca_cert: Option<PathBuf>,
+    data_dir: &Path,
+    secrets: &mut EnvSecrets,
+) -> anyhow::Result<ConnectOptions> {
+    // Reading the settings means opening the data directory, so a
+    // protected one asks for its passphrase here as it would anywhere
+    // else; --proxy on the command line answers the question without it.
+    let (stored_proxy, stored_ca) = if proxy.is_some() {
+        (None, None)
+    } else {
+        let mut store = Store::open(data_dir)?;
+        open_protected(&mut store, secrets).context(
+            "the proxy this data directory remembers cannot be read while it is locked; \
+             unlock it, or pass --proxy",
+        )?;
+        let config = store.load_config()?;
+        (config.proxy, config.ca_cert)
+    };
+    Ok(ConnectOptions {
+        extra_ca_certs: ca_cert.into_iter().chain(stored_ca).collect(),
+        proxy: proxy.or(stored_proxy).or_else(Proxy::url_from_env),
+        ..Default::default()
+    })
+}
+
 /// `--check-release`: one request to the releases page, then a line.
 ///
 /// It goes the way the relay connection goes, the remembered proxy
@@ -636,29 +745,7 @@ async fn check_release(
     use silver_client::update::{RELEASES_API, compare, latest_release};
     use std::cmp::Ordering;
 
-    // Reading the settings means opening the data directory, so a
-    // protected one asks for its passphrase here as it would anywhere
-    // else; --proxy on the command line answers the question without it.
-    let (stored_proxy, stored_ca) = if args.proxy.is_some() {
-        (None, None)
-    } else {
-        let mut store = Store::open(data_dir)?;
-        open_protected(&mut store, secrets).context(
-            "the proxy this data directory remembers cannot be read while it is locked; \
-             unlock it, or pass --proxy",
-        )?;
-        let config = store.load_config()?;
-        (config.proxy, config.ca_cert)
-    };
-    let options = ConnectOptions {
-        extra_ca_certs: args.ca_cert.iter().cloned().chain(stored_ca).collect(),
-        proxy: args
-            .proxy
-            .clone()
-            .or(stored_proxy)
-            .or_else(Proxy::url_from_env),
-        ..Default::default()
-    };
+    let options = release_options(args.proxy.clone(), args.ca_cert.clone(), data_dir, secrets)?;
     let current = env!("CARGO_PKG_VERSION");
     let release = latest_release(RELEASES_API, &options)
         .await

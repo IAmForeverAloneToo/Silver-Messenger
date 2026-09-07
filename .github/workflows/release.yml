@@ -222,6 +222,17 @@ jobs:
             cp "$f" "dist/$name-$(basename "$f")"
           done
           if [ -f minisign.pub ]; then cp minisign.pub "dist/$name/"; fi
+          # The bare binaries, beside the archive: `silver update` fetches
+          # the client alone rather than an archive carrying the relay,
+          # two SBOMs, the changelog and the licence -- about half the
+          # bytes for the thing being replaced. Named for the version and
+          # target so one release's assets never collide, and listed in
+          # SHA256SUMS with everything else, since that is what both the
+          # updater and a person check against.
+          for bin in silver silver-relay; do
+            cp "target/${{ matrix.target }}/release/$bin$ext" \
+               "dist/$bin-${version}-${{ matrix.target }}$ext"
+          done
           cd dist
           case "${{ matrix.target }}" in
             *windows*) 7z a "$name.zip" "$name" >/dev/null ;;
