@@ -96,7 +96,12 @@ else
   minisign -G -W -s "$key" -p "$pub"
 fi
 
-cp "$pub" "$repo/minisign.pub"
+if [ -d "$repo/.git" ]; then
+  cp "$pub" "$repo/minisign.pub"
+  in_checkout=1
+else
+  in_checkout=0
+fi
 
 # Prove the halves match before telling anyone to rely on them.
 check="$(mktemp)"
@@ -109,21 +114,26 @@ if [ "$by_hand" -eq 1 ]; then
 else
   minisign -S -W -s "$key" -m "$check" >/dev/null
 fi
-minisign -V -p "$repo/minisign.pub" -m "$check" >/dev/null
+minisign -V -p "$pub" -m "$check" >/dev/null
 echo
-echo "Key checked: it signs, and minisign.pub verifies what it signed."
+echo "Key checked: it signs, and the public half verifies what it signed."
 
 echo
-echo "The public half is now at minisign.pub in this checkout. Commit it:"
+echo "--- 1. The public half. Send these two lines to be committed as minisign.pub:"
 echo
-echo "    git add minisign.pub && git commit -m 'The release signing key'"
+sed 's/^/    /' "$pub"
 echo
-echo "It is public by design: it is what verifies, never what signs."
+if [ "$in_checkout" -eq 1 ]; then
+  echo "    A copy is already at minisign.pub in this checkout, so"
+  echo "    'git add minisign.pub' is enough if you would rather commit it here."
+  echo
+fi
+echo "    It is public by design: it is what verifies, never what signs."
 echo
 
 if [ "$by_hand" -eq 1 ]; then
   cat <<EOF
-The private half stays at $key and goes nowhere else. Back it up as you
+--- 2. The private half stays at $key and goes nowhere else. Back it up as you
 would a password manager's export. Do not put it in the repository's
 secrets: the point of --by-hand is that the repository cannot sign.
 
@@ -137,8 +147,8 @@ and is waiting for yours.
 EOF
 else
   cat <<EOF
-The private half is at $key. Back it up as you would a password manager's
-export, then put it into this repository's secrets:
+--- 2. The private half is at $key. Back it up as you would a password
+manager's export, then put it into this repository's secrets:
 
     https://github.com/IAmForeverAloneToo/Silver-Messanger/settings/secrets/actions
 
