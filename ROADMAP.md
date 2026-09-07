@@ -473,7 +473,7 @@ those who want to pay for it (46).
 
 ## Phase 11: 1.0
 
-55. [ ] **Independent review** (L). The review of `silver-protocol` and
+55. [x] **Independent review** (L). The review of `silver-protocol` and
         the relay promised in item 35, by someone who did not write
         them, its findings fixed and published with the report. Under
         way: the review of the 0.10.0 line reported 76 findings and is
@@ -482,22 +482,31 @@ those who want to pay for it (46).
         with what was found when each was checked against the code and
         what is done about it in
         [docs/design/audit-response.md](docs/design/audit-response.md).
-        0.10.1 carries the Critical finding, the ten Highs and the
+        0.10.1 carried the Critical finding, the ten Highs and the
         Mediums that share their code; 0.11.0 carries the rest of the
-        Mediums and the Lows; item 57 carries what needs a format
-        change. Ticked when those are out.
+        Mediums, the Lows and the Informational findings; item 57
+        carries what needs a format change. Done: 72 of the 76 are
+        fixed and out, and the four that are left — a message's own id
+        inside the authenticated body, rollback protection for the
+        key-bearing files, the identity key bound into the v4
+        handshake, and history file names under an HMAC — are item 57.
 56. [ ] **Stable** (S). Protocol v4 frozen and documented as such, a
         support policy for what a stable release promises and for how
         long, and the first 1.0 release.
-57. [ ] **What the review left for a format change** (L). The findings
-        of the report's section 13.3, each with a design note before
-        code: a message's own id inside the authenticated body; rollback
-        protection for the key-bearing files; the identity key bound
-        into the v4 handshake, which today makes the long-term
-        Diffie–Hellman key enough to impersonate; a device's own
-        counter-signature on its certificate; history file names under
-        an HMAC rather than the contact's id. Each changes a wire or an
-        on-disk format, so each waits for the version that may.
+57. [ ] **What the review left for a format change** (L). The four
+        findings of the report's section 13.3 that 0.11.0 could not
+        take, each with a design note before code: a message's own id
+        inside the authenticated body (SM-P-14); rollback protection for
+        the key-bearing files (SM-C-24); the identity key bound into the
+        v4 handshake, which today makes the long-term Diffie–Hellman key
+        enough to impersonate (SM-P-04); history file names under an
+        HMAC rather than the contact's id (SM-C-25). With them, the
+        defence in depth that section suggests beyond the fixes already
+        out: a device's own counter-signature on its certificate, so an
+        account cannot enroll a stranger's key even where the relay is
+        the one being lied to (SM-R-01 is fixed; this closes the shape
+        of it). Each changes a wire or an on-disk format, so each waits
+        for the version that may.
 
 ## Continuous
 

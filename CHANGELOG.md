@@ -4,11 +4,27 @@ Notable changes to Silver Messenger. Versions follow [semantic
 versioning](https://semver.org); while the major version is 0, a minor bump
 means behaviour or the wire protocol changed in a way worth reading about.
 
-## Unreleased
+## 0.11.0 - 2026-09-07
 
-The security review's Medium and Low findings, in the order the response
-note sets out ([docs/design/audit-response.md](docs/design/audit-response.md)).
-Section 13.1 went out in 0.10.1; this is section 13.2.
+The security review's Medium, Low and Informational findings, in the
+order the response note sets out
+([docs/design/audit-response.md](docs/design/audit-response.md)).
+Section 13.1 of the report went out in 0.10.1; this is section 13.2 and
+the Informational findings that sat beside those. That leaves four of
+the 76, each of which changes a wire or an on-disk format and waits for
+the version that may (roadmap item 57): a message's own id inside the
+authenticated body, rollback protection for the key-bearing files, the
+identity key bound into the v4 handshake, and history file names under
+an HMAC.
+
+Nothing here changes the wire protocol, so a 0.11.0 client talks to a
+0.10.x relay and the other way round, and a relay upgraded to 0.11.0
+keeps its database as it is. Two files a client keeps gain fields, both
+readable by an older version and written only when they say something:
+`contacts.json` records a per-sender acceptance window and which of your
+own devices pinned or verified each contact, and `groups.json` records
+whether an admin's word about you came from the group or from whoever
+invited you, and how often each invite link has been answered.
 
 ### Security
 
