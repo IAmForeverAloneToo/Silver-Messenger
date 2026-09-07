@@ -507,7 +507,7 @@ those who want to pay for it (46).
         the one being lied to (SM-R-01 is fixed; this closes the shape
         of it). Each changes a wire or an on-disk format, so each waits
         for the version that may.
-58. [ ] **Updating in place** (M). `silver update`: one command that
+58. [x] **Updating in place** (M). `silver update`: one command that
         finds the newest release, downloads the client for this
         platform, checks its SHA-256 against the digest the release API
         gives and against `SHA256SUMS`, makes the downloaded binary say
@@ -522,6 +522,11 @@ those who want to pay for it (46).
         public transparency log — no key for anyone to hold. Design note
         [docs/design/updates.md](docs/design/updates.md); what it does
         not defend against is in its section 8 and the threat model.
+        Done: the command, `/update`, the opt-in daily check, the
+        per-target assets, and tests that a tampered digest, a
+        disagreeing `SHA256SUMS`, an unsigned release, a redirect off the
+        host and a package-managed binary are each refused with nothing
+        left behind.
 
 ## Continuous
 

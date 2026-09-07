@@ -126,14 +126,47 @@ plain.exe` on any platform, `codesign --remove-signature silver` on a
 Mac). The Linux archives, the Debian packages and the container image
 carry no embedded signature and reproduce byte for byte.
 
-`silver --check-release` asks the releases page once whether a newer
-version exists and prints the answer. It never runs by itself, downloads
-nothing, and tells GitHub only that some computer at your address runs
-Silver Messenger — and it goes through the proxy and the extra roots this
+### Updating
+
+`silver update` replaces this binary with the newest release. It fetches
+the client for your platform, checks it four ways, and only then renames
+it into place:
+
+* against the SHA-256 the releases page reports for that file, which
+  comes from a different host than the bytes do;
+* against the same hash in `SHA256SUMS`, which is what you would check by
+  hand;
+* against the project's signature over `SHA256SUMS`, using the key built
+  into the client from `minisign.pub` — so what decides whether a binary
+  may replace yours comes from the source, not from the network;
+* and by running the downloaded file with `--version` and requiring the
+  version that was expected.
+
+If any of those disagrees, nothing on disk is touched and the message
+says what disagreed with what. The binary it replaced is kept beside it,
+so `silver update --rollback` puts it back. `silver update --check` says
+what is available and changes nothing, and `silver update --to 0.11.0`
+installs a named version — going backwards needs `--yes` as well, because
+an older client may not read what a newer one has written in your data
+directory.
+
+A client your package manager installed is not replaced: `silver update`
+says so and prints that manager's own command, since replacing it there
+would break its verification and be undone by its next upgrade.
+
+Nothing about this happens on its own. `silver update` runs when you run
+it; `/update` inside the client says where you stand and installs
+nothing. If you would like to be told, `update_check` in `config.json`
+asks the releases page once a day at start and prints one line — off
+unless you turn it on, because a check on a timer tells the release host
+your address, that you run Silver Messenger, and when you use it.
+
+`silver --check-release` is `silver update --check` under its older name.
+Both, and the daily check, go through the proxy and the extra roots this
 data directory remembers, as the relay connection does, so a client whose
-traffic is routed through Tor does not step outside it for the check. A
-protected directory asks for its passphrase so that they can be read;
-`--proxy` on the command line answers the question without it.
+traffic is routed through Tor does not step outside it. A protected
+directory asks for its passphrase so that they can be read; `--proxy` on
+the command line answers the question without it.
 
 ### From source
 
@@ -300,6 +333,10 @@ silver --ca-cert <PEM>     extra trusted root certificates for wss://; remembere
 silver --proxy <URL>       proxy to reach the relay through: http://host:port (CONNECT) or socks5://host:port (Tor); remembered (env SILVER_PROXY, else HTTPS_PROXY / ALL_PROXY)
 silver --pin <PIN>         pin the relay's TLS key (sha256:<hex>); refuse any other; remembered (env SILVER_PIN)
 silver --print-pin         connect once, print the pin of the key the relay presents and whether its certificate is trusted, and exit
+silver update              replace this binary with the newest release, after checking it against the releases page, SHA256SUMS and the project's signature
+silver update --check      say what is available and change nothing (the same as --check-release)
+silver update --rollback   put back the binary the last update replaced
+silver update --to <VER>   install a named version rather than the newest (going backwards also needs --yes)
 silver --check-release     ask the releases page once whether a newer version exists, print the answer, and exit (never by itself)
 silver --invite <TOKEN>    invite token for a relay that only registers invited identities; remembered (env SILVER_INVITE)
 silver --print-id          print your user id and exit

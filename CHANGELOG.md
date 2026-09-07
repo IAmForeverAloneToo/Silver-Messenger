@@ -6,6 +6,37 @@ means behaviour or the wire protocol changed in a way worth reading about.
 
 ## Unreleased
 
+### Added
+
+- `silver update` replaces the running client with the newest release,
+  after checking it four ways: against the SHA-256 the release API
+  reports for that file, which arrives from a different origin than the
+  bytes; against the same hash in `SHA256SUMS`, which is what a person
+  checks by hand; against the project's signature over `SHA256SUMS`,
+  using the key compiled into the client from `minisign.pub`, so what
+  decides whether a binary may replace yours comes from the source and
+  not from the network; and by running the downloaded file and requiring
+  it to report the version expected. A disagreement anywhere leaves the
+  running client alone and says what disagreed with what. The binary that
+  was replaced is kept beside it, so `silver update --rollback` puts it
+  back; `--check` reports without changing anything and `--to <version>`
+  installs a named one, which going backwards also needs `--yes` for,
+  since an older client may not read what a newer one has written.
+  A client a package manager installed is refused with that manager's own
+  command, because replacing it there breaks its verification and is
+  undone by its next upgrade. Releases now carry the bare `silver` and
+  `silver-relay` per target beside the archives, so an update fetches the
+  client alone rather than an archive holding the relay, two SBOMs, the
+  changelog and the licence. Design note
+  [docs/design/updates.md](docs/design/updates.md).
+- `/update` in the client says which version this is and what to run; it
+  downloads nothing, because the interface holds an unlocked data
+  directory and open sessions. `update_check` in `config.json` asks the
+  releases page once a day at start and prints one line -- off unless
+  turned on, since a check on a timer tells the release host an address,
+  a program and the times it is used. Both go through the proxy the relay
+  connection uses, so a client on Tor does not step outside it to ask.
+
 ### Security
 
 - Releases are signed again, and this time the key exists. `SHA256SUMS`

@@ -178,7 +178,7 @@ V6 and the threat model.
 | 8.2.x Client-side (browser) data protection | N/A | |
 | 8.3.1 Sensitive data not in URLs | Met | There are no URLs with data. |
 | 8.3.2 Users can remove or export their data | Met | `--export-backup` (identity and contacts, under its own passphrase); deleting the data directory removes everything local; the relay drops mailboxes after 30 days and holds nothing else about a user but the bundle. There is no remote "delete my identity from the relay" yet. |
-| 8.3.3 Users told what is collected | Met | The threat model, in the README's first paragraph. The client collects nothing; `--check-release` is opt-in and documented. |
+| 8.3.3 Users told what is collected | Met | The threat model, in the README's first paragraph. The client collects nothing; the releases page is asked only on `silver update`, or once a day under `update_check`, which is off unless turned on, and the README's "Updating" says what each tells the release host. |
 | 8.3.4 Sensitive data identified and protected | Met | Asset table; encryption at rest; sealed sender. |
 | 8.3.6 Sensitive data in memory wiped | Met | `Zeroize`/`ZeroizeOnDrop` on keys, session state, passphrases and plaintext buffers. |
 | 8.3.7 Encrypted at rest | Met | As 6.1.1. |
@@ -202,7 +202,7 @@ V6 and the threat model.
 | Control | Verdict | Evidence |
 | --- | --- | --- |
 | 10.1.1 Code analysis | Partly | clippy, `cargo audit`, `cargo deny`, fuzzing, the OpenSSF Scorecard; no dedicated malicious-code analysis. |
-| 10.2.1 No unauthorised phone-home | Met | The client contacts its relay and, only on `--check-release`, GitHub's releases API; nothing else, ever. Verified in tests that the client makes no other connections. |
+| 10.2.1 No unauthorised phone-home | Met | The client contacts its relay and, only on `silver update` (or its older name `--check-release`), GitHub's releases API; nothing else, ever. From 0.12.0 the `update_check` setting will make that request once a day at start, and it is off unless turned on, for the reason the threat model gives: a check on a timer reveals an address, a program and the times it is used. Verified in tests that the client makes no other connections. |
 | 10.2.2 No data collection | Met | None. |
 | 10.2.3 No backdoors, undocumented modes | Met | Every flag is documented (`--help`, README); `--log-ids` and `--submit-authenticated` are the only "less private" modes and say so. |
 | 10.3.1 Auto-update with signature checks | Met (by absence) | There is no auto-update; releases are signed and reproducible for manual verification. |
