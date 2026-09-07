@@ -1,3 +1,0 @@
-# The relay's system user, for its unit; systemd creates it at boot and
-# on `systemd-sysusers`.
-u silver - "Silver Messenger relay" /var/lib/silver-relay

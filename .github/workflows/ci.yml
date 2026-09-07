@@ -106,14 +106,12 @@ jobs:
       - run: TERM=xterm-256color python3 tests/tui/soak.py --minutes ${{ inputs.soak_minutes || 3 }}
 
   packaging:
-    # The packages, each checked the way its platform does
-    # (docs/design/distribution.md, section 5): the Debian package built
-    # from the debug binaries and installed in a container, the PKGBUILD
-    # and its .SRCINFO in an Arch container, the winget manifests against
-    # their schemas. The formula has its own job on macOS.
-    # The container images below are pinned by digest, as the relay's own
+    # The Debian package, built from the debug binaries and installed in a
+    # container the way apt would install it (docs/design/distribution.md,
+    # section 5). The formula has its own job on macOS.
+    # The container image below is pinned by digest, as the relay's own
     # base images are: a tag can be moved (SM-S-05). Moved by hand.
-    name: packages (Debian, Arch, winget)
+    name: packages (Debian)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -143,19 +141,6 @@ jobs:
             getent passwd silver
             apt-get remove -y -qq silver-messenger >/dev/null
             test ! -e /usr/bin/silver'
-      - name: Arch package, its .SRCINFO current and namcap clean of errors
-        run: |
-          docker run --rm -v "$PWD/packaging/aur:/aur:ro" archlinux:base-devel@sha256:84cd9ef000b3cff245ec028e87965b84724f4bf1cc63fc2741ba927b88515ed6 sh -ec '
-            pacman -Sy --noconfirm --needed namcap >/dev/null
-            useradd -m builder
-            cp -r /aur /build && chown -R builder /build && cd /build
-            su builder -s /bin/sh -c "makepkg --printsrcinfo" | diff -u .SRCINFO -
-            namcap PKGBUILD | tee namcap.txt
-            ! grep -q " E: " namcap.txt'
-      - name: winget manifests against their schemas
-        run: |
-          pip install pyyaml jsonschema || pip install --break-system-packages pyyaml jsonschema
-          python3 packaging/winget/validate.py
 
   homebrew:
     # This checkout tapped as it would be by a person, then the formula

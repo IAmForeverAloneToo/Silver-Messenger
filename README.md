@@ -67,16 +67,17 @@ ASCII marks (`v`, `vv`, `x`, `..`) by itself; `/marks` changes that, and
 first start may be refused. Right-click `silver` and choose Open once, or
 run `xattr -d com.apple.quarantine silver`.
 
-**With a package manager:** each of these installs the release archive
-above by its checksum, so what arrives is what the release page carries.
+**With a package manager:** both install the release binaries by their
+checksum, so what arrives is what the release page carries.
 
 ```sh
 brew tap iamforeveralonetoo/silver https://github.com/IAmForeverAloneToo/Silver-Messenger
-brew install silver-messenger                 # macOS and Linux (Homebrew)
-winget install IAmForeverAloneToo.SilverMessenger   # Windows, once the manifest is in winget-pkgs (the release notes say)
-sudo apt install ./silver-messenger_0.12.2_amd64.deb   # Debian and Ubuntu: the .deb from the release page, amd64 or arm64
-makepkg -si                                   # Arch: in packaging/aur/ of this repository (silver-messenger-bin), or from the AUR once published
+brew install silver-messenger                          # macOS and Linux (Homebrew)
+sudo apt install ./silver-messenger_0.12.2_amd64.deb   # Debian and Ubuntu, amd64 or arm64
 ```
+
+On Windows, on Arch, and anywhere else, take the one file for your
+platform from the release page: that is the whole client.
 
 The Debian package puts `silver` and `silver-relay` in `/usr/bin` and
 installs the relay's systemd unit without enabling it;
