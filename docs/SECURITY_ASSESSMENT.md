@@ -14,11 +14,15 @@ apply and say so. Every other control gets a verdict:
 - **N/A**: the control's subject does not exist in this program.
 
 This is a self-assessment by the author, checked against the code, the
-tests and the CI configuration, not an independent audit. An independent
-review of `silver-protocol` and the relay is planned before 1.0
-([ROADMAP.md](../ROADMAP.md) item 35) and has not happened. Controls
-marked Level 3 only are left out. Where a control is met by a design
-decision rather than code, the threat model
+tests and the CI configuration. It is not itself an audit — but it is no
+longer unaudited work: an independent adversarial review of the 0.10.0
+line reported 76 findings, published whole as
+[audits/2026-09-security-audit.md](audits/2026-09-security-audit.md) with
+the answer to each in
+[design/audit-response.md](design/audit-response.md), and every row below
+that the review contradicted has been corrected against the code that
+ships. Controls marked Level 3 only are left out. Where a control is met
+by a design decision rather than code, the threat model
 ([THREAT_MODEL.md](THREAT_MODEL.md)) is the reference.
 
 Summary: of the 14 chapters, six apply in full, six in part, and two

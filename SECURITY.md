@@ -105,7 +105,20 @@ against the RustSec advisory database on every push (`cargo audit`,
 against whom and where the gaps are.
 [docs/SECURITY_ASSESSMENT.md](docs/SECURITY_ASSESSMENT.md) walks the OWASP
 ASVS Level 2 controls and says, for each that applies, whether the code
-meets it and what closes any gap. Both are maintained by the author; an
-independent review of `silver-protocol` and the relay by someone who did
-not write them is planned before 1.0 and has not happened yet. If you are
-in a position to do one, the maintainer would like to hear from you.
+meets it and what closes any gap. Both are maintained by the author.
+
+An independent adversarial review of the 0.10.0 line, by people who did
+not write it, reported 76 findings: one Critical, ten High, 24 Medium, 30
+Low and eleven Informational. It is published whole and unedited as
+[docs/audits/2026-09-security-audit.md](docs/audits/2026-09-security-audit.md),
+and what was found when each finding was checked against the code, what
+was done about it and where a suggested fix was not taken is in
+[docs/design/audit-response.md](docs/design/audit-response.md), finding by
+finding. 0.10.1 carried the Critical, the Highs and the Mediums that
+shared their code; 0.11.0 carried the rest — 72 of the 76 are fixed and
+released. The four that are left each change a wire or an on-disk format
+and are named in the roadmap under item 57. The changelog's `Security`
+entries say what each finding was in the release that fixed it.
+
+A further review is welcome. If you are in a position to do one, the
+maintainer would like to hear from you.
