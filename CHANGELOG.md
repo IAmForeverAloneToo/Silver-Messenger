@@ -4,6 +4,22 @@ Notable changes to Silver Messenger. Versions follow [semantic
 versioning](https://semver.org); while the major version is 0, a minor bump
 means behaviour or the wire protocol changed in a way worth reading about.
 
+## 0.12.1 - 2026-09-07
+
+### Fixed
+
+- `silver update` could not install anything in 0.12.0. The download is
+  created the way any new file is, without the bit that lets it run, and
+  the last check before a swap is running it to see that it reports the
+  version expected -- so every update stopped there with "Permission
+  denied" and nothing was installed. The download is made runnable, by
+  its owner alone, as soon as it is written; the mode it finally keeps is
+  still the replaced binary's, which the swap copies over it. Found by
+  running the released 0.12.0 client against the real releases page
+  rather than a test one, and now covered both by a unit test at the
+  place the mode is set and by an integration test whose stand-in binary
+  is one the test actually executes.
+
 ## 0.12.0 - 2026-09-07
 
 ### Added
