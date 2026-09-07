@@ -12,23 +12,23 @@ class SilverMessenger < Formula
 
   on_macos do
     on_arm do
-      url "https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/download/v0.10.1/silver-messenger-v0.10.1-aarch64-apple-darwin.tar.gz"
-      sha256 "8aa479de4ed9274dd5ca3c53578417d8c95ff130601bb3e789177b5418faf66e"
+      url "https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/download/v0.11.0/silver-messenger-v0.11.0-aarch64-apple-darwin.tar.gz"
+      sha256 "81b55fbef4324b7eb0033b1f538d6a85f370801015ba238de5d50119091c2123"
     end
     on_intel do
-      url "https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/download/v0.10.1/silver-messenger-v0.10.1-x86_64-apple-darwin.tar.gz"
-      sha256 "1c83798b814e242f61bd07d584d78e4abfd1f82eefa45f7ee72f0fef1faae57d"
+      url "https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/download/v0.11.0/silver-messenger-v0.11.0-x86_64-apple-darwin.tar.gz"
+      sha256 "7b585a43d5aade8d6e10790b120d3c30bb8fe73a696296c43576ddb4d60adfba"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/download/v0.10.1/silver-messenger-v0.10.1-aarch64-unknown-linux-musl.tar.gz"
-      sha256 "a6aeb42de15c612c449340b0f50ad65d18a5b5d6ed789cd37f4da43e2ce9a75c"
+      url "https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/download/v0.11.0/silver-messenger-v0.11.0-aarch64-unknown-linux-musl.tar.gz"
+      sha256 "14f0df908553b9cbd9f8008b57ad7200cc28204663cc26fe2524456287ae1617"
     end
     on_intel do
-      url "https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/download/v0.10.1/silver-messenger-v0.10.1-x86_64-unknown-linux-musl.tar.gz"
-      sha256 "72833bdfcdfdb67701c3e38778fba948a61ab423bd6c7a5d845695eea5babc69"
+      url "https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/download/v0.11.0/silver-messenger-v0.11.0-x86_64-unknown-linux-musl.tar.gz"
+      sha256 "efa1485a2f6e17bd747c02f47d3c79f1a04a09f45c5b838bac62f59174dd3625"
     end
   end
 

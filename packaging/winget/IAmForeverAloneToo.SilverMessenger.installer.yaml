@@ -1,16 +1,16 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
 PackageIdentifier: IAmForeverAloneToo.SilverMessenger
-PackageVersion: 0.10.1
+PackageVersion: 0.11.0
 InstallerType: zip
 NestedInstallerType: portable
 NestedInstallerFiles:
-  - RelativeFilePath: silver-messenger-v0.10.1-x86_64-pc-windows-msvc\silver.exe
+  - RelativeFilePath: silver-messenger-v0.11.0-x86_64-pc-windows-msvc\silver.exe
     PortableCommandAlias: silver
-  - RelativeFilePath: silver-messenger-v0.10.1-x86_64-pc-windows-msvc\silver-relay.exe
+  - RelativeFilePath: silver-messenger-v0.11.0-x86_64-pc-windows-msvc\silver-relay.exe
     PortableCommandAlias: silver-relay
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/download/v0.10.1/silver-messenger-v0.10.1-x86_64-pc-windows-msvc.zip
-    InstallerSha256: 7D3ECBA3F8179CC640E485C80CBC32531C127ED044DC27B6287931B99E89BF33
+    InstallerUrl: https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/download/v0.11.0/silver-messenger-v0.11.0-x86_64-pc-windows-msvc.zip
+    InstallerSha256: 09FA763EDB7764365F485A0A20B3B37864B78B096D773CBAEF3945473F07B6B0
 ManifestType: installer
 ManifestVersion: 1.6.0

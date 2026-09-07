@@ -135,23 +135,24 @@ warning; the `--help` of each is the reference for now.
 
 ## 6. Status
 
-As of 0.10.1, the second release with the Debian packages and the
+As of 0.11.0, the third release with the Debian packages and the
 packaging archive:
 
 | Channel | State |
 | --- | --- |
-| Debian package | `silver-messenger_0.10.1_amd64.deb` and `_arm64.deb` are on the release page, built by the release workflow from the Linux archives. The amd64 package was downloaded here for 0.10.0, matched `SHA256SUMS`, installed with `dpkg` on this machine (both binaries reported the release), and purged cleanly; `lintian` reports no errors. Not yet installed on a Debian machine with systemd running. |
-| Homebrew tap | Live for 0.10.1: the formula in this repository names the 0.10.1 archives, and CI taps the repository on macOS, audits the formula, installs it from the release and runs its test on every push. Not yet tried by hand on a Mac. |
-| AUR | The PKGBUILD and `.SRCINFO` for 0.10.1 are in the repository and pass `namcap` and the `.SRCINFO` check in CI's Arch container; not pushed to the AUR (the maintainer's account). Not yet built with `makepkg -si` by hand. |
-| winget | Manifests for 0.10.1 in the repository, valid against the schemas; not submitted to `winget-pkgs` (a pull request the maintainer makes). Not yet tried with `winget install --manifest`. |
-| Authenticode | No certificate in the secrets; the 0.10.1 run printed the notice and the Windows executables went out unsigned. |
-| Notarisation | No Apple membership in the secrets; the 0.10.1 run printed the notice and the macOS executables went out unsigned. |
+| Debian package | `silver-messenger_0.11.0_amd64.deb` and `_arm64.deb` are on the release page, built by the release workflow from the Linux archives. The amd64 package was downloaded here for 0.10.0, matched `SHA256SUMS`, installed with `dpkg` on this machine (both binaries reported the release), and purged cleanly; `lintian` reports no errors. Not yet installed on a Debian machine with systemd running. |
+| Homebrew tap | Live for 0.11.0: the formula in this repository names the 0.11.0 archives, and CI taps the repository on macOS, audits the formula, installs it from the release and runs its test on every push. Not yet tried by hand on a Mac. |
+| AUR | The PKGBUILD and `.SRCINFO` for 0.11.0 are in the repository and pass `namcap` and the `.SRCINFO` check in CI's Arch container; not pushed to the AUR (the maintainer's account). Not yet built with `makepkg -si` by hand. |
+| winget | Manifests for 0.11.0 in the repository, valid against the schemas; not submitted to `winget-pkgs` (a pull request the maintainer makes). Not yet tried with `winget install --manifest`. |
+| Authenticode | No certificate in the secrets; the 0.11.0 run printed the notice and the Windows executables went out unsigned. |
+| Notarisation | No Apple membership in the secrets; the 0.11.0 run printed the notice and the macOS executables went out unsigned. |
 | minisign | No `minisign.pub` in the repository; every release so far carries `SHA256SUMS` unsigned, and the run says so. Section 3 says what the two ways of setting it up are worth. |
 | Installer | From 0.11.0 `install.sh` is a release asset covered by `SHA256SUMS`, so an operator checks it before running it as root instead of piping a branch into a shell. |
 
-The release's `silver-messenger-v0.10.0-packaging.tar.gz` holds, byte
-for byte, the files `packaging/update.sh 0.10.0` wrote into the
-repository in the packaging commit after the release.
+The release's `silver-messenger-v0.11.0-packaging.tar.gz` holds, byte
+for byte, the files `packaging/update.sh 0.11.0` wrote into the
+repository in the packaging commit after the release — checked by
+unpacking the published archive and diffing it against the checkout.
 
 ## 7. Implementation order
 
