@@ -74,7 +74,7 @@ above by its checksum, so what arrives is what the release page carries.
 brew tap iamforeveralonetoo/silver https://github.com/IAmForeverAloneToo/Silver-Messenger
 brew install silver-messenger                 # macOS and Linux (Homebrew)
 winget install IAmForeverAloneToo.SilverMessenger   # Windows, once the manifest is in winget-pkgs (the release notes say)
-sudo apt install ./silver-messenger_0.12.1_amd64.deb   # Debian and Ubuntu: the .deb from the release page, amd64 or arm64
+sudo apt install ./silver-messenger_0.12.2_amd64.deb   # Debian and Ubuntu: the .deb from the release page, amd64 or arm64
 makepkg -si                                   # Arch: in packaging/aur/ of this repository (silver-messenger-bin), or from the AUR once published
 ```
 
@@ -433,16 +433,30 @@ neither Rust nor access to the repository. The same workflow can show
 status and logs or restart the relay.
 
 **By hand**, on a Debian/Ubuntu or Fedora server as root. The installer
-is a release asset listed in `SHA256SUMS`, so it can be checked before it
-is run — which is worth doing for a script that installs software as
-root, and is why it is not offered as a pipe from a branch into a shell:
+is in the repository, and it is worth reading before running a script
+that installs software as root, which is why it is not offered as a pipe
+from a branch into a shell:
 
 ```sh
-curl -fsSLO https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/latest/download/install.sh
-curl -fsSLO https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/latest/download/SHA256SUMS
-grep ' install.sh$' SHA256SUMS | sha256sum -c -
+curl -fsSLO https://github.com/IAmForeverAloneToo/Silver-Messenger/raw/main/deploy/install.sh
+less install.sh
 SILVER_DOMAIN=relay.example.org SILVER_EMAIL=you@example.org bash install.sh
 ```
+
+Or, without the script at all, from the release page — which is the
+shorter path now that the relay is one file on it, and the better
+checked one, since the binary is covered by a list the project signs:
+
+```sh
+v=0.12.2; t=x86_64-unknown-linux-musl
+base=https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/download/v$v
+curl -fsSLO "$base/silver-relay-v$v-$t" -O "$base/SHA256SUMS" -O "$base/SHA256SUMS.minisig"
+minisign -Vm SHA256SUMS -p minisign.pub          # the list is the project's
+grep " silver-relay-v$v-$t\$" SHA256SUMS | sha256sum -c -
+sudo install -m755 "silver-relay-v$v-$t" /usr/local/bin/silver-relay
+```
+
+with `deploy/silver-relay.service` from the repository as the unit.
 
 This installs build tools and Rust (`rustup-init` from the Rust
 project's own host, checked against the SHA-256 published next to it),
@@ -819,9 +833,16 @@ weekly.
 
 Pushing a `v*` tag (or running the release workflow with a tag) builds
 the archives for all platforms with `cargo auditable`, attaches a CycloneDX
-SBOM per binary, writes `SHA256SUMS` and a `BUILD-INFO.txt` per target, attests the build
-provenance, and publishes it all on the releases page, together with the
-relay's installer so operators can check it before running it.
+SBOM per binary, writes `SHA256SUMS` and a `BUILD-INFO.txt` covering every target,
+attests the build provenance, and publishes it all on the releases page, together
+with the relay's installer so operators can check it before running it.
+
+A release page leads with which file to take: for most people that is the
+bare `silver-v<version>-<target>`, which is the whole client in one file —
+make it executable and run it. The `silver-messenger-v<version>-<target>`
+archives hold the same client with the relay, the SBOMs, the changelog and
+the licence beside it; the SBOMs live in the archive rather than loose on
+the page (`tar xzf <archive> --wildcards '*/sbom/*'` gets them).
 
 **Signing releases.** `SHA256SUMS` is signed with the project's minisign
 key, whose public half is `minisign.pub` at the repository root. Check a

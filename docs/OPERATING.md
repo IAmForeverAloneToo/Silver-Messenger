@@ -33,8 +33,10 @@ keep it updated, and know what to do when something goes wrong.
    The relay obtains its certificate under that name.
 3. **Ports.** 443 open to the world; nothing else. SSH from where you
    administer, and no other service on the host if you can help it.
-4. **Install.** The README's installer (`install.sh` from the release
-   page, checked against `SHA256SUMS`, or the "Deploy relay" workflow)
+4. **Install.** The relay binary from the release page, checked against
+   the signed `SHA256SUMS` and put beside `deploy/silver-relay.service`
+   (README, "Running a relay"), or the README's installer
+   (`deploy/install.sh` from the repository, or the "Deploy relay" workflow)
    with `SILVER_DOMAIN` and `SILVER_EMAIL`, or `deploy/compose.yml`.
    Without `SILVER_DOMAIN` the installer configures a loopback listener
    rather than a public plaintext one; `SILVER_ALLOW_PLAINTEXT=1` is the

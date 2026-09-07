@@ -51,13 +51,21 @@ sum_of() {
   fi
   printf '%s' "$found"
 }
-archive() { printf 'silver-messenger-v%s-%s' "$version" "$1"; }
+# A release carries the two programs, one file per target, and nothing
+# that is not the program (docs/design/distribution.md). Every package
+# below installs those files rather than unpacking an archive.
+client() { printf 'silver-v%s-%s' "$version" "$1"; }
+relay() { printf 'silver-relay-v%s-%s' "$version" "$1"; }
 
-mac_arm="$(sum_of "$(archive aarch64-apple-darwin).tar.gz")"
-mac_intel="$(sum_of "$(archive x86_64-apple-darwin).tar.gz")"
-linux_arm="$(sum_of "$(archive aarch64-unknown-linux-musl).tar.gz")"
-linux_intel="$(sum_of "$(archive x86_64-unknown-linux-musl).tar.gz")"
-windows="$(sum_of "$(archive x86_64-pc-windows-msvc).zip")"
+mac_arm="$(sum_of "$(client aarch64-apple-darwin)")"
+mac_arm_relay="$(sum_of "$(relay aarch64-apple-darwin)")"
+mac_intel="$(sum_of "$(client x86_64-apple-darwin)")"
+mac_intel_relay="$(sum_of "$(relay x86_64-apple-darwin)")"
+linux_arm="$(sum_of "$(client aarch64-unknown-linux-musl)")"
+linux_arm_relay="$(sum_of "$(relay aarch64-unknown-linux-musl)")"
+linux_intel="$(sum_of "$(client x86_64-unknown-linux-musl)")"
+linux_intel_relay="$(sum_of "$(relay x86_64-unknown-linux-musl)")"
+windows="$(sum_of "$(client x86_64-pc-windows-msvc).exe")"
 # The relay's unit as it is at the tag, which the Arch package installs:
 # the tag's copy from the repository, or, while the tag does not exist yet
 # (the release workflow makes it last), the checkout's, which is the
@@ -72,6 +80,27 @@ else
   exit 1
 fi
 rm -f "$unit"
+
+# The readme and the licence, which the Arch package used to take out of
+# the archive. A release carries the programs and nothing else now, so
+# these come from the tag the same way the unit does.
+from_tag() {
+  local f="$(mktemp)" sum
+  if curl -fsSL "$url/raw/v$version/$1" -o "$f" 2>/dev/null; then
+    sum="$(sha256sum "$f" | cut -d' ' -f1)"
+  elif [ -f "$repo/$1" ]; then
+    sum="$(sha256sum "$repo/$1" | cut -d' ' -f1)"
+  else
+    echo "no tag v$version in the repository and no $1 in this checkout" >&2
+    rm -f "$f"
+    exit 1
+  fi
+  rm -f "$f"
+  printf '%s' "$sum"
+}
+readme="$(from_tag README.md)"
+license="$(from_tag LICENSE)"
+
 sysusers="$(sha256sum "$here/aur/silver-messenger.sysusers" | cut -d' ' -f1)"
 
 # --- Homebrew ---------------------------------------------------------------
@@ -90,31 +119,53 @@ class SilverMessenger < Formula
   homepage "$url"
   license "AGPL-3.0-only"
 
+  # A release carries the two programs as two files, so the client is the
+  # download and the relay is a resource beside it.
   on_macos do
     on_arm do
-      url "$download/$(archive aarch64-apple-darwin).tar.gz"
+      url "$download/$(client aarch64-apple-darwin)"
       sha256 "$mac_arm"
+      resource "relay" do
+        url "$download/$(relay aarch64-apple-darwin)"
+        sha256 "$mac_arm_relay"
+      end
     end
     on_intel do
-      url "$download/$(archive x86_64-apple-darwin).tar.gz"
+      url "$download/$(client x86_64-apple-darwin)"
       sha256 "$mac_intel"
+      resource "relay" do
+        url "$download/$(relay x86_64-apple-darwin)"
+        sha256 "$mac_intel_relay"
+      end
     end
   end
 
   on_linux do
     on_arm do
-      url "$download/$(archive aarch64-unknown-linux-musl).tar.gz"
+      url "$download/$(client aarch64-unknown-linux-musl)"
       sha256 "$linux_arm"
+      resource "relay" do
+        url "$download/$(relay aarch64-unknown-linux-musl)"
+        sha256 "$linux_arm_relay"
+      end
     end
     on_intel do
-      url "$download/$(archive x86_64-unknown-linux-musl).tar.gz"
+      url "$download/$(client x86_64-unknown-linux-musl)"
       sha256 "$linux_intel"
+      resource "relay" do
+        url "$download/$(relay x86_64-unknown-linux-musl)"
+        sha256 "$linux_intel_relay"
+      end
     end
   end
 
   def install
-    bin.install "silver", "silver-relay"
-    doc.install "README.md", "CHANGELOG.md"
+    # The downloads keep their release names, which carry the version and
+    # the target; both are installed under the names people type.
+    bin.install Dir["silver-v*"].first => "silver"
+    resource("relay").stage do
+      bin.install Dir["silver-relay-v*"].first => "silver-relay"
+    end
   end
 
   test do
@@ -140,21 +191,30 @@ provides=('silver-messenger')
 conflicts=('silver-messenger')
 # The release binaries are stripped and reproducible; their bytes stay.
 options=('!strip')
+# A release carries the two programs as two files; the licence and the
+# readme come from the tag, as the unit already does.
 source=("silver-relay-\$pkgver.service::\$url/raw/v\$pkgver/deploy/silver-relay.service"
+        "silver-messenger-\$pkgver.README.md::\$url/raw/v\$pkgver/README.md"
+        "silver-messenger-\$pkgver.LICENSE::\$url/raw/v\$pkgver/LICENSE"
         'silver-messenger.sysusers')
-source_x86_64=("\$url/releases/download/v\$pkgver/silver-messenger-v\$pkgver-x86_64-unknown-linux-musl.tar.gz")
-source_aarch64=("\$url/releases/download/v\$pkgver/silver-messenger-v\$pkgver-aarch64-unknown-linux-musl.tar.gz")
+source_x86_64=("\$url/releases/download/v\$pkgver/silver-v\$pkgver-x86_64-unknown-linux-musl"
+               "\$url/releases/download/v\$pkgver/silver-relay-v\$pkgver-x86_64-unknown-linux-musl")
+source_aarch64=("\$url/releases/download/v\$pkgver/silver-v\$pkgver-aarch64-unknown-linux-musl"
+                "\$url/releases/download/v\$pkgver/silver-relay-v\$pkgver-aarch64-unknown-linux-musl")
 sha256sums=('$service'
+            '$readme'
+            '$license'
             '$sysusers')
-sha256sums_x86_64=('$linux_intel')
-sha256sums_aarch64=('$linux_arm')
+sha256sums_x86_64=('$linux_intel'
+                   '$linux_intel_relay')
+sha256sums_aarch64=('$linux_arm'
+                    '$linux_arm_relay')
 
 package() {
-  cd "silver-messenger-v\$pkgver-\$CARCH-unknown-linux-musl"
-  install -Dm755 silver "\$pkgdir/usr/bin/silver"
-  install -Dm755 silver-relay "\$pkgdir/usr/bin/silver-relay"
-  install -Dm644 README.md CHANGELOG.md -t "\$pkgdir/usr/share/doc/silver-messenger"
-  install -Dm644 LICENSE "\$pkgdir/usr/share/licenses/\$pkgname/LICENSE"
+  install -Dm755 "\$srcdir/silver-v\$pkgver-\$CARCH-unknown-linux-musl" "\$pkgdir/usr/bin/silver"
+  install -Dm755 "\$srcdir/silver-relay-v\$pkgver-\$CARCH-unknown-linux-musl" "\$pkgdir/usr/bin/silver-relay"
+  install -Dm644 "\$srcdir/silver-messenger-\$pkgver.README.md" "\$pkgdir/usr/share/doc/silver-messenger/README.md"
+  install -Dm644 "\$srcdir/silver-messenger-\$pkgver.LICENSE" "\$pkgdir/usr/share/licenses/\$pkgname/LICENSE"
   sed 's|/usr/local/bin/silver-relay|/usr/bin/silver-relay|' "\$srcdir/silver-relay-\$pkgver.service" |
     install -Dm644 /dev/stdin "\$pkgdir/usr/lib/systemd/system/silver-relay.service"
   install -Dm644 "\$srcdir/silver-messenger.sysusers" "\$pkgdir/usr/lib/sysusers.d/silver-messenger.conf"
@@ -174,13 +234,21 @@ pkgbase = silver-messenger-bin
 	conflicts = silver-messenger
 	options = !strip
 	source = silver-relay-$version.service::$url/raw/v$version/deploy/silver-relay.service
+	source = silver-messenger-$version.README.md::$url/raw/v$version/README.md
+	source = silver-messenger-$version.LICENSE::$url/raw/v$version/LICENSE
 	source = silver-messenger.sysusers
 	sha256sums = $service
+	sha256sums = $readme
+	sha256sums = $license
 	sha256sums = $sysusers
-	source_x86_64 = $download/$(archive x86_64-unknown-linux-musl).tar.gz
+	source_x86_64 = $download/$(client x86_64-unknown-linux-musl)
+	source_x86_64 = $download/$(relay x86_64-unknown-linux-musl)
 	sha256sums_x86_64 = $linux_intel
-	source_aarch64 = $download/$(archive aarch64-unknown-linux-musl).tar.gz
+	sha256sums_x86_64 = $linux_intel_relay
+	source_aarch64 = $download/$(client aarch64-unknown-linux-musl)
+	source_aarch64 = $download/$(relay aarch64-unknown-linux-musl)
 	sha256sums_aarch64 = $linux_arm
+	sha256sums_aarch64 = $linux_arm_relay
 
 pkgname = silver-messenger-bin
 EOF
@@ -203,16 +271,16 @@ cat > "$here/winget/$id.installer.yaml" <<EOF
 # yaml-language-server: \$schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
 PackageIdentifier: $id
 PackageVersion: $version
-InstallerType: zip
-NestedInstallerType: portable
-NestedInstallerFiles:
-  - RelativeFilePath: $(archive x86_64-pc-windows-msvc)\\silver.exe
-    PortableCommandAlias: silver
-  - RelativeFilePath: $(archive x86_64-pc-windows-msvc)\\silver-relay.exe
-    PortableCommandAlias: silver-relay
+# The client is the executable itself now, not an archive holding one, so
+# winget installs it as a portable command under the name people type.
+# The relay is not a thing anyone installs on Windows with a package
+# manager; it is on the release page for whoever wants it.
+InstallerType: portable
+Commands:
+  - silver
 Installers:
   - Architecture: x64
-    InstallerUrl: $download/$(archive x86_64-pc-windows-msvc).zip
+    InstallerUrl: $download/$(client x86_64-pc-windows-msvc).exe
     InstallerSha256: $(printf '%s' "$windows" | tr 'a-f' 'A-F')
 ManifestType: installer
 ManifestVersion: 1.6.0

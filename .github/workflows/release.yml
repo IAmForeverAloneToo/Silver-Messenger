@@ -13,14 +13,17 @@ name: Release binaries
 # release"):
 #   * binaries built with `cargo auditable`, so `cargo audit bin <file>`
 #     lists the exact dependencies inside them;
-#   * a CycloneDX SBOM per binary and target;
+#   * a CycloneDX SBOM per binary and target, inside each archive;
 #   * SHA256SUMS over every file, and the project's minisign signature over
 #     it when MINISIGN_SECRET_KEY is set and minisign.pub is in the
 #     repository (packaging/new-signing-key.sh sets both up). The client
 #     checks an update against that signature; a person checks a download
 #     against it (README, "Signing releases");
-#   * a BUILD-INFO.txt per target naming the compiler, the commit and the
-#     flags, so the build can be repeated years later;
+#   * one BUILD-INFO.txt naming, for every target, the compiler, the commit
+#     and the flags, so a build can be repeated years later;
+#   * `silver` and `silver-relay` for each target, one file each: what a
+#     release page carries, what `silver update` fetches, and the simplest
+#     thing for a person to download;
 #   * a SLSA build provenance attestation from GitHub for every file, which
 #     `gh attestation verify <file> --owner IAmForeverAloneToo` checks;
 #   * builds with locked dependencies, remapped paths and a fixed timestamp,
@@ -214,21 +217,21 @@ jobs:
             printf 'rustflags: --remap-path-prefix=<workspace>=/src --remap-path-prefix=<cargo home>=/cargo\n'
             printf 'command: cargo auditable build --release --locked --workspace --target %s\n' "${{ matrix.target }}"
           } > "dist/$name/BUILD-INFO.txt"
-          cp "dist/$name/BUILD-INFO.txt" "dist/$name-BUILD-INFO.txt"
-          # The SBOMs go inside the archive and next to it, so they can be
-          # read without unpacking anything.
+          # Kept aside for the one combined BUILD-INFO.txt the release
+          # job writes: five separate ones were five rows of a release
+          # page for a file most people never open.
+          cp "dist/$name/BUILD-INFO.txt" "dist/build-info-${{ matrix.target }}.part"
+          # The SBOMs go inside the archive. They used to be published
+          # loose beside it as well, which was ten more rows on every
+          # release page for something read by tooling that can unpack a
+          # tar; `tar xzf <archive> --wildcards '*/sbom/*'` gets them.
           find crates -name '*.cdx.json' -exec cp {} "dist/$name/sbom/" \;
-          for f in "dist/$name/sbom/"*.cdx.json; do
-            cp "$f" "dist/$name-$(basename "$f")"
-          done
           if [ -f minisign.pub ]; then cp minisign.pub "dist/$name/"; fi
-          # The bare binaries, beside the archive: `silver update` fetches
-          # the client alone rather than an archive carrying the relay,
-          # two SBOMs, the changelog and the licence -- about half the
-          # bytes for the thing being replaced. Named for the version and
-          # target so one release's assets never collide, and listed in
-          # SHA256SUMS with everything else, since that is what both the
-          # updater and a person check against.
+          # The two programs, one file each: this is what a release page
+          # carries and what `silver update` fetches. Named for the
+          # version and target so one release's assets never collide, and
+          # listed in SHA256SUMS, which is what both the updater and a
+          # person check against.
           for bin in silver silver-relay; do
             cp "target/${{ matrix.target }}/release/$bin$ext" \
                "dist/$bin-${version}-${{ matrix.target }}$ext"
@@ -296,10 +299,27 @@ jobs:
           done
           rm -r unpacked
 
-      # The relay installer, so an operator can check it against the list
-      # below instead of piping it out of a branch into a shell (SM-S-03).
-      - name: The installer as a release asset
-        run: cp deploy/install.sh dist/install.sh
+      # What a release page carries: the program, and what says the
+      # program is the program. Nothing else.
+      #
+      # A page of thirty-odd files is one nobody can read, and the answer
+      # to "which do I download" was somewhere among ten SBOMs, five
+      # build records, five archives and a packaging tarball. Those are
+      # all still built, attested and checked -- they are just not what a
+      # release page is for. What is left is the client and the relay for
+      # each platform, the Debian packages, and the checksum list with
+      # its signature, which `silver update` reads and a person checks by
+      # hand (docs/design/distribution.md).
+      #
+      # This runs before the checksums, so the list names exactly what
+      # the page carries and nothing a reader cannot find.
+      - name: Only the program
+        run: |
+          cd dist
+          rm -f -- *.cdx.json build-info-*.part BUILD-INFO.txt
+          rm -f -- *.tar.gz *.zip
+          echo "what the release will carry:"
+          ls -la
 
       - name: Checksums
         run: |
@@ -308,28 +328,29 @@ jobs:
           cat SHA256SUMS
 
       # The formula, the PKGBUILD and its .SRCINFO, and the winget
-      # manifests for this release, from the checksums above, as one
-      # archive: what the packaging commit that follows a release copies
-      # in. Its own checksum joins the list before the list is signed.
+      # manifests for this release, from the checksums above. They are
+      # what the packaging commit that follows a release copies in, so
+      # they are attached to the workflow run rather than to the release:
+      # a maintainer's working file is not something a reader of the
+      # release page has any use for.
       - name: Packaging files for this release
         env:
           TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           packaging/update.sh "$TAG" dist/SHA256SUMS
-          tar czf "dist/silver-messenger-${TAG}-packaging.tar.gz" \
+          mkdir -p packaging-out
+          tar czf "packaging-out/silver-messenger-${TAG}-packaging.tar.gz" \
             --sort=name --owner=0 --group=0 --numeric-owner \
             --mtime="@$(git log -1 --format=%ct)" \
             HomebrewFormula packaging/aur packaging/winget
-          cd dist
-          sha256sum "silver-messenger-${TAG}-packaging.tar.gz" >> SHA256SUMS
-          tail -1 SHA256SUMS
+          sha256sum "packaging-out/silver-messenger-${TAG}-packaging.tar.gz"
 
-      # The maintainer's signature is deliberately not made here. A key this
-      # workflow can use lives where the build lives, so it says exactly
-      # what the provenance attestation below already says and is no
-      # separate thing to compromise (SM-S-01). Signing happens afterwards,
-      # on a machine the maintainer holds, and the signature is attached to
-      # the release by hand; this step only says so.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: packaging
+          path: packaging-out/*
+          if-no-files-found: error
+
       # The project's own signature over SHA256SUMS, which is what the
       # client checks an update against and what a person checks a download
       # against. Signing here, from a secret, is weaker than signing on a
@@ -382,13 +403,49 @@ jobs:
         env:
           TAG: ${{ inputs.tag || github.ref_name }}
         run: |
+          # What to download, before what changed: a release page is a
+          # list of files sorted by name, and without this the answer to
+          # "which one do I want" is somewhere in thirty-odd rows.
+          version="${TAG#v}"
+          cat > notes.md <<EOF
+          ### Which file do I want
+
+          | You are on | Take |
+          | --- | --- |
+          | **Linux**, x86-64 | \`silver-v${version}-x86_64-unknown-linux-musl\` |
+          | **Linux**, ARM64 | \`silver-v${version}-aarch64-unknown-linux-musl\` |
+          | **macOS**, Apple silicon | \`silver-v${version}-aarch64-apple-darwin\` |
+          | **macOS**, Intel | \`silver-v${version}-x86_64-apple-darwin\` |
+          | **Windows** | \`silver-v${version}-x86_64-pc-windows-msvc.exe\` |
+          | **Debian or Ubuntu** | \`silver-messenger_${version}_amd64.deb\` (or \`_arm64\`) |
+          | **Running a relay** | \`install.sh\`, and the operator's guide |
+
+          That one file is the whole client: make it executable and run it.
+          Already on 0.12.0 or later? \`silver update\` does all of this for you.
+
+          The \`silver-messenger-v${version}-*\` archives hold the same client
+          with the relay, the SBOMs, the changelog and the licence beside it.
+
+          <details><summary>Checking what you downloaded</summary>
+
+          \`\`\`sh
+          minisign -Vm SHA256SUMS -p minisign.pub   # the list is the project's
+          sha256sum -c --ignore-missing SHA256SUMS  # your file is on the list
+          \`\`\`
+
+          \`minisign.pub\` is at the root of the repository. \`BUILD-INFO.txt\` names
+          the compiler, commit and flags each binary was built with, so the build
+          can be repeated. Every file also carries a GitHub build provenance
+          attestation: \`gh attestation verify <file> --owner IAmForeverAloneToo\`.
+
+          </details>
+
+          ---
+
+          EOF
           # The "## <version> - <date>" section for this tag, without the heading.
-          awk -v v="${TAG#v}" '/^## / { on = ($2 == v); next } on { print }' CHANGELOG.md > notes.md
-          if [ -s notes.md ]; then
-            cat notes.md
-          else
-            echo "CHANGELOG.md has no section for ${TAG#v}; the release gets generated notes only"
-          fi
+          awk -v v="$version" '/^## / { on = ($2 == v); next } on { print }' CHANGELOG.md >> notes.md
+          cat notes.md
 
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
