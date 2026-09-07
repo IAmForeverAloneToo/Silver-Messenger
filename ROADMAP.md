@@ -507,6 +507,21 @@ those who want to pay for it (46).
         the one being lied to (SM-R-01 is fixed; this closes the shape
         of it). Each changes a wire or an on-disk format, so each waits
         for the version that may.
+58. [ ] **Updating in place** (M). `silver update`: one command that
+        finds the newest release, downloads the client for this
+        platform, checks its SHA-256 against the digest the release API
+        gives and against `SHA256SUMS`, makes the downloaded binary say
+        its own version, and renames it over the running one, keeping
+        the old one for `silver update --rollback`. A binary a package
+        manager owns is refused with that manager's command instead.
+        Nothing automatic: `update-check` is off unless turned on, and
+        even on it only prints a line. The release gains a per-target
+        `silver` and `silver-relay` asset so an update fetches the
+        client alone rather than the archive, and a keyless signature
+        over `SHA256SUMS` made by the release workflow and recorded in a
+        public transparency log — no key for anyone to hold. Design note
+        [docs/design/updates.md](docs/design/updates.md); what it does
+        not defend against is in its section 8 and the threat model.
 
 ## Continuous
 
