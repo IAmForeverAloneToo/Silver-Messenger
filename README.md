@@ -161,6 +161,11 @@ asks the releases page once a day at start and prints one line — off
 unless you turn it on, because a check on a timer tells the release host
 your address, that you run Silver Messenger, and when you use it.
 
+`silver update` arrived in 0.12.0, and a release can only be installed by
+a client that has it: 0.11.0 and earlier have no such command, so moving
+from one of those to 0.12.0 is done once by hand, from the releases page
+or a package manager. Every release after that is one command.
+
 `silver --check-release` is `silver update --check` under its older name.
 Both, and the daily check, go through the proxy and the extra roots this
 data directory remembers, as the relay connection does, so a client whose

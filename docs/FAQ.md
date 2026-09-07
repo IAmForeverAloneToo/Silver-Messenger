@@ -138,7 +138,10 @@ at rest) or link the new computer as a device and remove the old one.
 
 ## How do I update, and what breaks?
 
-`silver update` does it: it fetches the client for your platform, checks
+`silver update` does it, from 0.12.0 onwards -- earlier clients have no
+such command, so the step from 0.11.0 or older to 0.12.0 is made once by
+hand, from the releases page or a package manager. After that: it fetches
+the client for your platform, checks
 it against the checksum the releases page reports, against `SHA256SUMS`,
 against the project's signature, and by running it to see that it reports
 the version expected -- and only then puts it in place. If anything
