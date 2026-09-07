@@ -4,6 +4,39 @@ Notable changes to Silver Messenger. Versions follow [semantic
 versioning](https://semver.org); while the major version is 0, a minor bump
 means behaviour or the wire protocol changed in a way worth reading about.
 
+## Unreleased
+
+### Security
+
+- Releases are signed again, and this time the key exists. `SHA256SUMS`
+  is signed with the project's minisign key, whose public half is
+  `minisign.pub` at the repository root, so a download is checked with
+  `minisign -Vm SHA256SUMS -p minisign.pub` and nothing needs to be asked
+  of GitHub. 0.11.0 had removed the signing step on the grounds that a key
+  the workflow can read says only what the build provenance says; that
+  went too far. The secret store and the release assets are separate
+  systems, so a signature made from a secret still survives someone who
+  can only reach the published files, and since a verifier checks against
+  `minisign.pub` either way, the step is also what makes an offline key a
+  later decision rather than a rewrite. The workflow verifies its own
+  signature against the published key before publishing, so a secret that
+  is not that key fails the release instead of shipping something nobody
+  can check.
+
+### Added
+
+- `packaging/new-signing-key.sh`, and `new-signing-key.ps1` for Windows,
+  make the release signing key: unencrypted for the repository's secret
+  store, where the workflow signs each release by itself, or `--by-hand`
+  (`-ByHand`) for a password-protected key that never leaves the
+  maintainer's machine. Both self-test the key before printing what to do
+  with each half, and refuse to replace a key the repository already
+  publishes.
+- A `Signing key check` workflow, run by hand, signs a throwaway string
+  with the secret and verifies it against `minisign.pub` -- the two
+  commands a release runs, without building or publishing anything, so a
+  mismatched key is found before a release rather than during one.
+
 ## 0.11.0 - 2026-09-07
 
 The security review's Medium, Low and Informational findings, in the
