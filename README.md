@@ -74,7 +74,7 @@ above by its checksum, so what arrives is what the release page carries.
 brew tap iamforeveralonetoo/silver https://github.com/IAmForeverAloneToo/Silver-Messenger
 brew install silver-messenger                 # macOS and Linux (Homebrew)
 winget install IAmForeverAloneToo.SilverMessenger   # Windows, once the manifest is in winget-pkgs (the release notes say)
-sudo apt install ./silver-messenger_0.11.0_amd64.deb   # Debian and Ubuntu: the .deb from the release page, amd64 or arm64
+sudo apt install ./silver-messenger_0.12.0_amd64.deb   # Debian and Ubuntu: the .deb from the release page, amd64 or arm64
 makepkg -si                                   # Arch: in packaging/aur/ of this repository (silver-messenger-bin), or from the AUR once published
 ```
 
