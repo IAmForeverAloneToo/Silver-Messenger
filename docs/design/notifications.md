@@ -110,7 +110,12 @@ What can be checked without a desktop is checked in CI:
 What cannot: that a toast appears. That is verified by hand on Windows
 11 with Windows Terminal, on macOS with Terminal.app, and on GNOME, and
 recorded per terminal in `docs/TERMINALS.md` with the version it was
-checked on, as the other columns there are.
+checked on, as the other columns there are. On Windows it was checked
+the day 0.13.0 shipped: a contact request sent to the maintainer over
+the public relay raised a toast reading `Silver Messenger` and `New
+message` under the Windows PowerShell header, and the maintainer accepted
+it as it is -- the header says where the notification is from, which is
+all it has to do.
 
 ## 6. What ships, and in what order
 
