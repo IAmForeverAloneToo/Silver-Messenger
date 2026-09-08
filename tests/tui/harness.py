@@ -122,13 +122,17 @@ TERMS = []
 class Term:
     """A client running in a pty, with a pyte screen tracking its output."""
 
-    def __init__(self, data_dir, relay_url, cols=COLS, rows=ROWS, extra=(), env=None):
+    def __init__(self, data_dir, relay_url, cols=COLS, rows=ROWS, extra=(), env=None, tty=False):
         self.cols, self.rows = cols, rows
         m, s = pty.openpty()
         fcntl.ioctl(s, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
         self.p = subprocess.Popen(
             [os.path.join(BIN, "silver"), "--data-dir", data_dir, "--relay", relay_url, *extra],
             stdin=s, stdout=s, stderr=s, env=env or client_env(), close_fds=True,
+            # With `tty`, the pty is the client's controlling terminal, so
+            # that /dev/tty opens: a passphrase prompt reads from there.
+            start_new_session=tty,
+            preexec_fn=(lambda: fcntl.ioctl(0, termios.TIOCSCTTY, 0)) if tty else None,
         )
         os.close(s)
         fcntl.fcntl(m, fcntl.F_SETFL, os.O_NONBLOCK)

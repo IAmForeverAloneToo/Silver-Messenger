@@ -4,6 +4,19 @@ Notable changes to Silver Messenger. Versions follow [semantic
 versioning](https://semver.org); while the major version is 0, a minor bump
 means behaviour or the wire protocol changed in a way worth reading about.
 
+## 0.12.4 - 2026-09-07
+
+### Fixed
+
+- The first-run question, whether this computer should join an identity
+  kept on another, hid the answer as it was typed. It was read with the
+  passphrase routine, so `y` and `n` put nothing on the screen and looked
+  as if they did nothing, and Enter on its own -- the natural next move
+  -- quietly started a new identity. A yes-or-no question now shows its
+  answer as it is typed, the way `silver update` has asked its own all
+  along, and both go through the one routine. Passphrases stay hidden.
+  Found on a Windows first run; it was the same everywhere.
+
 ## 0.12.3 - 2026-09-07
 
 ### Fixed
