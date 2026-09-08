@@ -94,11 +94,15 @@ def main():
 
     # --- the route, decided from the environment ---------------------------
     # Bob comes back under different environments; each time alice writes
-    # once and what reaches the pty says which path was taken. The test
-    # environment is xterm-256color, which the client does not recognise:
-    # both paths, so the sequences are written (the desktop's part cannot
-    # be seen from a pty; on this Linux there is no session bus, and the
-    # bell and title still work regardless).
+    # once and what reaches the pty says which path was taken. The test's
+    # own TERM (xterm-256color unless run.sh says otherwise) is one the
+    # client does not recognise: both paths, so the sequences are written
+    # (the desktop's part cannot be seen from a pty; on this Linux there is
+    # no session bus, and the bell and title still work regardless).
+    # A restarted bob is awaited by the words of the status line and not by
+    # its mark: a Windows Terminal environment draws the Unicode marks
+    # whatever TERM says, so the mark the harness expects under TERM=linux
+    # is not the one on screen.
 
     def arrives(term, message):
         """Alice writes; the restarted bob is on System, so what shows that
@@ -112,7 +116,7 @@ def main():
 
     def restart(extra, message):
         term = Term(pair.b_dir, pair.relay.url, env=client_env(**extra))
-        assert term.wait(G.connected + " connected", timeout=60), f"reconnect {extra}"
+        assert term.wait(" connected ws://", timeout=60), f"reconnect {extra}"
         return term, arrives(term, message)
 
     # Windows Terminal ignores the sequences: the desktop alone, so none
