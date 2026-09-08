@@ -334,3 +334,64 @@ async fn the_asset_list_survives_a_page_that_lists_nothing() {
     assert!(release.asset("SHA256SUMS").is_some());
     assert!(release.asset("nothing-like-this").is_none());
 }
+
+/// A releases page (or a TLS proxy in front of one) that ends the body by
+/// closing the socket without first sending TLS close_notify. rustls
+/// reports that close as an `UnexpectedEof`; the client must take it as
+/// the end of the answer it already received, not a failure. Corporate
+/// middleboxes close this way, and it left `silver update` unable to even
+/// check for a release from behind one.
+#[tokio::test]
+async fn a_close_without_close_notify_is_the_end_of_the_answer() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+    let cert_pem = certified.cert.pem();
+    let cert = rustls::pki_types::CertificateDer::from(certified.cert.der().to_vec());
+    let key = rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
+        certified.signing_key.serialize_der(),
+    ));
+    let server_config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert], key)
+        .unwrap();
+    let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(server_config));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut tls = acceptor.accept(tcp).await.unwrap();
+        // Read the request up to its blank line, then answer.
+        let mut seen = Vec::new();
+        let mut byte = [0u8; 1];
+        while !seen.ends_with(b"\r\n\r\n") {
+            if tls.read(&mut byte).await.unwrap() == 0 {
+                break;
+            }
+            seen.push(byte[0]);
+        }
+        let body = br#"{"tag_name":"v9.9.9","html_url":"https://localhost/r","assets":[]}"#;
+        let mut answer = b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n".to_vec();
+        answer.extend_from_slice(body);
+        tls.write_all(&answer).await.unwrap();
+        tls.flush().await.unwrap();
+        // Drop without shutdown: no close_notify is sent, so the client
+        // sees the TCP close as an abrupt end. This is the case under test.
+        drop(tls);
+    });
+
+    let mut ca = tempfile::NamedTempFile::new().unwrap();
+    ca.write_all(cert_pem.as_bytes()).unwrap();
+    let options = ConnectOptions {
+        extra_ca_certs: vec![ca.path().to_path_buf()],
+        ..Default::default()
+    };
+    let url = format!("https://localhost:{port}/releases/latest");
+    let release = update::latest_release(&url, &options)
+        .await
+        .expect("an answer that ends at an unclean close is still an answer");
+    assert_eq!(release.tag, "v9.9.9");
+}

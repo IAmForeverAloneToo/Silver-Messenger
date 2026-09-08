@@ -286,7 +286,20 @@ async fn get(
         write(&head.rest, &mut taken, &mut body, &mut sink)?;
         let mut buf = vec![0u8; 64 * 1024];
         loop {
-            let n = tls.read(&mut buf).await.context("reading the answer")?;
+            let n = match tls.read(&mut buf).await {
+                Ok(n) => n,
+                // The body ends when the server closes the connection
+                // (HTTP/1.0, Connection: close). A server, or a TLS proxy
+                // in front of it, may close the socket without first
+                // sending TLS close_notify; rustls reports that as
+                // UnexpectedEof. For a body that ends at the close, that
+                // is the end of the answer, not a fault -- corporate
+                // middleboxes routinely close this way. A truncated
+                // answer is still caught: a release must parse as JSON,
+                // and a download must match SHA256SUMS and its signature.
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e).context("reading the answer"),
+            };
             if n == 0 {
                 break;
             }
@@ -330,7 +343,14 @@ async fn read_headers<R: tokio::io::AsyncRead + Unpin>(reader: &mut R) -> anyhow
     let mut byte = [0u8; 1];
     // Headers are small; a server that sends 64 KiB of them is not one.
     while buf.len() < 64 * 1024 {
-        let n = reader.read(&mut byte).await.context("reading the answer")?;
+        let n = match reader.read(&mut byte).await {
+            Ok(n) => n,
+            // A close without TLS close_notify surfaces as UnexpectedEof;
+            // treat it as the end of the stream. Headers left incomplete
+            // then fall through to the "no header end" error below.
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(e).context("reading the answer"),
+        };
         if n == 0 {
             break;
         }
