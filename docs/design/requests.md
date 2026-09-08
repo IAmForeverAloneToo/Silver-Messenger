@@ -60,7 +60,10 @@ other reason the selection stays on the same pane if it still exists.
 A request entry reads `? 29cHxz2f…` -- the mark says stranger -- with the
 number of messages held as its badge. Its title is
 
-    request 3 · 29cHxz2fipYEUQacUJH817ZNwXQ7cqoQwY8ZTuWe3Nsa · not a contact · 4 messages
+    request 3 · not a contact · 29cHxz2fipYEUQacUJH817ZNwXQ7cqoQwY8ZTuWe3Nsa · 4 messages
+
+(the label before the id, so that a narrow pane, which cuts the end of a
+title, never cuts the label)
 
 and its status line
 

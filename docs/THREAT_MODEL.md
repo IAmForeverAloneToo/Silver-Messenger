@@ -281,10 +281,15 @@ sessions then start without one, which costs the first message the
 fourth Diffie–Hellman term (and the one-time ML-KEM key; the signed one
 still gives the post-quantum secret) until the deposit is topped up.
 Cannot learn who your contacts are from the relay. Their messages are
-decrypted but held in the Requests pane until you accept them (at most 50
+decrypted but held as a request -- an entry of the chat list that shows
+their id and nothing they chose -- until you accept them (at most 50
 strangers, 20 messages each), and a blocked id is dropped on arrival. A
 file they announce is never fetched while they are a stranger, and they
-get no receipts, so they cannot tell whether you are there. On the relay,
+get no receipts, so they cannot tell whether you are there: reading,
+declining and blocking all look like silence to them. They can ring your
+terminal once, with their first message; declined, they cannot ring it
+again until you accept them, since a declined stranger's next request
+waits without a bell or a notification (`docs/design/requests.md`). On the relay,
 each connection is limited to 60 messages, 30 lookups and 600 file chunks
 per minute (30 messages for anonymous connections); each address to 16
 connections, 20 new identities and 256 MiB of uploads an hour; mailboxes,
@@ -377,8 +382,10 @@ In a group, a contact who is a member sees everything said in it, as in
 any group, and learns the member list, which is what a group is. A
 contact who invites you to a group makes your client join it in MLS
 terms at once (the key package is spent; nothing is shown until you say
-yes); a stranger's invitation waits in the Requests pane, a blocked
-sender's is declined unseen. Because joining takes the group id, a
+yes); a stranger's invitation waits as an entry of the chat list, labelled
+an invitation and showing the inviter's id beside the name they chose,
+and rings nothing; a blocked sender's is declined unseen. Because joining
+takes the group id, a
 second Welcome for a group already joined or already inviting is
 refused, and declining is what makes room for another: whoever sends the
 first Welcome for an id cannot be allowed to decide what that id is,

@@ -49,23 +49,24 @@ def main():
     assert b.has("Silver Messenger, reader mode."), "the opening line"
     assert prompt_line(b) == "system>", "the System pane's prompt is last"
 
-    # A contact request is a line; the Requests pane reads its entries;
+    # A contact request is a line; its entry reads what was held;
     # accepting opens the chat and reads what waited.
     a.type(f"/add {b_id} bob\r")
     assert a.wait(" bob · "), "add"
     a.type("hello bob\r")
     assert b.wait("Contact request from"), "the request is announced"
     b.key(SHIFT_TAB)
-    assert b.wait("Requests: 1 waiting;"), "the Requests pane is read"
+    assert b.wait("Request 1 from"), "the request's entry is read"
     assert b.has(": hello bob"), "with the held message"
-    assert prompt_line(b) == "requests>"
+    assert b.has("(end of request)"), "and where it ends"
+    assert prompt_line(b) == "request 1>"
     b.type("/accept 1\r")
     assert b.wait("(end of chat)"), "the chat opens and ends"
     rows = [r.rstrip() for r in b.sc.display]
     end = rows.index("(end of chat)")
     assert rows[end - 2].startswith("Chat: ") and rows[end - 1].endswith(": hello bob"), rows[end - 2:end]
-    assert "System pane." not in rows[rows.index("Requests: 1 waiting; /accept <n> takes one, /block <n> drops it."):], \
-        "accepting lands on the chat, not on System first"
+    first = next(i for i, r in enumerate(rows) if r.startswith("Request 1 from"))
+    assert "System pane." not in rows[first:], "accepting lands on the chat, not on System first"
     b.type("/alias alice\r")
     assert b.wait_for(lambda: prompt_line(b) == "alice>", what="the prompt names the chat")
 

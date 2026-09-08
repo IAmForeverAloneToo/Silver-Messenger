@@ -56,6 +56,7 @@ const OUTBOX_FILE: &str = "outbox.json";
 const TRANSPARENCY_FILE: &str = crate::transparency::LOG_NAME;
 const REQUESTS_FILE: &str = "requests.json";
 const BLOCKED_FILE: &str = "blocked.json";
+const DECLINED_FILE: &str = "declined.json";
 const DEVICES_FILE: &str = "devices.json";
 const HISTORY_DIR: &str = "history";
 
@@ -79,6 +80,7 @@ const IDENTITY_FILES: &[&str] = &[
     TRANSPARENCY_FILE,
     REQUESTS_FILE,
     BLOCKED_FILE,
+    DECLINED_FILE,
     DEVICES_FILE,
     crate::groups::GROUPS_FILE,
     crate::groups::MLS_FILE,
@@ -756,6 +758,18 @@ pub struct ContactRequest {
     pub first_seen_ms: u64,
     pub messages: Vec<HeldMessage>,
 }
+
+/// A stranger the user said *not now* to (`docs/design/requests.md`):
+/// their next request waits like any other, but rings nothing. Cleared
+/// when they are accepted or blocked.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Declined {
+    pub user: UserId,
+    pub at_ms: u64,
+}
+
+/// Declined strangers remembered, at most; the oldest go first.
+pub const MAX_DECLINED: usize = 200;
 
 /// What stands between the files on disk and whoever copies them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1480,6 +1494,17 @@ impl Store {
         self.write_file(
             REQUESTS_FILE,
             serde_json::to_string_pretty(requests)?.as_bytes(),
+        )
+    }
+
+    pub fn load_declined(&self) -> anyhow::Result<Vec<Declined>> {
+        self.read_json_or_default(DECLINED_FILE)
+    }
+
+    pub fn save_declined(&self, declined: &[Declined]) -> anyhow::Result<()> {
+        self.write_file(
+            DECLINED_FILE,
+            serde_json::to_string_pretty(declined)?.as_bytes(),
         )
     }
 

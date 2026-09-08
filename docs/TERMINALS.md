@@ -87,9 +87,9 @@ running:
    The opening line (`Silver Messenger, reader mode. …`) and `Connected
    to …` are read as they appear.
 2. From the other client, add this one and write to it. `Contact request
-   from …` is read; `Shift-Tab` reads the Requests pane; `/accept 1` reads
-   the chat and the message in it; reviewing the cursor line reads the
-   prompt as the chat's name.
+   from …` is read; `Shift-Tab` reads the request's entry, its messages
+   and `(end of request)`; `/accept` there reads the chat and the message
+   in it; reviewing the cursor line reads the prompt as the chat's name.
 3. Type a message and press Enter: `you: …` is read once (the reader's
    own echo of the typing is expected; the sent line must not be read
    twice).

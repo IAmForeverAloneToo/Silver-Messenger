@@ -229,12 +229,16 @@ pub struct SystemLine {
 }
 
 /// What the message pane shows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Pane {
     System,
-    Requests,
     Thread(UserId),
     Group(silver_protocol::group::GroupId),
+    /// A stranger's messages, waiting to be accepted, declined or blocked
+    /// (`docs/design/requests.md`).
+    Request(UserId),
+    /// A stranger's invitation to a group, waiting for a yes or a no.
+    Invitation(silver_protocol::group::GroupId),
 }
 
 /// One row of the message pane as laid out: its text, and which entry of
@@ -255,6 +259,9 @@ pub struct View {
     /// Index into `rows` of the first visible row.
     pub start: usize,
     pub sidebar: Rect,
+    /// The pane under each drawn row of the chat list, top to bottom
+    /// inside its border; `None` for a divider.
+    pub sidebar_rows: Vec<Option<usize>>,
     pub input: Rect,
     pub status: Rect,
 }
@@ -267,10 +274,19 @@ impl Default for View {
             rows: Vec::new(),
             start: 0,
             sidebar: Rect::default(),
+            sidebar_rows: Vec::new(),
             input: Rect::default(),
             status: Rect::default(),
         }
     }
+}
+
+/// Whom a typed name may resolve to (`App::resolve_person`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum People {
+    Contacts,
+    /// Contacts and the strangers whose requests wait.
+    Both,
 }
 
 /// Tab completion in progress: what was typed before the completed part,
@@ -497,9 +513,18 @@ pub struct App {
     unlinked_noted: bool,
     pub connection: Connection,
     pub contacts: Vec<Contact>,
-    /// Messages from unknown senders awaiting /accept or /block.
+    /// Messages from unknown senders awaiting /accept, /decline or /block.
     pub requests: Vec<ContactRequest>,
     blocked: Vec<UserId>,
+    /// Strangers told *not now*: their next request rings nothing.
+    declined: Vec<silver_client::Declined>,
+    /// The number each waiting request or invitation was given when it
+    /// was first seen this run. A number is never given twice in a run,
+    /// so one said in a line stays true until the entry is handled.
+    waiting_numbers: HashMap<Pane, u32>,
+    next_waiting_number: u32,
+    /// Rows the chat list is scrolled down, so the selected entry shows.
+    pub sidebar_scroll: usize,
     pub threads: HashMap<UserId, Vec<ChatLine>>,
     /// Ids of messages received but not yet shown, per contact.
     pub unread: HashMap<UserId, Vec<String>>,
@@ -695,6 +720,7 @@ impl App {
         let contacts = store.load_contacts()?;
         let requests = store.load_requests()?;
         let blocked = store.load_blocked()?;
+        let declined = store.load_declined()?;
         let config = store.load_config()?;
         let read_receipts = config.read_receipts;
         let cover = config.cover;
@@ -788,6 +814,10 @@ impl App {
             known_ids,
             fetched_blobs: RecentIds::new(FETCHED_BLOBS_CAP),
             requests_full_noted: false,
+            declined,
+            waiting_numbers: HashMap::new(),
+            next_waiting_number: 1,
+            sidebar_scroll: 0,
             receipts: ReceiptQueue::default(),
             read_receipts,
             cover,
@@ -894,17 +924,18 @@ impl App {
             for line in [
                 "Getting started:",
                 "  1. Share your id: /invite shows it as a link and a QR code, /copy id puts it on the clipboard.",
-                "  2. Add someone with /add <their id or link>, or accept their request in the Requests pane when they write first.",
+                "  2. Add someone with /add <their id or link>, or open their request in the chat list when they write first and answer it.",
                 "  3. Type to chat. /send <path> sends a file. Tab completes commands and paths; F1 shows everything.",
             ] {
                 app.system(Level::Info, line);
             }
         }
-        if !app.requests.is_empty() {
-            let n = app.requests.len();
+        app.number_waiting();
+        let waiting = app.waiting().len();
+        if waiting > 0 {
             app.system(
                 Level::Info,
-                format!("{n} contact request(s) waiting in the Requests pane."),
+                format!("{waiting} request(s) waiting in the chat list; /requests lists them."),
             );
         }
         // Plain copies a previous run left behind (a crash, a kill).
@@ -1026,10 +1057,49 @@ impl App {
 
     // --- derived state -----------------------------------------------------
 
+    /// The panes the chat list shows, in order: System, one per contact,
+    /// one per group, then what waits -- a request per stranger and an
+    /// invitation per group -- in the order it was first seen
+    /// (`docs/design/requests.md`, section 3).
+    pub fn panes(&self) -> Vec<Pane> {
+        let mut panes = Vec::with_capacity(1 + self.contacts.len() + self.group_list.len());
+        panes.push(Pane::System);
+        panes.extend(self.contacts.iter().map(|c| Pane::Thread(c.user_id)));
+        panes.extend(self.group_list.iter().map(|g| Pane::Group(*g)));
+        panes.extend(self.waiting().into_iter().map(|(_, pane)| pane));
+        panes
+    }
+
+    pub fn pane_count(&self) -> usize {
+        self.panes().len()
+    }
+
+    /// The selected pane; System when the index points past the list.
+    pub fn selected_pane(&self) -> Pane {
+        self.panes()
+            .get(self.selected)
+            .copied()
+            .unwrap_or(Pane::System)
+    }
+
+    /// Where `pane` is in the chat list, if it is listed.
+    pub fn pane_index(&self, pane: Pane) -> Option<usize> {
+        self.panes().iter().position(|p| *p == pane)
+    }
+
+    /// Open `pane`, if it is listed.
+    pub fn select_pane(&mut self, pane: Pane) -> bool {
+        match self.pane_index(pane) {
+            Some(index) => {
+                self.select(index);
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn selected_contact(&self) -> Option<&Contact> {
-        self.selected
-            .checked_sub(1)
-            .and_then(|i| self.contacts.get(i))
+        self.selected_contact_index().map(|i| &self.contacts[i])
     }
 
     fn contact_index(&self, user_id: &UserId) -> Option<usize> {
@@ -1038,25 +1108,74 @@ impl App {
 
     /// Index into `contacts` of the selected pane, if it is a contact.
     fn selected_contact_index(&self) -> Option<usize> {
-        self.selected
-            .checked_sub(1)
-            .filter(|i| *i < self.contacts.len())
+        match self.selected_pane() {
+            Pane::Thread(id) => self.contact_index(&id),
+            _ => None,
+        }
     }
 
-    /// Panes: System, one per contact, one per group, then Requests while
-    /// any request or invitation is pending.
-    pub fn pane_count(&self) -> usize {
-        self.contacts.len() + self.group_list.len() + 1 + usize::from(self.has_requests_pane())
+    /// Index into `requests` of the selected pane, if it is a request.
+    fn selected_request_index(&self) -> Option<usize> {
+        match self.selected_pane() {
+            Pane::Request(from) => self.requests.iter().position(|r| r.from == from),
+            _ => None,
+        }
     }
 
-    /// Whether the Requests pane is shown: contact requests or group
-    /// invitations wait.
-    pub fn has_requests_pane(&self) -> bool {
+    /// The invitation whose pane is selected, if one is.
+    pub fn selected_invitation(&self) -> Option<silver_client::HeldWelcome> {
+        match self.selected_pane() {
+            Pane::Invitation(group) => self.invitations().into_iter().find(|h| h.group == group),
+            _ => None,
+        }
+    }
+
+    /// Whether anything waits: a stranger's request or invitation.
+    pub fn has_waiting(&self) -> bool {
         !self.requests.is_empty() || !self.invitations().is_empty()
     }
 
-    pub fn requests_pane_selected(&self) -> bool {
-        self.has_requests_pane() && self.selected == self.contacts.len() + self.group_list.len() + 1
+    /// What waits, each with its number, in the order first seen.
+    pub fn waiting(&self) -> Vec<(u32, Pane)> {
+        let mut out: Vec<(u32, Pane)> = self
+            .requests
+            .iter()
+            .map(|r| Pane::Request(r.from))
+            .chain(self.invitations().iter().map(|h| Pane::Invitation(h.group)))
+            .map(|pane| (self.number_of(pane).unwrap_or(u32::MAX), pane))
+            .collect();
+        out.sort_by_key(|(n, _)| *n);
+        out
+    }
+
+    /// The number a waiting entry was given, if it has one.
+    pub fn number_of(&self, pane: Pane) -> Option<u32> {
+        self.waiting_numbers.get(&pane).copied()
+    }
+
+    /// Give every waiting entry without a number the next one, in the
+    /// order they arrived, and forget the numbers of entries that are
+    /// gone. A number is never given twice in a run.
+    pub(super) fn number_waiting(&mut self) {
+        let mut fresh: Vec<(u64, Pane)> = self
+            .requests
+            .iter()
+            .map(|r| (r.first_seen_ms, Pane::Request(r.from)))
+            .chain(
+                self.invitations()
+                    .iter()
+                    .map(|h| (h.received_at_ms, Pane::Invitation(h.group))),
+            )
+            .collect();
+        let present: std::collections::HashSet<Pane> = fresh.iter().map(|(_, p)| *p).collect();
+        self.waiting_numbers
+            .retain(|pane, _| present.contains(pane));
+        fresh.retain(|(_, pane)| !self.waiting_numbers.contains_key(pane));
+        fresh.sort_by_key(|(at, _)| *at);
+        for (_, pane) in fresh {
+            self.waiting_numbers.insert(pane, self.next_waiting_number);
+            self.next_waiting_number += 1;
+        }
     }
 
     /// Total messages waiting in contact requests, plus group invitations.
@@ -1066,6 +1185,57 @@ impl App {
             .map(|r| r.messages.len())
             .sum::<usize>()
             + self.invitations().len()
+    }
+
+    /// Who `who` names among `among` (`docs/design/requests.md`, section
+    /// 4): an alias, compared without case, among contacts; a full id; or
+    /// a prefix of an id that exactly one of them has. Several sharing the
+    /// prefix are named, and nothing is chosen.
+    pub(super) fn resolve_person(&self, who: &str, among: People) -> Result<UserId, String> {
+        let who = who.trim();
+        if who.is_empty() {
+            return Err("Say who: an alias, an id, or enough of an id.".to_owned());
+        }
+        let contacts = matches!(among, People::Contacts | People::Both);
+        let requesters = matches!(among, People::Both);
+        if contacts
+            && let Some(contact) = self.contacts.iter().find(|c| {
+                c.alias
+                    .as_deref()
+                    .is_some_and(|a| a.eq_ignore_ascii_case(who))
+            })
+        {
+            return Ok(contact.user_id);
+        }
+        let mut ids: Vec<UserId> = Vec::new();
+        if contacts {
+            ids.extend(self.contacts.iter().map(|c| c.user_id));
+        }
+        if requesters {
+            ids.extend(self.requests.iter().map(|r| r.from));
+        }
+        if let Ok(id) = who.parse::<UserId>()
+            && ids.contains(&id)
+        {
+            return Ok(id);
+        }
+        let matches: Vec<UserId> = ids
+            .into_iter()
+            .filter(|id| id.to_string().starts_with(who))
+            .collect();
+        match matches.as_slice() {
+            [one] => Ok(*one),
+            [] => Err(format!("Nobody is called {who}, and no id starts with it.")),
+            several => Err(format!(
+                "{} ids start with {who}: {}. Say more of it.",
+                several.len(),
+                several
+                    .iter()
+                    .map(|id| self.contact_name(id))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        }
     }
 
     fn contact_name(&self, user_id: &UserId) -> String {
@@ -1222,6 +1392,16 @@ impl App {
             && y < sidebar.y + sidebar.height
     }
 
+    /// Whether (x, y) is on the message pane's title row (its top border).
+    fn on_title(&self, x: u16, y: u16) -> bool {
+        let pane = self.view.messages;
+        pane.width > 0
+            && pane.y > 0
+            && y + 1 == pane.y
+            && x + 1 >= pane.x
+            && x <= pane.x + pane.width
+    }
+
     /// Whether (x, y) is on the message pane's scrollbar (its right border).
     fn on_scrollbar(&self, x: u16, y: u16) -> bool {
         let pane = self.view.messages;
@@ -1261,6 +1441,14 @@ impl App {
             self.scroll_to_scrollbar(y);
             return;
         }
+        if self.on_title(x, y) {
+            // The title shows the id and cannot be selected; a click on
+            // it copies the id (docs/design/requests.md, section 4).
+            if let Pane::Thread(id) | Pane::Request(id) = self.view.pane {
+                self.copy_id(id);
+            }
+            return;
+        }
         let Some(cell) = self.cell_at(x, y) else {
             // A click anywhere else drops the selection; in the chat list
             // it also opens the chat under the pointer.
@@ -1272,8 +1460,8 @@ impl App {
                 && x > sidebar.x
             {
                 let row = (y - sidebar.y - 1) as usize;
-                if row < self.pane_count() {
-                    self.select(row);
+                if let Some(Some(pane)) = self.view.sidebar_rows.get(row) {
+                    self.select(*pane);
                 }
             }
             return;
@@ -1524,7 +1712,17 @@ impl App {
                     format!("{} {}", ui::clock(l.timestamp_ms), l.text)
                 }
             }),
-            Pane::Requests => None,
+            Pane::Request(from) => {
+                let request = self.requests.iter().find(|r| r.from == from)?;
+                let held = request.messages.get(source)?;
+                Some(format!(
+                    "{} {}…: {}",
+                    ui::clock(held.timestamp_ms),
+                    from.short(),
+                    held.text
+                ))
+            }
+            Pane::Invitation(_) => None,
             Pane::Thread(peer) => {
                 let line = self.threads.get(&peer)?.get(source)?;
                 let who = match line.direction {
@@ -1695,31 +1893,122 @@ impl App {
     fn cmd_copy(&mut self, args: &[&str]) {
         match args.first().map(|s| s.to_ascii_lowercase()).as_deref() {
             Some("id") | Some("me") => {
-                let me = self.me.to_string();
-                self.copy_text(&me, "your id");
+                let who = args[1..].join(" ");
+                if who.trim().is_empty() {
+                    let me = self.me.to_string();
+                    self.copy_text(&me, "your id");
+                    return;
+                }
+                // A contact's or a requester's id, so nobody has to read
+                // it off the title (docs/design/requests.md, section 4).
+                match self.resolve_person(&who, People::Both) {
+                    Ok(id) => self.copy_id(id),
+                    Err(why) => self.toast(why),
+                }
             }
             Some("link") | Some("invite") => {
                 let link = self.invite_link().to_string();
                 self.copy_text(&link, "your invite link");
             }
-            Some(_) => self.toast("Usage: /copy (last message), /copy id, /copy link"),
+            Some(_) => self.toast("Usage: /copy (last message), /copy id [who], /copy link"),
             None => {
-                let Some(peer) = self.selected_contact().map(|c| c.user_id) else {
-                    self.toast("Select a chat first, or /copy id, /copy link.");
-                    return;
+                let text = match self.selected_pane() {
+                    Pane::Thread(peer) => self
+                        .threads
+                        .get(&peer)
+                        .and_then(|lines| lines.last())
+                        .map(|line| line.text.clone()),
+                    Pane::Request(from) => self
+                        .requests
+                        .iter()
+                        .find(|r| r.from == from)
+                        .and_then(|r| r.messages.last())
+                        .map(|held| held.text.clone()),
+                    _ => {
+                        self.toast("Select a chat first, or /copy id, /copy link.");
+                        return;
+                    }
                 };
-                let Some(text) = self
-                    .threads
-                    .get(&peer)
-                    .and_then(|lines| lines.last())
-                    .map(|line| line.text.clone())
-                else {
+                let Some(text) = text else {
                     self.toast("No messages in this chat yet.");
                     return;
                 };
                 self.copy_text(&text, "the last message");
             }
         }
+    }
+
+    /// Put a person's id on the clipboard, named as the chat list names
+    /// them.
+    fn copy_id(&mut self, id: UserId) {
+        let what = format!("{}'s id", self.contact_name(&id));
+        let text = id.to_string();
+        self.copy_text(&text, &what);
+    }
+
+    /// `/whois [who]`: a person's id and standing, as selectable text in
+    /// the System pane; the open chat's or request's without an argument.
+    fn cmd_whois(&mut self, args: &[&str]) {
+        let who = args.join(" ");
+        let id = if who.trim().is_empty() {
+            match self.selected_pane() {
+                Pane::Thread(id) | Pane::Request(id) => id,
+                Pane::Invitation(_) => match self.selected_invitation() {
+                    Some(held) => held.from,
+                    None => return,
+                },
+                _ => {
+                    self.toast(
+                        "Open a chat or a request first, or /whois <alias, id or enough of it>.",
+                    );
+                    return;
+                }
+            }
+        } else {
+            match self.resolve_person(&who, People::Both) {
+                Ok(id) => id,
+                Err(why) => {
+                    self.toast(why);
+                    return;
+                }
+            }
+        };
+        let mut lines = vec![format!("{}: {id}", self.contact_name(&id))];
+        if let Some(contact) = self.contacts.iter().find(|c| c.user_id == id) {
+            lines.push(match &contact.alias {
+                Some(alias) => format!("alias: {alias} (yours; /alias changes it)"),
+                None => "alias: none (/alias gives one)".to_owned(),
+            });
+            lines.push(if contact.verified {
+                "verified: yes, by comparing safety numbers".to_owned()
+            } else {
+                "verified: no (/verify shows the safety number to compare)".to_owned()
+            });
+            if contact.revoked {
+                lines.push("identity: revoked; nothing can be sent to it".to_owned());
+            }
+            lines.push(match self.encryption_label(contact) {
+                Some(label) => format!("messages: {label}"),
+                None => "messages: no session yet; the first message starts one".to_owned(),
+            });
+        } else if let Some(request) = self.requests.iter().find(|r| r.from == id) {
+            let n = self.number_of(Pane::Request(id)).unwrap_or(0);
+            lines.push(format!(
+                "not a contact: request {n}, {} message(s) held; /accept, /decline or /block",
+                request.messages.len()
+            ));
+        } else if self.blocked.contains(&id) {
+            lines.push("blocked (/unblock undoes it)".to_owned());
+        } else {
+            lines.push("not a contact".to_owned());
+        }
+        if self.is_declined(&id) {
+            lines.push("declined before: their next request waits without ringing".to_owned());
+        }
+        for line in lines {
+            self.system(Level::Info, line);
+        }
+        self.select(0);
     }
 
     fn byte_index(&self, char_index: usize) -> usize {
@@ -1854,25 +2143,43 @@ impl App {
 
     /// `/go <name>`: open the chat whose alias, group name or id starts
     /// with `name`, without the mouse and without cycling through the
-    /// list; `system` and `requests` name those panes.
+    /// list; `system` names that pane, and `requests` the first entry
+    /// that waits.
     fn cmd_go(&mut self, args: &[&str]) {
         let wanted = args.join(" ").trim().to_lowercase();
         if wanted.is_empty() {
-            self.toast("Usage: /go <contact, group, system or requests>");
+            self.toast("Usage: /go <contact, group, request, system or requests>");
             return;
         }
-        let mut panes: Vec<(usize, String)> = vec![(0, "system".to_owned())];
-        for (i, contact) in self.contacts.iter().enumerate() {
-            panes.push((i + 1, contact.display_name().to_lowercase()));
-            panes.push((i + 1, contact.user_id.to_string().to_lowercase()));
+        // Every name a pane answers to, lower-cased, with its index.
+        let mut panes: Vec<(usize, String)> = Vec::new();
+        for (index, pane) in self.panes().into_iter().enumerate() {
+            match pane {
+                Pane::System => panes.push((index, "system".to_owned())),
+                Pane::Thread(id) => {
+                    if let Some(contact) = self.contacts.iter().find(|c| c.user_id == id) {
+                        panes.push((index, contact.display_name().to_lowercase()));
+                    }
+                    panes.push((index, id.to_string().to_lowercase()));
+                }
+                Pane::Group(group) => {
+                    panes.push((index, self.group_name(&group).to_lowercase()));
+                    panes.push((index, group.to_string().to_lowercase()));
+                }
+                Pane::Request(id) => panes.push((index, id.to_string().to_lowercase())),
+                Pane::Invitation(group) => {
+                    if let Some(held) = self.invitations().iter().find(|h| h.group == group) {
+                        panes.push((index, held.name.to_lowercase()));
+                    }
+                }
+            }
         }
-        for (i, group) in self.group_list.iter().enumerate() {
-            let pane = self.contacts.len() + i + 1;
-            panes.push((pane, self.group_name(group).to_lowercase()));
-            panes.push((pane, group.to_string().to_lowercase()));
-        }
-        if self.has_requests_pane() {
-            panes.push((self.pane_count() - 1, "requests".to_owned()));
+        if let Some(index) = self
+            .waiting()
+            .first()
+            .and_then(|(_, first)| self.pane_index(*first))
+        {
+            panes.push((index, "requests".to_owned()));
         }
         let exact: Vec<usize> = panes
             .iter()
@@ -2083,6 +2390,8 @@ impl App {
             "reader" => self.cmd_reader(&rest),
             "search" | "find" => self.cmd_search(&rest),
             "accept" => self.cmd_accept(&rest),
+            "requests" => self.cmd_requests(),
+            "whois" | "who" => self.cmd_whois(&rest),
             "block" => self.cmd_block(&rest),
             "unblock" => self.cmd_unblock(&rest),
             "blocked" => self.cmd_blocked(),
@@ -2113,8 +2422,9 @@ impl App {
 
     // --- help, completion and hints -----------------------------------------
 
-    /// Tab in a command line: complete the command name, or a path
-    /// argument; repeated presses cycle through the candidates.
+    /// Tab in a command line: complete the command name, a path, a
+    /// person's alias or a chat's name, whichever the command takes
+    /// there; repeated presses cycle through the candidates.
     fn complete(&mut self) {
         if self.cursor != self.input.chars().count() {
             return; // only at the end of the line
@@ -2136,13 +2446,36 @@ impl App {
                     .map(|c| format!("{} ", c.name))
                     .collect::<Vec<_>>(),
             ),
-            Some((name, rest)) => match commands::find(name) {
-                Some(c) if c.path_arg => (
-                    format!("/{name} "),
-                    commands::complete_path(rest.trim_start()),
-                ),
-                _ => return,
-            },
+            Some((name, rest)) => {
+                let Some(c) = commands::find(name) else {
+                    return;
+                };
+                if c.arg == commands::Arg::Path {
+                    (
+                        format!("/{name} "),
+                        commands::complete_path(rest.trim_start()),
+                    )
+                } else {
+                    // The last word is what is being completed; the words
+                    // before it say what kind of thing it is.
+                    let rest = rest.trim_start();
+                    let (before, partial) = match rest.rsplit_once(' ') {
+                        Some((before, partial)) => (before.trim(), partial),
+                        None => ("", rest),
+                    };
+                    let words: Vec<&str> = before.split_whitespace().collect();
+                    let stem = if before.is_empty() {
+                        format!("/{name} ")
+                    } else {
+                        format!("/{name} {before} ")
+                    };
+                    match commands::argument_kind(c, &words) {
+                        commands::Arg::Person => (stem, self.name_candidates(partial, false)),
+                        commands::Arg::Chat => (stem, self.name_candidates(partial, true)),
+                        _ => return,
+                    }
+                }
+            }
         };
         match candidates.len() {
             0 => self.toast("Nothing to complete."),
@@ -2160,6 +2493,29 @@ impl App {
                 });
             }
         }
+    }
+
+    /// The names that start like `partial`, for Tab: contact aliases,
+    /// and for a chat also group names, `system` and `requests`; sorted,
+    /// compared without case.
+    fn name_candidates(&self, partial: &str, chats: bool) -> Vec<String> {
+        let wanted = partial.to_lowercase();
+        let mut names: Vec<String> = self
+            .contacts
+            .iter()
+            .filter_map(|c| c.alias.clone())
+            .collect();
+        if chats {
+            names.extend(self.group_list.iter().map(|g| self.group_name(g)));
+            names.push("system".to_owned());
+            if self.has_waiting() {
+                names.push("requests".to_owned());
+            }
+        }
+        names.retain(|n| n.to_lowercase().starts_with(&wanted));
+        names.sort_by_key(|n| n.to_lowercase());
+        names.dedup();
+        names
     }
 
     /// What the status line says when there is no toast: the keys and
@@ -2238,8 +2594,14 @@ impl App {
                 format!("{} · Tab completes", names.join("  "))
             };
         }
-        if self.requests_pane_selected() {
-            return "/accept <n> · /block <n> · /accept g<n> · /decline g<n> · F1 help".to_owned();
+        match self.selected_pane() {
+            Pane::Request(_) => {
+                return "/accept · /decline · /block · typing a reply accepts · F1 help".to_owned();
+            }
+            Pane::Invitation(_) => {
+                return "/accept joins · /decline · /block the inviter · F1 help".to_owned();
+            }
+            _ => {}
         }
         // At the top of a chat whose older lines are in the file alone.
         if self.max_scroll > 0
@@ -2961,8 +3323,14 @@ impl App {
     // --- messaging ---------------------------------------------------------
 
     fn send_message(&mut self, text: String) {
-        if self.requests_pane_selected() {
-            self.toast("Accept a request first: /accept <n>.");
+        // Answering a stranger is accepting them (docs/design/requests.md).
+        if let Some(index) = self.selected_request_index() {
+            let from = self.accept_request(index);
+            self.send_content_to(from, Content::text(text));
+            return;
+        }
+        if matches!(self.selected_pane(), Pane::Invitation(_)) {
+            self.toast("/accept joins the group first; nothing can be sent to it before that.");
             return;
         }
         if let Some(group) = self.selected_group() {
@@ -4490,7 +4858,7 @@ impl App {
                     self.system(
                         Level::Warn,
                         format!(
-                            "{MAX_REQUESTS} people are waiting in the Requests pane; messages from anyone else are dropped until some are accepted or blocked."
+                            "{MAX_REQUESTS} strangers are waiting in the chat list; messages from anyone else are dropped until some are accepted, declined or blocked."
                         ),
                     );
                 }
@@ -4507,51 +4875,144 @@ impl App {
         };
         self.persist_requests();
         if is_new {
-            let n = self.requests.len();
+            let n = self.number_of(Pane::Request(from)).unwrap_or(0);
+            // Someone told *not now* waits like anyone else, but quietly:
+            // a stranger must not ring the terminal by writing again.
+            let quiet = self.is_declined(&from);
             self.system(
                 Level::Info,
                 format!(
-                    "Contact request from {}… ({from}). Open the Requests pane, then /accept {n} or /block {n}.",
-                    from.short()
+                    "Contact request from {}… ({from}), number {n}: it is in the chat list; open it, or /accept {n}, /decline {n} or /block {n}.{}",
+                    from.short(),
+                    if quiet {
+                        " You declined them before, so this rang nothing."
+                    } else {
+                        ""
+                    }
                 ),
             );
-            self.toast(format!("Contact request from {}…", from.short()));
-            self.notifier.announce();
+            if !quiet {
+                self.toast(format!("Contact request from {}…", from.short()));
+                self.notifier.announce();
+            }
         }
     }
 
-    /// Find a request by 1-based position or by user id.
-    fn resolve_request(&self, arg: &str) -> Option<usize> {
-        if let Ok(n) = arg.parse::<usize>() {
-            return (1..=self.requests.len()).contains(&n).then(|| n - 1);
+    /// A waiting entry named by a number (`3`; `g3` names an invitation
+    /// only, so an old habit cannot take a person by mistake), by a
+    /// requester's full id or a prefix of it that one requester has, or
+    /// by a group name that one invitation has.
+    fn resolve_waiting(&self, arg: &str) -> Result<Pane, String> {
+        let arg = arg.trim();
+        if let Some(rest) = arg.strip_prefix(['g', 'G'])
+            && let Ok(n) = rest.parse::<u32>()
+        {
+            return match self.waiting().into_iter().find(|(number, _)| *number == n) {
+                Some((_, pane @ Pane::Invitation(_))) => Ok(pane),
+                Some(_) => Err(format!(
+                    "{n} is a contact request, not an invitation; /accept {n} takes it."
+                )),
+                None => Err(format!(
+                    "No invitation {n} is waiting; /requests lists what is."
+                )),
+            };
         }
-        let id: UserId = arg.parse().ok()?;
-        self.requests.iter().position(|r| r.from == id)
+        if let Ok(n) = arg.parse::<u32>() {
+            return self
+                .waiting()
+                .into_iter()
+                .find(|(number, _)| *number == n)
+                .map(|(_, pane)| pane)
+                .ok_or_else(|| {
+                    format!("Nothing numbered {n} is waiting; /requests lists what is.")
+                });
+        }
+        if let Ok(id) = arg.parse::<UserId>()
+            && self.requests.iter().any(|r| r.from == id)
+        {
+            return Ok(Pane::Request(id));
+        }
+        let by_prefix: Vec<UserId> = self
+            .requests
+            .iter()
+            .map(|r| r.from)
+            .filter(|id| id.to_string().starts_with(arg))
+            .collect();
+        let by_name: Vec<silver_protocol::group::GroupId> = self
+            .invitations()
+            .iter()
+            .filter(|h| h.name.eq_ignore_ascii_case(arg))
+            .map(|h| h.group)
+            .collect();
+        match (by_prefix.as_slice(), by_name.as_slice()) {
+            ([one], []) => Ok(Pane::Request(*one)),
+            ([], [one]) => Ok(Pane::Invitation(*one)),
+            ([], []) => Err(format!(
+                "Nothing waiting is called {arg}; /requests lists what is."
+            )),
+            _ => Err(format!(
+                "{} waiting entries answer to {arg}; use the number /requests shows.",
+                by_prefix.len() + by_name.len()
+            )),
+        }
+    }
+
+    /// The entry a bare /accept, /decline or /block means: the open one.
+    fn waiting_here(&self) -> Option<Pane> {
+        match self.selected_pane() {
+            pane @ (Pane::Request(_) | Pane::Invitation(_)) => Some(pane),
+            _ => None,
+        }
+    }
+
+    /// The entry an argument names, or the open one without an argument.
+    fn waiting_named(&mut self, args: &[&str], verb: &str) -> Option<Pane> {
+        match args.first() {
+            Some(arg) => match self.resolve_waiting(arg) {
+                Ok(pane) => Some(pane),
+                Err(why) => {
+                    self.toast(why);
+                    None
+                }
+            },
+            None => {
+                let here = self.waiting_here();
+                if here.is_none() {
+                    self.toast(format!(
+                        "Open a request or an invitation first, or /{verb} <number or id>; /requests lists what waits."
+                    ));
+                }
+                here
+            }
+        }
     }
 
     fn cmd_accept(&mut self, args: &[&str]) {
-        let Some(arg) = args.first() else {
-            self.toast("Usage: /accept <n|user-id|g<n>> (see the Requests pane)");
+        let Some(pane) = self.waiting_named(args, "accept") else {
             return;
         };
-        if let Some(n) = arg
-            .strip_prefix(['g', 'G'])
-            .and_then(|rest| rest.parse::<usize>().ok())
-        {
-            self.accept_invitation(n);
-            return;
+        match pane {
+            Pane::Request(from) => {
+                if let Some(index) = self.requests.iter().position(|r| r.from == from) {
+                    self.accept_request(index);
+                }
+            }
+            Pane::Invitation(group) => self.accept_invitation_of(group),
+            _ => {}
         }
-        let Some(index) = self.resolve_request(arg) else {
-            self.toast("No such request. Numbers are shown in the Requests pane.");
-            return;
-        };
+    }
+
+    /// Accept the request at `index`: its sender becomes a contact, their
+    /// messages move into the chat, and the chat opens. Whose.
+    fn accept_request(&mut self, index: usize) -> UserId {
         let (from, count) = self.take_request(index);
+        self.forget_declined(&from);
         self.sync_contact(silver_protocol::device::ContactAction::Add {
             user: from,
             alias: None,
             bundle: None,
         });
-        self.select(self.contacts.len());
+        self.select_pane(Pane::Thread(from));
         self.system(
             Level::Info,
             format!(
@@ -4559,6 +5020,116 @@ impl App {
                 from.short()
             ),
         );
+        from
+    }
+
+    /// `/decline`: *not now*. The request goes, the sender is told
+    /// nothing, and their next one waits without ringing.
+    fn cmd_decline(&mut self, args: &[&str]) {
+        let Some(pane) = self.waiting_named(args, "decline") else {
+            return;
+        };
+        match pane {
+            Pane::Request(from) => {
+                let Some(index) = self.requests.iter().position(|r| r.from == from) else {
+                    return;
+                };
+                let request = self.requests.remove(index);
+                self.persist_requests();
+                self.note_declined(from);
+                self.select(0);
+                self.system(
+                    Level::Info,
+                    format!(
+                        "Declined {}… ({from}); {} message(s) dropped and nothing sent. If they write again it waits here without ringing; /block {from} would drop it unseen.",
+                        from.short(),
+                        request.messages.len()
+                    ),
+                );
+            }
+            Pane::Invitation(group) => self.decline_invitation_of(group),
+            _ => {}
+        }
+    }
+
+    /// `/requests`: what waits, numbered, in the System pane.
+    fn cmd_requests(&mut self) {
+        let waiting = self.waiting();
+        if waiting.is_empty() {
+            self.system(
+                Level::Info,
+                "Nothing is waiting: no requests, no invitations.",
+            );
+            self.select(0);
+            return;
+        }
+        let mut lines = Vec::with_capacity(waiting.len() + 1);
+        for (n, pane) in waiting {
+            match pane {
+                Pane::Request(from) => {
+                    if let Some(request) = self.requests.iter().find(|r| r.from == from) {
+                        let last = request
+                            .messages
+                            .last()
+                            .map(|m| format!(", the last at {}", ui::clock(m.timestamp_ms)))
+                            .unwrap_or_default();
+                        lines.push(format!(
+                            "{n}. request from {}… ({from}): {} message(s){last}",
+                            from.short(),
+                            request.messages.len()
+                        ));
+                    }
+                }
+                Pane::Invitation(group) => {
+                    if let Some(held) = self.invitations().iter().find(|h| h.group == group) {
+                        lines.push(format!(
+                            "{n}. invitation to {} from {}… ({}), {} members",
+                            held.name,
+                            held.from.short(),
+                            held.from,
+                            held.members.len()
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+        lines.push(
+            "/accept, /decline and /block take a number, or act on the open entry.".to_owned(),
+        );
+        for line in lines {
+            self.system(Level::Info, line);
+        }
+        self.select(0);
+    }
+
+    fn is_declined(&self, id: &UserId) -> bool {
+        self.declined.iter().any(|d| d.user == *id)
+    }
+
+    fn note_declined(&mut self, id: UserId) {
+        self.declined.retain(|d| d.user != id);
+        self.declined.push(silver_client::Declined {
+            user: id,
+            at_ms: now_ms(),
+        });
+        while self.declined.len() > silver_client::MAX_DECLINED {
+            self.declined.remove(0);
+        }
+        self.persist_declined();
+    }
+
+    fn forget_declined(&mut self, id: &UserId) {
+        if self.is_declined(id) {
+            self.declined.retain(|d| d.user != *id);
+            self.persist_declined();
+        }
+    }
+
+    fn persist_declined(&mut self) {
+        if let Err(e) = self.store.save_declined(&self.declined) {
+            self.toast(format!("Could not save the declined list: {e}"));
+        }
     }
 
     /// Accept the request at `index`: its sender becomes a contact (or
@@ -4567,7 +5138,7 @@ impl App {
     /// opens the chat, or settles the Requests pane.
     fn take_request(&mut self, index: usize) -> (UserId, usize) {
         let request = self.requests.remove(index);
-        self.save_requests();
+        self.persist_requests();
         let from = request.from;
         if self.contact_index(&from).is_none() {
             let mut contact = Contact::new(from);
@@ -4603,25 +5174,75 @@ impl App {
         (from, count)
     }
 
+    /// `/block`: never. Bare, it means the open chat, request or
+    /// invitation's inviter; with an argument, a waiting entry's number, a
+    /// person by alias, id or id prefix, or any id at all.
     fn cmd_block(&mut self, args: &[&str]) {
-        let Some(arg) = args.first() else {
-            self.toast("Usage: /block <n|user-id>");
-            return;
-        };
-        let id = match self.resolve_request(arg) {
-            Some(index) => {
-                let request = self.requests.remove(index);
-                self.persist_requests();
-                request.from
-            }
-            None => match arg.parse::<UserId>() {
-                Ok(id) => id,
-                Err(_) => {
-                    self.toast("Give a request number or a user id.");
+        let id = match args.first() {
+            None => match self.selected_pane() {
+                Pane::Request(from) => from,
+                Pane::Thread(id) => id,
+                Pane::Invitation(_) => {
+                    let Some(held) = self.selected_invitation() else {
+                        return;
+                    };
+                    held.from
+                }
+                _ => {
+                    self.toast("Open a chat or a request first, or /block <number, alias or id>.");
                     return;
                 }
             },
+            Some(arg) => {
+                let numbered = arg.parse::<u32>().is_ok() || arg.starts_with(['g', 'G']);
+                let waiting = if numbered {
+                    Some(self.resolve_waiting(arg))
+                } else {
+                    None
+                };
+                match waiting {
+                    Some(Ok(Pane::Request(from))) => from,
+                    Some(Ok(Pane::Invitation(group))) => {
+                        match self.invitations().into_iter().find(|h| h.group == group) {
+                            Some(held) => held.from,
+                            None => return,
+                        }
+                    }
+                    Some(Ok(_)) => return,
+                    Some(Err(why)) => {
+                        self.toast(why);
+                        return;
+                    }
+                    None => match self
+                        .resolve_person(arg, People::Both)
+                        .or_else(|why| arg.parse::<UserId>().map_err(|_| why))
+                    {
+                        Ok(id) => id,
+                        Err(why) => {
+                            self.toast(why);
+                            return;
+                        }
+                    },
+                }
+            }
         };
+        self.block(id);
+    }
+
+    /// Drop everything of `id`'s from now on: their request and
+    /// invitations go, they stop being a contact, and their messages are
+    /// dropped on arrival. Nothing is sent to them.
+    fn block(&mut self, id: UserId) {
+        if let Some(index) = self.requests.iter().position(|r| r.from == id) {
+            self.requests.remove(index);
+            self.persist_requests();
+        }
+        for held in self.invitations() {
+            if held.from == id {
+                let _ = self.groups.decline_welcome(&held.group);
+            }
+        }
+        self.forget_declined(&id);
         if let Some(index) = self.contact_index(&id) {
             self.contacts.remove(index);
             self.threads.remove(&id);
@@ -4634,6 +5255,8 @@ impl App {
         }
         self.client.forget_sessions(&id);
         self.sync_contact(silver_protocol::device::ContactAction::Block { user: id });
+        self.refresh_group_list();
+        self.number_waiting();
         self.select(0);
         self.system(
             Level::Info,
@@ -4641,20 +5264,33 @@ impl App {
         );
     }
 
+    /// `/unblock <who>`: a blocked id, whole or by a prefix one of them has.
     fn cmd_unblock(&mut self, args: &[&str]) {
-        let id = match args.first().map(|a| a.parse::<UserId>()) {
-            Some(Ok(id)) => id,
-            _ => {
-                self.toast("Usage: /unblock <user-id>");
+        let Some(who) = args.first().map(|a| a.trim()).filter(|a| !a.is_empty()) else {
+            self.toast("Usage: /unblock <id, or enough of it>; /blocked lists them");
+            return;
+        };
+        let matches: Vec<UserId> = self
+            .blocked
+            .iter()
+            .copied()
+            .filter(|b| b.to_string().starts_with(who))
+            .collect();
+        let id = match matches.as_slice() {
+            [one] => *one,
+            [] => {
+                self.toast("No blocked id starts like that; /blocked lists them.");
+                return;
+            }
+            several => {
+                self.toast(format!(
+                    "{} blocked ids start like that; say more of it.",
+                    several.len()
+                ));
                 return;
             }
         };
-        let before = self.blocked.len();
         self.blocked.retain(|b| *b != id);
-        if self.blocked.len() == before {
-            self.toast("That id is not blocked.");
-            return;
-        }
         self.persist_blocked();
         self.sync_contact(silver_protocol::device::ContactAction::Unblock { user: id });
         self.system(Level::Info, format!("Unblocked {id}."));
@@ -4671,22 +5307,18 @@ impl App {
         self.select(0);
     }
 
+    /// Save the requests and renumber what waits; a selection past the end
+    /// of the shortened list is pulled back onto it, and the caller says
+    /// which pane opens.
     fn persist_requests(&mut self) {
         self.save_requests();
-        self.settle_requests_pane();
+        self.number_waiting();
+        self.selected = self.selected.min(self.pane_count() - 1);
     }
 
     fn save_requests(&mut self) {
         if let Err(e) = self.store.save_requests(&self.requests) {
             self.toast(format!("Could not save requests: {e}"));
-        }
-    }
-
-    /// The Requests pane goes with the last request; a selection on it
-    /// lands on System.
-    fn settle_requests_pane(&mut self) {
-        if self.requests.is_empty() && self.selected >= self.pane_count() {
-            self.select(0);
         }
     }
 
@@ -4999,6 +5631,122 @@ mod tests {
     use silver_protocol::group::GroupId;
 
     /// Another member's client: an engine over a fresh identity.
+    #[tokio::test]
+    async fn people_are_named_by_alias_id_or_prefix() {
+        let (mut app, _dir) = app();
+        let nima = Identity::generate().user_id();
+        let nimrod = Identity::generate().user_id();
+        let mut contact = Contact::new(nima);
+        contact.alias = Some("nima".into());
+        app.contacts.push(contact);
+        let mut contact = Contact::new(nimrod);
+        contact.alias = Some("Nimrod".into());
+        app.contacts.push(contact);
+
+        assert_eq!(app.resolve_person("NIMA", People::Contacts), Ok(nima));
+        assert_eq!(app.resolve_person("nimrod", People::Both), Ok(nimrod));
+        assert_eq!(
+            app.resolve_person(&nima.to_string(), People::Contacts),
+            Ok(nima)
+        );
+        let most_of_it: String = nima.to_string().chars().take(40).collect();
+        assert_eq!(app.resolve_person(&most_of_it, People::Contacts), Ok(nima));
+        assert!(app.resolve_person("nobody", People::Both).is_err());
+        assert!(app.resolve_person("  ", People::Both).is_err());
+
+        // A stranger who wrote is a person among Both, not among Contacts.
+        let stranger = Identity::generate().user_id();
+        app.requests.push(ContactRequest {
+            from: stranger,
+            first_seen_ms: 1,
+            messages: Vec::new(),
+        });
+        assert!(
+            app.resolve_person(&stranger.to_string(), People::Contacts)
+                .is_err()
+        );
+        assert_eq!(
+            app.resolve_person(&stranger.to_string(), People::Both),
+            Ok(stranger)
+        );
+
+        // Tab offers aliases, and for a chat the group names and panes too.
+        assert_eq!(app.name_candidates("NI", false), vec!["nima", "Nimrod"]);
+        assert!(app.name_candidates("", true).contains(&"system".to_owned()));
+        assert!(
+            app.name_candidates("req", true)
+                .contains(&"requests".to_owned())
+        );
+        assert!(app.name_candidates("zz", true).is_empty());
+    }
+
+    #[tokio::test]
+    async fn waiting_entries_keep_their_numbers_and_decline_is_remembered() {
+        let (mut app, _dir) = app();
+        let first = Identity::generate().user_id();
+        let second = Identity::generate().user_id();
+        let third = Identity::generate().user_id();
+        let request = |from, at| ContactRequest {
+            from,
+            first_seen_ms: at,
+            messages: Vec::new(),
+        };
+        app.requests.push(request(first, 10));
+        app.number_waiting();
+        app.requests.push(request(second, 20));
+        app.number_waiting();
+        assert_eq!(app.number_of(Pane::Request(first)), Some(1));
+        assert_eq!(app.number_of(Pane::Request(second)), Some(2));
+        assert_eq!(
+            app.panes(),
+            vec![Pane::System, Pane::Request(first), Pane::Request(second)]
+        );
+
+        // Handled, a number is not given again: the next entry is 3.
+        app.requests.remove(0);
+        app.number_waiting();
+        app.requests.push(request(third, 30));
+        app.number_waiting();
+        assert_eq!(app.number_of(Pane::Request(third)), Some(3));
+        assert_eq!(app.resolve_waiting("2"), Ok(Pane::Request(second)));
+        assert!(app.resolve_waiting("1").is_err(), "1 was handled");
+        assert!(
+            app.resolve_waiting("g2").is_err(),
+            "g names an invitation only"
+        );
+        let prefix: String = second.to_string().chars().take(12).collect();
+        assert_eq!(app.resolve_waiting(&prefix), Ok(Pane::Request(second)));
+        assert!(app.resolve_waiting("nothing").is_err());
+
+        // The open entry is what a bare command means; declined, it goes,
+        // the stranger is remembered as told not now, and System opens.
+        assert!(app.select_pane(Pane::Request(third)));
+        assert_eq!(app.selected_pane(), Pane::Request(third));
+        assert_eq!(app.waiting_here(), Some(Pane::Request(third)));
+        app.cmd_decline(&[]);
+        assert!(app.requests.iter().all(|r| r.from != third));
+        assert!(app.is_declined(&third));
+        assert_eq!(app.selected_pane(), Pane::System);
+        assert!(
+            app.store
+                .load_declined()
+                .unwrap()
+                .iter()
+                .any(|d| d.user == third),
+            "remembered on disk"
+        );
+        app.forget_declined(&third);
+        assert!(!app.is_declined(&third));
+        assert!(app.store.load_declined().unwrap().is_empty());
+
+        // Accepted from its entry, a request becomes the open chat.
+        assert!(app.select_pane(Pane::Request(second)));
+        app.cmd_accept(&[]);
+        assert_eq!(app.selected_pane(), Pane::Thread(second));
+        assert!(app.contacts.iter().any(|c| c.user_id == second));
+        assert!(app.waiting().is_empty());
+    }
+
     fn engine() -> (Arc<Identity>, Groups) {
         let identity = Arc::new(Identity::generate());
         (identity.clone(), Groups::ephemeral(identity))
@@ -5119,7 +5867,7 @@ mod tests {
         // A stranger's Welcome waits in Requests; nothing of the group shows.
         assert!(app.group_list.is_empty());
         assert_eq!(app.invitations().len(), 1);
-        assert!(app.has_requests_pane());
+        assert!(app.has_waiting());
         assert_eq!(app.held_message_count(), 1);
         assert_eq!(app.pane_count(), 2);
         assert!(
@@ -5137,7 +5885,7 @@ mod tests {
         app.cmd_accept(&["g1"]);
         assert_eq!(app.group_list, vec![group]);
         assert!(app.invitations().is_empty());
-        assert!(!app.has_requests_pane());
+        assert!(!app.has_waiting());
         assert_eq!(app.selected_group(), Some(group));
         assert!(
             group_texts(&app, &group)
@@ -5166,15 +5914,22 @@ mod tests {
             1
         );
 
-        // Declined, an invitation goes without a trace.
+        // A second invitation gets the next number, not the first one
+        // again: numbers hold still (docs/design/requests.md). Declined,
+        // it goes without a trace, and the inviter is remembered as
+        // told *not now*.
         let second = alice.create("another", now_ms()).unwrap();
         let out = add_me(&mut app, &mut alice, &second.group, 1);
         deliver(&mut app, &out.envelopes[0]);
         assert_eq!(app.invitations().len(), 1);
+        assert_eq!(app.number_of(Pane::Invitation(second.group)), Some(2));
         app.cmd_decline(&["g1"]);
+        assert_eq!(app.invitations().len(), 1, "g1 was taken; nothing is 1 now");
+        app.cmd_decline(&["2"]);
         assert!(app.invitations().is_empty());
         assert!(app.groups.get(&second.group).is_none());
         assert_eq!(app.group_list, vec![group]);
+        assert!(app.is_declined(&alice_id));
 
         // A contact's Welcome is taken at once, with a badge on the pane.
         let (bob_id, mut bob) = engine();

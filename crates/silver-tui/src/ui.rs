@@ -39,7 +39,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let [messages, input] =
         Layout::vertical([Constraint::Min(3), Constraint::Length(input_rows + 2)]).areas(chat);
 
-    if !app.narrow {
+    if app.narrow {
+        app.view.sidebar_rows.clear();
+    } else {
         draw_sidebar(frame, app, sidebar);
     }
     draw_messages(frame, app, messages);
@@ -118,17 +120,54 @@ fn draw_help(frame: &mut Frame, app: &mut App) {
     );
 }
 
-fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
     let inner_width = area.width.saturating_sub(2) as usize;
-    let mut lines = Vec::with_capacity(app.contacts.len() + 2);
+    let inner_height = area.height.saturating_sub(2) as usize;
+    let (lines, panes) = sidebar_lines(app, inner_width);
+    // Scrolled so the selected entry is always on screen.
+    let selected_row = panes
+        .iter()
+        .position(|p| *p == Some(app.selected))
+        .unwrap_or(0);
+    if selected_row < app.sidebar_scroll {
+        app.sidebar_scroll = selected_row;
+    }
+    if inner_height > 0 && selected_row >= app.sidebar_scroll + inner_height {
+        app.sidebar_scroll = selected_row + 1 - inner_height;
+    }
+    app.sidebar_scroll = app
+        .sidebar_scroll
+        .min(lines.len().saturating_sub(inner_height));
+    let shown: Vec<Line> = lines
+        .into_iter()
+        .skip(app.sidebar_scroll)
+        .take(inner_height)
+        .collect();
+    app.view.sidebar_rows = panes
+        .into_iter()
+        .skip(app.sidebar_scroll)
+        .take(inner_height)
+        .collect();
+    let block = Block::bordered().title(" Chats ");
+    frame.render_widget(Paragraph::new(shown).block(block), area);
+}
 
-    let row = |label: String, badge: Option<usize>, selected: bool| -> Line<'static> {
+/// The chat list's rows, and the pane each one opens (`None` for a
+/// divider or a hint): System, contacts, groups, then a divider and what
+/// waits -- strangers marked `?`, drawn dim, named by id alone.
+fn sidebar_lines(app: &App, inner_width: usize) -> (Vec<Line<'static>>, Vec<Option<usize>>) {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut panes: Vec<Option<usize>> = Vec::new();
+
+    let row = |label: String, badge: Option<usize>, selected: bool, dim: bool| -> Line<'static> {
         let badge = badge.map(|n| format!(" {n} ")).unwrap_or_default();
         let room = inner_width.saturating_sub(badge.width() + 1);
         let label = truncate(&label, room);
         let pad = inner_width.saturating_sub(label.width() + badge.width());
         let style = if selected {
             app.theme.selected
+        } else if dim {
+            app.theme.dim
         } else {
             Style::default()
         };
@@ -142,94 +181,126 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
         ])
     };
 
-    lines.push(row("System".into(), None, app.selected == 0));
-    for (i, contact) in app.contacts.iter().enumerate() {
-        let unread = app
-            .unread
-            .get(&contact.user_id)
-            .map(|ids| ids.len())
-            .filter(|n| *n > 0);
-        let label = if contact.revoked {
-            format!("{} (revoked)", contact.display_name())
-        } else if contact.verified {
-            format!("{} {}", app.glyphs.verified, contact.display_name())
-        } else {
-            contact.display_name()
+    let mut divided = false;
+    for (index, pane) in app.panes().into_iter().enumerate() {
+        let selected = app.selected == index;
+        let line = match pane {
+            Pane::System => row("System".into(), None, selected, false),
+            Pane::Thread(id) => {
+                let Some(contact) = app.contacts.iter().find(|c| c.user_id == id) else {
+                    continue;
+                };
+                let unread = app.unread.get(&id).map(|ids| ids.len()).filter(|n| *n > 0);
+                let label = if contact.revoked {
+                    format!("{} (revoked)", contact.display_name())
+                } else if contact.verified {
+                    format!("{} {}", app.glyphs.verified, contact.display_name())
+                } else {
+                    contact.display_name()
+                };
+                row(label, unread, selected, false)
+            }
+            Pane::Group(group) => {
+                let unread = app
+                    .group_unread
+                    .get(&group)
+                    .map(|ids| ids.len())
+                    .filter(|n| *n > 0);
+                let label = match app.group_state_label(&group) {
+                    Some(state) => format!("# {} ({state})", app.group_name(&group)),
+                    None => format!("# {}", app.group_name(&group)),
+                };
+                row(label, unread, selected, false)
+            }
+            Pane::Request(_) | Pane::Invitation(_) => {
+                if !divided {
+                    divided = true;
+                    lines.push(separator(" requests ", inner_width, app.theme.dim));
+                    panes.push(None);
+                }
+                match pane {
+                    Pane::Request(from) => {
+                        let held = app
+                            .requests
+                            .iter()
+                            .find(|r| r.from == from)
+                            .map_or(0, |r| r.messages.len());
+                        row(
+                            format!("? {}…", from.short()),
+                            Some(held).filter(|n| *n > 0),
+                            selected,
+                            true,
+                        )
+                    }
+                    _ => {
+                        let Pane::Invitation(group) = pane else {
+                            continue;
+                        };
+                        let name = app
+                            .invitations()
+                            .into_iter()
+                            .find(|h| h.group == group)
+                            .map(|h| h.name)
+                            .unwrap_or_default();
+                        row(format!("? invitation · {name}"), None, selected, true)
+                    }
+                }
+            }
         };
-        lines.push(row(label, unread, app.selected == i + 1));
+        lines.push(line);
+        panes.push(Some(index));
     }
-    for (i, group) in app.group_list.iter().enumerate() {
-        let unread = app
-            .group_unread
-            .get(group)
-            .map(|ids| ids.len())
-            .filter(|n| *n > 0);
-        let label = match app.group_state_label(group) {
-            Some(state) => format!("# {} ({state})", app.group_name(group)),
-            None => format!("# {}", app.group_name(group)),
-        };
-        lines.push(row(
-            label,
-            unread,
-            app.selected == app.contacts.len() + i + 1,
-        ));
+    if app.contacts.is_empty() && !app.has_waiting() {
+        for line in [
+            Line::from(""),
+            Line::styled(" no contacts yet", app.theme.dim),
+            Line::styled(" /add <user-id>", app.theme.dim),
+        ] {
+            lines.push(line);
+            panes.push(None);
+        }
     }
-    if app.has_requests_pane() {
-        lines.push(row(
-            "Requests".into(),
-            Some(app.held_message_count()),
-            app.requests_pane_selected(),
-        ));
-    }
-    if app.contacts.is_empty() && app.requests.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(Line::styled(" no contacts yet", app.theme.dim));
-        lines.push(Line::styled(" /add <user-id>", app.theme.dim));
-    }
-
-    let block = Block::bordered().title(" Chats ");
-    frame.render_widget(Paragraph::new(lines).block(block), area);
+    (lines, panes)
 }
 
 fn draw_messages(frame: &mut Frame, app: &mut App, area: Rect) {
     let width = area.width.saturating_sub(2) as usize;
     let height = area.height.saturating_sub(2) as usize;
 
-    let (title, rows, pane) = match (app.selected_group(), app.selected_contact()) {
-        (Some(group), _) => (
-            app.group_title(&group),
-            group_rows(app, &group, width),
-            Pane::Group(group),
+    let pane = app.selected_pane();
+    let (title, rows) = match pane {
+        Pane::Group(group) => (app.group_title(&group), group_rows(app, &group, width)),
+        Pane::System => (" System ".to_owned(), system_rows(app, width)),
+        Pane::Request(from) => (request_title(app, from), request_rows(app, from, width)),
+        Pane::Invitation(group) => (
+            invitation_title(app, group),
+            invitation_rows(app, group, width),
         ),
-        (None, None) if app.requests_pane_selected() => (
-            " Requests ".to_owned(),
-            request_rows(app, width),
-            Pane::Requests,
-        ),
-        (None, None) => (" System ".to_owned(), system_rows(app, width), Pane::System),
-        (None, Some(contact)) => (
-            format!(
-                " {}{} · {}{}{}{} ",
-                if contact.verified && !contact.revoked {
-                    format!("{} ", app.glyphs.verified)
-                } else {
-                    String::new()
-                },
-                contact.display_name(),
-                contact.user_id,
-                if contact.revoked { " · revoked" } else { "" },
-                app.encryption_label(contact)
-                    .map(|l| format!(" · {l}"))
-                    .unwrap_or_default(),
-                if app.has_older_lines(&silver_client::Conversation::Contact(contact.user_id)) {
-                    " · older lines in the file"
-                } else {
-                    ""
-                }
+        Pane::Thread(id) => match app.contacts.iter().find(|c| c.user_id == id) {
+            Some(contact) => (
+                format!(
+                    " {}{} · {}{}{}{} ",
+                    if contact.verified && !contact.revoked {
+                        format!("{} ", app.glyphs.verified)
+                    } else {
+                        String::new()
+                    },
+                    contact.display_name(),
+                    contact.user_id,
+                    if contact.revoked { " · revoked" } else { "" },
+                    app.encryption_label(contact)
+                        .map(|l| format!(" · {l}"))
+                        .unwrap_or_default(),
+                    if app.has_older_lines(&silver_client::Conversation::Contact(id)) {
+                        " · older lines in the file"
+                    } else {
+                        ""
+                    }
+                ),
+                thread_rows(app, &id, width),
             ),
-            thread_rows(app, &contact.user_id, width),
-            Pane::Thread(contact.user_id),
-        ),
+            None => (" System ".to_owned(), system_rows(app, width)),
+        },
     };
 
     let total = rows.len();
@@ -300,6 +371,7 @@ fn draw_messages(frame: &mut Frame, app: &mut App, area: Rect) {
         rows: recorded,
         start,
         sidebar: app.view.sidebar,
+        sidebar_rows: std::mem::take(&mut app.view.sidebar_rows),
         input: app.view.input,
         status: app.view.status,
     };
@@ -368,70 +440,99 @@ fn system_rows(app: &App, width: usize) -> Vec<Row> {
     rows
 }
 
-fn request_rows(app: &App, width: usize) -> Vec<Row> {
-    let mut rows: Vec<Row> = Vec::new();
-    rows.extend(wrap_message(
-        vec![],
-        "People who wrote to you but are not contacts yet. /accept <n> starts a chat with them; /block <n> drops their messages from now on. Group invitations from strangers wait here too: /accept g<n> joins, /decline g<n> does not.",
-        app.theme.dim,
+/// The title of a request's pane: its number, that the writer is not a
+/// contact, their id, and how much waits. The label comes before the id
+/// so that a narrow pane, which cuts the title's end, never cuts it.
+fn request_title(app: &App, from: UserId) -> String {
+    let n = app.number_of(Pane::Request(from)).unwrap_or(0);
+    let count = app
+        .requests
+        .iter()
+        .find(|r| r.from == from)
+        .map_or(0, |r| r.messages.len());
+    format!(
+        " request {n} · not a contact · {from} · {count} message{} ",
+        if count == 1 { "" } else { "s" }
+    )
+}
+
+/// A stranger's held messages, laid out as a chat: every one, with its
+/// time, under the stranger's id; nothing was sent, so no marks.
+fn request_rows(app: &App, from: UserId, width: usize) -> Vec<Row> {
+    let Some(request) = app.requests.iter().find(|r| r.from == from) else {
+        return Vec::new();
+    };
+    let lines: Vec<ChatLine> = request
+        .messages
+        .iter()
+        .map(|held| ChatLine {
+            delivered: true,
+            ..ChatLine::new(
+                held.id.clone(),
+                Direction::Received,
+                held.timestamp_ms,
+                held.text.clone(),
+            )
+        })
+        .collect();
+    let name = format!("{}…", from.short());
+    lines_rows(
+        app,
+        &lines,
+        &|_| name.clone(),
+        &|_| name.clone(),
+        None,
         width,
-    ).into_iter().map(|l| (l, None)));
+    )
+}
+
+/// The title of an invitation's pane: its number, the group's name (the
+/// inviter's word), who invited, how many are in it, and when it came.
+fn invitation_title(app: &App, group: silver_protocol::group::GroupId) -> String {
+    let n = app.number_of(Pane::Invitation(group)).unwrap_or(0);
+    match app.invitations().into_iter().find(|h| h.group == group) {
+        Some(held) => format!(
+            " invitation {n} · {} · from {}… · {} members · {} ",
+            held.name,
+            held.from.short(),
+            held.members.len(),
+            clock(held.received_at_ms)
+        ),
+        None => " invitation ".to_owned(),
+    }
+}
+
+/// What the client knows of a group before joining it, and what the
+/// three answers do.
+fn invitation_rows(app: &App, group: silver_protocol::group::GroupId, width: usize) -> Vec<Row> {
+    let Some(held) = app.invitations().into_iter().find(|h| h.group == group) else {
+        return Vec::new();
+    };
+    let mut rows: Vec<Row> = Vec::new();
+    let text = format!(
+        "{}… ({}) invites you to the group {}, {} members, at {}.",
+        held.from.short(),
+        held.from,
+        held.name,
+        held.members.len(),
+        clock(held.received_at_ms)
+    );
+    rows.extend(
+        wrap_message(vec![], &text, Style::default(), width)
+            .into_iter()
+            .map(|l| (l, None)),
+    );
     rows.push((Line::from(""), None));
-    for (i, held) in app.invitations().iter().enumerate() {
-        rows.push((
-            Line::from(vec![
-                Span::styled(
-                    format!("g{}. {}", i + 1, held.name),
-                    app.theme.accent.add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!(
-                        "  a group of {}, from {}… ({})",
-                        held.members.len(),
-                        held.from.short(),
-                        held.from
-                    ),
-                    app.theme.dim,
-                ),
-            ]),
-            None,
-        ));
-        rows.push((Line::from(""), None));
-    }
-    for (i, request) in app.requests.iter().enumerate() {
-        rows.push((
-            Line::from(vec![
-                Span::styled(
-                    format!("{}. {}…", i + 1, request.from.short()),
-                    app.theme.accent.add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(format!("  {}", request.from), app.theme.dim),
-            ]),
-            None,
-        ));
-        let shown = request.messages.len().min(3);
-        for held in &request.messages[request.messages.len() - shown..] {
-            let prefix = vec![Span::styled(
-                format!("   {} ", clock(held.timestamp_ms)),
-                app.theme.dim,
-            )];
-            rows.extend(
-                wrap_message(prefix, &held.text, Style::default(), width)
-                    .into_iter()
-                    .map(|l| (l, None)),
-            );
-        }
-        if request.messages.len() > shown {
-            rows.push((
-                Line::styled(
-                    format!("   … and {} earlier", request.messages.len() - shown),
-                    app.theme.dim,
-                ),
-                None,
-            ));
-        }
-        rows.push((Line::from(""), None));
-    }
+    rows.extend(
+        wrap_message(
+            vec![],
+            "The name is the inviter's word, and the client knows nothing else of the group until you join. /accept joins it. /decline turns it down and tells nobody; their next invitation waits without ringing. /block drops everything of theirs from now on.",
+            app.theme.dim,
+            width,
+        )
+        .into_iter()
+        .map(|l| (l, None)),
+    );
     rows
 }
 

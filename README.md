@@ -201,14 +201,20 @@ hello!                               # anything not starting with / is sent to t
 /send ~/photo.jpg                    # sends a file (up to 16 MiB), encrypted like a message
 ```
 
-A message from someone who is not a contact yet lands in the **Requests**
-pane rather than in a chat; `/accept <n>` turns it into a contact (and moves
-the held messages into the chat), `/block <n>` drops everything from that id
-from then on. `/alias <name>` gives a contact a friendly name.
+A message from someone who is not a contact yet is a **request**: an entry
+of its own at the bottom of the chat list, marked `?` and named by the
+stranger's id, holding everything they sent. Open it and read; then
+`/accept` makes them a contact and moves the messages into a chat (typing
+a reply does the same), `/decline` says *not now* -- the messages go, the
+sender is told nothing, and if they write again the request comes back
+without ringing -- and `/block` drops everything from that id from then
+on. Each of the three also takes the number the request was announced
+with, or enough of the id, from anywhere; `/requests` lists what waits.
+`/alias <name>` gives a contact a friendly name.
 
 `/group new <name>` makes a group; `/group add <contact>` adds people who
 are contacts (their client takes you in at once if you are theirs, and
-otherwise shows the invitation in their Requests pane), and `/group
+otherwise lists the invitation in their chat list for them to open), and `/group
 invite` prints a link and a QR code anyone can join by. A group is a pane
 after the contacts, with each line showing who wrote it. Groups run on
 MLS (RFC 9420) with a post-quantum hybrid suite and need a relay on
@@ -240,7 +246,8 @@ message dressed up to look like a saved file elsewhere opens nothing.
 | ------------------------------- | ------------------------------------------------------------ |
 | `/add <user-id or link> [alias]` | Add a contact by id or invite link                           |
 | `/invite [copy]`                | Show your invite link and a QR code of it; `copy` puts it on the clipboard |
-| `/copy [id\|link]`              | Copy the last message of this chat, your id, or your invite link |
+| `/copy [id [who]\|link]`        | Copy the last message of this chat, your id (or a contact's, by alias or id), or your invite link; a click on a chat's title copies that person's id too |
+| `/whois [who]`                  | A person's id, alias, verification and how messages with them are protected, in the System pane: the open chat's, or one by alias, id or enough of it |
 | `/alias <name>`                 | Name the selected contact or group                           |
 | `/remove`                       | Forget the selected contact (history file stays on disk)     |
 | `/verify`                       | Show the safety number to compare with the selected contact  |
@@ -263,20 +270,21 @@ message dressed up to look like a saved file elsewhere opens nothing.
 | `/notify all\|terminal\|desktop\|bell\|off` | Bell and a desktop notification (`all`: by the terminal or the desktop, whichever this terminal calls for; `terminal` or `desktop` forces one), bell only, or nothing |
 | `/marks ascii\|unicode\|auto`   | Draw the marks in ASCII if your terminal shows boxes for them |
 | `/theme dark\|light\|mono\|contrast` | Colours for a dark or a light background, none at all, or bright bold text on black for high contrast |
-| `/go <name>`                    | Open the chat whose name (or id) starts with `name`          |
+| `/go <name>`                    | Open the chat whose name (or id) starts with `name`; `system` and `requests` name those |
 | `/sidebar <12-60>`              | How many columns the chat list takes (dragging its edge does the same); remembered |
 | `/reader on\|off`               | Start in reader mode next time (see below); `silver --reader` does it once |
 | `/history [n]`                  | In reader mode, read the last `n` lines of this chat with their times (default 10) |
 | `/unread`                       | Say what waits unread in every chat                          |
-| `/accept <n>`                   | Accept a contact request from the Requests pane              |
+| `/accept [n or id]`             | Accept a contact request or a group invitation: the open one, or one by its number or the sender's id (a typed reply to a request accepts it too) |
+| `/decline [n or id]`            | Turn one down: not now, where `/block` is never; nothing is sent, and the sender's next one waits without ringing |
+| `/requests`                     | List the requests and invitations waiting, with their numbers |
 | `/group new <name>`             | Make a group (needs a relay on 0.9.0); its pane opens after the contacts |
 | `/group add <contact>` / `remove <member>` / `leave` | Membership, by an admin; anyone may leave |
 | `/group members` / `info` / `rename <name>` / `admin add\|remove <member>` | List, describe, rename, appoint |
 | `/group invite [copy]` / `link reset` / `join <link>` | Show or copy the group's invite link (and its QR code), void old links, or ask to join by one |
 | `/group rejoin` / `forget`      | Ask the admins to re-add you after a missed change; drop a group you left or were removed from |
-| `/accept g<n>` / `/decline g<n>` | Take or turn down a group invitation from a stranger (a contact's is taken at once) |
-| `/block <n or id>`              | Drop everything from that id from now on                     |
-| `/unblock <id>`, `/blocked`     | Undo a block; list blocked ids                               |
+| `/block [n, alias or id]`       | Drop everything from that id from now on: the open chat or request's, or one by number, alias or id |
+| `/unblock <id>`, `/blocked`     | Undo a block (enough of the id will do); list blocked ids    |
 | `/me`                           | Show your own id                                             |
 | `/devices`                      | List your identity's devices: their names, when each was linked, and which one this is |
 | `/devices link <link> [days]`   | Take in a computer that printed a link with `silver --link`, sending it that many days of history (default 30, 0 for none) |
@@ -695,7 +703,8 @@ it does not, is in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
   Files from people you have not accepted are listed with their request
   but never fetched.
 * **Abuse controls**: strangers who know your id can write to you, but their
-  messages wait in the Requests pane until you accept or block them. The
+  messages wait as a request in the chat list until you accept, decline or
+  block them, and a stranger rings the terminal once at most. The
   relay limits each connection to 60 messages, 30 key lookups and 600 file
   chunks per minute, caps every mailbox and its total file storage, and can
   be told to register only identities that present an invite token.

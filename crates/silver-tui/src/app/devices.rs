@@ -899,8 +899,8 @@ impl App {
                         // move into the chat as they did there.
                         if let Some(index) = self.requests.iter().position(|r| r.from == user) {
                             self.take_request(index);
-                            self.settle_requests_pane();
                         }
+                        self.forget_declined(&user);
                         self.system(
                             Level::Info,
                             format!("Added {name} ({user}) on another of your devices."),
@@ -952,11 +952,18 @@ impl App {
                     self.requests.remove(index);
                     self.persist_requests();
                 }
+                for held in self.invitations() {
+                    if held.from == user {
+                        let _ = self.groups.decline_welcome(&held.group);
+                    }
+                }
+                self.forget_declined(&user);
                 if !self.blocked.contains(&user) {
                     self.blocked.push(user);
                     self.persist_blocked();
                 }
                 self.client.forget_sessions(&user);
+                self.refresh_group_list();
                 if self.selected >= self.pane_count() {
                     self.select(0);
                 }

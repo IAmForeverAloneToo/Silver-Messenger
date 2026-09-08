@@ -43,14 +43,20 @@ impl App {
     }
 
     fn pane_name(&self) -> String {
-        if let Some(group) = self.selected_group() {
-            self.group_name(&group)
-        } else if let Some(contact) = self.selected_contact() {
-            contact.display_name()
-        } else if self.requests_pane_selected() {
-            "requests".to_owned()
-        } else {
-            "system".to_owned()
+        let pane = self.selected_pane();
+        match pane {
+            super::Pane::Group(group) => self.group_name(&group),
+            super::Pane::Thread(_) => self
+                .selected_contact()
+                .map(|c| c.display_name())
+                .unwrap_or_else(|| "system".to_owned()),
+            super::Pane::Request(_) => {
+                format!("request {}", self.number_of(pane).unwrap_or(0))
+            }
+            super::Pane::Invitation(_) => {
+                format!("invitation {}", self.number_of(pane).unwrap_or(0))
+            }
+            super::Pane::System => "system".to_owned(),
         }
     }
 
@@ -133,42 +139,52 @@ impl App {
         }
         let name = self.pane_name();
         let Some(conversation) = self.selected_conversation() else {
-            if self.requests_pane_selected() {
-                let mut lines = vec![format!(
-                    "Requests: {} waiting; /accept <n> takes one, /block <n> drops it.",
-                    self.requests.len() + self.invitations().len()
-                )];
-                for (i, request) in self.requests.iter().enumerate() {
-                    let last = request
-                        .messages
-                        .last()
-                        .map(|m| m.text.clone())
-                        .unwrap_or_default();
-                    lines.push(format!("{}. {}…: {last}", i + 1, request.from.short()));
+            match self.selected_pane() {
+                super::Pane::Request(from) => {
+                    let n = self.number_of(super::Pane::Request(from)).unwrap_or(0);
+                    let Some(request) = self.requests.iter().find(|r| r.from == from) else {
+                        return;
+                    };
+                    let mut lines = vec![format!(
+                        "Request {n} from {}… ({from}), {} message(s) held; /accept, /decline or /block, or answer to accept.",
+                        from.short(),
+                        request.messages.len()
+                    )];
+                    lines.extend(request.messages.iter().map(|held| {
+                        format!("{}: {}", crate::ui::clock(held.timestamp_ms), held.text)
+                    }));
+                    lines.push("(end of request)".to_owned());
+                    for line in lines {
+                        self.say(line);
+                    }
                 }
-                for (i, held) in self.invitations().iter().enumerate() {
-                    lines.push(format!(
-                        "g{}. {} invites you to {}",
-                        i + 1,
-                        self.member_name(&held.from),
-                        held.name
+                super::Pane::Invitation(group) => {
+                    let n = self.number_of(super::Pane::Invitation(group)).unwrap_or(0);
+                    let Some(held) = self.invitations().into_iter().find(|h| h.group == group)
+                    else {
+                        return;
+                    };
+                    self.say(format!(
+                        "Invitation {n} to {} from {}… ({}), {} members; /accept or /decline.",
+                        held.name,
+                        held.from.short(),
+                        held.from,
+                        held.members.len()
                     ));
                 }
-                for line in lines {
-                    self.say(line);
-                }
-            } else {
-                self.say("System pane.");
-                let recent: Vec<String> = self
-                    .system
-                    .iter()
-                    .rev()
-                    .filter(|l| l.level != Level::Code)
-                    .take(CONTEXT_LINES)
-                    .map(|l| system_sentence(l.level, &l.text))
-                    .collect();
-                for line in recent.into_iter().rev() {
-                    self.say(line);
+                _ => {
+                    self.say("System pane.");
+                    let recent: Vec<String> = self
+                        .system
+                        .iter()
+                        .rev()
+                        .filter(|l| l.level != Level::Code)
+                        .take(CONTEXT_LINES)
+                        .map(|l| system_sentence(l.level, &l.text))
+                        .collect();
+                    for line in recent.into_iter().rev() {
+                        self.say(line);
+                    }
                 }
             }
             return;

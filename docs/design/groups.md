@@ -391,10 +391,11 @@ Welcome, and a joined group stays in sync while the user decides. The
 group stands as *invited* until the user says yes; nothing of it is
 shown or sent before that. If the sender is a contact, the front end says
 yes on the user's behalf and shows the group; if the sender is a
-stranger, the invitation waits in the Requests pane as "X invites you to
-<name> (n members)" until `/accept` or `/decline`, as held messages do
-today. Declining drops the state; the admin's group keeps a dead leaf
-until they notice and remove it.
+stranger, the invitation waits until `/accept` or `/decline`, as held
+messages do: first in a Requests pane, and from 0.14.0 as an entry of the
+chat list of its own (`docs/design/requests.md`). Declining drops the
+state; the admin's group keeps a dead leaf until they notice and remove
+it.
 
 ### 7.3 Join by link
 
@@ -540,8 +541,9 @@ Group panes in the sidebar after contacts, with the same unread badges;
 lines show the sender; marks are `⋯` (queued) and `✓` (every envelope
 accepted), no `✓✓`. Commands: `/group new|add|remove|leave|members|
 invite [copy]|join|link reset|admin add|admin remove|rename|info|
-rejoin|forget`, `/accept g<n>` and `/decline g<n>` for invitations in
-the Requests pane, `/alias` for a group's local name; the file commands
+rejoin|forget`, `/accept` and `/decline` for invitations (bare on the
+invitation's entry, or by number from anywhere, since 0.14.0), `/alias`
+for a group's local name; the file commands
 work in a group pane; `/copy`, `/search`, selection and everything in
 the message pane work unchanged. The help overlay and the status line
 learn the group commands from the table as they do today. (`/mute` and

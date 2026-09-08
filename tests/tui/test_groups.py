@@ -5,6 +5,8 @@ join by invite link taken without a second yes, a rename seen by all, a
 removal that ends what the removed member reads, a leave committed by the
 admin's client, and what survives a restart."""
 
+import re
+
 from harness import *
 
 
@@ -43,7 +45,7 @@ def main():
     assert b.wait_marks("hi all", G.accepted), "bob's mark"
 
     # Carol has never heard of alice: alice adds her as a contact and to
-    # the group, and the invitation waits in carol's Requests pane.
+    # the group, and the invitation waits as an entry of carol's chat list.
     c_dir = fresh_dir("groups-carol")
     c_id = identity(c_dir)
     c = Term(c_dir, pair.relay.url, cols=140)
@@ -54,13 +56,24 @@ def main():
     assert a.wait("you are an admin"), "back to the group"
     a.type("/group add carol\r")
     assert a.wait("· you added carol"), "carol added to the group"
-    # The word "Requests" is on the welcome screen too; the invitation's
-    # own line says the request is there to select.
+    # The invitation's own line says it is there to open; Shift-Tab lands
+    # on it, and its title says whose word the name is and how big it is.
     assert c.wait("invites you to the group team"), "carol is told of the invitation"
+    # The line wraps somewhere; the number is read across the wrap, with
+    # the box borders and the indent between the rows taken out.
+    assert c.wait_for(
+        lambda: "number 1:" in re.sub(r"[│\s]+", " ", " ".join(c.sc.display)),
+        what="with its number",
+    )
+    time.sleep(0.5)
+    assert b"\x07" not in c.take_raw(), "an invitation rings nothing; only a message does"
     c.key(SHIFT_TAB)
-    assert c.wait("g1. team"), "the invitation is listed"
-    assert c.has("a group of 3, from"), "with its size and sender"
-    c.type("/accept g1\r")
+    assert c.wait(" invitation 1 · team · from "), "the invitation's pane"
+    assert c.has("? invitation · team"), "listed as an invitation"
+    assert c.has("3 members"), "with its size"
+    # A bare /accept on the entry joins (the numbered form is covered by
+    # the unit tests).
+    c.type("/accept\r")
     assert c.wait("· "), "carol's group pane opens"
     assert c.wait("added you"), "with the note"
     assert c.has("3 members"), "carol's title"

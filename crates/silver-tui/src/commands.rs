@@ -10,8 +10,22 @@ pub struct CommandInfo {
     /// Placeholder for the arguments; empty when there are none.
     pub args: &'static str,
     pub help: &'static str,
-    /// The argument is a file path, which Tab completes.
-    pub path_arg: bool,
+    /// What Tab completes after the command name.
+    pub arg: Arg,
+}
+
+/// What a command's argument is, so that Tab can complete it
+/// (`docs/design/requests.md`, section 4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Arg {
+    /// Nothing to complete.
+    None,
+    /// A file path.
+    Path,
+    /// A person: a contact's alias.
+    Person,
+    /// A chat: a contact's alias, a group's name, `system` or `requests`.
+    Chat,
 }
 
 const fn cmd(
@@ -25,7 +39,44 @@ const fn cmd(
         aliases,
         args,
         help,
-        path_arg: false,
+        arg: Arg::None,
+    }
+}
+
+const fn cmd_taking(
+    arg: Arg,
+    name: &'static str,
+    aliases: &'static [&'static str],
+    args: &'static str,
+    help: &'static str,
+) -> CommandInfo {
+    CommandInfo {
+        name,
+        aliases,
+        args,
+        help,
+        arg,
+    }
+}
+
+/// What Tab completes at the argument after `before`, the words already
+/// typed after the command name: the table's kind for the first word,
+/// and a person at the second word of `group add`, `group remove`,
+/// `group admin add|remove` and `copy id`.
+pub fn argument_kind(command: &CommandInfo, before: &[&str]) -> Arg {
+    let is = |word: &str, wanted: &str| word.eq_ignore_ascii_case(wanted);
+    match (command.name, before) {
+        (_, []) => command.arg,
+        ("group", [verb]) if is(verb, "add") || is(verb, "remove") || is(verb, "kick") => {
+            Arg::Person
+        }
+        ("group", [verb, which])
+            if is(verb, "admin") && (is(which, "add") || is(which, "remove")) =>
+        {
+            Arg::Person
+        }
+        ("copy", [word]) if is(word, "id") => Arg::Person,
+        _ => Arg::None,
     }
 }
 
@@ -45,8 +96,15 @@ pub const COMMANDS: &[CommandInfo] = &[
     cmd(
         "copy",
         &[],
-        "[id|link]",
-        "copy the last message of this chat, your id, or your invite link",
+        "[id [who]|link]",
+        "copy the last message of this chat, your id (or a contact's: /copy id <alias or id>), or your invite link",
+    ),
+    cmd_taking(
+        Arg::Person,
+        "whois",
+        &["who"],
+        "[who]",
+        "a person's id, alias, verification and how messages with them are protected, in the System pane; the open chat's, or one by alias, id or enough of it",
     ),
     cmd(
         "group",
@@ -54,11 +112,18 @@ pub const COMMANDS: &[CommandInfo] = &[
         "<what> …",
         "groups: new <name>, add <contact>, remove <member>, leave, members, invite [copy], join <link>, link reset, admin add|remove <member>, rename <name>, info, rejoin, forget",
     ),
-    cmd(
+    cmd_taking(
+        Arg::Person,
         "decline",
         &[],
-        "<g1…>",
-        "turn a group invitation down (the Requests pane lists them)",
+        "[n|id]",
+        "turn a request or an invitation down: the open one, or one by number or sender; not now, where /block is never -- nothing is sent, and their next one waits without ringing",
+    ),
+    cmd(
+        "requests",
+        &[],
+        "",
+        "list the requests and invitations waiting in the chat list, with their numbers",
     ),
     cmd(
         "alias",
@@ -120,7 +185,8 @@ pub const COMMANDS: &[CommandInfo] = &[
         "dark|light|mono|contrast",
         "colours for a dark or a light background, none at all, or high contrast (bright bold text on black)",
     ),
-    cmd(
+    cmd_taking(
+        Arg::Chat,
         "go",
         &["chat"],
         "<name>",
@@ -145,26 +211,33 @@ pub const COMMANDS: &[CommandInfo] = &[
         "in reader mode, read the last n lines of this chat with their times (default 10)",
     ),
     cmd("unread", &[], "", "say what waits unread in every chat"),
-    cmd(
+    cmd_taking(
+        Arg::Person,
         "accept",
         &[],
-        "<n|user-id>",
-        "accept a contact request from the Requests pane",
+        "[n|id]",
+        "accept a contact request or a group invitation: the open one, or one by number or sender (typing a reply to a request accepts it too)",
     ),
-    cmd(
+    cmd_taking(
+        Arg::Person,
         "block",
         &[],
-        "<n|user-id>",
-        "ignore a requester or contact from now on",
+        "[n|alias|id]",
+        "ignore a requester or contact from now on: the open one, or one by number, alias or id",
     ),
-    cmd("unblock", &[], "<user-id>", "undo a block"),
+    cmd(
+        "unblock",
+        &[],
+        "<id>",
+        "undo a block (enough of the id to be one of them will do)",
+    ),
     cmd("blocked", &[], "", "list blocked ids"),
     CommandInfo {
         name: "send",
         aliases: &["file", "attach"],
         args: "<path>",
         help: "send a file (up to 16 MiB) to the selected contact; received files land in <data-dir>/downloads",
-        path_arg: true,
+        arg: Arg::Path,
     },
     cmd(
         "reply",
@@ -269,7 +342,7 @@ pub const COMMANDS: &[CommandInfo] = &[
 
 pub const KEY_HELP: &[&str] = &[
     "Tab / Shift-Tab, Alt-Up / Alt-Down, or a click in the list   switch chats",
-    "Enter sends · Alt-Enter new line · Up / Down recall earlier lines · Tab completes /commands and paths",
+    "Enter sends · Alt-Enter new line · Up / Down recall earlier lines · Tab completes /commands, paths, aliases and group names",
     "PgUp / PgDn or the mouse wheel scroll · Ctrl-Home / Ctrl-End jump · drag the scrollbar or the divider",
     "Drag to select text, double click a word, triple click a message, Shift-Up / Shift-Down for messages",
     "With one message selected, /reply, /react, /edit and /delete act on it",
@@ -390,6 +463,22 @@ pub fn complete_path(partial: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_argument_kind_follows_the_words_typed() {
+        let group = find("group").unwrap();
+        assert_eq!(argument_kind(group, &[]), Arg::None);
+        assert_eq!(argument_kind(group, &["add"]), Arg::Person);
+        assert_eq!(argument_kind(group, &["ADMIN", "remove"]), Arg::Person);
+        assert_eq!(argument_kind(group, &["rename"]), Arg::None);
+        let copy = find("copy").unwrap();
+        assert_eq!(argument_kind(copy, &[]), Arg::None);
+        assert_eq!(argument_kind(copy, &["id"]), Arg::Person);
+        assert_eq!(argument_kind(find("block").unwrap(), &[]), Arg::Person);
+        assert_eq!(argument_kind(find("whois").unwrap(), &[]), Arg::Person);
+        assert_eq!(argument_kind(find("go").unwrap(), &[]), Arg::Chat);
+        assert_eq!(argument_kind(find("send").unwrap(), &[]), Arg::Path);
+    }
 
     #[test]
     fn the_table_finds_names_and_aliases() {
