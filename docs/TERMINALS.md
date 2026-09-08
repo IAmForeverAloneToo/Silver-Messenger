@@ -18,7 +18,7 @@ optional sequences.
 | Focus events | Requested at start | The window counts as focused: read receipts go out for a chat left open |
 | Copy | The OS clipboard (Windows, macOS, X11, Wayland), else OSC 52 to the terminal | Over SSH without OSC 52 support, copies stay in the terminal's own selection; use `Shift`+drag |
 | Paste | The OS clipboard on `Ctrl-V`, `Shift-Insert`, right click | The terminal's own paste (usually `Ctrl-Shift-V`, `Cmd-V`, or the menu), which arrives as bracketed paste |
-| Desktop notification | OSC 777, OSC 9, OSC 99, written together; the terminal takes the one it knows | Bell and the unread count in the window title still work |
+| Desktop notification | Through the terminal where it raises one itself (OSC 777, OSC 9, OSC 99, written together; the terminal takes the one it knows), and through the operating system where it does not: the session bus on Linux, `osascript` on macOS, a toast on Windows. Decided from the environment at start; `/notify terminal` or `/notify desktop` forces one. The text is `New message`, always | Bell and the unread count in the window title still work. Over SSH only the terminal path can reach the desktop, and only that path is taken |
 | Window title | OSC 2, pushed at start and restored on exit | Ignored |
 | Colour | 16 colours; `--theme mono` and `NO_COLOR` use bold, dim and reverse video only; `--theme contrast` is bright bold text on black | Use mono |
 | Reader mode (`--reader`) | Raw mode, bracketed paste and focus events only: no alternate screen, no mouse, no title, no attributes; lines end in `\r\n`, the compose line is erased with `\r ESC[K` and the cursor moved within it with `ESC[nD` | Any terminal has these |
@@ -32,20 +32,20 @@ specific to it.
 
 | Terminal | Marks | Mouse | Selection with the mouse captured | Copy | Paste | Notification | Status |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Windows Terminal | Yes | Yes | `Shift`+drag; or use the client's own selection | OS clipboard | OS clipboard on `Ctrl-V`; `Ctrl-Shift-V` too | Bell and title | Checked by hand on 0.4.0; the marks, selection and paste fixes of 0.5.0 are expected |
-| Windows console (conhost) | No: ASCII marks by default | Wheel and clicks | None natively once the mouse is captured; the client's own selection and `Ctrl-C` copy instead, or `--no-mouse` for QuickEdit | OS clipboard | OS clipboard on `Ctrl-V`, `Shift-Insert`, right click | Bell and title | Checked by hand on 0.4.0 (the reason for Phase 5); 0.5.0 expected |
-| macOS Terminal.app | Yes | Yes | `Fn`+drag or `Option`+drag | OS clipboard | `Cmd-V` (bracketed paste); `Ctrl-V` reaches the client | Bell and title | Expected |
-| iTerm2 | Yes | Yes | `Option`+drag | OS clipboard; OSC 52 | `Cmd-V`; `Ctrl-V` reaches the client | OSC 9 toast | Expected |
-| GNOME Terminal and other VTE terminals | Yes | Yes | `Shift`+drag | OS clipboard | `Ctrl-Shift-V`, `Shift-Insert`; `Ctrl-V` reaches the client | Bell and title (VTE has no notification sequence) | Expected |
-| Konsole | Yes | Yes | `Shift`+drag | OS clipboard | `Ctrl-Shift-V`, `Shift-Insert` | Bell and title | Expected |
-| kitty | Yes | Yes | `Shift`+drag | OS clipboard; OSC 52 | `Ctrl-Shift-V` | OSC 99 | Expected |
-| WezTerm | Yes | Yes | `Shift`+drag | OS clipboard; OSC 52 | `Ctrl-Shift-V` | OSC 777 or 9 | Expected |
-| Alacritty | Yes | Yes | `Shift`+drag | OS clipboard; OSC 52 | `Ctrl-Shift-V` | Bell and title | Expected |
-| foot | Yes | Yes | `Shift`+drag | OS clipboard; OSC 52 | `Ctrl-Shift-V` | OSC 777 | Expected |
-| xterm | Yes | Yes | `Shift`+drag | OSC 52 (when `allowWindowOps` permits) | `Shift-Insert` | Bell and title | Checked: the test suite runs as `xterm-256color` |
-| tmux | Yes | Yes (with `mouse on`, tmux forwards the wheel and clicks) | tmux's own copy mode | OSC 52 through tmux when `set-clipboard on` | tmux paste (`prefix ]`) or the outer terminal's | Passed through by the outer terminal | Checked: `test_tmux.py` runs the client inside tmux |
+| Windows Terminal | Yes | Yes | `Shift`+drag; or use the client's own selection | OS clipboard | OS clipboard on `Ctrl-V`; `Ctrl-Shift-V` too | A Windows toast (0.13.0); it ignores the sequences | Checked by hand on 0.4.0; the marks, selection and paste fixes of 0.5.0 and the 0.13.0 toast are expected |
+| Windows console (conhost) | No: ASCII marks by default | Wheel and clicks | None natively once the mouse is captured; the client's own selection and `Ctrl-C` copy instead, or `--no-mouse` for QuickEdit | OS clipboard | OS clipboard on `Ctrl-V`, `Shift-Insert`, right click | A Windows toast (0.13.0) | Checked by hand on 0.4.0 (the reason for Phase 5); 0.5.0 and the 0.13.0 toast expected |
+| macOS Terminal.app | Yes | Yes | `Fn`+drag or `Option`+drag | OS clipboard | `Cmd-V` (bracketed paste); `Ctrl-V` reaches the client | Notification Center, through `osascript` (0.13.0) | Expected |
+| iTerm2 | Yes | Yes | `Option`+drag | OS clipboard; OSC 52 | `Cmd-V`; `Ctrl-V` reaches the client | OSC 9 toast, raised by iTerm2 itself | Expected |
+| GNOME Terminal and other VTE terminals | Yes | Yes | `Shift`+drag | OS clipboard | `Ctrl-Shift-V`, `Shift-Insert`; `Ctrl-V` reaches the client | The session bus (0.13.0; VTE has no notification sequence) | Expected |
+| Konsole | Yes | Yes | `Shift`+drag | OS clipboard | `Ctrl-Shift-V`, `Shift-Insert` | The session bus (0.13.0) | Expected |
+| kitty | Yes | Yes | `Shift`+drag | OS clipboard; OSC 52 | `Ctrl-Shift-V` | OSC 99, raised by kitty itself | Expected |
+| WezTerm | Yes | Yes | `Shift`+drag | OS clipboard; OSC 52 | `Ctrl-Shift-V` | OSC 777 or 9, raised by WezTerm itself | Expected |
+| Alacritty | Yes | Yes | `Shift`+drag | OS clipboard; OSC 52 | `Ctrl-Shift-V` | The session bus (0.13.0) | Expected |
+| foot | Yes | Yes | `Shift`+drag | OS clipboard; OSC 52 | `Ctrl-Shift-V` | OSC 777, raised by foot itself | Expected |
+| xterm | Yes | Yes | `Shift`+drag | OSC 52 (when `allowWindowOps` permits) | `Shift-Insert` | The session bus (0.13.0); xterm is not one the client recognises, so the sequences are written too and ignored | Checked: the test suite runs as `xterm-256color` |
+| tmux | Yes | Yes (with `mouse on`, tmux forwards the wheel and clicks) | tmux's own copy mode | OSC 52 through tmux when `set-clipboard on` | tmux paste (`prefix ]`) or the outer terminal's | The sequences wrapped in tmux's passthrough (0.13.0; needs `allow-passthrough on`) for the outer terminal, and the session bus | Checked: `test_tmux.py` runs the client inside tmux; the wrapping is checked in `test_notify.py` |
 | Linux virtual console | No: ASCII marks by default | No | gpm, if running | OSC 52 is ignored | The console has no clipboard | Bell | Checked: the test suite runs as `TERM=linux` |
-| SSH from any of the above | As the local terminal | As the local terminal | As the local terminal | OSC 52 reaches the local terminal's clipboard where supported | The local terminal's paste | The local terminal's | Expected |
+| SSH from any of the above | As the local terminal | As the local terminal | As the local terminal | OSC 52 reaches the local terminal's clipboard where supported | The local terminal's paste | The local terminal's, where it raises one: only the terminal path is taken, since the desktop is on the other end | Expected |
 
 ## Running the checks
 

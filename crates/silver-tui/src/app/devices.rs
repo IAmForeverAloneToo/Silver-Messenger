@@ -762,7 +762,6 @@ impl App {
                     },
                     None => (text, None),
                 };
-                let name = self.contact_name(&from);
                 let line = self.timed(
                     &conversation,
                     ChatLine {
@@ -785,7 +784,7 @@ impl App {
                 if shown {
                     self.note_read(&conversation, std::slice::from_ref(&id), now_ms());
                 } else {
-                    self.notifier.announce(&format!("New message from {name}"));
+                    self.notifier.announce();
                     self.unread.entry(from).or_default().push(id);
                 }
             }
