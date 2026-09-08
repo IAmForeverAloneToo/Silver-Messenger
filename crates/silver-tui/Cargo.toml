@@ -36,5 +36,12 @@ tempfile = "3"
 [target.'cfg(unix)'.dependencies]
 rlimit = "0.10"
 
+# Desktop notifications (docs/design/notifications.md): the session bus on
+# Linux, through the zbus the key store already links; a WinRT toast on
+# Windows. macOS uses `osascript` and needs nothing.
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.29", features = ["process"] }
+zbus = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+tauri-winrt-notification = { workspace = true }

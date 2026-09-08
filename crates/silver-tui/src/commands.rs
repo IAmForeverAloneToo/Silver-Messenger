@@ -105,8 +105,8 @@ pub const COMMANDS: &[CommandInfo] = &[
     cmd(
         "notify",
         &[],
-        "all|bell|off",
-        "bell and desktop notification for new messages, bell only, or nothing",
+        "all|terminal|desktop|bell|off",
+        "bell and a \"New message\" desktop notification (all: by the terminal or the desktop, whichever this terminal calls for), bell only, or nothing",
     ),
     cmd(
         "marks",

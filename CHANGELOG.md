@@ -4,6 +4,42 @@ Notable changes to Silver Messenger. Versions follow [semantic
 versioning](https://semver.org); while the major version is 0, a minor bump
 means behaviour or the wire protocol changed in a way worth reading about.
 
+## 0.13.0 - 2026-09-08
+
+### Added
+
+- Desktop notifications that reach the desktop. Since 0.4.0 a notification
+  was raised through the terminal alone -- OSC 777, 9 and 99 written to
+  stdout -- which the common terminals ignore, so on Windows Terminal, the
+  Windows console, Terminal.app, GNOME Terminal and every other VTE
+  terminal, Konsole and Alacritty `/notify all` was a bell and nothing
+  more. The client now asks the operating system itself where the
+  terminal will not: the session bus on Linux, through the `zbus` the key
+  store already links; `osascript` on macOS; a toast on Windows through
+  `tauri-winrt-notification`, the one crate this adds, gated to Windows.
+  Which path a run takes is decided once from the environment -- the
+  terminal's own sequences for the terminals that raise one and over SSH,
+  the desktop for the rest, both for a terminal the client does not
+  recognise -- and `/notify terminal` or `/notify desktop` forces one.
+  Inside tmux the sequences are wrapped in its passthrough. A machine
+  without a notification service is left alone for ten minutes after one
+  failed try, and the interface never waits for it. Design note
+  `docs/design/notifications.md`; roadmap item 59.
+
+### Changed
+
+- A notification says `New message` and nothing else, on every path, for
+  every event: not who wrote, not their alias or id, not a group's name,
+  not a word of content. Until now the terminal-raised toast on kitty,
+  iTerm2, WezTerm and foot named the sender, a contact request carried
+  the requester's id, and a group event its name. The call that raises a
+  notification takes no text at all now, so nothing about a message can
+  reach one by mistake later either. Everything that was in a
+  notification is still in the client: the System pane, the chat, the
+  unread count in the window title.
+- `/notify` gains `terminal` and `desktop`. `desktop`, which used to be
+  another word for `all`, now forces the operating system's path.
+
 ## 0.12.5 - 2026-09-08
 
 ### Fixed

@@ -502,6 +502,16 @@ conversation from the day it was linked, so one device taken exposes
 what you read on any of them, which is the price of having the message
 on every device and the reason to link only computers you keep.
 
+A desktop notification (0.13.0) says `Silver Messenger` and `New message`
+and nothing else, whichever path raises it — the terminal's own sequences
+or the operating system's notification service — so what a lock screen,
+a notification history or a glance at the screen learns is that a message
+arrived and when; never from whom, and never what. The call that raises
+one takes no text, so this holds by construction rather than by care. The
+unread count stays in the terminal's window title, which does not leave
+the terminal. Design note
+[docs/design/notifications.md](design/notifications.md).
+
 ### Holder of a compromised long-term Diffie–Hellman key
 
 Opens the sealed layer of every envelope ever sent to that user, which

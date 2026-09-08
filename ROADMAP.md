@@ -530,7 +530,7 @@ those who want to pay for it (46).
         disagreeing `SHA256SUMS`, an unsigned release, a redirect off the
         host and a package-managed binary are each refused with nothing
         left behind.
-59. [ ] **Desktop notifications that reach the desktop** (M). Item 15
+59. [x] **Desktop notifications that reach the desktop** (M). Item 15
         raised them through the terminal alone (OSC 777, 9 and 99), which
         the common terminals ignore, so on Windows Terminal, Terminal.app
         and every VTE terminal `all` was a bell and nothing more. The
@@ -542,6 +542,13 @@ those who want to pay for it (46).
         and nothing else, ever — no name, no id, no content — enforced by
         a raising call that takes no text. Design note
         [docs/design/notifications.md](docs/design/notifications.md).
+        Done in 0.13.0: the route from the environment with `/notify
+        terminal` and `/notify desktop` to force one, the three
+        platforms, the tmux wrapping, a failed service left alone for ten
+        minutes, and tests that every notification at a pty says the one
+        text and that each row of the environment table picks its path.
+        The desktop paths compile on every CI platform; that a toast
+        appears is checked by hand and recorded in `docs/TERMINALS.md`.
 
 ## Continuous
 

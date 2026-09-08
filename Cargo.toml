@@ -10,7 +10,7 @@ members = [
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.12.5"
+version = "0.13.0"
 edition = "2024"
 license = "AGPL-3.0-only"
 repository = "https://github.com/IAmForeverAloneToo/Silver-Messenger"
@@ -106,6 +106,10 @@ qrcode = { version = "0.14", default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
 open = "5"
+# The zbus version keyring already brings for the Secret Service, so the
+# notifications on Linux add no crate to the tree.
+zbus = "4.4"
+tauri-winrt-notification = "0.8"
 
 [profile.release]
 lto = "thin"

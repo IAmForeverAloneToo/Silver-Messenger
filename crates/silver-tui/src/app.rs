@@ -2422,15 +2422,16 @@ impl App {
         let mode = match args.first() {
             None => {
                 self.toast(format!(
-                    "Notifications: {}. Usage: /notify all|bell|off",
-                    self.notifier.mode().as_str()
+                    "Notifications: {}. Usage: /notify {}",
+                    self.notifier.mode().as_str(),
+                    NotifyMode::USAGE
                 ));
                 return;
             }
             Some(arg) => match NotifyMode::parse(arg) {
                 Some(mode) => mode,
                 None => {
-                    self.toast("Usage: /notify all|bell|off");
+                    self.toast(format!("Usage: /notify {}", NotifyMode::USAGE));
                     return;
                 }
             },
@@ -2441,14 +2442,17 @@ impl App {
         if let Err(e) = self.store.save_config(&config) {
             self.toast(format!("Could not save config: {e}"));
         }
-        self.system(
-            Level::Info,
-            match mode {
-                NotifyMode::All => "Notifications on: the terminal rings and, where it can, raises a desktop notification for messages you are not looking at. The window title shows the unread count.",
-                NotifyMode::Bell => "Notifications: bell only.",
-                NotifyMode::Off => "Notifications off. The window title still shows the unread count.",
-            },
-        );
+        let line = match mode {
+            NotifyMode::All => format!(
+                "Notifications on: the terminal rings for a message you are not looking at, and a desktop notification says \"New message\" and nothing else; here, {}. The window title shows the unread count.",
+                self.notifier.route().describe()
+            ),
+            NotifyMode::Terminal => "Notifications through this terminal's own sequences, whatever it is: the bell, and a \"New message\" notification where the terminal raises one.".to_owned(),
+            NotifyMode::Desktop => "Notifications from the desktop, whatever the terminal is: the bell, and a \"New message\" notification from the operating system.".to_owned(),
+            NotifyMode::Bell => "Notifications: bell only.".to_owned(),
+            NotifyMode::Off => "Notifications off. The window title still shows the unread count.".to_owned(),
+        };
+        self.system(Level::Info, line);
     }
 
     fn cmd_theme(&mut self, args: &[&str]) {
@@ -3496,7 +3500,7 @@ impl App {
                 if shown {
                     self.note_read(&conversation, std::slice::from_ref(&id), now_ms());
                 } else {
-                    self.notifier.announce(&format!("New message from {name}"));
+                    self.notifier.announce();
                 }
                 let wants = self.contacts[index].supports(capability::RECEIPTS);
                 if shown && wants && self.read_receipts {
@@ -4512,8 +4516,7 @@ impl App {
                 ),
             );
             self.toast(format!("Contact request from {}…", from.short()));
-            self.notifier
-                .announce(&format!("Contact request from {}…", from.short()));
+            self.notifier.announce();
         }
     }
 

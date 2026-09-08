@@ -61,7 +61,7 @@ def main():
     a.key(ESC)
     a.type("/notif")
     a.key(TAB)
-    assert a.input_line() == "/notify" and "/notify all|bell|off:" in a.status(), a.status()
+    assert a.input_line() == "/notify" and "/notify all|terminal|desktop|bell|off:" in a.status(), a.status()
     a.key(ESC)
     a.type("/send")
     time.sleep(0.3)

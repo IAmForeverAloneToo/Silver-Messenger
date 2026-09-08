@@ -1450,8 +1450,6 @@ impl App {
                     if self.arrived_deleted(&conversation, &id, Some(from)) {
                         continue;
                     }
-                    let name = self.member_name(&from);
-                    let group_name = self.group_name(&group);
                     let shown = self.selected_group() == Some(group) && self.focused;
                     let line = self.timed(
                         &conversation,
@@ -1473,8 +1471,7 @@ impl App {
                     if shown {
                         self.note_read(&conversation, std::slice::from_ref(&id), now_ms());
                     } else {
-                        self.notifier
-                            .announce(&format!("New message from {name} in {group_name}"));
+                        self.notifier.announce();
                         self.group_unread.entry(group).or_default().push(id);
                     }
                 }
@@ -1497,7 +1494,7 @@ impl App {
                     let name = self.group_name(&group);
                     let members = self.groups.get(&group).map_or(0, |r| r.identities().len());
                     self.system(Level::Info, format!("Joined {name} ({members} members)."));
-                    self.notifier.announce(&format!("Joined {name}"));
+                    self.notifier.announce();
                     self.group_unread
                         .entry(group)
                         .or_default()
@@ -1520,8 +1517,7 @@ impl App {
                                         held.members.len()
                                     ),
                                 );
-                                self.notifier
-                                    .announce(&format!("{inviter} added you to {}", held.name));
+                                self.notifier.announce();
                                 self.group_unread
                                     .entry(held.group)
                                     .or_default()
@@ -1539,7 +1535,7 @@ impl App {
                                 held.from, held.name, held.members.len()
                             ),
                         );
-                        self.notifier.announce(&format!("Invited to {}", held.name));
+                        self.notifier.announce();
                     }
                 }
                 GroupEvent::Removed { group, by } => {

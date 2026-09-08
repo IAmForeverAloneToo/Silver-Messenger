@@ -73,7 +73,7 @@ checksum, so what arrives is what the release page carries.
 ```sh
 brew tap iamforeveralonetoo/silver https://github.com/IAmForeverAloneToo/Silver-Messenger
 brew install silver-messenger                          # macOS and Linux (Homebrew)
-sudo apt install ./silver-messenger_0.12.5_amd64.deb   # Debian and Ubuntu, amd64 or arm64
+sudo apt install ./silver-messenger_0.13.0_amd64.deb   # Debian and Ubuntu, amd64 or arm64
 ```
 
 On Windows, on Arch, and anywhere else, take the one file for your
@@ -260,7 +260,7 @@ message dressed up to look like a saved file elsewhere opens nothing.
 | `/files encrypt on\|off`, `/files decrypt` | Keep received files as ciphertext (needs a protected data directory; `/open` still reads them), or write a plain copy of the last one |
 | `/search <text>`                | Find messages in the selected chat or group, or in every chat and group from System; it reads the history files, so lines older than the screen holds are found |
 | `/receipts on\|off`             | Tell contacts when you have read their messages (default on) |
-| `/notify all\|bell\|off`        | Bell and desktop notification, bell only, or nothing         |
+| `/notify all\|terminal\|desktop\|bell\|off` | Bell and a desktop notification (`all`: by the terminal or the desktop, whichever this terminal calls for; `terminal` or `desktop` forces one), bell only, or nothing |
 | `/marks ascii\|unicode\|auto`   | Draw the marks in ASCII if your terminal shows boxes for them |
 | `/theme dark\|light\|mono\|contrast` | Colours for a dark or a light background, none at all, or bright bold text on black for high contrast |
 | `/go <name>`                    | Open the chat whose name (or id) starts with `name`          |
@@ -306,9 +306,13 @@ click paste from the system clipboard, `Esc` clears the selection and then
 the input line, `Ctrl-Q` quits. Copies go to the system clipboard, or to
 the terminal's clipboard through OSC 52 over SSH and in tmux. Pasting keeps
 line breaks. New messages in chats you are not looking at ring the bell,
-raise a desktop notification where the terminal can (WezTerm, kitty, foot,
-iTerm2, rxvt and others; the notification never contains the message), and
-put the unread count in the window title; `/notify` adjusts that. If the
+raise a desktop notification — through the terminal where it raises one
+itself (WezTerm, kitty, foot, iTerm2, rxvt-unicode, and over SSH), and
+through the operating system everywhere else (Windows Terminal and the
+Windows console, Terminal.app, GNOME Terminal and every VTE terminal,
+Konsole, Alacritty) — and put the unread count in the window title;
+`/notify` adjusts that. A notification says `New message` and nothing
+else, ever: not who wrote, not what. If the
 terminal is narrower than 70 columns the list folds away and the chat title
 shows where you are. Everything the mouse does has a key or a command:
 `/go <name>` opens a chat by name and `/sidebar <columns>` resizes the
@@ -449,7 +453,7 @@ shorter path now that the relay is one file on it, and the better
 checked one, since the binary is covered by a list the project signs:
 
 ```sh
-v=0.12.5; t=x86_64-unknown-linux-musl
+v=0.13.0; t=x86_64-unknown-linux-musl
 base=https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/download/v$v
 curl -fsSLO "$base/silver-relay-v$v-$t" -O "$base/SHA256SUMS" -O "$base/SHA256SUMS.minisig"
 minisign -Vm SHA256SUMS -p minisign.pub          # the list is the project's
