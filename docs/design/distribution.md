@@ -139,13 +139,13 @@ warning; the `--help` of each is the reference for now.
 
 ## 6. Status
 
-As of 0.12.4:
+As of 0.12.5:
 
 | Channel | State |
 | --- | --- |
-| Debian package | `silver-messenger_0.12.4_amd64.deb` and `_arm64.deb` are on the release page, built by the release workflow from the Linux archives. The amd64 package was downloaded here for 0.10.0, matched `SHA256SUMS`, installed with `dpkg` on this machine (both binaries reported the release), and purged cleanly; `lintian` reports no errors. Not yet installed on a Debian machine with systemd running. |
-| Homebrew tap | Live for 0.12.4: the formula in this repository names the 0.12.4 binaries -- the client as its download, the relay as a resource -- and CI taps the repository on macOS, audits the formula, installs it from the release and runs its test on every push. Not yet tried by hand on a Mac. |
-| Release page | Fourteen files from 0.12.2: the client and the relay for each of the five targets, the two Debian packages, and `SHA256SUMS` with its signature. The notes lead with which file to take. Checked against the published 0.12.4: fourteen assets, and every file the notes name is one of them. |
+| Debian package | `silver-messenger_0.12.5_amd64.deb` and `_arm64.deb` are on the release page, built by the release workflow from the Linux archives. The amd64 package was downloaded here for 0.10.0, matched `SHA256SUMS`, installed with `dpkg` on this machine (both binaries reported the release), and purged cleanly; `lintian` reports no errors. Not yet installed on a Debian machine with systemd running. |
+| Homebrew tap | Live for 0.12.5: the formula in this repository names the 0.12.5 binaries -- the client as its download, the relay as a resource -- and CI taps the repository on macOS, audits the formula, installs it from the release and runs its test on every push. Not yet tried by hand on a Mac. |
+| Release page | Fourteen files from 0.12.2: the client and the relay for each of the five targets, the two Debian packages, and `SHA256SUMS` with its signature. The notes lead with which file to take. Checked against the published 0.12.5: fourteen assets, and every file the notes name is one of them. |
 | AUR and winget | Removed in 0.12.2. Both were written, linted in CI and regenerated at every release, and neither was ever installable: the AUR needs a push to `aur.archlinux.org` from the maintainer's account, and winget needs a pull request to `microsoft/winget-pkgs` per release. Neither had been done, so both were upkeep producing nothing. An Arch or Windows user takes the one file for their platform from the release page, which is the whole client. If either is ever wanted, the release page carries what a manifest would point at, and writing one again is an afternoon. |
 | Authenticode | No certificate in the secrets; the 0.12.1 run printed the notice and the Windows executables went out unsigned. |
 | Notarisation | No Apple membership in the secrets; the 0.12.1 run printed the notice and the macOS executables went out unsigned. |
