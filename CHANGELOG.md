@@ -4,6 +4,21 @@ Notable changes to Silver Messenger. Versions follow [semantic
 versioning](https://semver.org); while the major version is 0, a minor bump
 means behaviour or the wire protocol changed in a way worth reading about.
 
+## 0.12.5 - 2026-09-08
+
+### Fixed
+
+- `silver update` failed with "reading the answer: peer closed connection
+  without sending TLS close_notify" from behind a TLS-inspecting proxy,
+  the kind a workplace network runs. The update client asks over HTTP/1.0
+  and reads the answer until the connection closes; a server or a
+  middlebox that ends the body by closing the socket, without first
+  sending the TLS close_notify that rustls wants, made the read fail even
+  though the whole answer had already arrived. That close is now taken as
+  the end of the answer, which it is. Nothing is trusted more for it: a
+  release must still parse as JSON, and a download must still match
+  `SHA256SUMS` and its signature before it replaces anything.
+
 ## 0.12.4 - 2026-09-07
 
 ### Fixed

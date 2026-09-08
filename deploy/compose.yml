@@ -19,7 +19,7 @@
 
 services:
   relay:
-    image: ghcr.io/iamforeveralonetoo/silver-relay:0.12.4
+    image: ghcr.io/iamforeveralonetoo/silver-relay:0.12.5
     restart: unless-stopped
     ports:
       - "443:443"
