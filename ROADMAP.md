@@ -550,6 +550,26 @@ those who want to pay for it (46).
         The desktop paths compile on every CI platform; that a toast
         appears is checked by hand and recorded in `docs/TERMINALS.md`.
 
+60. [ ] **Requests, and naming people** (M). A contact's id could not be
+        copied and the header that shows it could not be selected, so
+        every command that wanted an id was hard to use; the numbers
+        `/accept` and `/block` took lived in one Requests pane and shifted
+        as it changed; a request could not be dealt with from where it
+        was read; and there was no way to turn a stranger down short of
+        blocking them. A request becomes a chat not yet answered: an
+        entry of its own in the sidebar, showing the stranger's id and
+        nothing they chose, where `/accept`, `/decline` and `/block` take
+        no argument and a typed reply accepts. Decline is *not now* where
+        block is *never*: the sender learns nothing either way, and a
+        declined stranger who writes again reappears without ringing.
+        The bell and the desktop notification are raised for a message
+        received and for nothing else. One resolver -- alias, id, unique
+        id prefix, or the selected chat -- under every command that names
+        a person; `/copy id <who>`, `/whois`, a click on the title that
+        copies the id, Tab completion of aliases and group names; numbers
+        that hold still. Design note
+        [docs/design/requests.md](docs/design/requests.md).
+
 ## Continuous
 
 - [ ] Every new parser gets a fuzz target; the terminal matrix, the
