@@ -119,6 +119,11 @@ everyone. Within it, in order of certainty: the fixed text and the
 no-text API (a change every platform gets, and the strictest part);
 the path choice and the tmux wrapping; Linux over the bus already linked;
 macOS through the constant script; Windows through the gated crate, kept
-only if `cargo deny` and the size measurement allow. The Windows
-executable's size before and after is recorded here once the release is
-out.
+only if `cargo deny` and the size measurement allow.
+
+Measured on the release. `cargo deny` stayed clean: the crate's one
+dependency of weight, `windows`, is the version already in the tree, so
+nothing was duplicated. `silver-v0.13.0-x86_64-pc-windows-msvc.exe` is
+13,222,912 bytes against 13,180,928 for `silver-v0.12.5`, 41,984 bytes
+more for the whole item -- the crate, the route, the tmux wrapping and
+the rest together -- so the crate stays.
