@@ -184,20 +184,12 @@ fn go_back(exe: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Ask, unless told not to.
+/// Ask, unless told not to. No one there to answer is a no.
 fn confirm(release: &Release, current: &str) -> anyhow::Result<bool> {
-    use std::io::{BufRead, Write};
-    print!(
-        "Replace Silver Messenger {current} with {}? [y/N] ",
+    crate::yes_no(&format!(
+        "Replace Silver Messenger {current} with {}? [y/N]",
         release.version()
-    );
-    std::io::stdout().flush().ok();
-    let mut line = String::new();
-    if std::io::stdin().lock().read_line(&mut line)? == 0 {
-        // No one is there to answer, so nothing is assumed.
-        return Ok(false);
-    }
-    Ok(matches!(line.trim(), "y" | "Y" | "yes" | "Yes"))
+    ))
 }
 
 /// The releases page is asked at most once a day, and only when the

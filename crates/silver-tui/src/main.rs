@@ -840,6 +840,29 @@ fn new_passphrase(secrets: &mut EnvSecrets) -> anyhow::Result<Zeroizing<String>>
     }
 }
 
+/// Ask a yes-or-no question at the terminal and read the answer as it is
+/// typed, in the open: `y` or `yes` in any case is yes, anything else is
+/// no, and so is nobody answering (end of input). A passphrase is read
+/// hidden; an answer to a question is not, or it looks unanswered.
+pub(crate) fn yes_no(prompt: &str) -> anyhow::Result<bool> {
+    use std::io::Write;
+    print!("{prompt} ");
+    std::io::stdout().flush()?;
+    yes_no_from(std::io::stdin().lock())
+}
+
+/// [`yes_no`] read from `input`, which is what makes it testable.
+fn yes_no_from(mut input: impl std::io::BufRead) -> anyhow::Result<bool> {
+    let mut line = String::new();
+    if input.read_line(&mut line)? == 0 {
+        return Ok(false);
+    }
+    Ok(matches!(
+        line.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
 /// First run, at a terminal: ask whether this computer should join an
 /// identity kept elsewhere instead of starting one. Scripts and tests,
 /// which give no terminal, start one.
@@ -850,12 +873,7 @@ fn offer_link(secrets: &EnvSecrets) -> anyhow::Result<bool> {
     println!("This is a new installation. If you already use Silver Messenger on another");
     println!("computer, this one can become a device of that identity: it gets the same");
     println!("contacts, and messages reach both. Otherwise it starts an identity of its own.");
-    let answer =
-        rpassword::prompt_password("Link this computer to an identity you already have? [y/N] ")?;
-    Ok(matches!(
-        answer.trim().to_ascii_lowercase().as_str(),
-        "y" | "yes"
-    ))
+    yes_no("Link this computer to an identity you already have? [y/N]")
 }
 
 /// First run: offer to protect the brand-new data directory.
@@ -890,4 +908,32 @@ fn offer_passphrase(store: &mut Store, secrets: &EnvSecrets) -> anyhow::Result<(
     store.set_passphrase(&first)?;
     println!("Encrypted. Keep the passphrase safe: without it this identity cannot be recovered.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::yes_no_from;
+
+    #[test]
+    fn a_yes_is_y_or_yes_in_any_case_and_nothing_else_is() {
+        for yes in ["y\n", "Y\n", "yes\n", "YES\r\n", "  yes  \n", "y"] {
+            assert!(yes_no_from(yes.as_bytes()).unwrap(), "{yes:?}");
+        }
+        for no in [
+            "n\n", "N\n", "no\n", "\n", "\r\n", " \n", "yeah\n", "ye\n", "y n\n",
+        ] {
+            assert!(!yes_no_from(no.as_bytes()).unwrap(), "{no:?}");
+        }
+    }
+
+    #[test]
+    fn nobody_answering_is_no() {
+        assert!(!yes_no_from("".as_bytes()).unwrap());
+    }
+
+    #[test]
+    fn the_first_line_is_the_answer() {
+        assert!(!yes_no_from("n\ny\n".as_bytes()).unwrap());
+        assert!(yes_no_from("y\nn\n".as_bytes()).unwrap());
+    }
 }
