@@ -530,6 +530,18 @@ those who want to pay for it (46).
         disagreeing `SHA256SUMS`, an unsigned release, a redirect off the
         host and a package-managed binary are each refused with nothing
         left behind.
+59. [ ] **Desktop notifications that reach the desktop** (M). Item 15
+        raised them through the terminal alone (OSC 777, 9 and 99), which
+        the common terminals ignore, so on Windows Terminal, Terminal.app
+        and every VTE terminal `all` was a bell and nothing more. The
+        client asks the operating system itself where the terminal will
+        not: the session bus on Linux through the `zbus` already linked,
+        `osascript` on macOS, a WinRT toast on Windows; the terminal path
+        stays for the terminals that raise one and for SSH, and the
+        sequences pass through tmux. The notification says `New message`
+        and nothing else, ever — no name, no id, no content — enforced by
+        a raising call that takes no text. Design note
+        [docs/design/notifications.md](docs/design/notifications.md).
 
 ## Continuous
 
