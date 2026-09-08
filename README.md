@@ -85,32 +85,32 @@ installs the relay's systemd unit without enabling it;
 
 ### Verifying a release
 
-Every release page carries, next to the archives, a `SHA256SUMS` file, a
-CycloneDX SBOM per binary and a `BUILD-INFO.txt` per target naming the
-compiler and the flags the binaries were built with; every file has a
-build provenance attestation from GitHub. To check a download:
+A release page carries the client and the relay for each platform, the
+two Debian packages, and `SHA256SUMS` with the project's signature over
+it; every file has a build provenance attestation from GitHub. The
+workflow run that built the release keeps an archive per target among
+its artifacts, with a CycloneDX SBOM per binary and a `BUILD-INFO.txt`
+naming the compiler and the flags the binaries were built with. To check
+a download:
 
 ```sh
-sha256sum -c SHA256SUMS --ignore-missing          # the archive is what was published
-gh attestation verify silver-messenger-*.tar.gz --owner IAmForeverAloneToo   # ...by the release workflow, from the tagged commit
+minisign -Vm SHA256SUMS -p minisign.pub           # the list is the project's; the key is at the repository root
+sha256sum -c SHA256SUMS --ignore-missing          # the file is what was published
+gh attestation verify silver-v* --owner IAmForeverAloneToo   # ...by the release workflow, from the tagged commit
 cargo audit bin silver                            # the dependencies inside the binary, against the advisory database
 ```
 
-The attestation is what says the file came from this project: it names
-the repository, the tagged commit and the workflow that built it, and
-GitHub's transparency log holds the record. **There is no maintainer
-signature today** — the repository publishes no `minisign.pub`, so
-`SHA256SUMS` goes out unsigned and the workflow says so on the release
-page. When a release does carry `SHA256SUMS.minisig`, `minisign -Vm
-SHA256SUMS -p minisign.pub` checks it against the key in this repository,
-and that is a second, separate root of trust only when the key is held
-outside GitHub (see "Signing releases" below).
+The signature is what says the list came from this project, from a key
+held outside GitHub (see "Signing releases" below). The attestation is
+what says the file was built by the release workflow from the tagged
+commit, and GitHub's transparency log holds that record. The two are
+separate roots of trust. Releases before 0.12.0 carry no signature.
 
 The binaries are reproducible: build the tagged commit yourself and the
 bytes match (CI does this twice on every push for Linux and fails when
 they differ). The compiler is part of that, so it is pinned in
-`rust-toolchain.toml` at the tag and named in the release's
-`BUILD-INFO.txt`; rustup picks it up from the file on its own. From a
+`rust-toolchain.toml` at the tag and named in the `BUILD-INFO.txt` the
+run's archives carry; rustup picks it up from the file on its own. From a
 fresh clone at the tag, on Linux:
 
 ```sh
@@ -124,7 +124,7 @@ A signed Windows or macOS executable (the release notes say whether a
 release is signed) differs from a rebuild by its signature alone: strip
 it and compare (`osslsigncode remove-signature -in silver.exe -out
 plain.exe` on any platform, `codesign --remove-signature silver` on a
-Mac). The Linux archives, the Debian packages and the container image
+Mac). The Linux binaries, the Debian packages and the container image
 carry no embedded signature and reproduce byte for byte.
 
 ### Updating
@@ -837,17 +837,20 @@ digest, and the compiler to an exact version; the OpenSSF Scorecard runs
 weekly.
 
 Pushing a `v*` tag (or running the release workflow with a tag) builds
-the archives for all platforms with `cargo auditable`, attaches a CycloneDX
-SBOM per binary, writes `SHA256SUMS` and a `BUILD-INFO.txt` covering every target,
-attests the build provenance, and publishes it all on the releases page, together
-with the relay's installer so operators can check it before running it.
+the two programs for all platforms with `cargo auditable`, writes a
+CycloneDX SBOM per binary and a `BUILD-INFO.txt` per target into an
+archive the run keeps as an artifact, publishes the binaries, the Debian
+packages and `SHA256SUMS` with its signature on the release page, and
+attests the provenance of every file there. The notes point a relay's
+operator at `deploy/install.sh` in the repository, to read before running.
 
 A release page leads with which file to take: for most people that is the
 bare `silver-v<version>-<target>`, which is the whole client in one file —
 make it executable and run it. The `silver-messenger-v<version>-<target>`
-archives hold the same client with the relay, the SBOMs, the changelog and
-the licence beside it; the SBOMs live in the archive rather than loose on
-the page (`tar xzf <archive> --wildcards '*/sbom/*'` gets them).
+archives, kept as artifacts of the workflow run rather than on the page,
+hold the same client with the relay, the SBOMs, the build record, the
+changelog and the licence beside it (`tar xzf <archive> --wildcards
+'*/sbom/*'` gets the SBOMs).
 
 **Signing releases.** `SHA256SUMS` is signed with the project's minisign
 key, whose public half is `minisign.pub` at the repository root. Check a

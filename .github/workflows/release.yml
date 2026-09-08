@@ -19,8 +19,9 @@ name: Release binaries
 #     repository (packaging/new-signing-key.sh sets both up). The client
 #     checks an update against that signature; a person checks a download
 #     against it (README, "Signing releases");
-#   * one BUILD-INFO.txt naming, for every target, the compiler, the commit
-#     and the flags, so a build can be repeated years later;
+#   * a BUILD-INFO.txt per target, inside the archive the run keeps as an
+#     artifact, naming the compiler, the commit and the flags, so a build
+#     can be repeated years later;
 #   * `silver` and `silver-relay` for each target, one file each: what a
 #     release page carries, what `silver update` fetches, and the simplest
 #     thing for a person to download;
@@ -217,10 +218,6 @@ jobs:
             printf 'rustflags: --remap-path-prefix=<workspace>=/src --remap-path-prefix=<cargo home>=/cargo\n'
             printf 'command: cargo auditable build --release --locked --workspace --target %s\n' "${{ matrix.target }}"
           } > "dist/$name/BUILD-INFO.txt"
-          # Kept aside for the one combined BUILD-INFO.txt the release
-          # job writes: five separate ones were five rows of a release
-          # page for a file most people never open.
-          cp "dist/$name/BUILD-INFO.txt" "dist/build-info-${{ matrix.target }}.part"
           # The SBOMs go inside the archive. They used to be published
           # loose beside it as well, which was ten more rows on every
           # release page for something read by tooling that can unpack a
@@ -316,7 +313,6 @@ jobs:
       - name: Only the program
         run: |
           cd dist
-          rm -f -- *.cdx.json build-info-*.part BUILD-INFO.txt
           rm -f -- *.tar.gz *.zip
           echo "what the release will carry:"
           ls -la
@@ -434,9 +430,11 @@ jobs:
           sha256sum -c --ignore-missing SHA256SUMS  # your file is on the list
           \`\`\`
 
-          \`minisign.pub\` is at the root of the repository. \`BUILD-INFO.txt\` names
-          the compiler, commit and flags each binary was built with, so the build
-          can be repeated. Every file also carries a GitHub build provenance
+          \`minisign.pub\` is at the root of the repository. The workflow run that
+          built this release keeps an archive per target among its artifacts, with
+          the SBOM and a \`BUILD-INFO.txt\` naming the compiler, commit and flags the
+          binaries were built with, so the build can be repeated. Every file on
+          this page also carries a GitHub build provenance
           attestation: \`gh attestation verify <file> --owner IAmForeverAloneToo\`.
 
           </details>
