@@ -550,7 +550,7 @@ those who want to pay for it (46).
         The desktop paths compile on every CI platform; that a toast
         appears is checked by hand and recorded in `docs/TERMINALS.md`.
 
-60. [ ] **Requests, and naming people** (M). A contact's id could not be
+60. [x] **Requests, and naming people** (M). A contact's id could not be
         copied and the header that shows it could not be selected, so
         every command that wanted an id was hard to use; the numbers
         `/accept` and `/block` took lived in one Requests pane and shifted
@@ -568,7 +568,15 @@ those who want to pay for it (46).
         a person; `/copy id <who>`, `/whois`, a click on the title that
         copies the id, Tab completion of aliases and group names; numbers
         that hold still. Design note
-        [docs/design/requests.md](docs/design/requests.md).
+        [docs/design/requests.md](docs/design/requests.md). Done in
+        0.14.0: the chat list is a list of panes with the waiting entries
+        at its end and scrolls to the selection; `/requests`, `/whois`,
+        `/copy id <who>`, `/decline`, the quiet rule for a declined
+        stranger, the ringing rule, and the resolver under every command
+        that names a person, with unit tests for each and a terminal test
+        that walks a request through decline, the quiet return, a typed
+        reply, `/whois`, the completed `/copy id`, the title click,
+        `/block` and `/unblock`.
 
 ## Continuous
 

@@ -50,21 +50,22 @@ impl App {
 
     /// The group whose pane is selected, if a group's is.
     pub fn selected_group(&self) -> Option<GroupId> {
-        let index = self.selected.checked_sub(1 + self.contacts.len())?;
-        self.group_list.get(index).copied()
+        match self.selected_pane() {
+            super::Pane::Group(group) => Some(group),
+            _ => None,
+        }
     }
 
     /// The pane index of `group`, if it is listed.
     fn group_pane(&self, group: &GroupId) -> Option<usize> {
-        self.group_list
-            .iter()
-            .position(|g| g == group)
-            .map(|i| i + 1 + self.contacts.len())
+        self.pane_index(super::Pane::Group(*group))
     }
 
     /// The groups the chat list shows: everything but invitations, oldest
-    /// first.
+    /// first. The selection follows its pane through the change; one
+    /// whose pane went lands on the last entry.
     pub(super) fn refresh_group_list(&mut self) {
+        let before = self.selected_pane();
         let mut groups: Vec<(u64, GroupId)> = self
             .groups
             .list()
@@ -76,7 +77,10 @@ impl App {
         for group in &self.group_list {
             self.group_threads.entry(*group).or_default();
         }
-        self.selected = self.selected.min(self.pane_count() - 1);
+        self.number_waiting();
+        self.selected = self
+            .pane_index(before)
+            .unwrap_or_else(|| self.selected.min(self.pane_count() - 1));
     }
 
     pub fn group_name(&self, group: &GroupId) -> String {
@@ -129,7 +133,8 @@ impl App {
         }
     }
 
-    /// Group invitations waiting for a yes or a no, for the Requests pane.
+    /// Group invitations waiting for a yes or a no, each an entry of the
+    /// chat list (`docs/design/requests.md`).
     pub fn invitations(&self) -> Vec<silver_client::HeldWelcome> {
         self.groups.invitations()
     }
@@ -213,33 +218,13 @@ impl App {
         }
     }
 
-    /// A contact by alias, id or unique id prefix.
-    fn resolve_contact(&self, who: &str) -> Option<usize> {
-        let who = who.trim();
-        if who.is_empty() {
-            return None;
-        }
-        if let Some(i) = self.contacts.iter().position(|c| {
-            c.alias
-                .as_deref()
-                .is_some_and(|a| a.eq_ignore_ascii_case(who))
-        }) {
-            return Some(i);
-        }
-        if let Ok(id) = who.parse::<UserId>() {
-            return self.contact_index(&id);
-        }
-        let matches: Vec<usize> = self
-            .contacts
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| c.user_id.to_string().starts_with(who))
-            .map(|(i, _)| i)
-            .collect();
-        match matches.as_slice() {
-            [one] => Some(*one),
-            _ => None,
-        }
+    /// A contact by alias, id or unique id prefix, through the one
+    /// resolver every command that names a person uses; the reason when
+    /// none.
+    fn resolve_contact(&self, who: &str) -> Result<usize, String> {
+        let id = self.resolve_person(who, super::People::Contacts)?;
+        self.contact_index(&id)
+            .ok_or_else(|| "No such contact; /add them first.".to_owned())
     }
 
     /// A member of `group` by alias, id or unique id prefix.
@@ -284,9 +269,12 @@ impl App {
         if !self.relay_serves_groups() {
             return;
         }
-        let Some(index) = self.resolve_contact(&args.join(" ")) else {
-            self.toast("No such contact; /add them first.");
-            return;
+        let index = match self.resolve_contact(&args.join(" ")) {
+            Ok(index) => index,
+            Err(why) => {
+                self.toast(why);
+                return;
+            }
         };
         let contact = &self.contacts[index];
         let name = contact.display_name();
@@ -717,15 +705,15 @@ impl App {
         }
     }
 
-    /// `/accept g<n>`: say yes to an invitation.
-    pub(super) fn accept_invitation(&mut self, n: usize) {
-        let invitations = self.invitations();
-        let Some(held) = n.checked_sub(1).and_then(|i| invitations.get(i)).cloned() else {
-            self.toast("No such invitation; the Requests pane numbers them g1, g2…");
+    /// Say yes to the invitation to `group`: join it, and open its pane.
+    pub(super) fn accept_invitation_of(&mut self, group: GroupId) {
+        let Some(held) = self.invitations().into_iter().find(|h| h.group == group) else {
+            self.toast("That invitation is no longer waiting; /requests lists what is.");
             return;
         };
         match self.groups.accept_welcome(&held.group) {
             Ok(()) => {
+                self.forget_declined(&held.from);
                 self.refresh_group_list();
                 self.note_in_group(
                     held.group,
@@ -743,23 +731,28 @@ impl App {
         }
     }
 
-    pub(super) fn cmd_decline(&mut self, args: &[&str]) {
-        let Some(n) = args
-            .first()
-            .and_then(|a| a.trim_start_matches(['g', 'G']).parse::<usize>().ok())
-        else {
-            self.toast("Usage: /decline g<n> (see the Requests pane)");
-            return;
-        };
-        let invitations = self.invitations();
-        let Some(held) = n.checked_sub(1).and_then(|i| invitations.get(i)).cloned() else {
-            self.toast("No such invitation; the Requests pane numbers them g1, g2…");
+    /// Say no to the invitation to `group`: *not now*. Nothing is sent,
+    /// and the inviter's next one waits without ringing.
+    pub(super) fn decline_invitation_of(&mut self, group: GroupId) {
+        let Some(held) = self.invitations().into_iter().find(|h| h.group == group) else {
+            self.toast("That invitation is no longer waiting; /requests lists what is.");
             return;
         };
         match self.groups.decline_welcome(&held.group) {
             Ok(()) => {
+                self.note_declined(held.from);
                 self.refresh_group_list();
-                self.toast(format!("Declined {}.", held.name));
+                self.select(0);
+                self.system(
+                    Level::Info,
+                    format!(
+                        "Declined the invitation to {} from {}… ({}); nothing was sent. Their next one waits without ringing; /block {} would drop it unseen.",
+                        held.name,
+                        held.from.short(),
+                        held.from,
+                        held.from
+                    ),
+                );
             }
             Err(e) => self.toast(format!("Could not decline: {e}")),
         }
@@ -1494,7 +1487,6 @@ impl App {
                     let name = self.group_name(&group);
                     let members = self.groups.get(&group).map_or(0, |r| r.identities().len());
                     self.system(Level::Info, format!("Joined {name} ({members} members)."));
-                    self.notifier.announce();
                     self.group_unread
                         .entry(group)
                         .or_default()
@@ -1509,6 +1501,8 @@ impl App {
                             Ok(()) => {
                                 self.refresh_group_list();
                                 self.note_in_group(held.group, &format!("{inviter} added you"));
+                                // Being added rings nothing: only a message
+                                // does (docs/design/requests.md).
                                 self.system(
                                     Level::Info,
                                     format!(
@@ -1517,7 +1511,6 @@ impl App {
                                         held.members.len()
                                     ),
                                 );
-                                self.notifier.announce();
                                 self.group_unread
                                     .entry(held.group)
                                     .or_default()
@@ -1528,14 +1521,21 @@ impl App {
                     } else if self.blocked.contains(&held.from) {
                         let _ = self.groups.decline_welcome(&held.group);
                     } else {
+                        // An invitation waits as an entry of the chat list
+                        // and rings nothing, whoever sent it.
+                        self.number_waiting();
+                        let n = self
+                            .number_of(super::Pane::Invitation(held.group))
+                            .unwrap_or(0);
                         self.system(
                             Level::Info,
                             format!(
-                                "{inviter} ({}) invites you to the group {} ({} members); the Requests pane has it (/accept g1 or /decline g1).",
-                                held.from, held.name, held.members.len()
+                                "{inviter} ({}) invites you to the group {} ({} members), number {n}: it is in the chat list; open it, or /accept {n} or /decline {n}.",
+                                held.from,
+                                held.name,
+                                held.members.len()
                             ),
                         );
-                        self.notifier.announce();
                     }
                 }
                 GroupEvent::Removed { group, by } => {

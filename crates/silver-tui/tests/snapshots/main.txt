@@ -2,8 +2,8 @@
 │ System                 ││─────────────────────── Wednesday 1 January 2025 ───────────────────────│
 │ ✓ bob                  ││hh:mm you ✓✓: hello bob                                                 │
 │ <short>…            1 ││hh:mm bob: hi alice, this is a longer message that has to wrap onto a   │
-│ Requests             1 ││           second row so the hanging indent shows                       │
-│                        ││hh:mm you ⋯: [file] photo.jpg (1.2 MiB)                                 │
+│─────── requests ───────││           second row so the hanging indent shows                       │
+│ ? <short>…          1 ││hh:mm you ⋯: [file] photo.jpg (1.2 MiB)                                 │
 │                        ││                                                                        │
 │                        ││                                                                        │
 │                        ││                                                                        │

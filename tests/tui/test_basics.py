@@ -14,10 +14,18 @@ def main():
     # A stranger's message gets no receipt: one mark only.
     time.sleep(1.5)
     assert a.wait_marks("hello bob", G.accepted), "stranger got a receipt?"
+    # The request is an entry of its own: Shift-Tab lands on it, its title
+    # says who and that they are not a contact, and a bare /accept there
+    # takes it.
     b.key(SHIFT_TAB)
-    assert b.wait("People who wrote to you"), "requests pane"
-    b.type("/accept 1\r")
-    assert b.wait("hello bob"), "accepted message moves into the chat"
+    # The title is cut to the pane's width, so only the start of the id
+    # is certain to show.
+    assert b.wait(f" request 1 · not a contact · {pair.a_id[:20]}"), "the request's pane"
+    assert b.has("? " + pair.a_id[:8]), "listed by id, marked a stranger"
+    assert b.has("hello bob"), "every held message is readable there"
+    b.type("/accept\r")
+    assert b.wait(f" {pair.a_id[:8]}… · {pair.a_id} · "), "the chat opens on acceptance"
+    assert b.has("hello bob"), "accepted message moves into the chat"
     b.type("/alias alice\r")
     b.type("hi alice\r")
     assert a.wait("hi alice"), "reply"

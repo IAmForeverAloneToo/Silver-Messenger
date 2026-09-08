@@ -4,6 +4,56 @@ Notable changes to Silver Messenger. Versions follow [semantic
 versioning](https://semver.org); while the major version is 0, a minor bump
 means behaviour or the wire protocol changed in a way worth reading about.
 
+## 0.14.0 - 2026-09-08
+
+### Added
+
+- Requests are chats you have not answered yet. A message from someone
+  who is not a contact is an entry of its own at the bottom of the chat
+  list, marked `?` and named by their id and nothing they chose; open it
+  and every message they sent is there, not the last three. On it,
+  `/accept`, `/decline` and `/block` take no argument, and a typed reply
+  accepts and sends. A group invitation from a stranger is an entry in
+  the same way. The one Requests pane, with its numbered list of everyone
+  waiting, is gone; `/requests` prints that list into the System pane.
+  The chat list scrolls to keep the selected entry on screen. Design
+  note `docs/design/requests.md`; roadmap item 60.
+- `/decline`: *not now*, where `/block` is *never*. The request and its
+  messages go and the sender is told nothing, exactly as with a block;
+  if they write again the request comes back, without a bell or a
+  notification, until you accept them. Who you declined is remembered
+  on this device (`declined.json`, at most two hundred) and forgotten
+  when you accept or block them. An invitation is declined the same way,
+  and its inviter's next one is quiet too.
+- One way of naming a person under every command that takes one: an
+  alias, the full id, or enough of the id to be one person's; with
+  nothing given, the open chat. `/block`, `/unblock`, `/accept`,
+  `/decline`, `/go`, `/group add`, `/group remove`, `/group admin`,
+  `/copy id` and `/whois` all use it, and an ambiguous prefix says who
+  it matched instead of guessing.
+- `/copy id <who>` copies a contact's id, and a click on the title of a
+  chat or a request copies the id shown there, since the title cannot be
+  selected. `/whois [who]` prints a person's id, alias, verification
+  state and how messages with them are protected into the System pane
+  as ordinary selectable text. Tab completes contact aliases after every
+  command that names a person, and group names too after `/go`.
+
+### Changed
+
+- The bell and the desktop notification are raised for a message
+  received, and for nothing else: a message in a chat, in a group, from
+  a stranger (their first), or reaching this device through a linked
+  one. A group invitation, being added to a group and joining one by
+  link no longer ring; they are in the System pane and the chat list. A
+  stranger can ring the terminal once, and not again once declined.
+- The numbers `/accept`, `/decline` and `/block` take hold still. A
+  request or invitation is numbered when first seen, in one sequence for
+  both kinds, and keeps its number until it is handled; a number is not
+  reused within a run, so the one in the arrival line stays true.
+  `/accept 3` takes entry 3 whichever kind it is; `/accept g3` takes it
+  only if it is an invitation. `/unblock` takes enough of an id to be
+  one of the blocked ones.
+
 ## 0.13.0 - 2026-09-08
 
 ### Added
