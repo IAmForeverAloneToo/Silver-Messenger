@@ -1828,12 +1828,30 @@ its own:
 
 ```json
 { "account": "<user id>", "device": "<device id>", "created_at_ms": n,
-  "name": "laptop", "signature": "<b64 64 bytes>" }
+  "name": "laptop", "signature": "<b64 64 bytes>",
+  "device_signature": "<b64 64 bytes>" }
 ```
 
 with `signature = sign("silver-messenger/v5/device", account (32) ||
 device (32) || created_at_ms (8 BE) || name length (1) || name)`, raw
-key bytes, and `name` the owner's name for the device: at most 32 bytes
+key bytes,
+
+`device_signature` is the *device's* signature over the same bytes,
+under `"silver-messenger/v5/device-countersignature"`. The account's
+signature proves the account meant to enroll a device; it does not prove
+the device agreed, because an account can certify any public key it can
+name. A device adds this when it accepts the provisioning message (14.3)
+and presents the counter-signed certificate from then on, so an account
+cannot enroll a key its holder never offered. A domain of its own, so
+neither key's signature over these bytes can be lifted into the other's
+place. The field is absent from certificates minted before it existed
+and from clients that do not write it, and such a certificate verifies
+on the account's signature alone; one that carries a *wrong* device
+signature is refused. It becomes required a release after every client
+in use is writing it. The account's signed device list (14.1 below)
+keeps the certificate as the account minted it, since the account's
+signature covers that list whole; the counter-signed form is what the
+device itself presents. and `name` the owner's name for the device: at most 32 bytes
 of UTF-8 without control characters, left out of the JSON when empty. A
 name is refused when it is chosen if it carries any of the invisible
 characters of 4.7 (zero-width spaces, the bidi embeddings and overrides,

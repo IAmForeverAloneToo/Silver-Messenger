@@ -712,9 +712,18 @@ pub async fn take_link(
             _ => {}
         }
     };
+    // The account's signature says the account meant to enroll a device;
+    // it does not say this device offered its key, because an account can
+    // certify any public key it can name. This device signs its own
+    // certificate before adopting it, and presents the counter-signed
+    // form from here on, so what it hands to peers carries both halves.
+    let certificate = client
+        .identity()
+        .countersign_device(&provisioning.certificate)
+        .map_err(|e| LinkError::Client(e.to_string()))?;
     let linked = Linked {
         account: provisioning.account,
-        certificate: provisioning.certificate.clone(),
+        certificate: certificate.clone(),
     };
     devices
         .lock()
@@ -728,7 +737,7 @@ pub async fn take_link(
     client.republish().await?;
     Ok(Taken {
         account: provisioning.account,
-        certificate: provisioning.certificate,
+        certificate,
         snapshot: provisioning.snapshot,
     })
 }

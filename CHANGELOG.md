@@ -48,6 +48,20 @@ nothing else -- and carried by whatever comes after it.
   A file longer than the record says is the ordinary interrupted append
   and is read, for the same reason a whole file one generation ahead is:
   a line that opens where it sits is one somebody encrypted there.
+- A device signs its own certificate. The account's signature says the
+  account meant to enroll a device; it says nothing about whether the
+  device agreed, because an account can certify any public key it can
+  name -- so an account could list a stranger's key as one of its own,
+  and the stranger's contacts would see it vouched for. A device now
+  counter-signs the certificate when it accepts the provisioning message
+  and presents the counter-signed form from then on, under a signing
+  domain of its own so neither key's signature over those bytes can be
+  lifted into the other's place. A certificate without the field
+  verifies on the account's signature alone, so clients that do not
+  write it yet keep working; one carrying a *wrong* device signature is
+  refused. Required a release later, as the design note schedules. The
+  account's signed device list keeps the certificate as the account
+  minted it, the account's signature covering that list whole.
 - A message carries its own id inside the body, where the AEAD covers it
   (SM-P-14, from the first review). The envelope's id is chosen after the
   ciphertext is made and no signature or AEAD reaches it, so a relay

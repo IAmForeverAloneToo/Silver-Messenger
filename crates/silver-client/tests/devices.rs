@@ -676,22 +676,46 @@ async fn a_device_links_by_its_link_and_takes_the_snapshot() {
     assert_eq!(certificate.account, alice.user_id());
     assert_eq!(certificate.device, laptop.user_id());
     assert_eq!(certificate.name, "laptop");
+    // What the account minted carries the account's signature alone: the
+    // account cannot produce the device's. What the device adopted is the
+    // same certificate with its own signature added, which is what says
+    // the device offered its key rather than having one attributed to it.
+    assert!(
+        !certificate.is_countersigned(),
+        "an account cannot sign for the device"
+    );
+    assert!(
+        taken.certificate.is_countersigned(),
+        "the device should have signed its own certificate before adopting it"
+    );
+    taken.certificate.verify().expect("both signatures verify");
     assert_eq!(
         taken,
         Taken {
             account: alice.user_id(),
-            certificate: certificate.clone(),
+            certificate: DeviceCertificate {
+                device_signature: taken.certificate.device_signature,
+                ..certificate.clone()
+            },
             snapshot: Some(info),
         }
     );
-    // On both disks the laptop is alice's now.
+    // On both disks the laptop is alice's now. The laptop keeps the
+    // certificate it signed; alice's copy is the one she minted, which
+    // she has no way to counter-sign.
+    let countersigned = taken.certificate.clone();
     assert_eq!(
         laptop_store.load_linked().unwrap(),
         Some(Linked {
             account: alice.user_id(),
-            certificate: certificate.clone(),
+            certificate: countersigned.clone(),
         })
     );
+    // The device *list* stays as the account signed it: it is the
+    // account's statement about its devices, and the account's signature
+    // covers it whole. What the laptop counter-signed is the certificate
+    // it presents for itself, which is `Linked` above and what goes in
+    // every body it sends.
     assert_eq!(
         laptop_store.load_devices().unwrap().devices,
         vec![certificate.clone()]

@@ -103,3 +103,31 @@ pub mod b64_array {
             .map_err(|_| serde::de::Error::custom(format!("expected {N} bytes, got {}", v.len())))
     }
 }
+
+/// [`b64_array`] for an optional fixed-size array: a field that a version
+/// before it existed does not write at all.
+pub mod b64_array_opt {
+    use super::STANDARD;
+    use base64::Engine as _;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer, const N: usize>(
+        bytes: &Option<[u8; N]>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        bytes.map(|b| STANDARD.encode(b)).serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>, const N: usize>(
+        d: D,
+    ) -> Result<Option<[u8; N]>, D::Error> {
+        let Some(s) = Option::<String>::deserialize(d)? else {
+            return Ok(None);
+        };
+        let v = STANDARD.decode(s).map_err(serde::de::Error::custom)?;
+        v.as_slice()
+            .try_into()
+            .map(Some)
+            .map_err(|_| serde::de::Error::custom(format!("expected {N} bytes, got {}", v.len())))
+    }
+}
