@@ -362,6 +362,17 @@ pub struct Contact {
     /// messages sent and received from then on.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub expire_after_s: u64,
+    /// The strongest post-quantum protection a session with them has ever
+    /// had, so that losing it can be noticed (0.15.0).
+    ///
+    /// A session that is weaker than this one was is either their client
+    /// going backwards or somebody serving a bundle with the ML-KEM keys
+    /// taken out, and those look identical from here. `None` until the
+    /// first session, and for contacts carried over from before 0.15.0 --
+    /// which is why the first session after an upgrade sets it rather than
+    /// warning about it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub best_pq: Option<crate::sessions::PqLevel>,
 }
 
 impl Contact {
@@ -380,6 +391,7 @@ impl Contact {
             revoked: false,
             device_received: HashMap::new(),
             expire_after_s: 0,
+            best_pq: None,
         }
     }
 

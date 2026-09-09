@@ -3045,7 +3045,7 @@ impl App {
         let name = contact.display_name();
         let line = match self.client.session_info(&contact.user_id) {
             Some(info) => format!(
-                "Messages with {name} are forward secret: each one is encrypted under a key used once and then discarded. The session was started by {} at {}{}. {}",
+                "Messages with {name} are forward secret: each one is encrypted under a key used once and then discarded. The session was started by {} at {}{}. {}{}",
                 if info.initiated_by_us { "you" } else { "them" },
                 crate::ui::clock(info.established_at_ms),
                 if info.awaiting_reply {
@@ -3059,6 +3059,17 @@ impl App {
                     "Its handshake used ML-KEM-768, so a recording of it stays closed even to a quantum computer; the ratchet after it is X25519 only. It becomes a fully post-quantum ratchet by itself when the next session starts, once both clients are on 0.8.0."
                 } else {
                     "Its handshake was classical (X25519 only): their client or the relay predates the post-quantum handshake of 0.6.0. It becomes post-quantum by itself when the next session starts after they update."
+                },
+                // The warning at the time is one line in System that
+                // scrolls away; this is where somebody who half-remembers
+                // it can check. Said only while the session is still the
+                // weaker one, so it goes by itself once they come back up.
+                match contact.best_pq {
+                    Some(best) if best > info.pq_level() => format!(
+                        " Sessions with {name} used to be {}, so this one has lost ground -- either they moved to an older client, or their key bundle is reaching you with the ML-KEM keys taken out. Ask them on another channel.",
+                        best.describe()
+                    ),
+                    _ => String::new(),
                 }
             ),
             None => match &contact.bundle {
@@ -3436,6 +3447,54 @@ impl App {
         if let Err(e) = self.store.save_contacts(&self.contacts) {
             self.toast(format!("Could not save contacts: {e}"));
         }
+    }
+
+    /// Record what a new session with `peer` is worth against a quantum
+    /// adversary, and say so when it is worth less than one with them has
+    /// been before.
+    ///
+    /// The session line already says what the new session *is*; what it
+    /// cannot say on its own is that this is a step down, because a
+    /// classical session with somebody who has only ever had classical
+    /// sessions reads exactly the same. That difference is the whole
+    /// signal: a peer's ML-KEM keys go missing either because they moved
+    /// to an older client or because something between you served their
+    /// bundle with those keys taken out, and the second is what an
+    /// attacker who wants this handshake breakable later would do. Neither
+    /// is distinguishable from here, so this says what changed and leaves
+    /// the judgement to the person who can ask them.
+    ///
+    /// Only a fall is worth saying: a rise is the ordinary result of them
+    /// updating, and the session line already names it.
+    fn note_pq_level(&mut self, peer: &UserId, name: &str, now: silver_client::PqLevel) {
+        let Some(i) = self.contact_index(peer) else {
+            return;
+        };
+        let before = self.contacts[i].best_pq;
+        if before == Some(now) {
+            return;
+        }
+        self.contacts[i].best_pq = Some(before.map_or(now, |b| b.max(now)));
+        self.persist_contacts();
+        // Nothing to compare against on the first session, or on the first
+        // after an upgrade from a version that did not record this.
+        let Some(before) = before else {
+            return;
+        };
+        if now >= before {
+            return;
+        }
+        self.system(
+            Level::Warn,
+            format!(
+                "The new session with {name} is {}, where sessions with them used to be {}. That happens when a contact moves to an older client, and equally when something between you serves their key bundle with the ML-KEM keys taken out -- which is what somebody who wanted to record this conversation and open it with a quantum computer later would do. Ask {name} on another channel whether they changed clients. /whois {name} shows the session as it stands.",
+                now.describe(),
+                before.describe(),
+            ),
+        );
+        self.toast(format!(
+            "{name}'s session lost post-quantum protection; see System."
+        ));
     }
 
     // --- messaging ---------------------------------------------------------
@@ -4048,6 +4107,9 @@ impl App {
                         if initiated_by_us { "you" } else { "them" },
                     ),
                 );
+                if let Some(info) = info {
+                    self.note_pq_level(&peer, &name, info.pq_level());
+                }
             }
             ClientEvent::Undecryptable { hint, reason, .. } => {
                 self.on_undecryptable(hint, reason);
@@ -6443,6 +6505,83 @@ mod tests {
                 .as_ref()
                 .is_some_and(|(t, _)| t.contains("type it out")),
             "a path is typeable, so the guard is the whole control here"
+        );
+    }
+
+    /// A session that loses post-quantum protection reads exactly like one
+    /// that never had it, so the loss has to be said outright. It is what
+    /// stripping the ML-KEM keys out of a served bundle would look like
+    /// from here, and the client cannot tell that from a peer moving to an
+    /// older client -- so it says what changed and who to ask.
+    #[tokio::test]
+    async fn a_session_that_loses_post_quantum_protection_says_so() {
+        use silver_client::PqLevel;
+        let (mut app, _dir) = app();
+        let peer = Identity::generate();
+        let id = peer.user_id();
+        let mut contact = Contact::new(id);
+        contact.alias = Some("bob".into());
+        app.contacts.push(contact);
+        let warned = |app: &App| {
+            app.system
+                .iter()
+                .any(|l| l.level == Level::Warn && l.text.contains("used to be"))
+        };
+
+        // The first session has nothing to be compared against, and a
+        // contact carried over from before this was recorded is the same
+        // case: note it, say nothing.
+        app.note_pq_level(&id, "bob", PqLevel::Ratchet);
+        assert_eq!(app.contacts[0].best_pq, Some(PqLevel::Ratchet));
+        assert!(!warned(&app), "the first session is not a downgrade");
+
+        // Losing the ratchet half is a fall, and is said.
+        app.note_pq_level(&id, "bob", PqLevel::Handshake);
+        assert!(warned(&app), "dropping to a classical ratchet went unsaid");
+        assert!(
+            app.toast.as_ref().is_some_and(|(t, _)| t.contains("bob")),
+            "the toast names the contact"
+        );
+        // The mark is the best it has ever been, not the latest: a peer
+        // who flips back and forth must not quietly reset the bar.
+        assert_eq!(app.contacts[0].best_pq, Some(PqLevel::Ratchet));
+
+        // Losing the handshake half too is a further fall from the same
+        // mark, and says so again.
+        app.system.clear();
+        app.note_pq_level(&id, "bob", PqLevel::Classical);
+        assert!(warned(&app), "dropping to classical went unsaid");
+
+        // Coming back up is ordinary: the session line already names it.
+        app.system.clear();
+        app.note_pq_level(&id, "bob", PqLevel::Ratchet);
+        assert!(!warned(&app), "recovering is not a downgrade");
+        assert_eq!(app.contacts[0].best_pq, Some(PqLevel::Ratchet));
+
+        // And it survives a restart, which is when a slow downgrade would
+        // otherwise be invisible: the mark is on the contact, not in memory.
+        app.persist_contacts();
+        let reloaded = app.store.load_contacts().unwrap();
+        assert_eq!(reloaded[0].best_pq, Some(PqLevel::Ratchet));
+    }
+
+    /// A contact written by a version that did not record this has no mark,
+    /// and the first session after the upgrade sets one rather than
+    /// reporting a fall it cannot actually see.
+    #[tokio::test]
+    async fn a_contact_from_before_the_mark_does_not_warn_on_its_first_session() {
+        use silver_client::PqLevel;
+        let (mut app, _dir) = app();
+        let peer = Identity::generate();
+        let id = peer.user_id();
+        app.contacts.push(Contact::new(id));
+        assert_eq!(app.contacts[0].best_pq, None);
+
+        app.note_pq_level(&id, "bob", PqLevel::Classical);
+        assert_eq!(app.contacts[0].best_pq, Some(PqLevel::Classical));
+        assert!(
+            !app.system.iter().any(|l| l.level == Level::Warn),
+            "nothing is known about what came before, so nothing is claimed"
         );
     }
 }
