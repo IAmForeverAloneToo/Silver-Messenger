@@ -201,9 +201,22 @@ the sender last verified it, for the recipient to compare with its own
 (section 11); inside the encrypted body, the relay can neither read nor
 alter it. `device` (absent from a primary and from clients before
 0.9.0) is the sender's device certificate when the sender is a linked
-device, and `id` the id the message goes by when this body is a copy for
-another device than the one it was first sealed for; both are section
-14. `content.type` is one of `text`, `receipt` (4.4), `file` (4.5),
+device (section 14), and `id` the id the message goes by.
+
+`id` is the message's own name, sealed inside the body where the AEAD
+covers it. The envelope's `id` is not: it is chosen after the ciphertext
+is made and no signature or AEAD reaches it, so a relay may put any value
+there — and a recipient that read the id from the envelope would file the
+message under the relay's name, leaving the sender's later edits,
+deletions, reactions and receipts, which all name the sender's id,
+matching nothing. A sender therefore mints the id first and puts it in
+both places; a recipient takes the body's. The two are equal for a
+message, and *differ by design* for a copy to one of the sender's own
+devices (section 14), where the body names the message being copied and
+the envelope keeps a fresh id of its own, which is what the relay
+de-duplicates on. Clients before this wrote `id` only on those copies;
+a body without one is read under the envelope's id, so that they keep
+working while they are still about. `content.type` is one of `text`, `receipt` (4.4), `file` (4.5),
 `revocation` and `succession` (section 10), `sync`, `provision` and
 `device_revocation` (section 14); unknown types are rejected by this
 implementation, which is why a sender uses a kind beyond `text` only

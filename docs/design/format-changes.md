@@ -55,11 +55,23 @@ enumerable.
 ## 2. The two that change what goes on the wire
 
 **SM-P-14, the message id inside the authenticated body.** A message's id
-is chosen by its sender and sits outside every AEAD and signature, so a
-relay renames a message and the recipient's edits, deletions, reactions
-and receipts all name the new id. A copy in the plain body already exists
-for device copies. It becomes mandatory and is compared against the
-envelope id, and a mismatch is refused.
+is chosen by its sender and sits outside every AEAD and signature — it is
+picked *after* the ciphertext is made — so a relay renames a message and
+the recipient's edits, deletions, reactions and receipts all name the new
+id. A copy in the plain body already exists for device copies. It becomes
+mandatory: the sender mints the id first, puts it in the body and on the
+envelope, and a recipient takes it from the body.
+
+**Corrected while writing it.** This paragraph used to end "and is
+compared against the envelope id, and a mismatch is refused", following
+the report. That is wrong for this program, and would have broken
+something that works: a copy of a message to one of the sender's *own*
+devices carries the original message's id in its body and a fresh id on
+its envelope, deliberately, because the envelope id is what the relay
+de-duplicates on. Those two are meant to differ. The comparison is also
+not needed — once the body's copy is the one that counts, what the
+envelope says has no effect, which is a stronger position than checking
+that it agrees.
 
 **The device counter-signature.** A device certificate is signed by the
 account, which proves the account meant to enroll *a* device; it does not
