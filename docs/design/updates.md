@@ -218,10 +218,23 @@ release host, as `tests/update.rs` already does for the check:
 * a downloaded file that cannot print its own `--version` is refused;
 * `--rollback` restores, and refuses when there is nothing to restore;
 * a path that looks package-managed is refused with that command;
-* the swap is atomic under a kill: a child is killed at a random moment
-  during the swap and the target is afterwards one of the two binaries,
-  never absent or partial — twenty rounds, as the robustness note's kill
-  test does for the store.
+* the swap under a kill, on Unix, two ways. A child is killed at a
+  random moment during a swap and the target is afterwards one of the
+  two binaries, never a piece of one — twenty rounds, as the robustness
+  note's kill test does for the store. And, because a kill lands inside a
+  window microseconds wide about never, a second test watches the path
+  from another thread while four hundred swaps run and requires that the
+  name never once resolves to nothing.
+
+  Both are Unix-only, and so is the guarantee. There the old binary is
+  hard-linked aside and the new one renamed over it, so the name always
+  resolves to a whole file. Windows cannot replace a running image at
+  all: its swap renames the target away and renames the replacement in,
+  and between those two the name is genuinely absent. That window cannot
+  be closed — see `install.rs`, which makes it as small and as
+  recoverable as it can be instead. Until 0.15.0 this section claimed the
+  kill test existed and it did not; the September 2026 review found that
+  (I-1), and the claim now describes tests that are there.
 
 In `tests/tui`: `/update` prints the three lines and downloads nothing.
 

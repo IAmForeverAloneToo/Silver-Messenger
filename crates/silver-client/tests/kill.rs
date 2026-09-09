@@ -246,3 +246,198 @@ fn the_store_survives_a_kill() {
             .expect("the contacts load beside a stray temp file");
     }
 }
+
+// --- the update swap under a kill ----------------------------------------
+
+/// Set in the child: the directory holding the binary being swapped.
+const SWAP_DIR: &str = "SILVER_KILL_TEST_SWAP_DIR";
+/// What the two stand-in binaries hold. Different lengths on purpose, so a
+/// half-written file is neither.
+const OLD: &[u8] = b"#!/bin/sh\necho 'silver 1.0.0'\n";
+const NEW: &[u8] = b"#!/bin/sh\necho 'silver 2.0.0 with rather more in it'\n";
+
+/// The child: swaps the binary back and forth as fast as it can, printing
+/// after each completed swap. It never returns.
+fn swap_until_killed(dir: &str) -> ! {
+    let dir = std::path::Path::new(dir);
+    let exe = dir.join("silver");
+    let mut out = std::io::stdout().lock();
+    let mut n = 0u64;
+    loop {
+        // The content going in is whichever one is not there now, so the
+        // target alternates and both are always a possible outcome.
+        let here = std::fs::read(&exe).expect("the binary is there");
+        let next: &[u8] = if here == OLD { NEW } else { OLD };
+        let staged = dir.join(".silver.new");
+        std::fs::write(&staged, next).expect("stage");
+        silver_client::update::install::swap(&staged, &exe).expect("swap");
+        writeln!(out, "{n}").expect("report");
+        out.flush().expect("flush");
+        n += 1;
+    }
+}
+
+/// A kill at any moment of a swap leaves one of the two binaries at the
+/// path, never nothing and never a piece of one.
+///
+/// `docs/design/updates.md` claimed this was tested and it was not, which
+/// the September 2026 review found (I-1). Writing it also fixes what the
+/// claim said: the guarantee is Unix's. There the old binary is
+/// hard-linked aside and the new one renamed over it, and a rename is
+/// atomic, so the name always resolves to a whole file. Windows cannot
+/// replace a running image, so its swap renames the target away and
+/// renames the replacement in, and between those two the name is
+/// genuinely absent -- a window that cannot be closed and that
+/// `update/install.rs` documents rather than hides.
+#[test]
+#[cfg(unix)]
+fn the_update_swap_survives_a_kill() {
+    if let Ok(dir) = std::env::var(SWAP_DIR) {
+        swap_until_killed(&dir);
+    }
+    let seed = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(1)
+        | 1;
+    let mut rng = Rng(seed);
+    let dir = tempfile::tempdir().expect("a directory");
+    let exe = dir.path().join("silver");
+    std::fs::write(&exe, OLD).expect("the first binary");
+    // Executable to begin with: `swap` copies the mode of the binary it
+    // replaces onto the replacement, deliberately, so a client installed
+    // 0750 in a shared directory stays that way. The mode below therefore
+    // checks that carrying-over survives a kill, not that swap invents a
+    // mode.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755))
+            .expect("the first binary is runnable");
+    }
+
+    let mut swaps = 0u64;
+    for round in 0..20 {
+        let test_exe = std::env::current_exe().expect("this test binary");
+        let mut child = Writer(
+            Command::new(test_exe)
+                .arg("--nocapture")
+                .arg("the_update_swap_survives_a_kill")
+                .env(SWAP_DIR, dir.path())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .expect("spawn the swapper"),
+        );
+        let mut reader = BufReader::new(child.0.stdout.take().expect("piped"));
+        // Let it finish one swap, so the kill lands during a later one
+        // rather than before it has started.
+        let mut first = String::new();
+        loop {
+            first.clear();
+            let read = reader.read_line(&mut first).expect("read the child");
+            assert!(read > 0, "the swapper died before finishing a swap");
+            if first.trim().parse::<u64>().is_ok() {
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_micros(200 + rng.next() % 40_000));
+        child.0.kill().expect("kill");
+        child.0.wait().expect("wait");
+        swaps += 1 + reader
+            .lines()
+            .map_while(Result::ok)
+            .filter_map(|l| l.trim().parse::<u64>().ok())
+            .count() as u64;
+
+        // The whole point: something is there, and it is one of the two.
+        let found = std::fs::read(&exe).unwrap_or_else(|e| {
+            panic!(
+                "round {round}: nothing at {} after the kill: {e}",
+                exe.display()
+            )
+        });
+        assert!(
+            found == OLD || found == NEW,
+            "round {round}: {} bytes at the path that are neither binary",
+            found.len()
+        );
+        // And it still runs, which is what the swap exists to preserve.
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&exe)
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert!(
+            mode & 0o100 != 0,
+            "round {round}: the binary lost its mode: {mode:o}"
+        );
+    }
+    assert!(
+        swaps >= 20,
+        "only {swaps} swaps completed across 20 rounds; the kills came too early to prove anything"
+    );
+}
+
+/// The name never resolves to nothing while a swap is running.
+///
+/// The kill test above checks the outcome of twenty randomly-timed kills,
+/// which is what `updates.md` claims — but a kill lands in a window a few
+/// microseconds wide about never, so on its own it would pass against a
+/// swap that unlinks the target first. This watches the path instead:
+/// while swaps run back to back, another thread asks whether the name
+/// exists, as fast as it can. On Unix the answer is always yes, because
+/// the old binary is hard-linked aside and the new one renamed over it,
+/// and rename is atomic. A swap that renamed the target away first would
+/// be caught here within a few hundred swaps.
+#[test]
+#[cfg(unix)]
+fn the_update_swap_never_leaves_the_name_empty() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    let dir = tempfile::tempdir().expect("a directory");
+    let exe = dir.path().join("silver");
+    std::fs::write(&exe, OLD).expect("the first binary");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).expect("runnable");
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let missing = Arc::new(AtomicU64::new(0));
+    let looks = Arc::new(AtomicU64::new(0));
+    let watcher = {
+        let (stop, missing, looks, exe) =
+            (stop.clone(), missing.clone(), looks.clone(), exe.clone());
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                if !exe.exists() {
+                    missing.fetch_add(1, Ordering::Relaxed);
+                }
+                looks.fetch_add(1, Ordering::Relaxed);
+            }
+        })
+    };
+
+    let staged = dir.path().join(".silver.new");
+    for _ in 0..400 {
+        let here = std::fs::read(&exe).expect("the binary is there");
+        let next: &[u8] = if here == OLD { NEW } else { OLD };
+        std::fs::write(&staged, next).expect("stage");
+        silver_client::update::install::swap(&staged, &exe).expect("swap");
+    }
+    stop.store(true, Ordering::Relaxed);
+    watcher.join().expect("the watcher");
+
+    assert!(
+        looks.load(Ordering::Relaxed) > 1000,
+        "the watcher barely ran ({} looks); the result says nothing",
+        looks.load(Ordering::Relaxed)
+    );
+    assert_eq!(
+        missing.load(Ordering::Relaxed),
+        0,
+        "the binary's name resolved to nothing during a swap, across {} looks",
+        looks.load(Ordering::Relaxed)
+    );
+}
