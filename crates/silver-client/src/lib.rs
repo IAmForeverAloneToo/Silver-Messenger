@@ -51,7 +51,7 @@ pub use linking::{
 };
 pub use proxy::Proxy;
 pub use receipts::ReceiptQueue;
-pub use sessions::{SessionError, SessionInfo, SessionStore, SharedSessions};
+pub use sessions::{PqLevel, SessionError, SessionInfo, SessionStore, SharedSessions};
 pub use transparency::{Discrepancy, LogStore, SharedLog};
 
 /// What this client understands beyond plain text, advertised inside every

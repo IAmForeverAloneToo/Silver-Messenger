@@ -53,6 +53,21 @@ means behaviour or the wire protocol changed in a way worth reading about.
   it has had an invariant test since 0.10.0, and reader mode now has the
   mirror of it, plus the same forgery walked through a real terminal.
 
+- A session that lost post-quantum protection said nothing about it. The
+  client showed what each new session was -- post-quantum throughout, in
+  the handshake only, or classical -- which is no help for the case that
+  matters: a classical session with a contact whose sessions had all been
+  post-quantum reads exactly like a classical session with a contact who
+  never had one. That is the shape of a bundle reaching you with the
+  ML-KEM keys stripped out, which is what somebody recording the
+  conversation to open later would arrange, and it looked ordinary. The
+  best level a session with each contact has reached is now kept with the
+  contact, and a session below it is reported when it starts and by
+  `/session` while it lasts. A rise says nothing: that is a contact
+  updating, and the session line already names it. The client cannot
+  distinguish a stripped bundle from a contact on an older client, so it
+  says what changed, gives both readings, and asks the user to check on
+  another channel.
 - A client built from a checkout with no `minisign.pub` installed
   whatever the release host served. Both the design note and the
   constant's own comment had said since 0.12.0 that such a build refuses

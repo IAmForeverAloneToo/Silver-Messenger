@@ -644,6 +644,14 @@ those who want to pay for it (46).
         refuses now, before fetching. The tests gained a signing key of
         their own, so the accepting half of the check is exercised too --
         with the project's key they could only ever show refusals.
+        The fifth is saying when a peer's post-quantum protection goes
+        away. Showing what a new session is was never enough: a classical
+        session with somebody who used to have post-quantum ones reads
+        exactly like one with somebody who never did, so a stripped bundle
+        looked ordinary. The best level reached with each contact is kept
+        with the contact and a fall is reported, with both readings --
+        their older client, or somebody taking the keys out in transit --
+        since the client cannot tell those apart.
 
 63. [ ] **The identity key somewhere the memory is not** (L, undecided).
         The one place where taking a key out of the process would buy

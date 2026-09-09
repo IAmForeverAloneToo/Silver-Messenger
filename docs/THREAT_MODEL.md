@@ -131,6 +131,18 @@ Can:
   nor forge the capability signature: all are signed. Either downgrade
   only removes protection the session would have added; the client shows
   which handshake and ratchet a session got, and `/session` says why.
+  From 0.15.0 it also says when that is *less* than a session with the
+  same contact used to get. Showing the new session's protection was not
+  enough on its own: a classical session with somebody whose sessions had
+  all been post-quantum read exactly like a classical session with
+  somebody who had never had one, so the one case worth noticing looked
+  like the ordinary one. The strongest level a session with each contact
+  has reached is kept with the contact, and a session below it is
+  reported at the time and in `/session` for as long as it lasts. The
+  client cannot tell a stripped bundle from a contact who moved to an
+  older client — both arrive as a bundle without ML-KEM keys — so it
+  says what changed, names both readings, and asks the user to check with
+  the contact over another channel.
 - See that a file was sent and roughly how big it is (to the nearest
   64 KiB between clients that pad, exactly otherwise): the encrypted
   chunks are put and fetched on anonymous connections, but a blob of a

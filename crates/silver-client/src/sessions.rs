@@ -185,6 +185,49 @@ pub(crate) struct SessionsFile {
     peers: HashMap<UserId, PeerSessions>,
 }
 
+/// How much of a session resists a quantum adversary, from least to most.
+///
+/// Ordered, and that is the point: a session with a contact is expected to
+/// hold this or climb, never to fall. It falls when their bundle stops
+/// carrying ML-KEM keys, which happens when they move to an older client
+/// -- and equally when something between the two of you serves a bundle
+/// with those keys stripped out, which is what an attacker who wants the
+/// handshake breakable later would do. The client cannot tell those
+/// apart, so it says what happened and leaves the judgement to the person
+/// who can ask.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum PqLevel {
+    /// X25519 alone: a recording opens to a quantum computer.
+    Classical,
+    /// The handshake mixed in ML-KEM; the ratchet after it did not.
+    Handshake,
+    /// Handshake and every ratchet step (protocol v4).
+    Ratchet,
+}
+
+impl PqLevel {
+    /// What a session of these two flags is.
+    pub fn of(post_quantum: bool, pq_ratchet: bool) -> Self {
+        match (post_quantum, pq_ratchet) {
+            (_, true) => Self::Ratchet,
+            (true, false) => Self::Handshake,
+            (false, false) => Self::Classical,
+        }
+    }
+
+    /// How to name it in a sentence about what was lost.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Classical => "classical (X25519 only)",
+            Self::Handshake => "post-quantum in the handshake",
+            Self::Ratchet => "post-quantum throughout",
+        }
+    }
+}
+
 /// What the front end may want to know about a conversation's session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SessionInfo {
@@ -199,6 +242,13 @@ pub struct SessionInfo {
     /// ML-KEM step, so healing after a compromise resists a quantum
     /// adversary too, not only the handshake.
     pub pq_ratchet: bool,
+}
+
+impl SessionInfo {
+    /// How much of this session a quantum adversary cannot touch.
+    pub fn pq_level(&self) -> PqLevel {
+        PqLevel::of(self.post_quantum, self.pq_ratchet)
+    }
 }
 
 pub struct SessionStore {
