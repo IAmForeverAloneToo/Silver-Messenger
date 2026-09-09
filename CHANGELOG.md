@@ -53,6 +53,19 @@ means behaviour or the wire protocol changed in a way worth reading about.
   it has had an invariant test since 0.10.0, and reader mode now has the
   mirror of it, plus the same forgery walked through a real terminal.
 
+- A system certificate store that could not be read was reported only at
+  `debug`, a level nothing runs at, and the client carried on with the
+  built-in Mozilla roots alone. That list is the floor, not the whole
+  store: the operating system's is what carries a root an administrator
+  added and, more to the point, their decision to *distrust* one. Reading
+  none of it now says so at `warn`, naming what it costs.
+- The threat model said the data directory and its files are the owner's
+  alone, giving Unix modes, without saying that those modes are all there
+  is: the code that sets them is compiled on Unix only, and on Windows
+  the directory takes the access rules it inherits -- which under a user
+  profile keep other unprivileged users out, and for a `--data-dir` put
+  somewhere world-writable do not. Said plainly now, the way 0.15.0's
+  process hardening says which platforms it covers.
 - An update on Windows could leave nothing where the program had been.
   Windows cannot replace a running image, so the swap renames it aside
   and gives the new file the name it left; between those two renames the

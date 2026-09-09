@@ -248,7 +248,19 @@ fn chain_verifier(options: &ConnectOptions) -> anyhow::Result<Arc<WebPkiServerVe
     for err in &native.errors {
         tracing::debug!("native certificate store: {err}");
     }
-    roots.add_parsable_certificates(native.certs);
+    let (added, _) = roots.add_parsable_certificates(native.certs);
+    // Mozilla's list is the floor, not the whole store: the operating
+    // system's is what carries a root an administrator added and, more to
+    // the point, what carries their decision to distrust one. Failing to
+    // read it leaves the client trusting a list nobody on this machine
+    // chose, which is a weaker position than it looks and used to be
+    // said only at `debug` -- a level nothing runs at.
+    if added == 0 {
+        tracing::warn!(
+            errors = native.errors.len(),
+            "no certificates could be read from this system's store;              falling back to the built-in Mozilla roots alone, so a root this system              distrusts may still be accepted"
+        );
+    }
 
     for path in &options.extra_ca_certs {
         let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(path)
