@@ -629,6 +629,15 @@ those who want to pay for it (46).
         invisible and bidirectional characters with it. Reader mode now
         has the mirror of the invariant test the full mode has had since
         0.10.0.
+        The third closes the key store paths 0.15.0 left half shut. The
+        key is written before the vault that needs it, so dropping an
+        unneeded one on the failure path only worked if the process lived
+        to take that path; a crash in the window left a key for good. The
+        undecided name is written down first now, and the next start
+        settles it -- the same for removing the protection and for erasing
+        the device, which had the same gap on the other side. And the
+        check that decides no longer reads "I cannot tell" as "no": that
+        would have deleted the key opening every file in the directory.
 
 63. [ ] **The identity key somewhere the memory is not** (L, undecided).
         The one place where taking a key out of the process would buy
