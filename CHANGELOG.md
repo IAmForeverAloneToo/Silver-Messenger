@@ -53,6 +53,24 @@ means behaviour or the wire protocol changed in a way worth reading about.
   it has had an invariant test since 0.10.0, and reader mode now has the
   mirror of it, plus the same forgery walked through a real terminal.
 
+- An update on Windows could leave nothing where the program had been.
+  Windows cannot replace a running image, so the swap renames it aside
+  and gives the new file the name it left; between those two renames the
+  path holds nothing, and the program that would notice is the one that
+  has just gone from it, so it cannot put itself back on a later start.
+  If the second rename failed, the recovery was a single `rename` back
+  whose result was discarded -- if that failed too, the user was left
+  with no program and no message saying where it had gone. The window
+  cannot be closed (the operating system offers no atomic replace for a
+  running file), so it is now as small and as survivable as it can be:
+  everything that can fail happens before the renames, the recovery
+  falls back to copying when a rename will not go, and if even that
+  fails the error names the file to rename back by hand. `rollback` had
+  the same two-rename window on every platform and now shares the same
+  recovery. A backup that is not a file is refused before anything
+  moves: the check was `exists()`, and by the time the backup is moved
+  the path is free, so a rename would have put a *directory* at the
+  binary's name and reported success.
 - The ratchet body, which carries every ordinary message, was the one
   body version parsed without being checked. The v0/v1 body has
   validated its message id and content since 0.3.0 and the v5 group body
