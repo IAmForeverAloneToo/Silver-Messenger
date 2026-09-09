@@ -17,7 +17,11 @@ def main():
     out = silver("--data-dir", a_dir, "--set-passphrase", env=env)
     assert "encrypted under your passphrase" in out, out
     raw = open(os.path.join(a_dir, "identity.json"), "rb").read()
-    assert raw.startswith(b"SMV1") and b"signing_seed" not in raw, raw[:16]
+    # SMV1 is a file bound to its name alone; SMV2 carries the generation
+    # it was written at as well, which is what a protected directory has
+    # written since rollback binding. Either is ciphertext, which is what
+    # this line is really asking.
+    assert raw[:4] in (b"SMV1", b"SMV2") and b"signing_seed" not in raw, raw[:16]
     a = Term(a_dir, relay.url, env=env)
     assert a.wait(G.connected + " connected"), "alice connects with the passphrase from the environment"
     assert not a.has("stored unencrypted"), "no warning once a passphrase is set"
