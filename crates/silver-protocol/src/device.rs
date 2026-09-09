@@ -21,12 +21,18 @@ use sha2::Sha256;
 
 use crate::ProtocolError;
 use crate::bundle::KeyBundle;
-use crate::encoding::{b64, b64_array};
+use crate::encoding::{b64, b64_array, b64_array_opt};
 use crate::envelope::Content;
 use crate::identity::{Identity, UserId};
 
 /// Domain of the identity key's signature over a device certificate.
 pub const DEVICE_DOMAIN: &[u8] = b"silver-messenger/v5/device";
+/// Domain of the *device* key's signature over its own certificate.
+///
+/// A domain of its own so the two signatures over the same bytes cannot
+/// be mistaken for one another: neither key's signature can be lifted
+/// into the other's place.
+pub const DEVICE_COUNTERSIGNATURE_DOMAIN: &[u8] = b"silver-messenger/v5/device-countersignature";
 /// Domain of the identity key's signature over its device list.
 pub const DEVICE_LIST_DOMAIN: &[u8] = b"silver-messenger/v5/device-list";
 /// Domain of the identity key's signature over a device revocation.
@@ -55,6 +61,24 @@ pub struct DeviceCertificate {
     pub name: String,
     #[serde(with = "b64_array")]
     pub signature: [u8; 64],
+    /// The device's own signature over the same bytes, under
+    /// [`DEVICE_COUNTERSIGNATURE_DOMAIN`].
+    ///
+    /// The account's signature proves the account meant to enroll *a*
+    /// device; it does not prove the device agreed, because an account
+    /// can certify any public key it can name. The device adds this when
+    /// it accepts the provisioning message, and presents the
+    /// counter-signed certificate from then on, so an account cannot
+    /// enroll a key its holder never offered.
+    ///
+    /// Optional for one release: a certificate minted before this existed
+    /// carries none, and verifies on the account's signature alone.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "b64_array_opt"
+    )]
+    pub device_signature: Option<[u8; 64]>,
 }
 
 /// The check a name must pass when a device is named for the first time.
@@ -106,7 +130,8 @@ impl DeviceCertificate {
         v
     }
 
-    /// Verify the account's signature and the shape.
+    /// Verify the account's signature, the device's when there is one,
+    /// and the shape.
     pub fn verify(&self) -> Result<(), ProtocolError> {
         check_name(&self.name)?;
         if self.account == self.device {
@@ -114,11 +139,24 @@ impl DeviceCertificate {
                 "a device certificate must name a key other than the account's".into(),
             ));
         }
-        self.account.verify(
-            DEVICE_DOMAIN,
-            &Self::signed_bytes(&self.account, &self.device, self.created_at_ms, &self.name),
-            &self.signature,
-        )
+        let signed =
+            Self::signed_bytes(&self.account, &self.device, self.created_at_ms, &self.name);
+        self.account
+            .verify(DEVICE_DOMAIN, &signed, &self.signature)?;
+        // Present from the release that added it; a certificate from
+        // before carries none and stands on the account's signature
+        // alone. One that carries a *wrong* one is refused, so a
+        // certificate cannot be dressed up with somebody else's.
+        if let Some(countersignature) = &self.device_signature {
+            self.device
+                .verify(DEVICE_COUNTERSIGNATURE_DOMAIN, &signed, countersignature)?;
+        }
+        Ok(())
+    }
+
+    /// Whether the device this names has said the certificate is its own.
+    pub fn is_countersigned(&self) -> bool {
+        self.device_signature.is_some()
     }
 
     /// The certificate as bytes, for the MLS leaf extension
@@ -157,6 +195,12 @@ impl DeviceCertificate {
             created_at_ms,
             name,
             signature,
+            // The MLS leaf extension carries the account's signature
+            // only. A leaf says which account a member belongs to; the
+            // device's own word about its enrollment travels with the
+            // certificate itself, and adding it here would change an
+            // extension every member already parses.
+            device_signature: None,
         })
     }
 }
@@ -238,6 +282,36 @@ impl Identity {
             device: *device,
             created_at_ms,
             name: name.to_owned(),
+            // The account cannot produce this: only the device's key can,
+            // which is the point. The device adds it on acceptance.
+            device_signature: None,
+        })
+    }
+
+    /// Sign `certificate` as the device it names, saying that this device
+    /// really did offer its key.
+    ///
+    /// Refuses a certificate for another key, so a device cannot vouch
+    /// for an enrollment that is not its own.
+    pub fn countersign_device(
+        &self,
+        certificate: &DeviceCertificate,
+    ) -> Result<DeviceCertificate, ProtocolError> {
+        if certificate.device != self.user_id() {
+            return Err(ProtocolError::Malformed(
+                "a device signs only its own certificate".into(),
+            ));
+        }
+        certificate.verify()?;
+        let signed = DeviceCertificate::signed_bytes(
+            &certificate.account,
+            &certificate.device,
+            certificate.created_at_ms,
+            &certificate.name,
+        );
+        Ok(DeviceCertificate {
+            device_signature: Some(self.sign(DEVICE_COUNTERSIGNATURE_DOMAIN, &signed)),
+            ..certificate.clone()
         })
     }
 
@@ -555,6 +629,80 @@ mod tests {
         );
         let unnamed = account.certify_device(&device.user_id(), "", 5).unwrap();
         assert!(!serde_json::to_string(&unnamed).unwrap().contains("name"));
+    }
+
+    /// The account's signature says the account meant to enroll *a*
+    /// device; it says nothing about whether the device agreed, because
+    /// an account can certify any public key it can name. The device's
+    /// own signature is what says the key was offered.
+    #[test]
+    fn a_device_signs_its_own_certificate_and_no_other() {
+        let account = Identity::generate();
+        let device = Identity::generate();
+        let stranger = Identity::generate();
+
+        // What the account can make on its own: an enrollment of a key
+        // whose holder has said nothing.
+        let minted = account
+            .certify_device(&stranger.user_id(), "not mine", 1)
+            .unwrap();
+        assert!(minted.verify().is_ok(), "the account's signature stands");
+        assert!(
+            !minted.is_countersigned(),
+            "and it is not the stranger's word"
+        );
+
+        // The stranger cannot be made to agree, and nobody else can agree
+        // on their behalf.
+        assert!(
+            device.countersign_device(&minted).is_err(),
+            "a device signs only its own certificate"
+        );
+        let signed = stranger.countersign_device(&minted).unwrap();
+        assert!(signed.is_countersigned());
+        assert!(signed.verify().is_ok());
+
+        // A signature lifted from elsewhere does not pass: the device's
+        // is over its own bytes under its own domain.
+        let mine = account
+            .certify_device(&device.user_id(), "mine", 2)
+            .unwrap();
+        let forged = DeviceCertificate {
+            device_signature: signed.device_signature,
+            ..mine.clone()
+        };
+        assert!(
+            forged.verify().is_err(),
+            "another device's signature must not pass as this one's"
+        );
+        // Nor the account's own, over the same bytes: the domains differ.
+        let lifted = DeviceCertificate {
+            device_signature: Some(mine.signature),
+            ..mine
+        };
+        assert!(
+            lifted.verify().is_err(),
+            "the account's signature must not pass as the device's"
+        );
+    }
+
+    /// The transition the design note asks for: a certificate minted
+    /// before the field existed carries none and still verifies.
+    #[test]
+    fn a_certificate_without_the_devices_signature_still_verifies() {
+        let account = Identity::generate();
+        let device = Identity::generate();
+        let cert = account.certify_device(&device.user_id(), "old", 3).unwrap();
+        assert!(cert.device_signature.is_none());
+        assert!(cert.verify().is_ok());
+        // And a JSON body from such a version, which does not write the
+        // field at all, parses to the same thing.
+        let json = serde_json::to_string(&cert).unwrap();
+        assert!(!json.contains("device_signature"));
+        assert_eq!(
+            serde_json::from_str::<DeviceCertificate>(&json).unwrap(),
+            cert
+        );
     }
 
     #[test]

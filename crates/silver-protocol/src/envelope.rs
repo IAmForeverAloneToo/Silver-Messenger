@@ -423,7 +423,7 @@ pub enum Body {
         /// The sender's last verified transparency log head, if any.
         head: Option<crate::transparency::LogHead>,
         /// The sender's device certificate, when it is a linked device.
-        device: Option<crate::device::DeviceCertificate>,
+        device: Option<Box<crate::device::DeviceCertificate>>,
         /// The message's id, when this is a copy for another device and
         /// the envelope's id is not it.
         id: Option<String>,
@@ -513,7 +513,7 @@ impl Body {
     /// ratchet or group body is returned unchanged.
     pub fn with_device(mut self, certificate: Option<crate::device::DeviceCertificate>) -> Self {
         if let Self::Plain { device, .. } = &mut self {
-            *device = certificate;
+            *device = certificate.map(Box::new);
         }
         self
     }
@@ -552,7 +552,7 @@ impl Body {
                     content: content.clone(),
                     caps: caps.clone(),
                     head: *head,
-                    device: device.clone(),
+                    device: device.as_deref().cloned(),
                     id: id.clone(),
                 })
             }
@@ -591,7 +591,7 @@ impl Body {
                     content: body.content,
                     caps: body.caps,
                     head: body.head,
-                    device: body.device,
+                    device: body.device.map(Box::new),
                     id: body.id,
                 })
             }
@@ -842,7 +842,7 @@ pub fn open(recipient: &Identity, envelope: &Envelope) -> Result<Message, Protoc
             signed: opened.signed,
             caps,
             head,
-            device,
+            device: device.map(|d| *d),
         }),
         Body::Ratchet(_) => Err(ProtocolError::Malformed(
             "body is encrypted under a session".into(),

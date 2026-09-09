@@ -1926,6 +1926,10 @@ fn envelope() {
 // ---------------------------------------------------------------------------
 // body.json
 
+// The plain variant is the wide one, carrying a device certificate that
+// the others do not; boxing it in a test fixture would only obscure the
+// vector it mirrors.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum BodyIn {
@@ -2307,7 +2311,10 @@ fn body() {
                         (sent_at_ms, sequence.epoch, sequence.seq),
                         (*t, *epoch, *seq)
                     );
-                    assert_eq!((&content, &caps, &head, &device, &id), (c, cs, h, d, i));
+                    assert_eq!(
+                        (&content, &caps, &head, &device.as_deref().cloned(), &id),
+                        (c, cs, h, d, i)
+                    );
                     if let Some(device) = &device {
                         device.verify().unwrap();
                     }
