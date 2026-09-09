@@ -19,7 +19,7 @@ scheduled, and this note says which is which rather than rounding up.
 | --- | --- |
 | What ships in 0.15.0 | Both Highs, all seven Mediums, and eight of the eighteen Lows. No patch release was cut ahead of it: neither High is reachable without either a line the user pastes without reading (H-2) or the access class that already reads an unlocked client outright (H-1, M-1), so nothing here is a race against disclosure. |
 | What is scheduled | The remaining Lows and the one Informational that is a real defect (I-1), under roadmap item 63. Section 4 lists them individually with what each costs to leave. |
-| Where a suggested fix was not taken | Section 3. Four cases, each argued. |
+| Where a suggested fix was not taken | Section 5. Five cases, each argued. |
 | Disclosure | The report goes in whole, this note beside it, as [SECURITY.md](../../SECURITY.md) says of every review. |
 
 ## 2. What the review got right about the code, in one paragraph
@@ -43,15 +43,15 @@ Verdict: **C** confirmed as reported, **P** confirmed in part.
 
 | ID | Sev | Verdict | What was done, and where |
 | --- | --- | --- | --- |
-| H-1 | High | C | Windows gained a restricted process access list, so opening the process for reading is refused; macOS has neither protection and is now said to. The threat model gained "Program running as you" as an actor with a per-platform table, the README says the same, and SECURITY.md gained the platform statement the report noted was missing entirely. Not done: a non-zero `lock_after_minutes` default (§4), and macOS hardened-runtime signing (§4). |
-| H-2 | High | C | `/devices link` is two steps. The first parses, checks and says what the device would be given — the identity signs a standing certificate, the device is thereafter you, its full id to compare against the other computer's, and the contacts, groups and messages that go with it — then stops. `/devices link confirm` proceeds, and the paste guard sits on that line. See §3 for why the guard is not on the first line, contrary to the report's wording. |
+| H-1 | High | C | Windows gained a restricted process access list, so opening the process for reading is refused; macOS has neither protection and is now said to. The threat model gained "Program running as you" as an actor with a per-platform table, the README says the same, and SECURITY.md gained the platform statement the report noted was missing entirely. Not done: macOS hardened-runtime signing (§4). The review's other suggestion here, a non-zero `lock_after_minutes` default, is decided against (§4). |
+| H-2 | High | C | `/devices link` is two steps. The first parses, checks and says what the device would be given — the identity signs a standing certificate, the device is thereafter you, its full id to compare against the other computer's, and the contacts, groups and messages that go with it — then stops. `/devices link confirm` proceeds, and the paste guard sits on that line. See §5 for why the guard is not on the first line, contrary to the report's wording. |
 | M-1 | Medium | C | Exactly the report's Rev 3 design: the directory fsync added to `write_atomic` mirroring `install.rs`, a `vault.pending` list written before any step that can orphan a key and drained by the next `Store::open`, and compensating deletes on the error paths. Removing the protection and wiping had the same gap on the other side and are covered too. One correction of our own: the predicate read an *unreadable* vault as one that did not name the key and deleted it, which would take every file in the directory with it; it now keeps the key when it cannot tell. Not done: the `data-key-*` enumeration sweep (§4). |
 | M-2 | Medium | C | The strongest post-quantum level a session with each contact has reached is kept with the contact; a session below it is reported when it starts and by `/session` while it lasts. Only a fall is reported. The client cannot tell a stripped bundle from a peer on an older client — the two arrive as the same bytes — so it gives both readings and asks the user to check on another channel. |
-| M-3 | Medium | C | Refused outright, before a byte is fetched, and again inside the verify path so no route through it ends without a signature. Stricter than the report's suggested `--allow-unsigned` gate; §3 says why. `signature_checked` could then only ever be true and is gone, with the parenthetical it fed. |
+| M-3 | Medium | C | Refused outright, before a byte is fetched, and again inside the verify path so no route through it ends without a signature. Stricter than the report's suggested `--allow-unsigned` gate; §5 says why. `signature_checked` could then only ever be true and is gone, with the parenthetical it fed. |
 | M-4 | Medium | C | `per_hour` no longer clamps its rate to 1.0, so zero is off as it already was for `per_minute`, with tests for both. |
 | M-5 | Medium | C | Both consequences. The sweep runs in a single write transaction, which removes the window rather than coping with it; within it, the accounting is charged only for rows actually removed with the size taken from the removed value, and `by_id.remove` is gated on the index still pointing at the row just removed — which is the stranding half. Pinned by a test that runs an acknowledging thread against the sweep and checks the accounting describes exactly the mail still queued. |
 | M-6 | Medium | C | All four of the report's parts: `one_sentence` moved to the `say()` boundary so one call is one line always, `one_line` on the compose prompt, `is_invisible` extended with U+115F/U+1160/U+3164/U+FFA0/U+E0080–E00FF, and a reader-mode invariant test mirroring the full mode's. A pty test walks the same forgery through a real terminal. |
-| M-7 | Medium | P | `/send`, `/relay` and `/group join` go through the guard. `/unblock` and `/alias` do not: §3. |
+| M-7 | Medium | P | `/send`, `/relay` and `/group join` go through the guard. `/unblock` and `/alias` do not: §5. |
 | L-2 | Low | C | The window cannot be closed — Windows offers no atomic replace for a running image — so what can fail happens before the two renames, the recovery falls back to copying when a rename will not go, and when neither goes the error names the file to rename back by hand. `rollback` had the same window on every platform and now shares that recovery. Writing the test found a third thing: the backup was checked with `exists()`, so a *directory* could have been renamed onto the binary's name. |
 | L-3 | Low | C | The first refusal of a run is logged and the rest counted, with a line a minute carrying the total. What is refused is unchanged. |
 | L-4 | Low | C | The metrics listener calls the same `set_http_timeouts` the main listener has used since 0.7.0, serves sixteen connections at once and gives each a deadline. |
@@ -98,16 +98,26 @@ be tighter, a defence in depth, or a documentation defect.
   which is why the report downgraded it; the boundary check is still the
   right place, alongside the ratchet-body validation added for M-6's
   neighbours.
-* **H-1 remainder — `lock_after_minutes` still defaults to 0**, and
-  macOS release builds are unsigned unless notarization secrets are set.
-  The first directly shrinks the window the review demonstrated and is a
-  user-visible behaviour change, so it wants the maintainer's call rather
-  than a quiet default flip at release time.
+* **H-1 remainder — macOS release builds are unsigned** unless
+  notarization secrets are set, so the hardened runtime that would
+  restrict same-user attach is absent. Ad-hoc signing would get
+  `CS_RESTRICT` without notarization.
 * **M-1 remainder — no enumeration sweep of `data-key-*` entries.** The
   pending list covers every key orphaned from 0.15.0 on; keys orphaned by
   *earlier* versions stay until removed by hand, because `keyring` offers
   no portable enumeration and the platform-specific calls
   (`CredEnumerate` and friends) are a per-platform piece of work.
+
+### The idle lock stays off by default
+
+The review recommends a non-zero `lock_after_minutes` for
+passphrase-protected directories, on the ground that it shrinks the
+window the live exercise used. **Decided against.** It would also lock
+people out of a program they deliberately left running, and the choice
+between those costs belongs to the person using it, not to a default.
+The setting exists, `/lock` exists, and the threat model says what an
+unlocked client is worth; what it does not do is decide for the user
+which risk they would rather carry.
 
 ## 5. Where a suggested fix was not taken
 
