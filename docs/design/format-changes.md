@@ -224,12 +224,24 @@ speed, that is affordable; for a client collecting five hundred queued
 messages after a week offline, it is five hundred of them.
 
 So the unit is the **write operation, not the line**: a batch of appends
-raises the counter once, by the number of lines. Which means the natural
-counter for a history file is its **line count**, and that makes the
-check exact rather than approximate — a file with fewer lines than the
-anchor says has been truncated, one with more has been added to behind
-the client's back, and the line index in each line's AAD (section 1)
-already refuses a reorder, a drop in the middle, or a duplicate.
+records the file's new length once. Which makes the counter for a history
+file its **length in bytes**, and the check exact rather than
+approximate: a file shorter than the record says has been truncated.
+
+Length, and not a count of lines, because of what goes in each line's
+associated data. Section 1 says "its index", and the index that works is
+the line's **byte offset**, not its ordinal — an offset is what an append
+already knows, and an ordinal would make every message read the whole
+conversation to find out what number it is. The offset is as strong: take
+a line out and everything after it moves, so none of it opens; put two
+lines the other way round and neither is where it was written. What the
+offset cannot show is the end being cut off, and that is what the
+recorded length is for.
+
+Longer than the record is not tampering but the ordinary interrupted
+append, and it is safe to accept for the same reason a whole file one
+generation ahead is: producing a line that opens at the offset it sits at
+takes the key.
 
 ### 5.4 Enumerating a directory of meaningless names
 

@@ -753,6 +753,23 @@ impl Conversation {
             Self::Group(group) => group_history_name(group),
         }
     }
+
+    /// How the record of what was written names this conversation, and
+    /// what [`Conversation::parse_id`] reads back.
+    fn id(&self) -> String {
+        match self {
+            Self::Contact(peer) => peer.to_string(),
+            Self::Group(group) => format!("group-{group}"),
+        }
+    }
+
+    /// The conversation an id from the record names.
+    fn parse_id(id: &str) -> Option<Self> {
+        match id.strip_prefix("group-") {
+            Some(group) => group.parse().ok().map(Self::Group),
+            None => id.parse().ok().map(Self::Contact),
+        }
+    }
 }
 
 /// A message from someone who is not a contact yet, held until the user
@@ -1581,12 +1598,12 @@ impl Store {
             let name = relative_name(&self.root, &path);
             let text = fs::read_to_string(&path)?;
             let mut out = String::new();
-            for line in text.lines() {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let plain = decode_line(from, &name, line)?;
-                out.push_str(&encode_line(to, &name, &plain));
+            // Read at the offset each line is at now, written at the
+            // offset it lands on: blank lines are dropped, so the two are
+            // not the same and the line has to be re-bound.
+            for (at, line) in lines_with_offsets(&text) {
+                let plain = decode_line(from, &name, at, line)?;
+                out.push_str(&encode_line(to, &name, out.len() as u64, &plain));
                 out.push('\n');
             }
             write_atomic(&path, out.as_bytes())?;
@@ -2055,7 +2072,10 @@ impl Store {
     // --- history ---------------------------------------------------------------
 
     pub fn append_history(&self, peer: &UserId, entry: &HistoryEntry) -> anyhow::Result<()> {
-        self.append_history_line(&history_name(peer), &serde_json::to_string(entry)?)
+        self.append_history_line(
+            &Conversation::Contact(*peer),
+            &serde_json::to_string(entry)?,
+        )
     }
 
     /// A group's conversation log, kept like a contact's under
@@ -2065,7 +2085,7 @@ impl Store {
         group: &silver_protocol::GroupId,
         entry: &HistoryEntry,
     ) -> anyhow::Result<()> {
-        self.append_history_line(&group_history_name(group), &serde_json::to_string(entry)?)
+        self.append_history_line(&Conversation::Group(*group), &serde_json::to_string(entry)?)
     }
 
     /// [`Store::append_text`] for a group's log.
@@ -2081,7 +2101,7 @@ impl Store {
             text: text.to_owned(),
             saved: saved.map(Path::to_path_buf),
         };
-        self.append_history_line(&group_history_name(group), &serde_json::to_string(&line)?)
+        self.append_history_line(&Conversation::Group(*group), &serde_json::to_string(&line)?)
     }
 
     /// [`Store::load_history`] for a group's log.
@@ -2105,7 +2125,10 @@ impl Store {
             ids: ids.to_vec(),
             at_ms,
         };
-        self.append_history_line(&history_name(peer), &serde_json::to_string(&line)?)
+        self.append_history_line(
+            &Conversation::Contact(*peer),
+            &serde_json::to_string(&line)?,
+        )
     }
 
     /// Replace the text of the entry `id` from now on; the original line
@@ -2122,22 +2145,62 @@ impl Store {
             text: text.to_owned(),
             saved: saved.map(Path::to_path_buf),
         };
-        self.append_history_line(&history_name(peer), &serde_json::to_string(&line)?)
+        self.append_history_line(
+            &Conversation::Contact(*peer),
+            &serde_json::to_string(&line)?,
+        )
     }
 
-    fn append_history_line(&self, name: &str, json: &str) -> anyhow::Result<()> {
+    fn append_history_line(&self, conversation: &Conversation, json: &str) -> anyhow::Result<()> {
         self.ensure_unlocked()?;
-        let path = self.root.join(name);
+        let name = conversation.file_name();
+        if let Some(why) = self.generations().refusal() {
+            bail!("{why}");
+        }
+        let path = self.root.join(&name);
         let mut file = append_private(&path)?;
-        let mut line = encode_line(self.cipher.as_deref(), name, json);
-        line.push('\n');
+        let mut at = file.metadata()?.len();
         // A line cut short by a crash has no newline; start a fresh one
         // rather than glue this line onto it and lose both.
-        if !ends_with_newline(&mut file)? {
+        let broken = !ends_with_newline(&mut file)?;
+        if broken {
+            at += 1;
+        }
+        let mut line = encode_line(self.cipher.as_deref(), &name, at, json);
+        line.push('\n');
+        if broken {
             line.insert(0, '\n');
         }
         file.write_all(line.as_bytes())?;
-        Ok(())
+        file.flush()?;
+        self.note_history_write(&name, conversation)
+    }
+
+    /// Record a history file's length after a write, so that a later
+    /// truncation is refused rather than read as a shorter conversation.
+    ///
+    /// Counted from the file rather than from what was just appended,
+    /// which makes this idempotent: an append interrupted before it got
+    /// here leaves a longer file than the record says, and the next one
+    /// through settles it. Longer is safe -- a line at an offset the
+    /// record has not reached is one somebody encrypted there, which
+    /// takes the key.
+    fn note_history_write(&self, name: &str, conversation: &Conversation) -> anyhow::Result<()> {
+        let Some(cipher) = self.cipher.clone() else {
+            return Ok(());
+        };
+        let mut generations = self.generations.lock().unwrap_or_else(|e| e.into_inner());
+        let Generations::Bound(state) = &mut *generations else {
+            return Ok(());
+        };
+        let bytes = fs::metadata(self.root.join(name))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        state.wrote_history(name, &conversation.id(), bytes);
+        state.generation += 1;
+        let state = state.clone();
+        drop(generations);
+        self.persist_generations(&state, &cipher)
     }
 
     /// Move the conversation log from `old` to `new`, for example when a
@@ -2160,18 +2223,22 @@ impl Store {
         let new_name = history_name(new);
         let new_path = self.root.join(&new_name);
         let mut out = append_private(&new_path)?;
-        for line in text.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let plain = decode_line(self.cipher.as_deref(), &old_name, line)?;
-            let mut encoded = encode_line(self.cipher.as_deref(), &new_name, &plain);
+        // Appended after whatever the new name already holds, so each
+        // line is bound to where it lands there rather than where it sat
+        // in the file it came from.
+        let mut at = out.metadata()?.len();
+        for (from_at, line) in lines_with_offsets(&text) {
+            let plain = decode_line(self.cipher.as_deref(), &old_name, from_at, line)?;
+            let mut encoded = encode_line(self.cipher.as_deref(), &new_name, at, &plain);
             encoded.push('\n');
+            at += encoded.len() as u64;
             out.write_all(encoded.as_bytes())?;
         }
         out.flush()?;
+        drop(out);
         fs::remove_file(&old_path).with_context(|| format!("removing {}", old_path.display()))?;
-        Ok(())
+        self.forget_history_file(&old_name)?;
+        self.note_history_write(&new_name, &Conversation::Contact(*new))
     }
 
     /// The conversation with `peer`, receipts applied to the entries they
@@ -2196,14 +2263,30 @@ impl Store {
         if !path.exists() {
             return Ok(Vec::new());
         }
+        let generations = self.generations();
+        if let Some(why) = generations.refusal() {
+            bail!("{why}");
+        }
         let text =
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        // A conversation shorter than the record says has had its end cut
+        // off, which is the one thing binding each line to its offset
+        // cannot show: what is left is all genuine, there is just less of
+        // it. Longer is an append this directory made and did not finish
+        // recording.
+        if let Some(recorded) = generations.state().and_then(|s| s.history_bytes(name))
+            && (text.len() as u64) < recorded
+        {
+            bail!(
+                "{name} is shorter than this directory last wrote it ({} bytes where it wrote \
+                 {recorded}): the end of the conversation has been cut off. Nothing has been \
+                 read from it.",
+                text.len()
+            );
+        }
         let mut lines = Vec::new();
-        for line in text.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let parsed = decode_line(self.cipher.as_deref(), name, line)
+        for (at, line) in lines_with_offsets(&text) {
+            let parsed = decode_line(self.cipher.as_deref(), name, at, line)
                 .and_then(|plain| serde_json::from_str::<HistoryLine>(&plain).map_err(Into::into));
             match parsed {
                 Ok(parsed) => lines.push(Ok(parsed)),
@@ -2300,16 +2383,56 @@ impl Store {
         self.ensure_unlocked()?;
         let mut out = String::new();
         for line in lines {
+            // Each line is bound to where it lands in the file it is
+            // being written into, not where it came from: a rewrite that
+            // drops a message moves everything after it.
+            let at = out.len() as u64;
             match line {
                 Ok(parsed) => {
                     let json = serde_json::to_string(parsed)?;
-                    out.push_str(&encode_line(self.cipher.as_deref(), name, &json));
+                    out.push_str(&encode_line(self.cipher.as_deref(), name, at, &json));
                 }
                 Err(raw) => out.push_str(raw),
             }
             out.push('\n');
         }
-        write_atomic(&self.root.join(name), out.as_bytes())
+        write_atomic(&self.root.join(name), out.as_bytes())?;
+        let Some(conversation) = self
+            .generations()
+            .state()
+            .and_then(|s| s.conversations().find(|(n, _)| *n == name))
+            .and_then(|(_, id)| Conversation::parse_id(id))
+            .or_else(|| self.conversation_of_file(name))
+        else {
+            return Ok(());
+        };
+        self.note_history_write(name, &conversation)
+    }
+
+    /// Forget a history file that has been removed, so that its record
+    /// does not outlive it and turn its absence into a truncation.
+    fn forget_history_file(&self, name: &str) -> anyhow::Result<()> {
+        let Some(cipher) = self.cipher.clone() else {
+            return Ok(());
+        };
+        let mut generations = self.generations.lock().unwrap_or_else(|e| e.into_inner());
+        let Generations::Bound(state) = &mut *generations else {
+            return Ok(());
+        };
+        state.removed_history(name);
+        state.generation += 1;
+        let state = state.clone();
+        drop(generations);
+        self.persist_generations(&state, &cipher)
+    }
+
+    /// Which conversation a history file's name belongs to, worked out
+    /// from the name itself.
+    fn conversation_of_file(&self, name: &str) -> Option<Conversation> {
+        let stem = name
+            .strip_prefix(&format!("{HISTORY_DIR}/"))?
+            .strip_suffix(".jsonl")?;
+        Conversation::parse_id(stem)
     }
 
     // --- section 4.7: read marks, edits, reactions, deletions ------------------
@@ -2329,7 +2452,7 @@ impl Store {
             read: ids.to_vec(),
             at_ms,
         };
-        self.append_history_line(&conversation.file_name(), &serde_json::to_string(&line)?)
+        self.append_history_line(conversation, &serde_json::to_string(&line)?)
     }
 
     /// The message `id` says `text` from now on, by the edit `edit_id`
@@ -2352,7 +2475,7 @@ impl Store {
             at_ms,
             from,
         };
-        self.append_history_line(&conversation.file_name(), &serde_json::to_string(&line)?)
+        self.append_history_line(conversation, &serde_json::to_string(&line)?)
     }
 
     /// `from`'s reaction to the message `id` (`None`: one's own); an empty
@@ -2369,7 +2492,7 @@ impl Store {
             from,
             emoji: emoji.to_owned(),
         };
-        self.append_history_line(&conversation.file_name(), &serde_json::to_string(&line)?)
+        self.append_history_line(conversation, &serde_json::to_string(&line)?)
     }
 
     /// Remove the messages `ids` from the file for good ("delete for me",
@@ -2595,10 +2718,27 @@ fn encode_file(cipher: Option<&FileCipher>, name: &str, plain: &[u8]) -> Vec<u8>
     }
 }
 
-fn decode_line(cipher: Option<&FileCipher>, name: &str, line: &str) -> anyhow::Result<String> {
+/// One line of a line-oriented file, which sits at byte offset `at`.
+///
+/// The offset is bound in along with the name, so a line cannot be moved,
+/// dropped or repeated without the lines around it failing to open: every
+/// line after a change of length is at an offset it was not written at.
+/// A line's own offset is what an append knows without reading the file,
+/// which is why it is the offset and not the line's ordinal.
+fn decode_line(
+    cipher: Option<&FileCipher>,
+    name: &str,
+    at: u64,
+    line: &str,
+) -> anyhow::Result<String> {
     if line.starts_with(LINE_PREFIX) {
         match cipher {
-            Some(c) => c.decrypt_line(name, line),
+            Some(c) => c.decrypt_line_at(name, Some(at), line).or_else(|e| {
+                // Written before offsets were bound in. A directory that
+                // still holds such lines is one this version has not
+                // rewritten yet.
+                c.decrypt_line(name, line).map_err(|_| e)
+            }),
             None => bail!("{name} is encrypted but the data directory is not unlocked"),
         }
     } else {
@@ -2606,11 +2746,25 @@ fn decode_line(cipher: Option<&FileCipher>, name: &str, line: &str) -> anyhow::R
     }
 }
 
-fn encode_line(cipher: Option<&FileCipher>, name: &str, plain: &str) -> String {
+fn encode_line(cipher: Option<&FileCipher>, name: &str, at: u64, plain: &str) -> String {
     match cipher {
-        Some(c) => c.encrypt_line(name, plain),
+        Some(c) => c.encrypt_line_at(name, Some(at), plain),
         None => plain.to_owned(),
     }
+}
+
+/// Each non-blank line of `text` with the byte offset it sits at.
+///
+/// Blank lines are skipped but still counted towards the offsets, since
+/// they take up room in the file: a reader that ignored them would be
+/// looking at different offsets from the writer.
+fn lines_with_offsets(text: &str) -> impl Iterator<Item = (u64, &str)> {
+    let mut at = 0u64;
+    text.split('\n').filter_map(move |line| {
+        let here = at;
+        at += line.len() as u64 + 1;
+        (!line.trim().is_empty()).then_some((here, line))
+    })
 }
 
 /// The first few bytes of a file, for telling an encrypted one from a
@@ -2937,6 +3091,94 @@ mod tests {
             again.load_contacts().unwrap().len(),
             1,
             "the file the interrupted write left behind should still open"
+        );
+    }
+
+    /// The history half of SM-C-24: cutting the end off a conversation
+    /// is the one thing binding each line to its offset cannot show, so
+    /// the length is recorded and a shorter file is refused.
+    #[test]
+    fn a_history_file_with_its_end_cut_off_is_refused() {
+        let (store, dir) = bound_store();
+        let peer = Identity::generate().user_id();
+        for i in 0..4 {
+            store.append_history(&peer, &entry(i)).unwrap();
+        }
+        assert_eq!(store.load_history(&peer).unwrap().len(), 4);
+
+        // Somebody with write access takes the last two messages off.
+        let path = dir.path().join(history_name(&peer));
+        let text = fs::read_to_string(&path).unwrap();
+        let keep: String = text.lines().take(2).map(|l| format!("{l}\n")).collect();
+        fs::write(&path, keep).unwrap();
+
+        let err = store.load_history(&peer).unwrap_err().to_string();
+        assert!(
+            err.contains("cut off"),
+            "a truncated conversation was read as a shorter one: {err}"
+        );
+    }
+
+    /// Taking a line out shortens the file, which the length catches.
+    /// *Reordering* leaves the length exactly as it was, and is caught
+    /// instead by each line being bound to the offset it was written at.
+    #[test]
+    fn two_history_lines_swapped_round_do_not_open() {
+        let (store, dir) = bound_store();
+        let peer = Identity::generate().user_id();
+        for i in 0..4 {
+            store.append_history(&peer, &entry(i)).unwrap();
+        }
+        let path = dir.path().join(history_name(&peer));
+        let text = fs::read_to_string(&path).unwrap();
+        let mut lines: Vec<&str> = text.lines().collect();
+        // A swap keeps the file the same length whatever the lines are,
+        // and keeps everything after them where it was.
+        lines.swap(1, 2);
+        fs::write(&path, lines.join("\n") + "\n").unwrap();
+
+        let ids: Vec<String> = store
+            .load_history(&peer)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+        assert!(
+            !ids.contains(&entry(1).id) && !ids.contains(&entry(2).id),
+            "the swapped lines should not have opened: {ids:?}"
+        );
+        assert_eq!(
+            ids,
+            vec![entry(0).id, entry(3).id],
+            "the lines still at the offsets they were written at should open"
+        );
+    }
+
+    /// An append interrupted before the length was recorded leaves a
+    /// longer file than the record says, which is not tampering: a line
+    /// at an offset the record has not reached is one somebody encrypted
+    /// there, and that takes the key.
+    #[test]
+    fn a_history_append_interrupted_before_it_was_recorded_still_reads() {
+        let (store, dir) = bound_store();
+        let peer = Identity::generate().user_id();
+        store.append_history(&peer, &entry(0)).unwrap();
+        let vault_path = dir.path().join(VAULT_FILE);
+        let state_path = dir.path().join(STATE_FILE);
+        let before_vault = fs::read(&vault_path).unwrap();
+        let before_state = fs::read(&state_path).unwrap();
+
+        store.append_history(&peer, &entry(1)).unwrap();
+        // Wind the record back: the line landed, nothing recorded it.
+        fs::write(&vault_path, &before_vault).unwrap();
+        fs::write(&state_path, &before_state).unwrap();
+
+        let mut again = Store::open(dir.path()).unwrap();
+        again.unlock_with_keystore().unwrap();
+        assert_eq!(
+            again.load_history(&peer).unwrap().len(),
+            2,
+            "an interrupted append should still be read"
         );
     }
 

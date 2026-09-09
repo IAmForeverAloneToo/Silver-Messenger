@@ -19,6 +19,14 @@
 //! *that* file is the one number in plaintext `vault.json`. One anchor,
 //! and nothing outside the encryption that names anything.
 //!
+//! History is bound differently, because it is appended to a line at a
+//! time rather than written whole: each line carries the **byte offset**
+//! it sits at, so a line taken out or two put the other way round leaves
+//! them at offsets they were not written at, and none of those opens.
+//! The one thing an offset cannot show is the end being cut off, so the
+//! file's length is recorded in [`HistoryState`] and a shorter one is
+//! refused.
+//!
 //! ## What this cannot do
 //!
 //! An attacker who rolls the **whole directory** back to a consistent
@@ -39,11 +47,35 @@ pub(crate) const STATE_FILE: &str = "state";
 /// fall back to.
 pub(crate) const STATE_PREVIOUS_FILE: &str = "state.prev";
 
-/// Every file's generation.
-///
-/// History files are not in here yet: they are appended to a line at a
-/// time rather than written whole, so they need a line index in each
-/// line's associated data and a line count here, which is its own change.
+/// Where a history file stands, and whose it is.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct HistoryState {
+    /// The conversation the file holds, as its id: a user id, or a group
+    /// id with the `group-` prefix the old file names carried.
+    ///
+    /// History files are named after nothing (SM-C-25), so the directory
+    /// listing no longer says which conversations exist and this is what
+    /// says it instead. Both callers of `conversations()` need the
+    /// complete set — a conversation the expiry sweep cannot see is one
+    /// whose disappearing messages never disappear — and rebuilding it
+    /// from the contacts and groups files would be a different set,
+    /// because history outlives a contact who was removed.
+    pub conversation: String,
+    /// How long the file was when it was last written.
+    ///
+    /// Shorter than this means it has been truncated. Longer is an append
+    /// interrupted before this was recorded: the extra is a line somebody
+    /// encrypted at the offset it sits at, which takes the key, so it
+    /// cannot be anybody else's.
+    ///
+    /// Bytes rather than a count of lines because each line is bound to
+    /// its **offset** in the file, and an offset is what an append knows
+    /// without reading what is already there. Counting lines would make
+    /// every message read the whole conversation first.
+    pub bytes: u64,
+}
+
+/// Every file's generation, and where each history file stands.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct State {
     /// The generation this state itself was written at, matching
@@ -52,6 +84,14 @@ pub(crate) struct State {
     /// Whole files, by name.
     #[serde(default)]
     pub files: BTreeMap<String, u64>,
+    /// Line-oriented history files, by name.
+    ///
+    /// These are not in `files`: a history file is appended to a line at
+    /// a time rather than written whole, so what binds it is a line index
+    /// in each line's associated data and the count below, not one
+    /// generation for the file.
+    #[serde(default)]
+    pub history: BTreeMap<String, HistoryState>,
 }
 
 /// Where a directory stands with respect to rollback binding.
@@ -114,6 +154,37 @@ impl State {
     /// Record that `name` was written at `at`.
     pub fn wrote(&mut self, name: &str, at: u64) {
         self.files.insert(name.to_owned(), at);
+    }
+
+    /// Record that the history file `name` holds `conversation` and is
+    /// now `bytes` long.
+    pub fn wrote_history(&mut self, name: &str, conversation: &str, bytes: u64) {
+        self.history.insert(
+            name.to_owned(),
+            HistoryState {
+                conversation: conversation.to_owned(),
+                bytes,
+            },
+        );
+    }
+
+    /// How long a history file is known to be. `None` for one this state
+    /// has never recorded, which is a file the operation that created it
+    /// failed to record — so any length is its own.
+    pub fn history_bytes(&self, name: &str) -> Option<u64> {
+        self.history.get(name).map(|h| h.bytes)
+    }
+
+    /// Every history file, with the conversation it holds.
+    pub fn conversations(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.history
+            .iter()
+            .map(|(name, h)| (name.as_str(), h.conversation.as_str()))
+    }
+
+    /// Forget a history file that has been removed.
+    pub fn removed_history(&mut self, name: &str) {
+        self.history.remove(name);
     }
 }
 
