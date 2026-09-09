@@ -4,6 +4,47 @@ Notable changes to Silver Messenger. Versions follow [semantic
 versioning](https://semver.org); while the major version is 0, a minor bump
 means behaviour or the wire protocol changed in a way worth reading about.
 
+## Unreleased
+
+Roadmap item 57, the first half: the on-disk change the first review's
+SM-C-24 asked for. It changes what a data directory looks like, so it is
+kept out of 0.15.0 -- that release is the answer to the second review and
+nothing else -- and carried by whatever comes after it.
+
+### Security
+
+- An older copy of a file put back into a live data directory is refused
+  rather than read. Until now the at-rest encryption bound each file to
+  its own name, which stops one file being read as another but not an
+  older copy of a file being read as itself: an old `sessions.json` puts
+  back ratchet state that has already been used, so the next send repeats
+  a message key, and an old `contacts.json` undoes a key-change warning
+  or a `verified` mark. Every file is now written at a generation, bound
+  into its associated data, so a file at the wrong one does not decrypt
+  at all rather than decrypting and being judged afterwards. What each
+  file's generation should be is kept in a new encrypted `state` file,
+  and the generation of *that* is one plaintext number in `vault.json` --
+  the only thing outside the encryption, and it names nothing.
+  The file is written before the record of it, so a crash between the two
+  leaves a file one generation ahead, which is accepted; the other order
+  would make the crash case a file one generation *behind*, which is
+  exactly the old copy an attacker puts back.
+  A directory written by an earlier version adopts generations on its
+  next unlock, and one with no protection at rest is not bound at all:
+  there is no AEAD to put a generation into, and the client already says
+  such a directory is unprotected.
+  What this does not catch, and the threat model now says so, is a
+  rollback of the *whole* directory to a consistent earlier state: every
+  file agrees with every other, because they did once.
+- `silver --reset-rollback-protection`, for the new failure this
+  introduces: `state` and the copy kept beside it both unreadable. The
+  directory then unlocks -- refusing to unlock would leave no way to run
+  the reset, which needs the data key -- and every read and write refuses
+  with the reason until somebody decides. The reset rebuilds the record
+  from the generations the files themselves carry, and says plainly that
+  whatever happened to the directory before that moment is now
+  unprovable.
+
 ## 0.15.0 - 2026-09-09
 
 A second independent security review of the 0.14.0 line reported 2 High,

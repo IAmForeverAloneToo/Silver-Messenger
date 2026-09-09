@@ -21,6 +21,10 @@ use zeroize::Zeroizing;
 
 const VAULT_AAD: &[u8] = b"silver-messenger/v1/vault";
 pub(crate) const FILE_MAGIC: &[u8; 4] = b"SMV1";
+/// A file that carries the generation it was written at, in the eight
+/// bytes after this. Its own magic rather than a flag inside the first,
+/// so a reader knows the shape before it has decrypted anything.
+pub(crate) const GENERATION_MAGIC: &[u8; 4] = b"SMV2";
 /// Prefix of an encrypted line in a line-oriented file.
 pub const LINE_PREFIX: &str = "enc:";
 /// `Kdf::algorithm` when the data key is wrapped under a random key kept
@@ -111,6 +115,25 @@ pub struct VaultFile {
     /// field goes, and with it the old key.
     #[serde(default, skip_serializing_if = "Option::is_none", with = "b64_opt")]
     pub previous_key: Option<Vec<u8>>,
+    /// Which version of `state` belongs to this directory, or `None` in a
+    /// directory written before rollback binding existed.
+    ///
+    /// This is the one number that anchors the rest, and it sits in the
+    /// clear because `vault.json` is read before there is a key to read
+    /// anything with. It says how many times the directory has been
+    /// written and nothing else -- no name, no id -- which the
+    /// modification times already say. Everything that would name
+    /// something is in `state`, encrypted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_generation: Option<u64>,
+}
+
+/// A file that opened, and the generation it says it was written at.
+pub struct OpenedFile {
+    /// `None` for a file bound to its name alone, which is every file in
+    /// a directory that has not adopted rollback binding.
+    pub generation: Option<u64>,
+    pub plain: Zeroizing<Vec<u8>>,
 }
 
 /// The unlocked data key, and — during a rotation — the one before it.
@@ -138,6 +161,9 @@ impl FileCipher {
                 kdf,
                 wrapped_key,
                 previous_key: None,
+                // A fresh directory has no `state` yet; the store writes
+                // one and stamps this on the first write.
+                state_generation: None,
             },
             Self {
                 key,
@@ -164,7 +190,8 @@ impl FileCipher {
             key,
             previous: None,
         };
-        let vault = cipher.wrap_under_kek(kek, Kdf::keystore());
+        // A fresh directory, so no `state` to point at yet.
+        let vault = cipher.wrap_under_kek(kek, Kdf::keystore(), None);
         (vault, cipher)
     }
 
@@ -214,19 +241,34 @@ impl FileCipher {
 
     /// The same data key wrapped under `passphrase` instead: files need no
     /// rewriting when the protection changes.
-    pub fn wrap_under_passphrase(&self, passphrase: &str, kdf: Kdf) -> anyhow::Result<VaultFile> {
+    ///
+    /// `state_generation` is the directory's, carried over from the vault
+    /// being replaced. It is a parameter rather than something this
+    /// forgets so that changing the protection cannot quietly detach a
+    /// directory from its own anchor.
+    pub fn wrap_under_passphrase(
+        &self,
+        passphrase: &str,
+        kdf: Kdf,
+        state_generation: Option<u64>,
+    ) -> anyhow::Result<VaultFile> {
         let kek = derive(&kdf, passphrase)?;
-        Ok(self.wrapped(kdf, &kek))
+        Ok(self.wrapped(kdf, &kek, state_generation))
     }
 
     /// The same data key wrapped under a key-store `kek`.
-    pub fn wrap_under_kek(&self, kek: &[u8; 32], kdf: Kdf) -> VaultFile {
-        self.wrapped(kdf, kek)
+    pub fn wrap_under_kek(
+        &self,
+        kek: &[u8; 32],
+        kdf: Kdf,
+        state_generation: Option<u64>,
+    ) -> VaultFile {
+        self.wrapped(kdf, kek, state_generation)
     }
 
     /// Both keys wrapped under `kek`, so a rotation left half-done is
     /// still readable: whichever key a file is under is in the vault.
-    fn wrapped(&self, kdf: Kdf, kek: &[u8; 32]) -> VaultFile {
+    fn wrapped(&self, kdf: Kdf, kek: &[u8; 32], state_generation: Option<u64>) -> VaultFile {
         VaultFile {
             version: 1,
             kdf,
@@ -235,18 +277,66 @@ impl FileCipher {
                 .previous
                 .as_ref()
                 .map(|old| seal(kek, VAULT_AAD, old.as_slice())),
+            state_generation,
         }
     }
 
     pub fn is_encrypted(bytes: &[u8]) -> bool {
-        bytes.starts_with(FILE_MAGIC)
+        bytes.starts_with(FILE_MAGIC) || bytes.starts_with(GENERATION_MAGIC)
     }
 
-    /// Encrypt a whole file; `name` is bound as associated data.
+    /// Encrypt a whole file bound to its name alone.
+    ///
+    /// The shape written before generations existed, and the one a
+    /// directory with no rollback binding still uses.
     pub fn encrypt(&self, name: &str, plaintext: &[u8]) -> Vec<u8> {
         let mut out = FILE_MAGIC.to_vec();
         out.extend(seal(&self.key, name.as_bytes(), plaintext));
         out
+    }
+
+    /// Encrypt a whole file at generation `at`.
+    ///
+    /// The generation goes in the header in the clear *and* into the
+    /// associated data. In the clear so that a reader knows which
+    /// generation to check the tag against without being told — otherwise
+    /// losing the record of what was written would leave every file
+    /// undecryptable, and a directory that opens for nobody is a worse
+    /// answer than one whose past cannot be proved. In the associated
+    /// data so the header cannot lie: change the number and the tag
+    /// fails.
+    ///
+    /// It is not a secret. It counts writes, which the modification times
+    /// and the anchor in `vault.json` already say.
+    pub fn encrypt_at(&self, name: &str, at: u64, plaintext: &[u8]) -> Vec<u8> {
+        let mut out = GENERATION_MAGIC.to_vec();
+        out.extend_from_slice(&at.to_be_bytes());
+        out.extend(seal(&self.key, &file_aad(name, Some(at)), plaintext));
+        out
+    }
+
+    /// Decrypt a whole file of either shape, saying which generation it
+    /// claims. The claim is checked by the tag, so it is the file's own
+    /// and not something an editor could put there.
+    pub fn open_file(&self, name: &str, bytes: &[u8]) -> anyhow::Result<OpenedFile> {
+        if let Some(rest) = bytes.strip_prefix(GENERATION_MAGIC) {
+            let (at, body) = rest
+                .split_at_checked(8)
+                .context("file is too short to carry a generation")?;
+            let at = u64::from_be_bytes(at.try_into().expect("split at eight"));
+            let aad = file_aad(name, Some(at));
+            let plain = open(&self.key, &aad, body)
+                .or_else(|| self.previous(&aad, body))
+                .with_context(|| format!("could not decrypt {name}: wrong key or damaged file"))?;
+            return Ok(OpenedFile {
+                generation: Some(at),
+                plain,
+            });
+        }
+        Ok(OpenedFile {
+            generation: None,
+            plain: self.decrypt(name, bytes)?,
+        })
     }
 
     pub fn decrypt(&self, name: &str, bytes: &[u8]) -> anyhow::Result<Zeroizing<Vec<u8>>> {
@@ -266,21 +356,67 @@ impl FileCipher {
 
     /// Encrypt one line of a line-oriented file.
     pub fn encrypt_line(&self, name: &str, line: &str) -> String {
+        self.encrypt_line_at(name, None, line)
+    }
+
+    /// Encrypt the line at index `at` of a line-oriented file.
+    ///
+    /// The index is bound in, so a line cannot be moved, dropped or
+    /// repeated without the line it lands on failing to decrypt. `None`
+    /// is the shape written before this existed.
+    pub fn encrypt_line_at(&self, name: &str, at: Option<u64>, line: &str) -> String {
         format!(
             "{LINE_PREFIX}{}",
-            to_base64(&seal(&self.key, name.as_bytes(), line.as_bytes()))
+            to_base64(&seal(&self.key, &file_aad(name, at), line.as_bytes()))
         )
     }
 
     pub fn decrypt_line(&self, name: &str, line: &str) -> anyhow::Result<String> {
+        self.decrypt_line_at(name, None, line)
+    }
+
+    /// Decrypt the line that must be at index `at`.
+    pub fn decrypt_line_at(
+        &self,
+        name: &str,
+        at: Option<u64>,
+        line: &str,
+    ) -> anyhow::Result<String> {
         let body = line
             .strip_prefix(LINE_PREFIX)
             .context("line is not encrypted")?;
         let bytes = from_base64(body.trim()).context("encrypted line is not base64")?;
-        let plain = open(&self.key, name.as_bytes(), &bytes)
-            .or_else(|| self.previous(name.as_bytes(), &bytes))
-            .with_context(|| format!("could not decrypt a line of {name}"))?;
+        let aad = file_aad(name, at);
+        let plain = open(&self.key, &aad, &bytes)
+            .or_else(|| self.previous(&aad, &bytes))
+            .with_context(|| match at {
+                Some(at) => format!("could not decrypt line {at} of {name}"),
+                None => format!("could not decrypt a line of {name}"),
+            })?;
         String::from_utf8(plain.to_vec()).context("decrypted line is not UTF-8")
+    }
+}
+
+/// What a file's contents are bound to: its name, and where it stands.
+///
+/// The name alone stops one file being read as another. The generation --
+/// a write counter for a whole file, a line index for a line -- stops an
+/// older copy of the *same* file being read as the current one, which the
+/// name cannot do because an older copy has the right name.
+///
+/// The separator is a byte that cannot appear in a name, so
+/// `("a", Some(1))` and `("a\u{1}1", None)` are different associated
+/// data rather than the same bytes twice.
+fn file_aad(name: &str, at: Option<u64>) -> Vec<u8> {
+    match at {
+        None => name.as_bytes().to_vec(),
+        Some(at) => {
+            let mut aad = Vec::with_capacity(name.len() + 9);
+            aad.extend_from_slice(name.as_bytes());
+            aad.push(0);
+            aad.extend_from_slice(&at.to_be_bytes());
+            aad
+        }
     }
 }
 
@@ -422,7 +558,7 @@ mod tests {
 
         let rotating = old.rotating();
         let vault = rotating
-            .wrap_under_passphrase("hunter2", vault.kdf)
+            .wrap_under_passphrase("hunter2", vault.kdf, None)
             .unwrap();
         assert!(vault.previous_key.is_some());
         let rotating = FileCipher::unlock(&vault, "hunter2").unwrap();
@@ -453,7 +589,7 @@ mod tests {
         let settled = rotating.settled();
         assert!(
             settled
-                .wrap_under_passphrase("hunter2", vault.kdf)
+                .wrap_under_passphrase("hunter2", vault.kdf, None)
                 .unwrap()
                 .previous_key
                 .is_none()
@@ -518,7 +654,7 @@ mod tests {
         );
         // Rewrapped under a passphrase, the files stay as they are.
         let rewrapped = cipher
-            .wrap_under_passphrase("hunter2", Kdf::fast())
+            .wrap_under_passphrase("hunter2", Kdf::fast(), None)
             .unwrap();
         let by_passphrase = FileCipher::unlock(&rewrapped, "hunter2").unwrap();
         assert_eq!(
@@ -530,7 +666,7 @@ mod tests {
         );
         assert!(FileCipher::unlock_with_kek(&rewrapped, &kek).is_err());
         // And back.
-        let back = by_passphrase.wrap_under_kek(&kek, Kdf::keystore());
+        let back = by_passphrase.wrap_under_kek(&kek, Kdf::keystore(), None);
         let by_kek = FileCipher::unlock_with_kek(&back, &kek).unwrap();
         assert_eq!(
             by_kek.decrypt("contacts.json", &blob).unwrap().as_slice(),
