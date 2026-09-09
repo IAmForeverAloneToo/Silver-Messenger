@@ -53,6 +53,21 @@ means behaviour or the wire protocol changed in a way worth reading about.
   it has had an invariant test since 0.10.0, and reader mode now has the
   mirror of it, plus the same forgery walked through a real terminal.
 
+- The ratchet body, which carries every ordinary message, was the one
+  body version parsed without being checked. The v0/v1 body has
+  validated its message id and content since 0.3.0 and the v5 group body
+  since 0.9.0; protocol v2 and v4 went straight from JSON to a value.
+  The rules existed further in -- the ML-KEM field lengths inside the
+  decrypt path, the handshake's shape inside `Session::accept` -- so a
+  body that never reached those, because it named a session or a prekey
+  this client does not hold, was carried around unexamined. They now run
+  where every body passes: the fixed ML-KEM lengths (the associated data
+  concatenates those fields without a length prefix, which is why they
+  are fixed rather than merely expected), a post-quantum handshake that
+  is only half present, and a v4 handshake with no key-binding signature,
+  which is the only thing tying the initiator's key to the sender in a
+  body that carries no sealed-layer signature. No new rule, and nothing
+  that was accepted before is refused now.
 - A client sitting on a relay rate limit wrote a log line per refused
   frame. A refusal costs the sender nothing and the relay a bucket check,
   so the cheapest way to fill an operator's disk -- or their journald

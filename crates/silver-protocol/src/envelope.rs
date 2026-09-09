@@ -384,6 +384,40 @@ pub enum Body {
     Group(GroupBody),
 }
 
+impl RatchetBody {
+    /// Check what can be checked without keys, at the point of parsing.
+    ///
+    /// The v0/v1 body has done this since 0.3.0 and the v5 group body
+    /// since 0.9.0; the ratchet body, which carries every ordinary
+    /// message, did none of it. Its fields were checked further in, where
+    /// they are used -- `RatchetHeader::check_lengths` inside the decrypt
+    /// path, the handshake's shape inside `Session::accept` -- so a body
+    /// that never reached those, because it named a session or a prekey
+    /// this client does not have, was carried around unexamined and its
+    /// failure came from somewhere further away than it needed to.
+    ///
+    /// Nothing here is a new rule. It is the rules that already existed,
+    /// applied where every body passes rather than only where the ones
+    /// that get that far do.
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        self.message.header.check_lengths()?;
+        if let Some(init) = &self.init {
+            init.check_lengths()?;
+            // A v4 body carries no sealed-layer signature, so this
+            // signature is the only thing tying `identity_dh` to the
+            // sender. `Session::accept` requires it; requiring it here
+            // means a v4 handshake that arrives without one is refused
+            // whether or not it reaches a client that could accept it.
+            if self.v == 4 && init.identity_dh_signature.is_none() {
+                return Err(ProtocolError::Malformed(
+                    "a v4 handshake carries no key-binding signature".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Peek at the version before choosing how to parse.
 #[derive(Deserialize)]
 struct Version {
@@ -512,9 +546,11 @@ impl Body {
                     id: body.id,
                 })
             }
-            2 | 4 => Ok(Self::Ratchet(
-                serde_json::from_slice(bytes).map_err(malformed)?,
-            )),
+            2 | 4 => {
+                let body: RatchetBody = serde_json::from_slice(bytes).map_err(malformed)?;
+                body.validate()?;
+                Ok(Self::Ratchet(body))
+            }
             5 => {
                 let body: GroupBody = serde_json::from_slice(bytes).map_err(malformed)?;
                 body.validate()?;
@@ -1343,5 +1379,112 @@ mod tests {
         };
         assert_eq!(content, text("ratcheted"));
         assert_eq!(sequence.seq, 1);
+    }
+
+    /// A ratchet body is checked where it is parsed, not only where its
+    /// parts are used.
+    ///
+    /// Every one of these was already refused somewhere further in --
+    /// inside the decrypt path, or inside `Session::accept`. The point is
+    /// that a body which never reaches those, because it names a session
+    /// or a prekey this client does not hold, used to be carried around
+    /// unexamined. `decode` is where every body passes.
+    #[test]
+    fn a_ratchet_body_is_refused_at_the_boundary_not_only_at_the_point_of_use() {
+        let base = serde_json::json!({
+            "v": 2,
+            "session": crate::encoding::to_base64(&[7u8; 16]),
+            "message": {
+                "header": {
+                    "dh": crate::encoding::to_base64(&[1u8; 32]),
+                    "pn": 0,
+                    "n": 0,
+                },
+                "ciphertext": crate::encoding::to_base64(b"nothing readable"),
+            }
+        });
+        // The shape itself is fine.
+        Body::decode(base.to_string().as_bytes()).expect("a well-formed v2 body parses");
+
+        let refused = |mutate: &dyn Fn(&mut serde_json::Value), what: &str| {
+            let mut body = base.clone();
+            mutate(&mut body);
+            let got = Body::decode(body.to_string().as_bytes());
+            assert!(
+                matches!(got, Err(ProtocolError::Malformed(_))),
+                "{what} was accepted at the boundary"
+            );
+        };
+
+        // An ML-KEM ratchet key of the wrong length. The associated data
+        // concatenates these without a length prefix, which is why the
+        // lengths are fixed rather than merely expected.
+        refused(
+            &|b| {
+                b["message"]["header"]["kem"] =
+                    serde_json::json!(crate::encoding::to_base64(&[0u8; 8]))
+            },
+            "a short ML-KEM ratchet key",
+        );
+        refused(
+            &|b| {
+                b["message"]["header"]["kem_ct"] =
+                    serde_json::json!(crate::encoding::to_base64(&[0u8; 8]))
+            },
+            "a short ML-KEM chain ciphertext",
+        );
+
+        // A handshake whose post-quantum half is only half there: the
+        // ciphertext says one thing and the absent prekey id another.
+        refused(
+            &|b| {
+                b["init"] = serde_json::json!({
+                    "identity_dh": crate::encoding::to_base64(&[2u8; 32]),
+                    "ephemeral": crate::encoding::to_base64(&[3u8; 32]),
+                    "signed_prekey_id": 1,
+                    "kem_ciphertext": crate::encoding::to_base64(&[0u8; 1088]),
+                })
+            },
+            "a handshake with a ciphertext and no prekey id",
+        );
+        refused(
+            &|b| {
+                b["init"] = serde_json::json!({
+                    "identity_dh": crate::encoding::to_base64(&[2u8; 32]),
+                    "ephemeral": crate::encoding::to_base64(&[3u8; 32]),
+                    "signed_prekey_id": 1,
+                    "pq_prekey_id": 4,
+                    "kem_ciphertext": crate::encoding::to_base64(&[0u8; 9]),
+                })
+            },
+            "a handshake ML-KEM ciphertext of the wrong length",
+        );
+
+        // A v4 handshake with no key-binding signature. A v4 body is not
+        // signed at the sealed layer, so without this nothing ties the
+        // initiator's key to the sender.
+        refused(
+            &|b| {
+                b["v"] = serde_json::json!(4);
+                b["init"] = serde_json::json!({
+                    "identity_dh": crate::encoding::to_base64(&[2u8; 32]),
+                    "ephemeral": crate::encoding::to_base64(&[3u8; 32]),
+                    "signed_prekey_id": 1,
+                    "pq_prekey_id": 4,
+                    "kem_ciphertext": crate::encoding::to_base64(&[0u8; 1088]),
+                })
+            },
+            "an unsigned v4 handshake",
+        );
+
+        // And a v2 handshake without one is still fine: its envelope
+        // signature does that job.
+        let mut ok = base.clone();
+        ok["init"] = serde_json::json!({
+            "identity_dh": crate::encoding::to_base64(&[2u8; 32]),
+            "ephemeral": crate::encoding::to_base64(&[3u8; 32]),
+            "signed_prekey_id": 1,
+        });
+        Body::decode(ok.to_string().as_bytes()).expect("a classical v2 handshake still parses");
     }
 }

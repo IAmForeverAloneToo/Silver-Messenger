@@ -119,6 +119,37 @@ pub struct RatchetHeader {
     pub kem_ct: Option<Vec<u8>>,
 }
 
+impl InitHeader {
+    /// Check the variable-length fields at the boundary.
+    ///
+    /// `Session::accept` checks the same things and more, but only for a
+    /// handshake that reaches it: one naming a prekey this client does
+    /// not hold, or arriving for a session it already has, is turned away
+    /// earlier and its contents are never looked at. The checks that cost
+    /// nothing belong where every header passes, not where the ones that
+    /// get that far do.
+    pub fn check_lengths(&self) -> Result<(), ProtocolError> {
+        if self
+            .kem_ciphertext
+            .as_ref()
+            .is_some_and(|ct| ct.len() != KEM_CIPHERTEXT_LEN)
+        {
+            return Err(ProtocolError::Malformed(
+                "bad ML-KEM handshake ciphertext length".into(),
+            ));
+        }
+        // The two describe one thing: which of the responder's ML-KEM keys
+        // this was encapsulated to, and the result. One without the other
+        // is a header that cannot mean anything.
+        if self.kem_ciphertext.is_some() != self.pq_prekey_id.is_some() {
+            return Err(ProtocolError::Malformed(
+                "post-quantum handshake is half present".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl RatchetHeader {
     /// Check that the variable-length fields are the only lengths they may
     /// be. The associated data below concatenates them without a length
@@ -129,7 +160,7 @@ impl RatchetHeader {
     /// key does and the AEAD fails — but the encoding should not need the
     /// accident. A length prefix goes in at the next domain bump; until
     /// then the lengths are fixed, so refusing anything else is enough.
-    fn check_lengths(&self) -> Result<(), ProtocolError> {
+    pub(crate) fn check_lengths(&self) -> Result<(), ProtocolError> {
         if self
             .kem
             .as_ref()
