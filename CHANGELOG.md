@@ -6,10 +6,26 @@ means behaviour or the wire protocol changed in a way worth reading about.
 
 ## Unreleased
 
-Roadmap item 57, the first half: the on-disk change the first review's
-SM-C-24 asked for. It changes what a data directory looks like, so it is
-kept out of 0.15.0 -- that release is the answer to the second review and
-nothing else -- and carried by whatever comes after it.
+Roadmap item 57: the two on-disk changes the first review asked for
+(SM-C-24, SM-C-25), and the two wire changes as optional fields (SM-P-14,
+and a device's own signature on its certificate). The on-disk pair
+changes what a data directory looks like and migrates it on first
+unlock, so it is kept out of 0.15.0 -- that release is the answer to the
+second review and nothing else.
+
+**These sections are in commit order, not release order.** 0.15.0 has
+not been tagged, so the tip of `main` carries both: cutting a release
+from it as it stands would ship this section under 0.15.0's name. The
+on-disk pair is a migration and deserves to be read as one rather than
+folded into a release of security fixes.
+
+The cut for 0.15.0 is "Settle how the on-disk pair is built, before
+writing it" -- everything up to and including that commit, which is the
+last before the first line of on-disk code. One thing from 0.15.0's own
+work lands after it and would go in the next release instead: the
+host-name check on a redirect target, which the new fuzz target found.
+Nothing resolves a host name with a NUL or an `@` in it, so that one was
+not reachable in practice; it is a loose end, not a hole.
 
 ### Security
 
