@@ -281,6 +281,19 @@ pub struct Policy {
     pub one_time_prekeys_per_user_per_hour: u32,
     /// Group sequencer entries the relay keeps at most; 0 for no cap.
     pub max_groups: u64,
+    /// Bundle changes one identity may write into the transparency log
+    /// per hour; 0 for no cap.
+    ///
+    /// The log is append-only and hash-chained, which is what lets a
+    /// client prove the relay served everyone the same keys — so its
+    /// growth cannot be answered by removing entries, only by refusing to
+    /// add them. A client publishes on connecting (no entry: the bundle
+    /// is unchanged) and again when it links or renames a device or
+    /// rotates its weekly signed prekey, so a handful an hour is far more
+    /// than honest use and still bounds an identity to a few thousand
+    /// entries a year rather than the ~5,700 an hour that publishing a
+    /// fresh prekey on every reconnect allowed.
+    pub log_entries_per_user_per_hour: u32,
 }
 
 impl Default for Policy {
@@ -305,6 +318,7 @@ impl Default for Policy {
             hosts: Vec::new(),
             one_time_prekeys_per_user_per_hour: 30,
             max_groups: 100_000,
+            log_entries_per_user_per_hour: 12,
         }
     }
 }
@@ -568,6 +582,9 @@ pub struct RelayState {
     addresses: Mutex<HashMap<IpAddr, AddressState>>,
     /// How many one-time prekeys each user has had handed out lately.
     handouts: Mutex<HashMap<UserId, Bucket>>,
+    /// Bundle changes each identity may have written into the
+    /// transparency log per hour. See [`RelayState::log_entry_allowed`].
+    log_entries: Mutex<HashMap<UserId, Bucket>>,
     connections: AtomicU32,
     counters: Counters,
     next_session: AtomicU64,
@@ -687,6 +704,7 @@ impl RelayState {
             online: Mutex::new(HashMap::new()),
             addresses: Mutex::new(HashMap::new()),
             handouts: Mutex::new(HashMap::new()),
+            log_entries: Mutex::new(HashMap::new()),
             connections: AtomicU32::new(0),
             counters: Counters::default(),
             next_session: AtomicU64::new(0),
@@ -826,6 +844,24 @@ impl RelayState {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .retain(|_, b| b.last.elapsed() < cutoff);
+        self.log_entries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|_, b| b.last.elapsed() < cutoff);
+    }
+
+    /// Whether `user` may add one more entry to the transparency log now.
+    ///
+    /// Only asked when the publish would actually add one, so a client
+    /// republishing an unchanged bundle is never refused.
+    fn log_entry_allowed(&self, user: &UserId) -> bool {
+        let mut entries = self.log_entries.lock().unwrap_or_else(|e| e.into_inner());
+        entries
+            .entry(*user)
+            .or_insert_with(|| {
+                Bucket::per_hour(f64::from(self.policy.log_entries_per_user_per_hour))
+            })
+            .try_take()
     }
 
     /// Whether one more one-time prekey of `user`'s may be handed out now.
@@ -2033,6 +2069,21 @@ impl RelayState {
             error!("storing bundle: {e:#}");
             (ErrorCode::Internal, "storage error")
         };
+        // Before the write: an entry in the transparency log is there
+        // for good, so this is the only moment the growth can be
+        // answered. Asked only when the bundle actually differs from the
+        // last logged one, so republishing the same bundle -- what every
+        // client does on connecting -- costs nothing and is never
+        // refused.
+        if self.policy.log_entries_per_user_per_hour > 0
+            && self.store.bundle_would_log(&bundle).map_err(storage)?
+            && !self.log_entry_allowed(me)
+        {
+            return Err((
+                ErrorCode::RateLimited,
+                "too many key changes this hour; the transparency log keeps every one for good",
+            ));
+        }
         self.store.put_bundle(&bundle).map_err(storage)?;
         let (Some(keys), Some(pq_keys)) = (one_time, pq_one_time) else {
             return Ok(None);
