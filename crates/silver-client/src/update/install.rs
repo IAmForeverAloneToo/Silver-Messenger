@@ -168,13 +168,45 @@ pub fn swap(new: &Path, exe: &Path) -> anyhow::Result<PathBuf> {
 
     #[cfg(windows)]
     {
-        // A running image cannot be deleted, but it can be renamed out of
-        // the way, and the replacement then takes the name it left.
+        // Windows cannot replace a running image in one step: it can only
+        // be renamed out of the way and the replacement given the name it
+        // left. Between those two renames the path holds nothing, and the
+        // program that has just vanished from it is the one running this
+        // code, so it cannot put itself back on a later start.
+        //
+        // The window cannot be closed -- the operating system offers no
+        // atomic replace for a running file -- so make it as small and as
+        // survivable as it can be. Everything that can fail happens
+        // first: the new file is checked here rather than discovered
+        // missing between the renames, and the mode was copied above.
+        if !new.is_file() {
+            bail!(
+                "{} is not there to install; nothing has been changed",
+                new.display()
+            );
+        }
         std::fs::rename(exe, &backup).with_context(|| format!("moving {} aside", exe.display()))?;
         if let Err(e) = std::fs::rename(new, exe) {
-            // Put it back rather than leave the name empty.
-            let _ = std::fs::rename(&backup, exe);
-            return Err(e).with_context(|| format!("putting the new binary at {}", exe.display()));
+            // Put it back rather than leave the name empty, and if the
+            // rename back will not go either, copy: leaving the user with
+            // no program is worse than leaving them without a rollback.
+            let put_back = restore(&backup, exe);
+            let at = exe.display();
+            return match put_back {
+                Ok(()) => {
+                    Err(e).with_context(|| format!("putting the new binary at {at}"))
+                }
+                // Both the install and the recovery failed, so the path
+                // may be empty and this process may not run again. Say
+                // exactly what to do by hand, since a later start cannot.
+                Err(recovery) => Err(e).with_context(|| {
+                    format!(
+                        "putting the new binary at {at}, and {} could not be put back either                          ({recovery:#}); the previous version is at {}, so rename that back to                          {at} by hand",
+                        at,
+                        backup.display()
+                    )
+                }),
+            };
         }
     }
     #[cfg(not(windows))]
@@ -199,9 +231,9 @@ pub fn swap(new: &Path, exe: &Path) -> anyhow::Result<PathBuf> {
 /// Put back what the last update replaced.
 pub fn rollback(exe: &Path) -> anyhow::Result<PathBuf> {
     let backup = backup_path(exe);
-    if !backup.exists() {
+    if !backup.is_file() {
         bail!(
-            "there is nothing to go back to: {} does not exist",
+            "there is nothing to go back to: {} is not a file",
             backup.display()
         );
     }
@@ -210,9 +242,21 @@ pub fn rollback(exe: &Path) -> anyhow::Result<PathBuf> {
     let aside = exe.with_extension("rolling-back");
     let _ = std::fs::remove_file(&aside);
     std::fs::rename(exe, &aside).with_context(|| format!("moving {} aside", exe.display()))?;
+    // The same two-rename window as the Windows half of `swap`, on every
+    // platform: between these the path holds nothing. If the second will
+    // not go, put the current binary back by whatever means -- see
+    // `restore`.
     if let Err(e) = std::fs::rename(&backup, exe) {
-        let _ = std::fs::rename(&aside, exe);
-        return Err(e).with_context(|| format!("restoring {}", exe.display()));
+        let at = exe.display();
+        return match restore(&aside, exe) {
+            Ok(()) => Err(e).with_context(|| format!("restoring {at}")),
+            Err(recovery) => Err(e).with_context(|| {
+                format!(
+                    "restoring {at}, and the binary that was running could not be put back                      either ({recovery:#}); it is at {}, so rename that back to {at} by hand",
+                    aside.display()
+                )
+            }),
+        };
     }
     let _ = std::fs::remove_file(&aside);
     #[cfg(not(windows))]
@@ -232,6 +276,29 @@ pub fn tidy_after_update() {
     if let Ok(exe) = running_binary() {
         let _ = std::fs::remove_file(backup_path(&exe));
     }
+}
+
+/// Put `exe` back from `backup` after a failed replacement.
+///
+/// A rename if the filesystem will take one, a copy if it will not. The
+/// distinction matters on Windows, where the path is empty at this point
+/// and the program that would notice is the one that is missing: a
+/// rollback lost is an inconvenience, a program lost is the user having
+/// nothing to run. So the copy is worth the duplicated bytes.
+fn restore(backup: &Path, exe: &Path) -> anyhow::Result<()> {
+    // A file, not merely something at that path: the destination is free
+    // by now, so a rename would happily move a *directory* onto it and
+    // report success, leaving the name taken by something that cannot be
+    // run.
+    if !backup.is_file() {
+        bail!("{} is not there to put back", backup.display());
+    }
+    if std::fs::rename(backup, exe).is_ok() {
+        return Ok(());
+    }
+    std::fs::copy(backup, exe)
+        .with_context(|| format!("copying {} back to {}", backup.display(), exe.display()))?;
+    Ok(())
 }
 
 fn copy_permissions(from: &Path, to: &Path) -> anyhow::Result<()> {
@@ -388,5 +455,73 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         base
+    }
+
+    /// Putting the binary back must not depend on a rename working.
+    ///
+    /// Both `swap` on Windows and `rollback` everywhere move the running
+    /// binary out of the way and then move the other one in. Between
+    /// those two the path holds nothing, and the program that would
+    /// notice is the one that is missing -- it cannot put itself back on
+    /// a later start. So when the second move fails, the recovery has to
+    /// try harder than the thing that just failed: a rename if that
+    /// works, a copy if it does not. A rollback lost is an
+    /// inconvenience; a program lost is the user with nothing to run.
+    #[test]
+    fn putting_a_binary_back_falls_back_to_copying() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("silver");
+        let backup = dir.path().join("silver.backup");
+
+        // The ordinary case: a rename, and the backup is consumed.
+        std::fs::write(&backup, b"the previous version").unwrap();
+        restore(&backup, &exe).unwrap();
+        assert_eq!(std::fs::read(&exe).unwrap(), b"the previous version");
+        assert!(!backup.exists(), "a rename leaves nothing behind it");
+
+        // A rename that cannot go: the destination's directory is not the
+        // source's, which is the shape a cross-device rename has. The
+        // copy takes over and the path is not left empty.
+        let other = tempfile::tempdir().unwrap();
+        let far = other.path().join("silver.backup");
+        std::fs::write(&far, b"from somewhere else").unwrap();
+        std::fs::remove_file(&exe).unwrap();
+        restore(&far, &exe).unwrap();
+        assert_eq!(std::fs::read(&exe).unwrap(), b"from somewhere else");
+
+        // Nothing to put back is an error rather than a silent success:
+        // the caller reports it, and the message tells the user what to
+        // do by hand, since a later start of this program cannot.
+        std::fs::remove_file(&exe).unwrap();
+        let missing = dir.path().join("not-here");
+        assert!(restore(&missing, &exe).is_err());
+        assert!(!exe.exists(), "nothing was invented to fill the gap");
+    }
+
+    /// Something that is not a file is not a binary to go back to, and
+    /// is refused before anything is moved.
+    ///
+    /// The check used to be `exists()`. By the time the backup is moved
+    /// into place the path is free, so a rename puts whatever it is
+    /// there and reports success -- leaving the name taken by something
+    /// that cannot be run, which is the failure this whole area exists to
+    /// avoid.
+    #[test]
+    fn a_backup_that_is_not_a_file_is_refused_before_anything_moves() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("silver");
+        std::fs::write(&exe, b"running").unwrap();
+        std::fs::create_dir(backup_path(&exe)).unwrap();
+
+        let err = rollback(&exe).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("is not a file"),
+            "a directory was taken for a binary: {err:#}"
+        );
+        assert_eq!(
+            std::fs::read(&exe).unwrap(),
+            b"running",
+            "the running binary was moved for a rollback that could never work"
+        );
     }
 }

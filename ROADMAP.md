@@ -671,6 +671,12 @@ those who want to pay for it (46).
         went from JSON to a value unchecked, while v0/v1 and v5 had
         validated at the boundary for versions. Its rules existed, further
         in, where only the bodies that got that far met them.
+        The ninth is the Windows swap, where the path is briefly empty
+        because the operating system will not replace a running image any
+        other way. That cannot be closed, so it is made survivable: the
+        recovery copies when it cannot rename, and says what to rename by
+        hand when it can do neither. Rollback shared the window and now
+        shares the recovery.
 
 63. [ ] **The identity key somewhere the memory is not** (L, undecided).
         The one place where taking a key out of the process would buy
