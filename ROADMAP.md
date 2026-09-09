@@ -730,13 +730,22 @@ those who want to pay for it (46).
         of a finding otherwise closed — an enumeration sweep of
         `data-key-*` entries for keys orphaned by versions before 0.15.0.
 
-        **What is left in this item** is two remainders of findings
-        otherwise closed. **L-14**: the updater's two parsers are fuzzed,
-        being what it reads before checking any signature, and the
-        hand-rolled HTTP response parser, `transparency.rs`, `vault.rs`,
-        `linking.rs` and `Pin::parse` are not. **H-1**: macOS release
-        builds are unsigned unless notarization secrets are set, so the
-        hardened runtime that would restrict a same-user attach is
+        **L-14** is done too, and wider than the report asked. Its five
+        remaining parsers — the hand-rolled HTTP response head, with the
+        redirect check beside it, `transparency.rs`, `vault.rs`,
+        `linking.rs` and `Pin::parse` — each got a target that asserts
+        the property it exists for rather than only running it: a page
+        the transparency log refuses leaves the head where it was, a
+        vault file opens under its own name and no other, a pin prints
+        what it parsed, a device link prints the device somebody is meant
+        to compare. Writing the first found a defect worth the exercise:
+        `split_https_url` read `evil.test@api.github.com` as a host,
+        which ends with `.github.com` and so passed the redirect check
+        while naming another host to anybody reading it. Refused now.
+
+        **What is left in this item** is one remainder. **H-1**: macOS
+        release builds are unsigned unless notarization secrets are set,
+        so the hardened runtime that would restrict a same-user attach is
         absent; ad-hoc signing with `--options runtime` is the cheap
         version of it, and belongs here only once somebody has checked on
         a real macOS that it restricts what it is supposed to, rather

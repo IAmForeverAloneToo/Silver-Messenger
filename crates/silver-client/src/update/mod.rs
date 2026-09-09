@@ -363,28 +363,39 @@ async fn read_headers<R: tokio::io::AsyncRead + Unpin>(reader: &mut R) -> anyhow
         }
         buf.push(byte[0]);
         if buf.ends_with(b"\r\n\r\n") {
-            let head = String::from_utf8_lossy(&buf).into_owned();
-            let status_line = head.lines().next().unwrap_or_default().to_owned();
-            let status = status_line
-                .split_whitespace()
-                .nth(1)
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0);
-            let location = head
-                .lines()
-                .find(|l| l.to_ascii_lowercase().starts_with("location:"))
-                .and_then(|l| l.split_once(':'))
-                .map(|(_, v)| v.trim().to_owned())
-                .filter(|v| !v.is_empty());
-            return Ok(Head {
-                status,
-                status_line,
-                location,
-                rest: Vec::new(),
-            });
+            return Ok(parse_head(&buf));
         }
     }
     bail!("malformed answer (no header end)")
+}
+
+/// Pull the status and the redirect target out of a complete header
+/// block.
+///
+/// Kept apart from the reading above so that it can be fuzzed: this is
+/// the half that interprets bytes somebody else chose, and the reader is
+/// only a loop looking for a blank line. `bytes` is everything up to and
+/// including that blank line.
+fn parse_head(bytes: &[u8]) -> Head {
+    let head = String::from_utf8_lossy(bytes).into_owned();
+    let status_line = head.lines().next().unwrap_or_default().to_owned();
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let location = head
+        .lines()
+        .find(|l| l.to_ascii_lowercase().starts_with("location:"))
+        .and_then(|l| l.split_once(':'))
+        .map(|(_, v)| v.trim().to_owned())
+        .filter(|v| !v.is_empty());
+    Head {
+        status,
+        status_line,
+        location,
+        rest: Vec::new(),
+    }
 }
 
 /// `https://host[:port]/path` into its parts.
@@ -396,6 +407,15 @@ fn split_https_url(url: &str) -> anyhow::Result<(String, u16, String)> {
         Some(i) => (&rest[..i], &rest[i..]),
         None => (rest, "/"),
     };
+    // `user@host` is not a shape this understands, and taking the whole
+    // of it as the host makes `release_host` read the part after the `@`
+    // while a reader reads the part before it: `evil.com@api.github.com`
+    // ends with `.github.com` and would pass. Nothing here resolves such
+    // a name, so it failed closed rather than wrongly -- but the check
+    // and the connection should not be looking at different things.
+    if authority.contains('@') {
+        bail!("the releases address may not carry a user name: {url}");
+    }
     let (host, port) = match authority.rsplit_once(':') {
         Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) && !p.is_empty() => {
             (h, p.parse::<u16>().context("port")?)
@@ -420,6 +440,30 @@ pub fn parse_release_for_fuzzing(bytes: &[u8]) -> anyhow::Result<Release> {
 #[doc(hidden)]
 pub fn sums_line_for_fuzzing(sums: &[u8], name: &str) -> Option<String> {
     sums_line(sums, name)
+}
+
+/// Exposed for the fuzz target: the status and the redirect target, as
+/// read out of a header block a host chose.
+///
+/// Returns the status, the status line as it would be printed, and the
+/// `Location:` value if there is one.
+#[doc(hidden)]
+pub fn parse_head_for_fuzzing(bytes: &[u8]) -> (u16, String, Option<String>) {
+    let head = parse_head(bytes);
+    (head.status, head.status_line, head.location)
+}
+
+/// Exposed for the fuzz target: where a redirect is allowed to go.
+///
+/// `split_https_url` decides which host a request is made to and
+/// `may_follow` decides whether a redirect may reach it, so between them
+/// they are what keeps an answer from the release host from sending the
+/// updater somewhere else.
+#[doc(hidden)]
+pub fn redirect_target_for_fuzzing(url: &str, from: &str) -> Option<(String, u16, String, bool)> {
+    let (host, port, path) = split_https_url(url).ok()?;
+    let allowed = may_follow(from, &host);
+    Some((host, port, path, allowed))
 }
 
 fn parse_release(bytes: &[u8]) -> anyhow::Result<Release> {
@@ -780,6 +824,16 @@ mod tests {
         );
         assert!(split_https_url("http://x/").is_err());
         assert!(split_https_url("https://:1/").is_err());
+
+        // A user name in the authority is refused rather than taken as
+        // part of the host. Read as a host, `evil.test@api.github.com`
+        // ends with `.github.com`, so `may_follow` would wave it through
+        // while a person reading the line sees `evil.test` first. Nothing
+        // resolves such a name, so this failed closed -- but the check
+        // and the connection must not be looking at different things.
+        assert!(split_https_url("https://evil.test@api.github.com/x").is_err());
+        assert!(split_https_url("https://api.github.com@evil.test/x").is_err());
+        assert!(split_https_url("https://user:pass@api.github.com:443/x").is_err());
 
         let ok = br#"{"tag_name":"v9.9.9","html_url":"https://x/r"}"#;
         let release = parse_release(ok).unwrap();

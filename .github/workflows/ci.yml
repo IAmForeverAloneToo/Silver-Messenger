@@ -39,6 +39,9 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo fmt --all -- --check
+      # The fuzz targets are their own crate rather than a workspace
+      # member, so `--all` above does not reach them.
+      - run: cargo fmt --manifest-path fuzz/Cargo.toml -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   audit:
@@ -288,7 +291,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [frames, envelope, blob_chunk, session, invite_link, file_name, stored, group_body, device, pq, identifier, release]
+        target: [frames, envelope, blob_chunk, session, invite_link, file_name, stored, group_body, device, pq, identifier, release, http_head, transparency, vault, linking, pin]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master

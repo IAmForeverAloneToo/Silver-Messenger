@@ -96,6 +96,22 @@ says so at its head.
   they left running on purpose. Which of those costs to carry is the
   user's to choose: `lock_after_minutes` and `/lock` are both there, and
   the threat model says what an unlocked client is worth.
+- Five more parsers are fuzzed, which is the rest of what the review
+  asked for (L-14). The updater's own HTTP -- the header block it reads
+  for a status and a redirect, and the check on where that redirect may
+  go -- along with the transparency log's replay, the vault's file and
+  line formats, device links and snapshots, and certificate pins. Each
+  target asserts the property the code exists for rather than only
+  running it: a page the log refuses leaves the head where it was, a
+  vault file opens under its own name and under no other, a pin prints
+  what it parsed, a device link prints the device a person is meant to
+  compare. Writing the first found something: `split_https_url` took
+  `evil.test@api.github.com` as a host, and a host ending in
+  `.github.com` passes the redirect check -- so a redirect naming one
+  host to a reader could be checked as another. Nothing resolves such a
+  name, so it failed closed rather than wrongly, but the check and the
+  connection should not be looking at different things. A user name in
+  the address is refused now.
 - Key buffers are still not pinned out of swap, and the client still
   will not sweep the key store for entries a pre-0.15.0 crash orphaned.
   Both were left open by the review (L-1, and the remainder of M-1) and
