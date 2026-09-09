@@ -53,6 +53,26 @@ means behaviour or the wire protocol changed in a way worth reading about.
   it has had an invariant test since 0.10.0, and reader mode now has the
   mirror of it, plus the same forgery walked through a real terminal.
 
+- The key store could keep a wrapping key that nothing needed. 0.15.0
+  already dropped a key made for a change that then failed, but only by
+  running the failure path -- and the key is written to the store before
+  the vault that makes it needed, so a crash, a kill or a power loss in
+  the window between left a key nobody read, nobody remembered, and that
+  still opened a copy of the directory taken while it was encrypted. The
+  name of a key whose fate is undecided is now written to `vault.pending`
+  before the step that could orphan it, and the next start takes out
+  whatever that file names and the vault does not need. Removing the
+  protection and erasing the device are covered the same way, both having
+  had the same gap between deleting the vault and deleting the key.
+  Deciding this needs the vault, so `write_atomic` now syncs the
+  directory entry after the rename, not just the file's contents: until
+  it does, a crash can leave the bytes safely on disk under no name.
+- The same key-store check treated a vault it could not read as a vault
+  that did not name the key, and deleted it. An unreadable vault is the
+  absence of an answer, not a no, and the key it might name is the only
+  way into every file in the directory: the check now keeps both the key
+  and the note, and a later start decides.
+
 ### Fixed
 
 - A group alias was stored exactly as typed while a contact alias was

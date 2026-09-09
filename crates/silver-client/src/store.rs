@@ -43,6 +43,9 @@ use crate::sessions::{PrekeyFile, SessionsFile};
 use crate::vault::{FileCipher, Kdf, LINE_PREFIX, VaultError, VaultFile};
 
 const VAULT_FILE: &str = "vault.json";
+/// Key store entries this directory may not need, written down before the
+/// step that could orphan them. See [`Store::add_pending`].
+const PENDING_FILE: &str = "vault.pending";
 /// Where `SILVER_LOG` writes, when it is set. Not under the data key: it
 /// is opened before the directory is unlocked.
 pub const LOG_FILE: &str = "silver.log";
@@ -830,7 +833,13 @@ impl Store {
         let root = root.into();
         create_private_dir(&root, Some(HISTORY_DIR))?;
         create_private_dir(&root.join(HISTORY_DIR), None)?;
-        Ok(Self { root, cipher: None })
+        let store = Self { root, cipher: None };
+        // Before anything else looks at the directory, and before any
+        // unlock: a change that a crash cut short may have left a key in
+        // the key store that nothing here needs. Reads no key and asks the
+        // store nothing when there is no note, which is every normal start.
+        store.settle_pending();
+        Ok(store)
     }
 
     pub fn root(&self) -> &Path {
@@ -864,6 +873,97 @@ impl Store {
     /// The data key, for components that keep their own files (the outbox).
     pub fn cipher(&self) -> Option<Arc<FileCipher>> {
         self.cipher.clone()
+    }
+
+    // --- keys the store may still be holding --------------------------------
+
+    /// The names in `vault.pending`, or none when it is absent or
+    /// unreadable.
+    ///
+    /// Plaintext and read before any unlock, since the whole point is to
+    /// reach it on a start that cannot open anything else.
+    fn read_pending(&self) -> Vec<String> {
+        let path = self.root.join(PENDING_FILE);
+        fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Vec<String>>(&text).ok())
+            .unwrap_or_default()
+    }
+
+    /// Write down that the key store may end up holding a key under `name`
+    /// that this directory does not need, before the step that makes it so.
+    ///
+    /// This is the durable half of [`Store::drop_unused_kek`]. That runs on
+    /// the error paths of a change and cannot run at all if the process
+    /// dies: the key store is written before the vault that would make the
+    /// key needed, so a crash in the window between leaves a key nobody
+    /// reads and nobody remembers to remove. The note is written and synced
+    /// first, so the next [`Store::open`] finishes what the crash
+    /// interrupted.
+    ///
+    /// A failure here fails the change. The alternative is making a key
+    /// with no record that it exists, which is the situation this exists to
+    /// prevent.
+    fn add_pending(&self, name: &str) -> anyhow::Result<()> {
+        let mut names = self.read_pending();
+        if !names.iter().any(|n| n == name) {
+            names.push(name.to_owned());
+        }
+        write_atomic(
+            &self.root.join(PENDING_FILE),
+            serde_json::to_string(&names)?.as_bytes(),
+        )
+        .context("noting the key store entry that may need removing")
+    }
+
+    /// Take `name` off the list: its fate is settled, either way.
+    fn clear_pending(&self, name: &str) {
+        let names: Vec<String> = self
+            .read_pending()
+            .into_iter()
+            .filter(|n| n != name)
+            .collect();
+        let path = self.root.join(PENDING_FILE);
+        let _ = if names.is_empty() {
+            fs::remove_file(&path).or_else(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            })
+        } else {
+            serde_json::to_string(&names)
+                .map_err(std::io::Error::other)
+                .and_then(|text| {
+                    write_atomic(&path, text.as_bytes()).map_err(std::io::Error::other)
+                })
+        };
+    }
+
+    /// Settle every name a interrupted change left behind. Called from
+    /// [`Store::open`], before anything else reads the directory.
+    ///
+    /// Costs nothing on a normal start: with no `vault.pending` there is
+    /// no name to settle and the key store is never asked anything.
+    fn settle_pending(&self) {
+        for name in self.read_pending() {
+            self.drop_unused_kek(&name);
+        }
+    }
+
+    /// Whether the vault on disk names `name`, so the directory needs the
+    /// key kept under it.
+    ///
+    /// `Err` when that cannot be established. The caller keeps the key
+    /// then, and keeps the note so a later start can decide: a key left
+    /// behind is a bounded exposure this comes back to, while a key
+    /// deleted because a read happened to fail takes every file in the
+    /// directory with it.
+    fn vault_needs_key(&self, name: &str) -> anyhow::Result<bool> {
+        Ok(self
+            .read_vault()?
+            .is_some_and(|vault| vault.kdf.is_keystore() && vault.kdf.keystore_name() == name))
     }
 
     fn read_vault(&self) -> anyhow::Result<Option<VaultFile>> {
@@ -997,11 +1097,12 @@ impl Store {
         }
         let kdf = Kdf::keystore();
         let name = kdf.keystore_name();
+        self.add_pending(&name)?;
         let kek = crate::keystore::create(&name)?;
         let sealed = self.seal_under_kek(&kek, kdf);
-        if sealed.is_err() {
-            self.drop_unused_kek(&name);
-        }
+        // Either way the key's fate is decided: the vault names it, or it
+        // goes. The note only outlives a crash.
+        self.drop_unused_kek(&name);
         sealed
     }
 
@@ -1030,14 +1131,26 @@ impl Store {
     /// and an entry nobody reads is still an extractable key sitting beside
     /// a directory somebody may have copied. Kept only when the vault on
     /// disk names it, which is when the directory does need it.
+    ///
+    /// Every outcome is final for the note in `vault.pending` except the
+    /// two that are not settled: a vault that cannot be read, and a key
+    /// store that will not take the key out. Both keep the note, so the
+    /// next [`Store::open`] tries again rather than forgetting the key
+    /// exists.
     fn drop_unused_kek(&self, name: &str) {
-        let needed = self
-            .read_vault()
-            .ok()
-            .flatten()
-            .is_some_and(|vault| vault.kdf.is_keystore() && vault.kdf.keystore_name() == name);
-        if !needed {
-            let _ = crate::keystore::delete(name);
+        match self.vault_needs_key(name) {
+            Ok(true) => self.clear_pending(name),
+            Ok(false) => match crate::keystore::delete(name) {
+                Ok(()) => self.clear_pending(name),
+                Err(e) => {
+                    tracing::warn!("could not take an unused key out of the key store: {e:#}")
+                }
+            },
+            // Fail safe. Deleting on a read that merely failed would take
+            // every file in the directory with it.
+            Err(e) => {
+                tracing::warn!("cannot tell whether a key store entry is still in use: {e:#}")
+            }
         }
     }
 
@@ -1061,6 +1174,12 @@ impl Store {
                     .cipher
                     .clone()
                     .context("the data directory is locked")?;
+                // Written down before the rotation, not after it: until it
+                // happens the vault still names this key and settling the
+                // note keeps it, and once it happens the note is the only
+                // record that the superseded key is still in the store.
+                let old_name = old.kdf.keystore_name();
+                self.add_pending(&old_name)?;
                 self.rotate_key(&cipher, |c| {
                     c.wrap_under_passphrase(passphrase, kdf.clone())
                 })?;
@@ -1068,10 +1187,11 @@ impl Store {
                 // nothing current -- but it still opens a copy of the
                 // directory taken before the change, which is exactly what
                 // a changed passphrase is meant to close.
-                crate::keystore::delete(&old.kdf.keystore_name()).context(
+                crate::keystore::delete(&old_name).context(
                     "the passphrase is set and the files are under a new key, but the old key \
                      could not be taken out of the key store; remove it by hand",
                 )?;
+                self.clear_pending(&old_name);
                 Ok(())
             }
             Protection::None => {
@@ -1103,11 +1223,11 @@ impl Store {
         if crate::keystore::available() {
             let kdf = Kdf::keystore();
             let name = kdf.keystore_name();
+            self.add_pending(&name)?;
             let kek = crate::keystore::create(&name)?;
-            if let Err(e) = self.rotate_key(&cipher, |c| Ok(c.wrap_under_kek(&kek, kdf.clone()))) {
-                self.drop_unused_kek(&name);
-                return Err(e);
-            }
+            let rotated = self.rotate_key(&cipher, |c| Ok(c.wrap_under_kek(&kek, kdf.clone())));
+            self.drop_unused_kek(&name);
+            rotated?;
             return Ok(Protection::Keystore);
         }
         self.remove_protection()
@@ -1154,14 +1274,22 @@ impl Store {
             bail!("the data directory is locked");
         };
         self.recrypt_all(Some(&cipher), None)?;
+        // Before the vault goes, since the vault is the only other record
+        // that the key exists: a crash between the two used to leave a key
+        // opening a copy of the directory taken while it was encrypted.
+        let keystore_name = vault.kdf.is_keystore().then(|| vault.kdf.keystore_name());
+        if let Some(name) = &keystore_name {
+            self.add_pending(name)?;
+        }
         fs::remove_file(self.root.join(VAULT_FILE)).context("removing vault.json")?;
-        if vault.kdf.is_keystore() {
+        if let Some(name) = &keystore_name {
             // As in `set_passphrase_with`: the files are plain now, but the
             // key still opens a copy taken while they were not.
-            crate::keystore::delete(&vault.kdf.keystore_name()).context(
+            crate::keystore::delete(name).context(
                 "the files are stored unencrypted now, but the old key could not be taken out \
                  of the key store; remove it by hand",
             )?;
+            self.clear_pending(name);
         }
         Ok(Protection::None)
     }
@@ -1474,6 +1602,12 @@ impl Store {
             .flatten()
             .filter(|vault| vault.kdf.is_keystore())
             .map(|vault| vault.kdf.keystore_name());
+        // Noted before the vault naming it goes, so a wipe that dies partway
+        // through still has the key taken out on the next start rather than
+        // leaving it beside whatever copy was made first.
+        if let Some(name) = &keystore_entry {
+            let _ = self.add_pending(name);
+        }
         // `silver.log` goes with the rest. It is written only when
         // SILVER_LOG asks for it, it is outside the data key, and at
         // `debug` it names envelope ids, contact ids and the relay: a
@@ -1499,7 +1633,9 @@ impl Store {
         // still where its vault says. A key store that cannot be reached
         // is not worth failing the wipe over: the files are already gone.
         if let Some(name) = keystore_entry {
-            let _ = crate::keystore::delete(&name);
+            if crate::keystore::delete(&name).is_ok() {
+                self.clear_pending(&name);
+            }
         }
         Ok(())
     }
@@ -2234,7 +2370,25 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     file.sync_all()?;
     drop(file);
     fs::rename(&tmp, path).with_context(|| format!("renaming into {}", path.display()))?;
+    // The contents were synced, the name that reaches them was not: a
+    // rename is a change to the directory, and until that is synced a crash
+    // can leave the old name (or no name) with the new bytes safely on
+    // disk. It matters most for `vault.pending`, whose whole purpose is to
+    // be readable after a crash, and for `vault.json`, which is what says
+    // whether the key store's key is still needed.
+    sync_parent(path);
     Ok(())
+}
+
+/// Flush the directory entry a `rename` just made. Best effort: a file
+/// system that will not sync a directory handle (some do not) is not a
+/// reason to fail a write that has otherwise succeeded.
+fn sync_parent(path: &Path) {
+    if let Some(dir) = path.parent()
+        && let Ok(handle) = fs::File::open(dir)
+    {
+        let _ = handle.sync_all();
+    }
 }
 
 #[cfg(test)]
@@ -2466,6 +2620,110 @@ mod tests {
         store.drop_unused_kek(stray);
         assert!(crate::keystore::load(stray).unwrap().is_none());
         assert!(crate::keystore::load(&name).unwrap().is_some());
+        drop(dir);
+    }
+
+    /// The in-process error paths only run if the process survives. A
+    /// crash between writing the key and writing the vault that needs it
+    /// left a key nobody read and nobody remembered, next to a directory
+    /// somebody may have copied. `vault.pending` is written first, so the
+    /// next open finishes what the crash interrupted.
+    #[test]
+    fn a_key_a_crash_orphaned_is_taken_out_on_the_next_start() {
+        crate::keystore::use_mock_store();
+        let dir = tempfile::tempdir().unwrap();
+
+        // Exactly what dying inside `protect_with_keystore` leaves: the
+        // note, and the key, and no vault naming it.
+        let kdf = Kdf::keystore();
+        let name = kdf.keystore_name();
+        let store = Store::open(dir.path()).unwrap();
+        store.add_pending(&name).unwrap();
+        crate::keystore::create(&name).unwrap();
+        drop(store);
+        assert!(dir.path().join(PENDING_FILE).exists());
+
+        // The next start takes it out, and stops carrying the note.
+        let store = Store::open(dir.path()).unwrap();
+        assert!(
+            crate::keystore::load(&name).unwrap().is_none(),
+            "a key no vault names survived a restart"
+        );
+        assert!(!dir.path().join(PENDING_FILE).exists());
+        drop(store);
+
+        // The same note for a key the vault does name leaves it alone: a
+        // crash in the other half of the window, after the vault landed.
+        let mut store = Store::open(dir.path()).unwrap();
+        store.load_or_create_identity().unwrap();
+        store.protect_with_keystore().unwrap();
+        let live = store.read_vault().unwrap().unwrap().kdf.keystore_name();
+        store.add_pending(&live).unwrap();
+        drop(store);
+        let store = Store::open(dir.path()).unwrap();
+        assert!(
+            crate::keystore::load(&live).unwrap().is_some(),
+            "the key the directory runs on was taken out"
+        );
+        assert!(!dir.path().join(PENDING_FILE).exists());
+        drop(store);
+        drop(dir);
+    }
+
+    /// A vault that cannot be read is not permission to delete: the key it
+    /// might name is the only way into every file in the directory, so an
+    /// unreadable vault keeps both the key and the note for a later start.
+    #[test]
+    fn an_unreadable_vault_never_costs_the_key_that_opens_it() {
+        crate::keystore::use_mock_store();
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path()).unwrap();
+        store.load_or_create_identity().unwrap();
+        store.protect_with_keystore().unwrap();
+        let name = store.read_vault().unwrap().unwrap().kdf.keystore_name();
+        store.add_pending(&name).unwrap();
+        drop(store);
+
+        // Not absent -- unreadable. Absent means "no protection", which is
+        // a fact; this is the absence of a fact.
+        fs::write(dir.path().join(VAULT_FILE), b"{ this is not json").unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        assert!(
+            crate::keystore::load(&name).unwrap().is_some(),
+            "a key was deleted because the vault would not parse"
+        );
+        assert!(
+            dir.path().join(PENDING_FILE).exists(),
+            "the note was dropped while the question was still open"
+        );
+        drop(store);
+        drop(dir);
+    }
+
+    /// Removing the protection deletes the vault and then the key. A crash
+    /// between the two left a key that opens a copy of the directory taken
+    /// while it was still encrypted.
+    #[test]
+    fn unprotecting_leaves_no_key_behind_even_if_it_stops_halfway() {
+        crate::keystore::use_mock_store();
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path()).unwrap();
+        store.load_or_create_identity().unwrap();
+        store.protect_with_keystore().unwrap();
+        let name = store.read_vault().unwrap().unwrap().kdf.keystore_name();
+
+        // Stop after the vault is gone but before the key is.
+        store.add_pending(&name).unwrap();
+        fs::remove_file(dir.path().join(VAULT_FILE)).unwrap();
+        drop(store);
+        assert!(crate::keystore::load(&name).unwrap().is_some());
+
+        let store = Store::open(dir.path()).unwrap();
+        assert!(
+            crate::keystore::load(&name).unwrap().is_none(),
+            "the key outlived the vault that named it"
+        );
+        drop(store);
         drop(dir);
     }
 

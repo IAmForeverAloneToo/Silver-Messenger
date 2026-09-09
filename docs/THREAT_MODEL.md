@@ -450,7 +450,16 @@ that is erased and the key of a change that failed before the vault
 naming it was written: until then, erasing a device left its wrapping key
 in the key store, where an old copy of the directory taken before the
 erase still had something to be opened with, and a program of the same
-user could read it. Where
+user could read it. That last part only held while the process lived to
+run its own error paths, so 0.15.0 also writes the name of a key whose
+fate is undecided to `vault.pending` *before* the step that could orphan
+it — creating the key, or removing the vault that names it — and the next
+start takes out anything that file names and the vault does not need. A
+crash, a kill or a power loss in that window therefore costs an extra
+start, not a key left in the store for good. The same check refuses to
+delete when the vault cannot be read at all rather than when it says no:
+an unreadable vault is the absence of an answer, and acting on it would
+throw away the key that opens every file in the directory. Where
 there is neither (no key store and no passphrase), the files are plain and
 the client says so at start. Plain or not, the data directory and every
 file in it are the owner's alone (0.11.0: the directory 0700, the files
