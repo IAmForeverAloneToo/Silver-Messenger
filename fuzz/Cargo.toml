@@ -100,3 +100,39 @@ name = "release"
 path = "fuzz_targets/release.rs"
 test = false
 doc = false
+bench = false
+
+[[bin]]
+name = "http_head"
+path = "fuzz_targets/http_head.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transparency"
+path = "fuzz_targets/transparency.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vault"
+path = "fuzz_targets/vault.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "linking"
+path = "fuzz_targets/linking.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pin"
+path = "fuzz_targets/pin.rs"
+test = false
+doc = false
+bench = false

@@ -22,7 +22,7 @@ up.
 | Question | Decision |
 | --- | --- |
 | What ships in 0.15.0 | Both Highs, all seven Mediums, eleven of the eighteen Lows in full, three more in part, and the one Informational that is a real defect (I-1). No patch release was cut ahead of it: neither High is reachable without either a line the user pastes without reading (H-2) or the access class that already reads an unlocked client outright (H-1, M-1), so nothing here is a race against disclosure. |
-| What is scheduled | Two remainders, under roadmap item 63: the parsers L-14 leaves unfuzzed, and the macOS signing H-1 wants. Section 4 lists both with what each costs to leave. |
+| What is scheduled | One remainder, under roadmap item 63: the macOS signing H-1 wants, which needs checking on a real Mac before it is claimed. Section 4 says what leaving it costs. |
 | What is declined | L-1 and the M-1 remainder, on one decision about `forbid(unsafe_code)`; the L-11 and L-12 remainders, each on its own argument; and the review's suggested non-zero `lock_after_minutes` default. All five are argued in section 4 rather than left open. |
 | Where a suggested fix was not taken | Section 5. Five cases, each argued. |
 | Disclosure | The report goes in whole, this note beside it, as [SECURITY.md](../../SECURITY.md) says of every review. |
@@ -68,7 +68,7 @@ Verdict: **C** confirmed as reported, **P** confirmed in part.
 | L-16 | Low | C | `Content::check` validates a file's blob id, size cap and chunk count where the body is parsed, alongside the ratchet-body validation added for M-6's neighbours. One deliberate difference from `BlobRef::validate`: an empty file has one chunk and zero bytes, which `upload_file` really produces and the group half really refuses. Noted rather than settled here. |
 | L-11 | Low | P | A system trust store that yields nothing now warns and says what it costs, instead of a `debug` line nothing runs at. The report's sharper half — that removing a compromised CA from the OS store does not remove it from the compiled-in Mozilla set, so OS-store incident response is ineffective against the built-in list — is **documented but not changed** (§4). |
 | L-12 | Low | P | `silver.log` is bounded: it rolls at 8 MiB keeping one previous file, and `/wipe` takes the rolled half too, it being the same record. The side-channel itself — plaintext metadata beside an encrypted directory, readable with the vault locked — is unchanged (§4). |
-| L-14 | Low | P | The release description and the checksum list get a fuzz target, both being parsed before any signature has been checked. The hand-rolled HTTP response parser, `transparency.rs`, `vault.rs`, `linking.rs` and `Pin::parse` do not (§4). |
+| L-14 | Low | C | All of them. The release description and the checksum list came first, being parsed before any signature has been checked; the five the report also named — the hand-rolled HTTP response head (with the redirect check beside it), `transparency.rs`, `vault.rs`, `linking.rs` and `Pin::parse` — followed, each with the property it exists for asserted rather than merely exercised. Writing the first of those found a defect: `split_https_url` took `evil.test@api.github.com` as a host, which ends with `.github.com` and so passed the redirect check while reading as another name entirely. Refused now. |
 | L-15 | Low | C | The bound login is required by default; `--allow-unbound-auth` takes it back for a relay that still has clients older than 0.6.0, and says in the log what that costs. |
 | L-18 | Low | C | The group alias is filtered on the way in — including copies synced from the user's own devices — and on the way out, since a directory written by an earlier version already holds whatever was typed then. With the prompt filtered too (M-6), the raw-prompt gap is closed twice. |
 | L-7, L-9, L-17 | Low | — | The report itself rejects or downgrades these to documented behaviour after counter-review. Nothing done, nothing owed. |
@@ -76,16 +76,16 @@ Verdict: **C** confirmed as reported, **P** confirmed in part.
 | I-2 | Info | — | A stale line in the *first* report, already answered in that report's response note. The historical record is published unedited by convention. |
 
 Every finding is now in the table except **L-1**, which is declined, and
-the partial remainders of **H-1**, **M-1**, **L-11**, **L-12** and
-**L-14**. Section 4 says what each of those is and what leaving it costs.
+the partial remainders of **H-1**, **M-1**, **L-11** and **L-12**.
+Section 4 says what each of those is and what leaving it costs.
 
 ## 4. What is not done, and what it costs
 
 Two of these are *declined* and two more are *decided*: settled below,
-not coming back. The rest stand under roadmap item 63. Nothing here is a
-way for someone else to read a message or forge one; every item is either
-a bound that should be tighter, a defence in depth, or a documentation
-defect.
+not coming back. Only the last stands under roadmap item 63. Nothing here
+is a way for someone else to read a message or forge one; every item is
+either a bound that should be tighter, a defence in depth, or a
+documentation defect.
 
 * **L-1 — no `mlock`/`VirtualLock` on key buffers.** *Declined.* Keys can
   reach swap or a hibernation image. The threat model says so; locking
@@ -112,11 +112,6 @@ defect.
   `SILVER_LOG` is set, it is written 0600, and the threat model says
   what it is. Turning it on is a deliberate trade, and the client should
   not quietly make the diagnostic unreadable in exchange.
-* **L-14 remainder — five parsers still have no fuzz target.** The
-  updater's two are fuzzed, being the ones read before any signature has
-  been checked. The hand-rolled HTTP response parser, `transparency.rs`,
-  `vault.rs`, `linking.rs` and `Pin::parse` are not, and every one of
-  them takes bytes chosen by somebody else.
 * **H-1 remainder — macOS release builds are unsigned** unless
   notarization secrets are set, so the hardened runtime that would
   restrict same-user attach is absent. Ad-hoc signing would get

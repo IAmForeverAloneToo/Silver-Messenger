@@ -13,6 +13,14 @@ fuzz_target!(|data: &[u8]| {
     let total = head.get(1).copied().unwrap_or(1) as u32;
     let _ = open_chunk(&key, "fuzz", index, total, body);
     let _ = is_valid_blob_id(&String::from_utf8_lossy(head));
-    let size = u64::from_le_bytes(head.iter().copied().chain(std::iter::repeat(0)).take(8).collect::<Vec<u8>>().try_into().unwrap());
+    let size = u64::from_le_bytes(
+        head.iter()
+            .copied()
+            .chain(std::iter::repeat(0))
+            .take(8)
+            .collect::<Vec<u8>>()
+            .try_into()
+            .unwrap(),
+    );
     let _ = chunk_count(size);
 });
