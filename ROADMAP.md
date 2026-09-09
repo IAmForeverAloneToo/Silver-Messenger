@@ -425,6 +425,16 @@ those who want to pay for it (46).
         and each of those carries the relay. The item stays open for
         the day people who use groups and devices ask for names, and is
         not a condition of 1.0.
+        Re-examined in 0.15.0 and still gated. Groups (47) and devices
+        (48) have both shipped, which is the condition this item was
+        waiting on, and neither produced the need: a group is joined by
+        its link, a device by the link it prints, a person by an invite
+        or a QR code, and each of those already carries the relay. A name
+        would add a namespace the relay owns and can lie about — the
+        safety number stays the truth either way, but a name is the thing
+        people would trust instead of checking it, which is the failure
+        this program keeps trying not to build. Left open rather than
+        dropped: the condition is real and may yet be met.
 
 ## Phase 10: a finished terminal client
 
@@ -763,6 +773,17 @@ those who want to pay for it (46).
         the answer to "a key stolen once, for good" is judged to be worth
         that, and the revocation certificate and `/rotate` are the cheap
         answer standing in the meantime.
+        The September 2026 review sharpens the question without settling
+        it. It read the *Diffie–Hellman* key out of a running client's
+        memory in six seconds, and the identity key sits in the same
+        file — so "a key stolen once, for good" is demonstrated rather
+        than hypothetical. But what hardware custody would buy is bounded
+        by what the hardware holds: enclaves and most tokens do P-256,
+        the identity key is Ed25519, and every peer would have to accept
+        a second algorithm or a hybrid. That is a protocol change with
+        its own design note, for a benefit that only bites after a
+        compromise the revocation certificate already answers. Still
+        undecided, and still not a condition of 1.0.
 
 ## Continuous
 
