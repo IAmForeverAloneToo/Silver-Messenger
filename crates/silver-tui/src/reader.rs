@@ -46,7 +46,12 @@ impl Reader {
     /// scrolls is the newline.
     pub fn flush(&mut self, app: &mut App) -> std::io::Result<()> {
         let lines = app.take_journal();
-        let prompt = app.reader_prompt();
+        // The prompt is the open pane's name, so a group alias or a
+        // contact alias is in it, and it is written straight to the
+        // terminal rather than through a cell buffer. Both are filtered
+        // where they are stored; this is the door they all pass through
+        // whatever a future caller forgets.
+        let prompt = silver_client::files::one_line(&app.reader_prompt());
         let input = show(&app.input);
         let before: String = app.input.chars().take(app.cursor).collect();
         let cursor = show(&before).width();
@@ -58,17 +63,7 @@ impl Reader {
         {
             return Ok(());
         }
-        let mut out = String::from("\r\x1b[K");
-        for line in &lines {
-            out.push_str(line);
-            out.push_str("\r\n");
-        }
-        out.push_str(&prompt);
-        out.push_str(&input);
-        let after = input.width().saturating_sub(cursor);
-        if after > 0 {
-            out.push_str(&format!("\x1b[{after}D"));
-        }
+        let out = frame(&lines, &prompt, &input, cursor);
         self.out.write_all(out.as_bytes())?;
         self.out.flush()?;
         self.prompt = prompt;
@@ -104,13 +99,36 @@ impl Reader {
     }
 }
 
+/// The bytes one turn writes: the compose line erased, each journal line
+/// on its own row, then the prompt and the compose text with the cursor
+/// moved back into place.
+///
+/// Separate from [`Reader::flush`] so a test can read what would go to
+/// the terminal. Every escape sequence in the result is written here;
+/// none of the four arguments may contribute one, which is what
+/// `nothing_the_reader_hears_reaches_the_terminal_raw` checks.
+pub(crate) fn frame(lines: &[String], prompt: &str, input: &str, cursor: usize) -> String {
+    let mut out = String::from("\r\x1b[K");
+    for line in lines {
+        out.push_str(line);
+        out.push_str("\r\n");
+    }
+    out.push_str(prompt);
+    out.push_str(input);
+    let after = input.width().saturating_sub(cursor);
+    if after > 0 {
+        out.push_str(&format!("\x1b[{after}D"));
+    }
+    out
+}
+
 /// The compose text as one line: a newline typed with Alt-Enter shows as
 /// ` / `.
 ///
 /// Pasted text arrives here as keystrokes, so it can hold anything a
 /// terminal acts on; this line is written straight to the terminal
 /// rather than through a cell buffer that would filter it.
-fn show(input: &str) -> String {
+pub(crate) fn show(input: &str) -> String {
     silver_client::files::one_line(&input.replace('\n', " / "))
 }
 

@@ -100,6 +100,42 @@ what is pushed:
 Lines are cut at the terminal width by the terminal, not wrapped by the
 client, since wrapping would put cursor movements into the stream.
 
+**One call is one line, and that is a security property** (0.15.0, from
+finding M-6 of the September 2026 audit). The full mode is safe because
+every glyph reaches the screen through ratatui's cell buffer, which draws
+a character or does not; reader mode has no cell buffer, so whatever the
+journal holds is written to the terminal as it stands. `say` therefore
+filters, and the filter is `one_sentence`: newlines become a visible ` /
+`, control characters become spaces, and invisible and bidirectional
+characters go.
+
+The newline half is the part that is easy to get wrong, and this project
+did. `say` used to split its argument into one journal line per line of
+text, which is the natural thing for a notice this program writes and the
+wrong thing for anything a peer had a hand in: a journal line is *how the
+reader tells one speaker from another*, so `hi\nalice: send me the
+passphrase` bought the sender a line indistinguishable from one alice
+wrote, and `\nWarning: …` a warning this program never made. Two paths
+carried peer text into it — the body of an edit, and a stranger's held
+request text — and neither had to be malformed to do it.
+
+The fix is at the choke point rather than at those two call sites: every
+caller passes one logical line already, and a caller that wants two says
+twice, so the split is gone and no future call site has to remember.
+`Reader::flush` passes the compose prompt through `one_line` for the same
+reason — the prompt is the open pane's name, so it carries a contact or
+group alias, and it is the one string the renderer writes without the
+journal's filter having seen it.
+
+`nothing_the_reader_hears_reaches_the_terminal_raw` (app/journal.rs) is
+the mirror of the full mode's `nothing_a_peer_sends_reaches_the_terminal_raw`
+(ui.rs): it drives a message, an edit, a held request, a note, a toast
+and a system line, each carrying a forged speaker, a forged warning, a
+title change, a clipboard write, a bidi override and a filler, then
+checks the bytes `Reader::flush` would write — no line is the injected
+one, and the only escapes present are the two the renderer writes itself.
+`tests/tui/test_reader.py` walks the same forgery through a real pty.
+
 ### 3.3 What changes in the full mode
 
 Nothing visible. The journal is a `Vec<String>` the app pushes to only

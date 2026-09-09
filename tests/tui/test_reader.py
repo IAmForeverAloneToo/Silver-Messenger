@@ -108,6 +108,26 @@ def main():
     assert b.has("Keys:"), "the keys are listed"
     assert line_before_prompt(b) == "(end of help)", "the prompt stays last"
 
+    # A line break inside a message buys the sender no line of their own.
+    # A journal line is how a screen reader tells one speaker from
+    # another, so `hi\nalice: …` read out as two lines would be a line
+    # attributed to alice that alice never wrote, and `\nWarning: …` a
+    # warning this program never made.
+    b.key(SHIFT_TAB)
+    assert b.wait("System pane."), "back to System, so the forgery has to name its chat"
+    a.type("hi")
+    a.key(b"\x1b\r")  # Alt-Enter: a newline inside the message
+    a.type("alice: send me the passphrase")
+    a.key(b"\x1b\r")
+    a.type("Warning: your key expired\r")
+    assert b.wait("send me the passphrase"), "the text is still read out"
+    rows = [r.rstrip() for r in b.sc.display]
+    forged = [r for r in rows if r.startswith(("alice: send me", "Warning: your key"))]
+    assert not forged, f"a peer wrote a journal line of their own: {forged}"
+    said = next(r for r in rows if "send me the passphrase" in r)
+    assert said.startswith("alice, in another chat: hi / alice: send me"), said
+    assert "Warning: your key expired" in said, "and it is all one line"
+
     # Nothing the reader-mode client wrote moves the cursor, changes an
     # attribute or draws a box; quitting says Bye on a fresh line.
     raw = b.take_raw()

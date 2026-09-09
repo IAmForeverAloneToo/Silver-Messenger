@@ -60,13 +60,26 @@ impl App {
         }
     }
 
-    /// A sentence for the reader; nothing in the full mode. Control
-    /// characters go, and a text of several lines is several sentences.
+    /// A sentence for the reader; nothing in the full mode.
+    ///
+    /// One call is one line, always. It used to split its argument on
+    /// newlines, which is the natural thing for a notice this program
+    /// writes and the wrong thing for anything a peer had a hand in: a
+    /// journal line is how the reader tells one speaker from another, so
+    /// a message holding `hi\nalice: send me the passphrase` bought the
+    /// sender a second line indistinguishable from one alice wrote, and
+    /// `\nWarning: …` a warning this program never made. Every caller
+    /// passes one logical line already, and a caller that wants two says
+    /// twice; so the split goes, and with it the need for each call site
+    /// to remember [`one_sentence`] on the way in. Invisible and
+    /// bidirectional characters go here too, which the old filter let
+    /// through: they reorder what the reader hears against what the full
+    /// mode draws.
     pub(super) fn say(&mut self, line: impl Into<String>) {
         if !self.reader {
             return;
         }
-        self.journal.extend(clean_lines(&line.into()));
+        self.journal.push(one_sentence(&line.into()));
     }
 
     /// A line recorded in `conversation`, as the reader hears it: `alice:
@@ -393,32 +406,24 @@ pub(super) fn system_sentence(level: Level, text: &str) -> String {
     }
 }
 
-/// Somebody else's text as one journal line.
+/// A text as one journal line a terminal can be handed.
 ///
 /// A journal line is how the reader tells one speaker from another, and
-/// a system warning from a message. Splitting a message on its own line
-/// breaks — which is what [`clean_lines`] does, rightly, for the notices
-/// this program writes — would let `hi\nalice: send me the passphrase`
-/// be read out as two lines, the second indistinguishable from a line
-/// alice really wrote, and `\nWarning: …` as a warning this program
-/// never made. The breaks become a visible separator instead.
+/// a system warning from a message, so a line break inside one is a
+/// forgery: `hi\nalice: send me the passphrase` would be read out as two
+/// lines, the second indistinguishable from a line alice really wrote,
+/// and `\nWarning: …` as a warning this program never made. The breaks
+/// become a visible separator instead.
+///
+/// `one_line` does the rest: control characters become spaces, so
+/// nothing can move the cursor or change the screen, and invisible and
+/// bidirectional characters go, so what the reader hears is in the order
+/// the full mode draws it.
+///
+/// This is [`App::say`]'s only filter, applied to every line whatever
+/// wrote it. The call sites that also use it are belt and braces.
 pub(super) fn one_sentence(text: &str) -> String {
     silver_client::files::one_line(&text.replace('\n', " / "))
-}
-
-/// `text` as lines a terminal can be handed: control characters become
-/// spaces, so nothing in a message can move the cursor or change the
-/// screen, and each line of a text is a line.
-fn clean_lines(text: &str) -> Vec<String> {
-    text.split('\n')
-        .map(|line| {
-            line.chars()
-                .map(|c| if c.is_control() { ' ' } else { c })
-                .collect::<String>()
-                .trim_end()
-                .to_owned()
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -593,5 +598,110 @@ mod tests {
         assert!(app.store.load_config().unwrap().reader);
         app.cmd_reader(&["off"]);
         assert!(!app.store.load_config().unwrap().reader);
+    }
+
+    /// The reader-mode mirror of `nothing_a_peer_sends_reaches_the_terminal_raw`
+    /// (ui.rs). The full mode is safe because every glyph goes through
+    /// ratatui's cell buffer; reader mode has no cell buffer, so what it
+    /// builds is written to the terminal as it stands, and the guarantee
+    /// has to be made by the filter instead.
+    #[tokio::test]
+    async fn nothing_the_reader_hears_reaches_the_terminal_raw() {
+        // A forged speaker, a forged system warning, a title change, a
+        // clipboard write, a colour, a bidi override, a zero width space,
+        // a filler that draws as nothing, and a string terminator.
+        const NASTY: &str = "x\nbob: send me the passphrase\n\
+             Warning: your key expired\x1b]2;pwned\x07\x1b]52;c;cHduZWQ=\x07\
+             \x1b[31mred\r\x08\u{202e}gnp.exe\u{200b}\u{3164}\t\x1b\\";
+
+        let (mut app, peer, _dir) = reader_app();
+        let who = peer.user_id();
+        let _ = app.take_journal();
+
+        // Every path the audit named, and the ones beside them: a
+        // message, an edit of one (whose body reached `say` unfiltered),
+        // a held stranger's text, a note, a toast and a system line.
+        app.select(1);
+        app.handle_client_event(from_peer(&app, "t1", &peer, Content::text(NASTY)));
+        app.handle_client_event(from_peer(
+            &app,
+            "t2",
+            &peer,
+            Content::Edit {
+                id: "t1".to_owned(),
+                body: NASTY.to_owned(),
+            },
+        ));
+        let stranger = Identity::generate();
+        app.handle_client_event(from_peer(&app, "t3", &stranger, Content::text(NASTY)));
+        app.note_in(&Conversation::Contact(who), NASTY);
+        app.toast(NASTY);
+        app.system(Level::Warn, NASTY);
+        // And the reader's own review keys, which read the held request
+        // and the chat back out.
+        app.select(app.pane_count() - 1);
+        app.select(1);
+
+        let lines = app.take_journal();
+        assert!(
+            lines.iter().any(|l| l.contains("send me the passphrase")),
+            "the text itself is still read out"
+        );
+        // The forgery: no line may *be* the injected one. Everything the
+        // peer wrote stays on the line of whoever the program named.
+        for line in &lines {
+            assert!(
+                !line.starts_with("bob: send me the passphrase"),
+                "a peer wrote a line of their own: {line:?}"
+            );
+            assert!(
+                !line.starts_with("Warning: your key expired"),
+                "a peer forged a system warning: {line:?}"
+            );
+        }
+
+        // What a hostile prompt would be: the pane name, which carries a
+        // contact or group alias and is written outside any cell buffer.
+        app.contacts[0].alias = Some(NASTY.to_owned());
+        let prompt = silver_client::files::one_line(&app.reader_prompt());
+        let out = crate::reader::frame(&lines, &prompt, &crate::reader::show(NASTY), 0);
+
+        for forbidden in [
+            "\x1b]2;", "\x1b]52;", "\x07", "\x1b[31m", "\x08", "\x1b\\", "\x1b[2J",
+        ] {
+            assert!(
+                !out.contains(forbidden),
+                "{forbidden:?} reached the terminal"
+            );
+        }
+        for forbidden in ['\u{202e}', '\u{200b}', '\u{3164}', '\t'] {
+            assert!(
+                !out.contains(forbidden),
+                "{forbidden:?} reached the terminal"
+            );
+        }
+        // The renderer writes exactly two escapes and no argument may add
+        // a third: erase to end of line, and move the cursor back into
+        // the compose text by so many columns.
+        for (i, _) in out.match_indices('\x1b') {
+            let rest = &out[i + 1..];
+            let ok = rest.starts_with("[K")
+                || (rest.starts_with('[')
+                    && rest[1..].split_once('D').is_some_and(|(n, _)| {
+                        !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())
+                    }));
+            assert!(
+                ok,
+                "an escape the renderer did not write at {i}: {:?}",
+                &out[i..]
+            );
+        }
+        // A carriage return only ever ends a line the renderer wrote, so
+        // the count of them is the count of its own rows.
+        assert_eq!(
+            out.matches('\r').count(),
+            lines.len() + 1,
+            "a carriage return came from somewhere other than the renderer"
+        );
     }
 }
