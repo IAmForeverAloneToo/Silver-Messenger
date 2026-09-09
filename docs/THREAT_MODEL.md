@@ -648,8 +648,23 @@ is protected by the session: without the session state and the private
 prekeys of the time, it stays unreadable. With the prekeys as well, the
 attacker can derive sessions started against those prekeys and read their
 messages until the next Diffie–Hellman ratchet step they cannot follow.
-Both keys live in the same directory, so in practice this is the
-device-thief case above.
+
+**From protocol v4 this key also impersonates.** A v4 message carries no
+signature at the sealed layer — that is what makes it deniable — so what
+tells the responder who started a session is the initiator's published
+signature over their own Diffie–Hellman key, which is a public value
+anybody can copy, together with the handshake needing the initiator's
+X25519 secret. Whoever holds that secret alone can therefore start v4
+sessions as its owner with every one of their contacts, without the
+identity key. Until 0.15.0 this section listed only what the key
+decrypts and left impersonation to the identity key's section, which was
+wrong for v4. Both keys do live in the same file, so this is usually the
+device-thief case above — but not always: the review of September 2026
+read the Diffie–Hellman key out of a running client's memory, where it
+is in use on every envelope, and that is not the same event as reading
+the signing seed. What to do about it, and why binding the identity key
+freshly would cost v4 its deniability, is
+[docs/design/format-changes.md](design/format-changes.md) section 3.
 
 ### Holder of a compromised identity key
 
