@@ -36,6 +36,18 @@ nothing else -- and carried by whatever comes after it.
   What this does not catch, and the threat model now says so, is a
   rollback of the *whole* directory to a consistent earlier state: every
   file agrees with every other, because they did once.
+- History gets the same treatment, in the shape a file appended to a line
+  at a time needs. Each line is bound to the **byte offset** it sits at,
+  so taking one out moves everything after it and none of it opens, and
+  putting two the other way round leaves neither where it was written.
+  What that cannot show is the end being cut off -- what is left is all
+  genuine, there is just less of it -- so the file's length is recorded
+  and a shorter one is refused outright. The offset rather than the
+  line's number because an append already knows the offset: counting
+  lines would make every message read the whole conversation first.
+  A file longer than the record says is the ordinary interrupted append
+  and is read, for the same reason a whole file one generation ahead is:
+  a line that opens where it sits is one somebody encrypted there.
 - `silver --reset-rollback-protection`, for the new failure this
   introduces: `state` and the copy kept beside it both unreadable. The
   directory then unlocks -- refusing to unlock would leave no way to run
