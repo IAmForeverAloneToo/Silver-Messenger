@@ -1785,3 +1785,65 @@ fn messages_from_one_sender_may_arrive_well_out_of_order() {
         &ratchet
     );
 }
+
+#[test]
+fn a_group_alias_is_reduced_to_what_a_terminal_will_draw() {
+    // A contact alias has always been filtered, on the way in and on the
+    // way out; the group branch of the same command stored what it was
+    // given. It matters because `display_name()` is the string the
+    // reader's compose prompt is built from, and that prompt is written
+    // to the terminal without passing through the cell buffer.
+    let mut seq = Sequencer::default();
+    let mut blobs = HashMap::new();
+    let (mut alice, _bob, _carol, group) = three(&mut seq, &mut blobs);
+
+    alice
+        .groups
+        .set_alias(&group, Some("team\u{1b}]2;pwned\u{7}\u{202e}b".to_owned()))
+        .unwrap();
+    let record = alice.groups.get(&group).unwrap();
+    assert_eq!(record.alias.as_deref(), Some("team]2;pwnedb"));
+    assert_eq!(record.display_name(), "team]2;pwnedb");
+
+    // Long enough to push a line about is cut.
+    alice
+        .groups
+        .set_alias(&group, Some("x".repeat(200)))
+        .unwrap();
+    assert_eq!(
+        alice
+            .groups
+            .get(&group)
+            .unwrap()
+            .display_name()
+            .chars()
+            .count(),
+        crate::files::MAX_ALIAS_CHARS
+    );
+
+    // An alias of nothing but invisible characters is no alias at all,
+    // and the group falls back to its name.
+    alice
+        .groups
+        .set_alias(&group, Some("\u{200b}\u{202e}".to_owned()))
+        .unwrap();
+    assert_eq!(alice.groups.get(&group).unwrap().alias, None);
+    assert_eq!(
+        alice.groups.get(&group).unwrap().display_name(),
+        "the papers"
+    );
+}
+
+#[test]
+fn a_group_alias_that_reached_disk_unfiltered_is_still_filtered_on_the_way_out() {
+    // A data directory written by a version before the alias was filtered
+    // holds whatever was typed then, so the read side has to filter too.
+    let mut seq = Sequencer::default();
+    let mut blobs = HashMap::new();
+    let (mut alice, _bob, _carol, group) = three(&mut seq, &mut blobs);
+    alice.groups.record_mut(&group).unwrap().alias = Some("team\u{1b}]2;pwned\u{7}".to_owned());
+    assert_eq!(
+        alice.groups.get(&group).unwrap().display_name(),
+        "team]2;pwned"
+    );
+}

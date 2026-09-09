@@ -93,7 +93,12 @@ def main():
     identity(d_dir)
     d = Term(d_dir, pair.relay.url, cols=140)
     assert d.wait(G.connected + " connected"), "dave connects"
+    # Joining tells a stranger this id, so the link only says so; the
+    # second line asks.
     d.type(f"/group join {link}\r")
+    assert wait_flat(d, "tells the admin your id"), "joining says what it discloses"
+    assert not d.has("Join request sent"), "and nothing is sent on one line"
+    d.type("/group join confirm\r")
     assert d.wait("Join request sent"), "request sent"
     assert a.wait("joined by link"), "alice's client added dave"
     assert d.wait("# team"), "dave's chat list has the group"

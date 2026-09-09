@@ -26,7 +26,23 @@ def main():
     l_dir = fresh_dir("devices-laptop")
     linking = Linking(l_dir, pair.relay.url, name="laptop", account=pair.a_id)
     link = linking.link()
+    # The link alone only says what the device would be given; nothing is
+    # signed until the second line. Check the price is named, and that the
+    # device id shown is the one the laptop printed to compare against.
     a.type(f"/devices link {link}\r")
+    assert wait_flat(a, "that device is you"), "linking says what it grants"
+    assert "Run /devices link confirm to go ahead." in flat(a), "and stops"
+    assert not a.has('Linking "laptop"'), "nothing is signed on one line"
+    a.type("/devices\r")
+    assert a.wait("No linked devices"), "the list is still empty"
+    # The whole point of the second line: written in one burst, the way a
+    # terminal without bracketed paste hands a paste over, it is refused.
+    a.key(b"/devices link confirm\r")
+    assert wait_flat(a, "arrived faster than anyone types"), "a pasted confirmation is refused"
+    assert not a.has('Linking "laptop"'), "and still nothing is signed"
+    # Typed out, it goes ahead: refusing a paste must not lose the answer
+    # to the question, or the advice would be to start over.
+    a.type("/devices link confirm\r")
     assert a.wait('Linking "laptop"'), "alice starts linking"
     assert a.wait('Linked the device "laptop"', timeout=30), "linked"
     linking.wait_line("Linked: this is the device")

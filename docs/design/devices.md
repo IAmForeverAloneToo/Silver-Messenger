@@ -428,7 +428,11 @@ prekeys included, so the primary can start a session with it), prints
 the link and the QR code, and waits. The device does not know the
 account yet.
 
-On the primary: `/devices link <link>` (or `/devices link` and paste).
+On the primary: `/devices link <link>` (or `/devices link` and paste),
+which says what the device would be given and stops, then `/devices link
+confirm` — see `docs/design/consequential-commands.md` for why the grant
+is named before it is made and why the paste guard sits on the second
+line rather than the first.
 The primary makes the certificate with `created_at_ms` now and the
 name from the link or the owner's answer, looks the device up, starts a
 session with it, and sends a **provisioning** message: the certificate,
@@ -583,8 +587,9 @@ one device today.
 ### 8.3 Interface
 
 `/devices` lists this account's devices with names, which one this is,
-and when each was linked; `/devices link <link> [days]` (primary; `days`
-of history to send, default 30, 0 for none), `/devices remove <n>`
+and when each was linked; `/devices link <link> [days]` then `/devices
+link confirm` (primary; `days` of history to send, default 30, 0 for
+none, at most 3650), `/devices remove <n>`
 (primary), `/devices name <n> <name>` (primary: a fresh certificate for
 the same key, which the renamed device takes as its own from the next
 `sync devices`; there is no sync kind for a device to ask for a name, so

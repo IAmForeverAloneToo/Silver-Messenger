@@ -462,7 +462,7 @@ impl Contact {
     pub fn display_name(&self) -> String {
         self.alias
             .as_deref()
-            .map(|alias| crate::files::printable(alias, 40))
+            .map(|alias| crate::files::printable(alias, crate::files::MAX_ALIAS_CHARS))
             .filter(|alias| !alias.is_empty())
             .unwrap_or_else(|| format!("{}…", self.user_id.short()))
     }

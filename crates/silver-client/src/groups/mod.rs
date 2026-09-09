@@ -245,12 +245,37 @@ pub struct LinkUses {
     pub used: u32,
 }
 
+/// A group alias as it is stored: only what a terminal will draw, and no
+/// more of it than fits a name.
+///
+/// An alias is the user's own word for a group — typed here, or synced
+/// from another of their devices — so this is not defence against a
+/// peer. It is defence against a paste: `display_name()` reaches the
+/// reader's compose prompt, which is the one peer-influenced string the
+/// interface writes without going through the cell buffer, and an alias
+/// carrying an escape sequence would arrive there intact.
+fn clean_alias(alias: Option<String>) -> Option<String> {
+    alias
+        .map(|a| crate::files::printable(&a, crate::files::MAX_ALIAS_CHARS))
+        .filter(|a| !a.is_empty())
+}
+
 impl GroupRecord {
-    pub fn display_name(&self) -> &str {
-        match &self.alias {
+    /// The alias if one is set, otherwise the group's name.
+    ///
+    /// The alias is reduced to what can be seen even if the file on disk
+    /// says otherwise, exactly as a contact's is: it reaches window
+    /// titles, notifications and the reader's compose prompt, not only
+    /// the cell buffer, and a file written by an older version may hold
+    /// one that was never filtered. The group *name* needs no filtering
+    /// here — `SilverGroup::check` refuses control characters in it on
+    /// every receive path — but it costs nothing to pass both through
+    /// the same door.
+    pub fn display_name(&self) -> String {
+        match clean_alias(self.alias.clone()) {
             Some(alias) => alias,
-            None if self.name.is_empty() => "(unnamed group)",
-            None => &self.name,
+            None if self.name.is_empty() => "(unnamed group)".to_owned(),
+            None => crate::files::printable(&self.name, silver_protocol::group::MAX_NAME_BYTES),
         }
     }
 
@@ -341,7 +366,7 @@ impl GroupsFile {
     pub(crate) fn names(&self) -> BTreeMap<GroupId, String> {
         self.groups
             .iter()
-            .map(|(id, r)| (*id, r.display_name().to_owned()))
+            .map(|(id, r)| (*id, r.display_name()))
             .collect()
     }
 }
@@ -698,7 +723,7 @@ impl Groups {
 
     pub fn set_alias(&mut self, group: &GroupId, alias: Option<String>) -> Result<()> {
         let record = self.record_mut(group)?;
-        record.alias = alias.filter(|a| !a.trim().is_empty());
+        record.alias = clean_alias(alias);
         self.persist()
     }
 
@@ -715,7 +740,7 @@ impl Groups {
             self.file.expected.insert(
                 id,
                 ExpectedGroup {
-                    alias: expected.alias.filter(|a| !a.trim().is_empty()),
+                    alias: clean_alias(expected.alias),
                     ..expected
                 },
             );
