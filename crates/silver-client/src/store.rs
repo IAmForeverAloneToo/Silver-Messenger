@@ -15,8 +15,13 @@
 //! devices.json         the account's linked devices and revocations
 //! state                which version of each file is the current one
 //! state.prev           the version of that before the last write
-//! history/<user>.jsonl one line per message, per peer
+//! history/<name>.jsonl one line per message, per conversation
 //! ```
+//!
+//! The history file's `<name>` is a MAC of the conversation's id under a
+//! key of its own, so a listing of the directory is not the contact and
+//! group list; `state` says which file is whose. Without protection at
+//! rest there is no key to compute one with, and the name is the id.
 //!
 //! On a linked device `identity.json` also carries, under `linked`, the
 //! account it belongs to and the certificate the account signed for it.
@@ -747,7 +752,10 @@ pub enum Conversation {
 }
 
 impl Conversation {
-    fn file_name(&self) -> String {
+    /// The name a version before SM-C-25 filed this conversation under,
+    /// and the one a directory with no protection at rest still uses:
+    /// there is no key to compute anything else with.
+    fn plain_file_name(&self) -> String {
         match self {
             Self::Contact(peer) => history_name(peer),
             Self::Group(group) => group_history_name(group),
@@ -1156,12 +1164,93 @@ impl Store {
             state.wrote(name, at);
             state.generation = state.generation.max(at);
         }
+        self.adopt_history(cipher, &mut state)?;
         self.persist_generations(&state, cipher)?;
         *self.generations.lock().unwrap_or_else(|e| e.into_inner()) = Generations::Bound(state);
         tracing::info!(
             "this data directory now records what it last wrote, so an older copy of one of its \
              files is refused rather than read"
         );
+        Ok(())
+    }
+
+    /// Move history files off names that say whose they are, and record
+    /// what each holds.
+    ///
+    /// A file already under its new name is one a run that did not finish
+    /// had already moved, and is left alone but still recorded; a file
+    /// under its old name is read there, written under the new one, and
+    /// only then removed. So a crash leaves at worst both, and the next
+    /// unlock finishes the job — which is why the old one goes last.
+    fn adopt_history(&self, cipher: &FileCipher, state: &mut State) -> anyhow::Result<()> {
+        let dir = self.root.join(HISTORY_DIR);
+        if !dir.exists() {
+            return Ok(());
+        }
+        let mut moved = 0usize;
+        for entry in fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))? {
+            let path = entry?.path();
+            let Some(stem) = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_suffix(".jsonl"))
+            else {
+                continue;
+            };
+            let old_name = format!("{HISTORY_DIR}/{stem}.jsonl");
+            let Some(conversation) = Conversation::parse_id(stem) else {
+                // Already under a name that says nothing, from a run that
+                // did not finish. Its lines are bound to that name, so it
+                // stays where it is; all it needs is to be in the index,
+                // and the id for that is not in the file name any more.
+                let known = state
+                    .conversations()
+                    .find(|(n, _)| *n == old_name)
+                    .map(|(_, id)| id.to_owned());
+                if let Some(id) = known {
+                    let bytes = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                    state.wrote_history(&old_name, &id, bytes);
+                }
+                continue;
+            };
+            // From the record being built, not from `self`: the store's
+            // own view is still the one from before this adoption, and
+            // asking it would give back the name we are moving away from.
+            let new_name = format!(
+                "{HISTORY_DIR}/{}.jsonl",
+                cipher.history_name(&conversation.id())
+            );
+            if new_name == old_name {
+                continue;
+            }
+            let text =
+                fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+            // Every line is bound to the file's name, so a rename means
+            // re-encrypting each one. The ciphertext of a line is as long
+            // as it was, so the offsets do not move.
+            let mut out = String::new();
+            for (at, line) in lines_with_offsets(&text) {
+                let plain = decode_line(Some(cipher), &old_name, at, line)?;
+                out.push_str(&encode_line(
+                    Some(cipher),
+                    &new_name,
+                    out.len() as u64,
+                    &plain,
+                ));
+                out.push('\n');
+            }
+            write_atomic(&self.root.join(&new_name), out.as_bytes())?;
+            state.wrote_history(&new_name, &conversation.id(), out.len() as u64);
+            fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+            state.removed_history(&old_name);
+            moved += 1;
+        }
+        if moved > 0 {
+            tracing::info!(
+                "{moved} conversation logs are no longer filed under the name of who they are \
+                 with, so a listing of this directory is no longer the contact list"
+            );
+        }
         Ok(())
     }
 
@@ -1520,6 +1609,19 @@ impl Store {
         from: Option<&FileCipher>,
         to: Option<&FileCipher>,
     ) -> anyhow::Result<()> {
+        // Taken before anything is rewritten, because it is the only
+        // thing that still says which conversation a file that is named
+        // after nothing holds.
+        let index: HashMap<String, String> = self
+            .generations()
+            .state()
+            .map(|state| {
+                state
+                    .conversations()
+                    .map(|(n, id)| (n.to_owned(), id.to_owned()))
+                    .collect()
+            })
+            .unwrap_or_default();
         for name in recrypted_files() {
             let path = self.root.join(name);
             if !path.exists() {
@@ -1598,15 +1700,31 @@ impl Store {
             let name = relative_name(&self.root, &path);
             let text = fs::read_to_string(&path)?;
             let mut out = String::new();
+            // Going back to plaintext takes the record of what each file
+            // is called with it, so the file has to go back to the name
+            // that says whose it is while the record can still say.
+            let to_name = match to {
+                None => index
+                    .get(name.as_str())
+                    .and_then(|id| Conversation::parse_id(id))
+                    .map(|c| c.plain_file_name())
+                    .unwrap_or_else(|| name.clone()),
+                Some(_) => name.clone(),
+            };
             // Read at the offset each line is at now, written at the
             // offset it lands on: blank lines are dropped, so the two are
             // not the same and the line has to be re-bound.
             for (at, line) in lines_with_offsets(&text) {
                 let plain = decode_line(from, &name, at, line)?;
-                out.push_str(&encode_line(to, &name, out.len() as u64, &plain));
+                out.push_str(&encode_line(to, &to_name, out.len() as u64, &plain));
                 out.push('\n');
             }
-            write_atomic(&path, out.as_bytes())?;
+            if to_name == name {
+                write_atomic(&path, out.as_bytes())?;
+            } else {
+                write_atomic(&self.root.join(&to_name), out.as_bytes())?;
+                fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+            }
         }
         Ok(())
     }
@@ -2153,7 +2271,7 @@ impl Store {
 
     fn append_history_line(&self, conversation: &Conversation, json: &str) -> anyhow::Result<()> {
         self.ensure_unlocked()?;
-        let name = conversation.file_name();
+        let name = self.history_file(conversation);
         if let Some(why) = self.generations().refusal() {
             bail!("{why}");
         }
@@ -2213,14 +2331,14 @@ impl Store {
         if old == new {
             return Ok(());
         }
-        let old_name = history_name(old);
+        let old_name = self.history_file(&Conversation::Contact(*old));
         let old_path = self.root.join(&old_name);
         if !old_path.exists() {
             return Ok(());
         }
         let text = fs::read_to_string(&old_path)
             .with_context(|| format!("reading {}", old_path.display()))?;
-        let new_name = history_name(new);
+        let new_name = self.history_file(&Conversation::Contact(*new));
         let new_path = self.root.join(&new_name);
         let mut out = append_private(&new_path)?;
         // Appended after whatever the new name already holds, so each
@@ -2306,7 +2424,7 @@ impl Store {
     /// entry wherever the entry stands. An edit applies only to a message
     /// its sender wrote, whichever came first.
     fn load_history_named(&self, conversation: &Conversation) -> anyhow::Result<Vec<HistoryEntry>> {
-        let lines = self.read_history_lines(&conversation.file_name())?;
+        let lines = self.read_history_lines(&self.history_file(conversation))?;
         let mut entries: Vec<HistoryEntry> = Vec::new();
         let mut updates = Vec::new();
         for line in lines.into_iter().flatten() {
@@ -2409,6 +2527,23 @@ impl Store {
         self.note_history_write(name, &conversation)
     }
 
+    /// Where a conversation's log lives.
+    ///
+    /// With the directory protected this is a MAC of the conversation's
+    /// id under the data key, so a directory listing is no longer the
+    /// contact and group list (SM-C-25). Without protection there is no
+    /// key to compute one with, and an attacker who can read the
+    /// directory can read the messages anyway, so the plain name stands.
+    fn history_file(&self, conversation: &Conversation) -> String {
+        match self.cipher.as_deref() {
+            Some(cipher) => format!(
+                "{HISTORY_DIR}/{}.jsonl",
+                cipher.history_name(&conversation.id())
+            ),
+            None => conversation.plain_file_name(),
+        }
+    }
+
     /// Forget a history file that has been removed, so that its record
     /// does not outlive it and turn its absence into a truncation.
     fn forget_history_file(&self, name: &str) -> anyhow::Result<()> {
@@ -2508,7 +2643,7 @@ impl Store {
         conversation: &Conversation,
         ids: &[String],
     ) -> anyhow::Result<Vec<HistoryEntry>> {
-        let name = conversation.file_name();
+        let name = self.history_file(conversation);
         if !self.root.join(&name).exists() {
             return Ok(Vec::new());
         }
@@ -2578,7 +2713,7 @@ impl Store {
         ids: &[String],
         from: Option<UserId>,
     ) -> anyhow::Result<Vec<Deletion>> {
-        let name = conversation.file_name();
+        let name = self.history_file(conversation);
         let lines = self.read_history_lines(&name)?;
         let authors: HashMap<&str, Option<UserId>> = lines
             .iter()
@@ -2630,9 +2765,28 @@ impl Store {
         Ok(outcome)
     }
 
-    /// Every conversation that has a log, from the history directory's
-    /// file names.
+    /// Every conversation that has a log.
+    ///
+    /// From the index in `state` where there is one, since a history file
+    /// is named after nothing once the directory is protected (SM-C-25)
+    /// and its name no longer says whose it is. The index is what makes
+    /// this list complete, which matters more than it looks: a
+    /// conversation the expiry sweep cannot see is one whose
+    /// disappearing messages never disappear, and history outlives a
+    /// contact who was removed, so rebuilding the list from the contacts
+    /// and groups files would be a different set.
+    ///
+    /// A directory with no protection is still read from its file names,
+    /// which are still the ids.
     pub fn conversations(&self) -> anyhow::Result<Vec<Conversation>> {
+        if let Some(state) = self.generations().state() {
+            let mut out: Vec<Conversation> = state
+                .conversations()
+                .filter_map(|(_, id)| Conversation::parse_id(id))
+                .collect();
+            out.sort_by_key(|c| c.id());
+            return Ok(out);
+        }
         let dir = self.root.join(HISTORY_DIR);
         let mut out = Vec::new();
         if !dir.exists() {
@@ -2643,15 +2797,11 @@ impl Store {
             let Some(stem) = name.to_str().and_then(|n| n.strip_suffix(".jsonl")) else {
                 continue;
             };
-            if let Some(group) = stem.strip_prefix("group-") {
-                if let Ok(group) = group.parse() {
-                    out.push(Conversation::Group(group));
-                }
-            } else if let Ok(peer) = stem.parse() {
-                out.push(Conversation::Contact(peer));
+            if let Some(conversation) = Conversation::parse_id(stem) {
+                out.push(conversation);
             }
         }
-        out.sort_by_key(|c| c.file_name());
+        out.sort_by_key(|c| c.id());
         Ok(out)
     }
 
@@ -2899,7 +3049,9 @@ mod tests {
         store.append_history(&peer, &entry(0)).unwrap();
         // A crash in the middle of a write leaves the file without its
         // final newline.
-        let path = dir.path().join(history_name(&peer));
+        let path = dir
+            .path()
+            .join(store.history_file(&Conversation::Contact(peer)));
         let mut file = OpenOptions::new().append(true).open(&path).unwrap();
         file.write_all(b"{\"id\":\"1\",\"dir").unwrap();
         drop(file);
@@ -2943,7 +3095,10 @@ mod tests {
             let path = root.join(name);
             assert_eq!(mode(&path) & 0o077, 0, "{name} is readable by others");
         }
-        assert_eq!(mode(&root.join(history_name(&peer))) & 0o077, 0);
+        assert_eq!(
+            mode(&root.join(store.history_file(&Conversation::Contact(peer)))) & 0o077,
+            0
+        );
 
         // A directory that is not ours is left as it is: --data-dir could
         // name anything, and tightening someone's home directory with it
@@ -3094,6 +3249,80 @@ mod tests {
         );
     }
 
+    /// SM-C-25: the directory listing was the contact and group list.
+    /// Everything that was in a file name has to still be findable, so
+    /// this checks the list is complete and the names say nothing —
+    /// including for a conversation with somebody who is not a contact,
+    /// which is the case rebuilding the list from `contacts.json` would
+    /// miss.
+    #[test]
+    fn history_names_say_nothing_and_every_conversation_is_still_found() {
+        let (store, dir) = bound_store();
+        let peer = Identity::generate().user_id();
+        let stranger = Identity::generate().user_id();
+        let group = silver_protocol::GroupId::generate();
+        store.append_history(&peer, &entry(0)).unwrap();
+        store.append_history(&stranger, &entry(1)).unwrap();
+        store.append_group_history(&group, &entry(2)).unwrap();
+        // Only one of them is a contact, and the other two must be found
+        // all the same.
+        store.save_contacts(&[Contact::new(peer)]).unwrap();
+
+        let mut found = store.conversations().unwrap();
+        found.sort_by_key(|c| c.id());
+        let mut want = vec![
+            Conversation::Contact(peer),
+            Conversation::Contact(stranger),
+            Conversation::Group(group),
+        ];
+        want.sort_by_key(|c| c.id());
+        assert_eq!(found, want, "every conversation with a log must be listed");
+
+        for entry in fs::read_dir(dir.path().join(HISTORY_DIR)).unwrap() {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            for id in [peer.to_string(), stranger.to_string(), group.to_string()] {
+                assert!(!name.contains(&id), "{name} names {id}");
+            }
+        }
+    }
+
+    /// A directory whose history is still filed under the contact's id is
+    /// moved off those names on the next unlock, and the conversations
+    /// stay readable and findable across the move.
+    #[test]
+    fn history_filed_under_a_contact_id_is_moved_on_the_next_unlock() {
+        crate::keystore::use_mock_store();
+        let (mut store, dir) = temp_store();
+        store.load_or_create_identity().unwrap();
+        let peer = Identity::generate().user_id();
+        // Written while the directory is unprotected, so it lands under
+        // the name an older version used.
+        store.append_history(&peer, &entry(0)).unwrap();
+        let plain = dir.path().join(history_name(&peer));
+        assert!(plain.exists());
+
+        store.protect_with_keystore().unwrap();
+        assert!(
+            !plain.exists(),
+            "the file should have moved off the name that says whose it is"
+        );
+        assert_eq!(store.load_history(&peer).unwrap().len(), 1);
+        assert_eq!(
+            store.conversations().unwrap(),
+            vec![Conversation::Contact(peer)]
+        );
+
+        // And it survives a fresh handle, which reads the index rather
+        // than the file names.
+        let mut again = Store::open(dir.path()).unwrap();
+        again.unlock_with_keystore().unwrap();
+        assert_eq!(again.load_history(&peer).unwrap().len(), 1);
+        assert_eq!(
+            again.conversations().unwrap(),
+            vec![Conversation::Contact(peer)]
+        );
+    }
+
     /// The history half of SM-C-24: cutting the end off a conversation
     /// is the one thing binding each line to its offset cannot show, so
     /// the length is recorded and a shorter file is refused.
@@ -3107,7 +3336,9 @@ mod tests {
         assert_eq!(store.load_history(&peer).unwrap().len(), 4);
 
         // Somebody with write access takes the last two messages off.
-        let path = dir.path().join(history_name(&peer));
+        let path = dir
+            .path()
+            .join(store.history_file(&Conversation::Contact(peer)));
         let text = fs::read_to_string(&path).unwrap();
         let keep: String = text.lines().take(2).map(|l| format!("{l}\n")).collect();
         fs::write(&path, keep).unwrap();
@@ -3129,7 +3360,9 @@ mod tests {
         for i in 0..4 {
             store.append_history(&peer, &entry(i)).unwrap();
         }
-        let path = dir.path().join(history_name(&peer));
+        let path = dir
+            .path()
+            .join(store.history_file(&Conversation::Contact(peer)));
         let text = fs::read_to_string(&path).unwrap();
         let mut lines: Vec<&str> = text.lines().collect();
         // A swap keeps the file the same length whatever the lines are,
@@ -3649,7 +3882,12 @@ mod tests {
         assert_eq!(history[0].receipt, Some(ReceiptKind::Read));
         // Nothing about it is left on disk, and a late line naming it, or
         // its entry again, counts for nothing.
-        let raw = fs::read_to_string(store.root.join(history_name(&peer))).unwrap();
+        let raw = fs::read_to_string(
+            store
+                .root
+                .join(store.history_file(&Conversation::Contact(peer))),
+        )
+        .unwrap();
         assert!(!raw.contains("edited") && !raw.contains("msg 2"), "{raw}");
         store
             .append_edit(&conv, "2", "back?", "e2", 12, None)
@@ -3664,7 +3902,7 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        assert!(!store.root.join(nobody.file_name()).exists());
+        assert!(!store.root.join(store.history_file(&nobody)).exists());
     }
 
     #[test]
@@ -3696,7 +3934,12 @@ mod tests {
         assert!(gone.deleted);
         assert!(gone.text.is_empty() && gone.previous.is_empty() && gone.reactions.is_empty());
         assert!(!gone.edited);
-        let raw = fs::read_to_string(store.root.join(history_name(&peer))).unwrap();
+        let raw = fs::read_to_string(
+            store
+                .root
+                .join(store.history_file(&Conversation::Contact(peer))),
+        )
+        .unwrap();
         assert!(!raw.contains("edited") && !raw.contains("msg 1"), "{raw}");
         // Later edits and reactions leave the placeholder alone.
         store
@@ -3711,13 +3954,23 @@ mod tests {
         // nobody has seen is free to invent, so a line per invented id is
         // a file anyone in the conversation could grow without end
         // (SM-C-19).
-        let before = fs::read_to_string(store.root.join(history_name(&peer))).unwrap();
+        let before = fs::read_to_string(
+            store
+                .root
+                .join(store.history_file(&Conversation::Contact(peer))),
+        )
+        .unwrap();
         assert_eq!(
             store.mark_deleted(&conv, "7", Some(peer)).unwrap(),
             Deletion::Tombstoned
         );
         assert_eq!(
-            fs::read_to_string(store.root.join(history_name(&peer))).unwrap(),
+            fs::read_to_string(
+                store
+                    .root
+                    .join(store.history_file(&Conversation::Contact(peer)))
+            )
+            .unwrap(),
             before,
             "an id the history does not hold leaves nothing behind"
         );
@@ -3768,7 +4021,7 @@ mod tests {
             .append_edit(&conv, "1", "edited", "e", 2, None)
             .unwrap();
         store.remove_messages(&conv, &["nothing".into()]).unwrap();
-        let raw = fs::read_to_string(store.root.join(conv.file_name())).unwrap();
+        let raw = fs::read_to_string(store.root.join(store.history_file(&conv))).unwrap();
         assert!(raw.lines().all(|l| l.starts_with(LINE_PREFIX)), "{raw}");
         assert_eq!(store.load_group_history(&group).unwrap()[0].text, "edited");
     }
@@ -3984,7 +4237,9 @@ mod tests {
             }
             assert!(is_encrypted(name), "{name} was left in the clear");
         }
-        let history = fs::read_to_string(root.join(history_name(&peer))).unwrap();
+        let history =
+            fs::read_to_string(root.join(store.history_file(&Conversation::Contact(peer))))
+                .unwrap();
         assert!(history.lines().all(|l| l.starts_with(LINE_PREFIX)));
         assert_eq!(
             store.read_private_file(crate::groups::MLS_FILE).unwrap(),
@@ -4211,14 +4466,29 @@ mod tests {
         let raw_identity = fs::read(&identity_path).unwrap();
         assert!(FileCipher::is_encrypted(&raw_identity));
         assert!(!String::from_utf8_lossy(&raw_identity).contains("signing_seed"));
-        let raw_history = fs::read_to_string(
-            dir.path()
-                .join("history")
-                .join(format!("{}.jsonl", peer.user_id())),
-        )
-        .unwrap();
+        // And the file is no longer named after who it is with, which is
+        // SM-C-25: a listing of the directory was the contact list, with
+        // every file in it encrypted.
+        let plain_name = dir
+            .path()
+            .join("history")
+            .join(format!("{}.jsonl", peer.user_id()));
+        assert!(
+            !plain_name.exists(),
+            "the history is still filed under the contact's id"
+        );
+        let conversation = Conversation::Contact(peer.user_id());
+        let raw_history =
+            fs::read_to_string(dir.path().join(store.history_file(&conversation))).unwrap();
         assert!(raw_history.lines().all(|l| l.starts_with(LINE_PREFIX)));
         assert!(!raw_history.contains("msg 0"));
+        for entry in fs::read_dir(dir.path().join("history")).unwrap() {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            assert!(
+                !name.contains(&peer.user_id().to_string()),
+                "{name} names the contact"
+            );
+        }
 
         // A fresh handle starts locked and refuses to read until unlocked.
         let mut again = Store::open(dir.path()).unwrap();

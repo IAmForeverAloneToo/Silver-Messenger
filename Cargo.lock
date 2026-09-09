@@ -4707,6 +4707,7 @@ dependencies = [
  "directories",
  "ed25519-dalek",
  "futures-util",
+ "hmac 0.12.1",
  "keyring",
  "minisign-verify",
  "openmls",
