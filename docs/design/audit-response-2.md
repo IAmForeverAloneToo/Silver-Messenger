@@ -10,15 +10,20 @@ is done about it, and where. It follows
 note and the code disagree, the code wins and this note is corrected.
 
 There is no Critical and no cryptographic break. The two Highs and every
-Medium are fixed in 0.15.0; the Lows are partly fixed and partly
-scheduled, and this note says which is which rather than rounding up.
+Medium are fixed in 0.15.0, as are eleven of the eighteen Lows and the
+one Informational that was a real defect. Of the rest, three Lows the
+report itself withdrew, one is declined, and the others are remainders of
+findings otherwise closed — two scheduled, three declined with the
+argument written down. This note says which is which rather than rounding
+up.
 
 ## 1. Decisions
 
 | Question | Decision |
 | --- | --- |
-| What ships in 0.15.0 | Both Highs, all seven Mediums, and eight of the eighteen Lows. No patch release was cut ahead of it: neither High is reachable without either a line the user pastes without reading (H-2) or the access class that already reads an unlocked client outright (H-1, M-1), so nothing here is a race against disclosure. |
-| What is scheduled | The remaining Lows and the one Informational that is a real defect (I-1), under roadmap item 63. Section 4 lists them individually with what each costs to leave. |
+| What ships in 0.15.0 | Both Highs, all seven Mediums, eleven of the eighteen Lows in full, three more in part, and the one Informational that is a real defect (I-1). No patch release was cut ahead of it: neither High is reachable without either a line the user pastes without reading (H-2) or the access class that already reads an unlocked client outright (H-1, M-1), so nothing here is a race against disclosure. |
+| What is scheduled | Two remainders, under roadmap item 63: the parsers L-14 leaves unfuzzed, and the macOS signing H-1 wants. Section 4 lists both with what each costs to leave. |
+| What is declined | L-1 and the M-1 remainder, on one decision about `forbid(unsafe_code)`; the L-11 and L-12 remainders, each on its own argument; and the review's suggested non-zero `lock_after_minutes` default. All five are argued in section 4 rather than left open. |
 | Where a suggested fix was not taken | Section 5. Five cases, each argued. |
 | Disclosure | The report goes in whole, this note beside it, as [SECURITY.md](../../SECURITY.md) says of every review. |
 
@@ -55,75 +60,103 @@ Verdict: **C** confirmed as reported, **P** confirmed in part.
 | L-2 | Low | C | The window cannot be closed — Windows offers no atomic replace for a running image — so what can fail happens before the two renames, the recovery falls back to copying when a rename will not go, and when neither goes the error names the file to rename back by hand. `rollback` had the same window on every platform and now shares that recovery. Writing the test found a third thing: the backup was checked with `exists()`, so a *directory* could have been renamed onto the binary's name. |
 | L-3 | Low | C | The first refusal of a run is logged and the rest counted, with a line a minute carrying the total. What is refused is unchanged. |
 | L-4 | Low | C | The metrics listener calls the same `set_http_timeouts` the main listener has used since 0.7.0, serves sixteen connections at once and gives each a deadline. |
+| L-5 | Low | C | Both halves. `--max-mailbox-messages 0` gave a relay that answered "mailbox full" to everyone, since `count >= 0` holds of every mailbox; zero is no cap now, agreeing with `--mailbox-storage-mib` and `--max-identities`, which already documented it that way. `--max-mailbox-mib` multiplied to bytes without saturating where the line below it did, so a large enough value wrapped to a small cap; it saturates, as do the additions compared against it. |
+| L-6 | Low | C | An identity may write `--log-entries-per-user-per-hour` entries (12 by default, 0 for no cap). The log is append-only and hash-chained — that is what lets a client prove the relay served everyone the same keys — so growth cannot be answered by pruning, only by refusing to append. Republishing an unchanged bundle appends nothing and is never refused, which is what every client does on connecting. |
+| L-8 | Low | C | `Session::respond` checks `init.signed_prekey_id` against the prekey it was handed. The one-time and post-quantum keys were already matched; the signed one, which every handshake uses, was not, so a caller that looked up the wrong id built a session deriving a different root and failing every AEAD with nothing to say why. |
+| L-10 | Low | C | `Session`, `IdentitySecrets` and `PrekeySecret` say at the type what serializing them yields: plaintext keys. They are public API, and "serializable so a client can persist it" read as an invitation to persist it as it comes. |
+| L-13 | Low | C | `/whois` marks a name that mixes alphabets whose letters look alike. Only the mixture: a name written wholly in Cyrillic is somebody's actual name, and a Latin name with a digit in it is nobody's attack. A prompt to compare safety numbers, not a refusal — an alias is the user's own to set. |
+| L-16 | Low | C | `Content::check` validates a file's blob id, size cap and chunk count where the body is parsed, alongside the ratchet-body validation added for M-6's neighbours. One deliberate difference from `BlobRef::validate`: an empty file has one chunk and zero bytes, which `upload_file` really produces and the group half really refuses. Noted rather than settled here. |
 | L-11 | Low | P | A system trust store that yields nothing now warns and says what it costs, instead of a `debug` line nothing runs at. The report's sharper half — that removing a compromised CA from the OS store does not remove it from the compiled-in Mozilla set, so OS-store incident response is ineffective against the built-in list — is **documented but not changed** (§4). |
 | L-12 | Low | P | `silver.log` is bounded: it rolls at 8 MiB keeping one previous file, and `/wipe` takes the rolled half too, it being the same record. The side-channel itself — plaintext metadata beside an encrypted directory, readable with the vault locked — is unchanged (§4). |
 | L-14 | Low | P | The release description and the checksum list get a fuzz target, both being parsed before any signature has been checked. The hand-rolled HTTP response parser, `transparency.rs`, `vault.rs`, `linking.rs` and `Pin::parse` do not (§4). |
 | L-15 | Low | C | The bound login is required by default; `--allow-unbound-auth` takes it back for a relay that still has clients older than 0.6.0, and says in the log what that costs. |
 | L-18 | Low | C | The group alias is filtered on the way in — including copies synced from the user's own devices — and on the way out, since a directory written by an earlier version already holds whatever was typed then. With the prompt filtered too (M-6), the raw-prompt gap is closed twice. |
 | L-7, L-9, L-17 | Low | — | The report itself rejects or downgrades these to documented behaviour after counter-review. Nothing done, nothing owed. |
+| I-1 | Info | C | The claim in `docs/design/updates.md` that the swap is tested under a kill was false, in the document about the path that replaces the running binary. The test exists, and writing it corrected the claim too: a kill lands in a window microseconds wide about never, so a second test watches the path from another thread across four hundred swaps and requires that the name never resolve to nothing. Both are Unix-only, and so is the guarantee — Windows cannot replace a running image, so its swap has a window `install.rs` makes small and recoverable rather than closing. The old claim covered neither. |
 | I-2 | Info | — | A stale line in the *first* report, already answered in that report's response note. The historical record is published unedited by convention. |
 
-Findings not in the table — **L-1, L-5, L-6, L-8, L-10, L-13, L-16** and
-**I-1** — are not done. Section 4 says what each is and what leaving it
-costs.
+Every finding is now in the table except **L-1**, which is declined, and
+the partial remainders of **H-1**, **M-1**, **L-11**, **L-12** and
+**L-14**. Section 4 says what each of those is and what leaving it costs.
 
 ## 4. What is not done, and what it costs
 
-Scheduled under roadmap item 63. Nothing here is a way for someone else
-to read a message or forge one; every item is either a bound that should
-be tighter, a defence in depth, or a documentation defect.
+Two of these are *declined* and two more are *decided*: settled below,
+not coming back. The rest stand under roadmap item 63. Nothing here is a
+way for someone else to read a message or forge one; every item is either
+a bound that should be tighter, a defence in depth, or a documentation
+defect.
 
-* **I-1 — `docs/design/updates.md` claims a kill test that does not
-  exist.** The worst of the eight, because it is a false statement about
-  what is tested, in a document about the update path. Either the test
-  gets written or the claim goes; it should not survive another release.
-* **L-1 — no `mlock`/`VirtualLock` on key buffers.** Keys can reach swap
-  or a hibernation image. The threat model says so; locking the small
-  fixed-size buffers would narrow it. Blocked on the decision below.
-* **L-5 — `--max-mailbox-mib` can wrap on multiply, and
-  `--max-mailbox-messages 0` silently means "always full".** Both are
-  operator footguns of the same family as M-4, which was fixed; these
-  were missed and should follow it.
-* **L-6 — transparency log growth is uncapped per identity.** Append-only
-  and never pruned.
-* **L-8 — `Session::respond` never checks `init.signed_prekey_id`
-  against the supplied prekey**, giving a silent dead session instead of
-  a clean error.
-* **L-10 — session, identity and prekey secrets serialize as plaintext
-  base64 JSON.** A footgun for anything that persists them outside the
-  vault; this program does not, but the type invites it.
-* **L-13 — homoglyph and mixed-script names are unmitigated.**
-* **L-16 — `Content::File` metadata is not validated at the protocol
-  layer.** The client validates on every receive path before allocating,
-  which is why the report downgraded it; the boundary check is still the
-  right place, alongside the ratchet-body validation added for M-6's
-  neighbours.
+* **L-1 — no `mlock`/`VirtualLock` on key buffers.** *Declined.* Keys can
+  reach swap or a hibernation image. The threat model says so; locking
+  the small fixed-size buffers would narrow it. See the decision below.
+* **L-11 remainder — the compiled-in Mozilla roots are added to the
+  system store, not used instead of it.** *Decided, not scheduled.* So
+  removing a compromised CA from the operating system's store does not
+  stop this client accepting it: `webpki-roots` is loaded first and the
+  native certificates are added on top. The alternative — the system
+  store alone whenever it yields anything — honours a local distrust
+  decision, and costs a client that will not connect at all on a machine
+  whose store is partial, unreadable or absent, which is every container
+  and a fair number of servers. **The floor stays**, because the answer
+  for somebody who cares which authorities can vouch for their relay is
+  not a shorter list of them: it is `--pin`, which takes every authority
+  out of the question for the one host this program talks to. That is
+  what the README recommends and what the finding's own scenario wants.
+* **L-12 remainder — `silver.log` is plaintext beside an encrypted
+  directory.** *Decided, not scheduled.* It is bounded now and `/wipe`
+  takes it, but what it holds — envelope ids, contact ids, the relay —
+  is readable while the vault is locked. It is not encrypted because a
+  log that needs the data key is no use for the case it exists for: a
+  client that will not start, or will not unlock. It is off unless
+  `SILVER_LOG` is set, it is written 0600, and the threat model says
+  what it is. Turning it on is a deliberate trade, and the client should
+  not quietly make the diagnostic unreadable in exchange.
+* **L-14 remainder — five parsers still have no fuzz target.** The
+  updater's two are fuzzed, being the ones read before any signature has
+  been checked. The hand-rolled HTTP response parser, `transparency.rs`,
+  `vault.rs`, `linking.rs` and `Pin::parse` are not, and every one of
+  them takes bytes chosen by somebody else.
 * **H-1 remainder — macOS release builds are unsigned** unless
   notarization secrets are set, so the hardened runtime that would
   restrict same-user attach is absent. Ad-hoc signing would get
   `CS_RESTRICT` without notarization.
-* **M-1 remainder — no enumeration sweep of `data-key-*` entries.** The
-  pending list covers every key orphaned from 0.15.0 on; keys orphaned by
-  *earlier* versions stay until removed by hand. Blocked on the same
+* **M-1 remainder — no enumeration sweep of `data-key-*` entries.**
+  *Declined.* The pending list covers every key orphaned from 0.15.0 on;
+  keys orphaned by *earlier* versions stay until removed by hand. Same
   decision as L-1.
 
-### The one decision those two wait on
+### The one decision those two are declined on
 
 Both want a system call — `mlock`/`VirtualLock` for L-1, `CredEnumerate`
 and its equivalents for the sweep, which `keyring` exposes on no backend
 — and `silver-client`, the crate holding the keys, is
 `#![forbid(unsafe_code)]`. The review counted that among the reasons the
-tree reads as it does. So the choice is: drop the property in the crate
+tree reads as it does. So the choice was: drop the property in the crate
 that most wants it, or take a dependency whose whole job is to hold the
 unsafe (`region`, `memsec`, `secmem-alloc` — the last from the author of
 the `secmem-proc` already linked on Windows for the process access
 list).
 
-One decision, covering both, and not one to make quietly. A Low finding
-about swap and a leftover key from before 0.15.0 are not obviously worth
-either an audited-away invariant or a new dependency in the crate that
-handles every secret. Recorded here so the trade is visible rather than
-resolved by whoever touches it next.
+**Neither. Both findings are declined**, and the decision is one, not
+two. `forbid(unsafe_code)` on the crate that touches every secret is
+worth more than what either finding buys: L-1 narrows a swap exposure
+that full-disk encryption already answers and that pinning the key alone
+would not close anyway — the decrypted messages beside it stay pageable —
+and the M-1 remainder is a key left behind by a version older than
+0.15.0, removable by hand, on a machine whose key store the attacker
+would have to hold already. A dependency is not a way around the same
+trade: it moves the unsafe out of view without removing it from the
+process, and the reviewer's point was about what runs, not about which
+crate declares it.
+
+What stands instead: the threat model says plainly that an unlocked
+client's pages can reach swap and that full-disk encryption is the answer
+to it, and the FAQ now says what the key store holds, why the client will
+not sweep it, and how to clear a stray entry by hand without having to
+work out which one is live. Neither is a silent gap. If the trade is ever
+reopened it will be for something that wants unsafe on its own account,
+not for these two.
 
 ### The idle lock stays off by default
 
