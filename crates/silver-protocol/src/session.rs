@@ -393,6 +393,18 @@ impl Session {
         init: &InitHeader,
         pq_ratchet: bool,
     ) -> Result<Self, ProtocolError> {
+        // The header names which signed prekey the initiator used, and
+        // the caller looks it up and hands it in. If the two disagree the
+        // handshake computes a different secret on each side and the
+        // session is silently dead -- every message failing its AEAD,
+        // with nothing to say why. The one-time and post-quantum keys are
+        // matched against the header below; the signed one, which every
+        // handshake uses, was not.
+        if init.signed_prekey_id != signed.id {
+            return Err(ProtocolError::Malformed(
+                "signed prekey given is not the one the header names".into(),
+            ));
+        }
         if init.one_time_prekey_id.is_some() != one_time.is_some() {
             return Err(ProtocolError::Malformed(
                 "one-time prekey given does not match the header".into(),
@@ -1022,6 +1034,52 @@ mod tests {
 
     fn handshake(with_one_time: bool) -> (Session, Session, InitHeader) {
         handshake_with(with_one_time, Keys::Classical)
+    }
+
+    /// A signed prekey that is not the one the header names is refused,
+    /// rather than making a session that can never read anything.
+    ///
+    /// The caller reads `signed_prekey_id` out of the header and looks
+    /// the key up; if it hands in the wrong one, the two sides derive
+    /// different roots and every message fails its AEAD with nothing to
+    /// say why. The one-time and post-quantum keys were matched against
+    /// the header; the signed one, which every handshake uses, was not.
+    #[test]
+    fn a_signed_prekey_that_is_not_the_one_named_is_refused() {
+        let alice = Identity::generate();
+        let bob = Peer::new();
+        let (_, init) = Session::initiate(&alice, &bob.bundle(false)).unwrap();
+        assert_eq!(init.signed_prekey_id, bob.signed.id);
+
+        // The right key still works.
+        Session::respond(
+            &bob.identity,
+            &alice.user_id(),
+            &bob.signed,
+            None,
+            None,
+            &init,
+            false,
+        )
+        .expect("the key the header names");
+
+        // A different one, as a caller that looked up the wrong id would
+        // pass: refused, and said so.
+        let other = PrekeySecret::generate(bob.signed.id + 1, 0);
+        let err = Session::respond(
+            &bob.identity,
+            &alice.user_id(),
+            &other,
+            None,
+            None,
+            &init,
+            false,
+        )
+        .expect_err("a prekey the header does not name");
+        assert!(
+            matches!(&err, ProtocolError::Malformed(m) if m.contains("signed prekey")),
+            "{err:?}"
+        );
     }
 
     fn handshake_with(with_one_time: bool, keys: Keys) -> (Session, Session, InitHeader) {

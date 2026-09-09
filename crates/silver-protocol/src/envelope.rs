@@ -24,7 +24,7 @@ use x25519_dalek::{EphemeralSecret, PublicKey};
 use zeroize::Zeroizing;
 
 use crate::ProtocolError;
-use crate::blob::BlobKey;
+use crate::blob::{BlobKey, MAX_CHUNKS, MAX_FILE_BYTES, chunk_count, is_valid_blob_id};
 use crate::bundle::KeyBundle;
 use crate::encoding::{b64, b64_array};
 use crate::group::GroupBody;
@@ -197,10 +197,45 @@ impl Content {
             }
         };
         match self {
-            Self::Text { reply_to, .. } | Self::File { reply_to, .. } => match reply_to {
+            Self::Text { reply_to, .. } => match reply_to {
                 Some(id) => id_ok(id, "reply_to is not a message id"),
                 None => Ok(()),
             },
+            // The same rules `BlobRef::validate` applies to a file in a
+            // group, applied to one in a conversation. The client checks
+            // size and chunk count on every path that fetches a file,
+            // before it allocates anything, which is why nothing here was
+            // reachable -- but the group half of the protocol checks at
+            // the boundary and this half did not, and a rule enforced in
+            // one of two places is a rule waiting for a third caller.
+            Self::File {
+                size,
+                blob,
+                chunks,
+                reply_to,
+                ..
+            } => {
+                if !is_valid_blob_id(blob) {
+                    return Err(malformed("file names no blob"));
+                }
+                // Not `size == 0`, which `BlobRef::validate` refuses for
+                // a group: an empty file is a thing a person sends, and
+                // `chunk_count` gives it one chunk. The two halves
+                // disagree about that and this is not the change that
+                // settles it -- what matters here is the upper bound and
+                // that the chunk count matches, neither of which was
+                // checked at all.
+                if *size > MAX_FILE_BYTES {
+                    return Err(malformed("file is larger than the cap"));
+                }
+                if *chunks == 0 || *chunks > MAX_CHUNKS || *chunks != chunk_count(*size) {
+                    return Err(malformed("file chunk count does not match its size"));
+                }
+                match reply_to {
+                    Some(id) => id_ok(id, "reply_to is not a message id"),
+                    None => Ok(()),
+                }
+            }
             Self::Edit { id, .. } => id_ok(id, "edit names no message id"),
             Self::Delete { ids } => {
                 if ids.is_empty() || ids.len() > MAX_DELETE_IDS {
@@ -1379,6 +1414,63 @@ mod tests {
         };
         assert_eq!(content, text("ratcheted"));
         assert_eq!(sequence.seq, 1);
+    }
+
+    /// A file's own numbers are checked where the body is parsed.
+    ///
+    /// The group half of the protocol has always done this
+    /// (`BlobRef::validate`); the conversation half validated only
+    /// `reply_to`, and left size, chunk count and the blob id to the
+    /// client, which checks them on every path that fetches a file. That
+    /// made the rule real but dependent on one caller remembering it.
+    #[test]
+    fn a_file_is_checked_where_it_is_parsed() {
+        let file = |size: u64, chunks: u32, blob: &str| Content::File {
+            name: "photo.jpg".into(),
+            size,
+            blob: blob.into(),
+            key: crate::blob::BlobKey::from_parts([1u8; 32], [2u8; 24]),
+            chunks,
+            sha256: [3u8; 32],
+            reply_to: None,
+        };
+        let good = "00112233445566778899aabbccddeeff";
+
+        // What an honest client sends.
+        file(1, 1, good).check().expect("a one-byte file");
+        file(0, 1, good)
+            .check()
+            .expect("an empty file, which has one chunk and is a thing people send");
+        let big = crate::blob::MAX_FILE_BYTES;
+        file(big, crate::blob::chunk_count(big), good)
+            .check()
+            .expect("a file at the cap");
+
+        // And what nobody honest does.
+        assert!(
+            file(big + 1, crate::blob::chunk_count(big), good)
+                .check()
+                .is_err()
+        );
+        assert!(
+            file(1024, 9999, good).check().is_err(),
+            "a chunk count that does not follow from the size"
+        );
+        assert!(file(1024, 0, good).check().is_err(), "no chunks at all");
+        for bad in [
+            "",
+            "nothex",
+            &"0".repeat(31),
+            &"0".repeat(33),
+            "00112233445566778899aabbccddeegg",
+        ] {
+            assert!(
+                file(1024, crate::blob::chunk_count(1024), bad)
+                    .check()
+                    .is_err(),
+                "blob id {bad:?} was accepted"
+            );
+        }
     }
 
     /// A ratchet body is checked where it is parsed, not only where its
