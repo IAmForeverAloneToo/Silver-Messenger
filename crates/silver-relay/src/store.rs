@@ -1068,6 +1068,23 @@ impl Store {
         Ok(victims.len())
     }
 
+    /// Whether logging `bundle` would add an entry, which is true when it
+    /// differs from the owner's last logged one.
+    ///
+    /// For the budget in `RelayState::publish`: the log is append-only
+    /// and hash-chained, so growth cannot be answered by removing
+    /// entries, only by refusing to add them — and refusing is only fair
+    /// for a publish that would actually add one. A publish that changes
+    /// nothing costs the log nothing and is never refused.
+    pub fn bundle_would_log(&self, bundle: &KeyBundle) -> anyhow::Result<bool> {
+        let txn = self.db.begin_write()?;
+        let latest = read_latest(&txn, &subject(&bundle.user_id))?;
+        // A read through a write transaction, then dropped without
+        // committing: `read_latest` wants one, and this writes nothing.
+        drop(txn);
+        Ok(latest.and_then(|l| l.bundle_leaf) != Some(bundle.transparency_leaf()))
+    }
+
     /// Store `bundle` and, if it differs from the owner's last logged one,
     /// log it in the same transaction, so nothing served is ever missing
     /// from the log.

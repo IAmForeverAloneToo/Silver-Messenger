@@ -142,6 +142,12 @@ struct Args {
     /// beyond that get the bundle without one.
     #[arg(long, env = "SILVER_RELAY_ONE_TIME_PREKEYS_PER_USER_PER_HOUR", default_value_t = Policy::default().one_time_prekeys_per_user_per_hour)]
     one_time_prekeys_per_user_per_hour: u32,
+    /// Key changes one identity may write into the transparency log per
+    /// hour; 0 for no cap. The log is append-only and kept for good, so
+    /// this is the only place its growth can be bounded. A client
+    /// publishing an unchanged bundle never touches it.
+    #[arg(long, env = "SILVER_RELAY_LOG_ENTRIES_PER_USER_PER_HOUR", default_value_t = Policy::default().log_entries_per_user_per_hour)]
+    log_entries_per_user_per_hour: u32,
     /// Group sequencer entries kept at most; 0 for no cap. A group's
     /// entry is one counter and one hash, and goes when no commit has
     /// moved it for 180 days.
@@ -719,6 +725,7 @@ async fn main() -> anyhow::Result<()> {
         require_bound_auth: !args.allow_unbound_auth,
         hosts: relay_hosts(&args, &transport),
         one_time_prekeys_per_user_per_hour: args.one_time_prekeys_per_user_per_hour,
+        log_entries_per_user_per_hour: args.log_entries_per_user_per_hour,
         max_groups: args.max_groups,
         ..Policy::default()
     };

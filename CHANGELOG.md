@@ -19,6 +19,17 @@ says so at its head.
 
 ### Security
 
+- The transparency log had no bound on how fast one identity could grow
+  it. Every publish whose bundle differs from the last logged one appends
+  an entry that is kept for good -- and a fresh signed prekey makes every
+  publish differ, so roughly 5,700 entries an hour per address were
+  possible. The log is append-only and hash-chained, which is what lets a
+  client prove the relay served everyone the same keys, so its growth
+  cannot be answered by removing entries: only by refusing to add them.
+  An identity may now write `--log-entries-per-user-per-hour` of them (12
+  by default, 0 for no cap). A client publishing an unchanged bundle
+  adds nothing and is never refused, which is what every client does on
+  connecting; an honest one adds a few a week.
 - `/whois` marks a name that mixes alphabets whose letters look alike.
   Cyrillic `a` and Greek `o` draw as the Latin ones, so a suggested alias
   can be made to read as a name you already trust, and the safety number

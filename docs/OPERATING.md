@@ -127,6 +127,7 @@ capitals with `SILVER_RELAY_` in front: `--max-connections` is
 | `--anonymous-sends-per-minute` | 30 | Messages a connection that never logs in may submit; 0 turns anonymous submission off | See "Abuse": turning it off costs senders their anonymity towards the relay |
 | `--lookups-per-minute` | 30 | Key lookups per connection; 0 turns them off rather than allowing one a minute | Rarely |
 | `--one-time-prekeys-per-user-per-hour` | 30 | One-time prekeys handed out for one user; 0 stops them being handed out | Rarely; beyond it, lookups get the bundle without one |
+| `--log-entries-per-user-per-hour` | 12 | Key changes one identity may add to the transparency log; 0 for no cap | The log is append-only and kept for good, so this is where its growth is bounded. A client publishing an unchanged bundle never adds one; an honest one adds a few a week |
 | `--max-mailbox-messages`, `--max-mailbox-mib` | 1000, 32 | A recipient's queue; 0 for no cap on either | Users who are offline for long stretches |
 | `--message-ttl-days` | 30 | How long an unacknowledged message is kept | A stricter retention policy (shorter), or long-absent users (longer) |
 | `--max-blob-mib` | 16 | Largest file; 0 turns file transfer off | Your users share bigger files, or none |

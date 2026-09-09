@@ -456,6 +456,73 @@ async fn a_login_holds_only_for_the_relay_it_was_made_for() {
     ));
 }
 
+/// The transparency log is append-only and kept for good, so an identity
+/// cannot be allowed to write into it without limit.
+///
+/// Publishing an *unchanged* bundle adds no entry and is never refused --
+/// that is what every client does on connecting. Publishing a changed one
+/// adds an entry that stays for the life of the relay, and a fresh signed
+/// prekey makes every publish a changed one, which is how a few thousand
+/// entries an hour were possible.
+#[tokio::test]
+async fn key_changes_are_not_written_into_the_log_faster_than_the_policy_says() {
+    let (url, _) = start(Policy {
+        log_entries_per_user_per_hour: 2,
+        ..Policy::default()
+    })
+    .await;
+    let mut ws = open(&url, None).await;
+    let alice = authenticate(&mut ws).await;
+
+    // Four distinct signed prekeys, kept, so that republishing one is
+    // genuinely the same bundle. Generating a new secret with the same id
+    // would be a different public key and so a different change.
+    let keys: Vec<PrekeySecret> = (1..=4).map(|id| PrekeySecret::generate(id, 0)).collect();
+    let publish = |n: usize| ClientFrame::Publish {
+        bundle: alice.key_bundle_with(Prekeys::classical(keys[n].signed_by(&alice), vec![])),
+        invite: None,
+    };
+
+    // A publish is answered with `Published` and then a prekey status;
+    // this is the answer that says which.
+    async fn verdict(ws: &mut Ws) -> ServerFrame {
+        loop {
+            match next(ws).await {
+                Some(ServerFrame::PrekeyStatus { .. }) => continue,
+                Some(frame) => return frame,
+                None => panic!("the connection closed with no answer"),
+            }
+        }
+    }
+
+    // The first two changes fit the budget.
+    for n in 0..2 {
+        send(&mut ws, &publish(n)).await;
+        assert!(
+            matches!(verdict(&mut ws).await, ServerFrame::Published),
+            "change {n} should fit a budget of two"
+        );
+    }
+
+    // The third is refused, and says why.
+    send(&mut ws, &publish(2)).await;
+    match verdict(&mut ws).await {
+        ServerFrame::Error { code, message } => {
+            assert_eq!(code, ErrorCode::RateLimited, "{message}");
+            assert!(message.contains("key changes"), "{message}");
+        }
+        other => panic!("a third key change should be refused, got {other:?}"),
+    }
+
+    // Republishing what is already logged adds nothing, so it is still
+    // accepted with the budget spent.
+    send(&mut ws, &publish(1)).await;
+    assert!(
+        matches!(verdict(&mut ws).await, ServerFrame::Published),
+        "an unchanged bundle costs the log nothing and must not be refused"
+    );
+}
+
 #[tokio::test]
 async fn one_time_prekeys_are_not_handed_out_faster_than_the_policy_says() {
     let (url, _) = start(Policy {
