@@ -652,6 +652,14 @@ those who want to pay for it (46).
         with the contact and a fall is reported, with both readings --
         their older client, or somebody taking the keys out in transit --
         since the client cannot tell those apart.
+        The sixth is two on the relay. An hourly limit of zero allowed one
+        an hour rather than none, so `--registrations-per-hour 0` left
+        registration open at a trickle -- a limit wrong in the only
+        direction that matters. And the expiry sweep listed its victims in
+        a read transaction and removed them in a later write one, so an
+        acknowledgement landing between the two was charged for twice and
+        the difference came out of the mail still queued. It runs in one
+        write transaction now.
 
 63. [ ] **The identity key somewhere the memory is not** (L, undecided).
         The one place where taking a key out of the process would buy

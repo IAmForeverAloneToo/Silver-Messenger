@@ -119,20 +119,20 @@ capitals with `SILVER_RELAY_` in front: `--max-connections` is
 | --- | --- | --- | --- |
 | `--invite-token` | none | Who may register a new identity | You want a closed relay; `admin invite-set` changes it without a restart |
 | `--max-identities` | 100000 | Identities the relay keeps, linked devices included (each person's devices count, at most eight per person) | A small relay: set it to the number of people you expect, times the devices each may link, with room |
-| `--registrations-per-hour` | 20 per address | New identities from one address; a linked device registers as one, and a device revocation costs one too | A shared address (a NAT, a Tor exit) registers many people at once |
+| `--registrations-per-hour` | 20 per address | New identities from one address; a linked device registers as one, and a device revocation costs one too; 0 closes registration | A shared address (a NAT, a Tor exit) registers many people at once |
 | `--connections-per-address` | 16 | Open connections from one address | Many users behind one NAT (raise), or abuse (lower) |
 | `--max-connections` | 4096 | Open connections in total | The host is bigger or smaller than that |
 | `--idle-timeout-secs` | 120 | A silent connection is closed after this | Clients ping every 30 seconds; only if a network needs longer |
 | `--sends-per-minute` | 60 | Messages one authenticated connection may submit | Bots or bulk senders |
 | `--anonymous-sends-per-minute` | 30 | Messages a connection that never logs in may submit; 0 turns anonymous submission off | See "Abuse": turning it off costs senders their anonymity towards the relay |
 | `--lookups-per-minute` | 30 | Key lookups per connection; 0 turns them off rather than allowing one a minute | Rarely |
-| `--one-time-prekeys-per-user-per-hour` | 30 | One-time prekeys handed out for one user | Rarely; beyond it, lookups get the bundle without one |
+| `--one-time-prekeys-per-user-per-hour` | 30 | One-time prekeys handed out for one user; 0 stops them being handed out | Rarely; beyond it, lookups get the bundle without one |
 | `--max-mailbox-messages`, `--max-mailbox-mib` | 1000, 32 | A recipient's queue | Users who are offline for long stretches |
 | `--message-ttl-days` | 30 | How long an unacknowledged message is kept | A stricter retention policy (shorter), or long-absent users (longer) |
 | `--max-blob-mib` | 16 | Largest file; 0 turns file transfer off | Your users share bigger files, or none |
 | `--blob-storage-mib` | 1024 | Files on deposit in total | Disk |
 | `--mailbox-storage-mib` | 4096 | Queued messages in every mailbox together; 0 for no cap | Disk. Mail is freed as recipients acknowledge it and by `--message-ttl-days`; past the cap a send is answered `storage_full` |
-| `--blob-mib-per-address-per-hour` | 256 | Uploads from one address | Abuse, or a shared address |
+| `--blob-mib-per-address-per-hour` | 256 | Uploads from one address; 0 stops uploads | Abuse, or a shared address |
 | `--max-groups` | 100000 | Groups with a live epoch sequencer entry (one counter and one hash each; an entry idle for 180 days is retired and its headstone dropped 180 days after that, neither counting against the cap); 0 for no cap | A small relay, with room: a group costs the relay almost nothing, so this is a guard against a loop making entries, not a sizing knob |
 | `--trusted-proxy` | loopback | Whose `X-Forwarded-For` names the client | A TLS front on another host |
 | `--require-bound-auth` | off | Refuse the login of clients before 0.6.0 | Once everyone has updated |

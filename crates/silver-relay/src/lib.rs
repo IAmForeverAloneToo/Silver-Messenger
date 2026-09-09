@@ -330,6 +330,20 @@ pub fn canonical_address(addr: IpAddr) -> IpAddr {
 }
 
 /// A token bucket: `burst` tokens, refilled at `per_minute / 60` per second.
+///
+/// A rate of zero turns the thing off: it refuses everything, rather than
+/// allowing a trickle. That is the convention across this relay's limits
+/// -- `--lookups-per-minute 0` stops lookups, `--max-blob-mib 0` stops
+/// file transfer, `--anonymous-sends-per-minute 0` stops anonymous
+/// submission -- and `max_identities`, which is a cap rather than a rate,
+/// is the documented exception at zero meaning no cap.
+///
+/// `per_hour` did not follow it. It clamped its rate up to 1.0, so a zero
+/// became one an hour: an operator who closed registration with
+/// `--registrations-per-hour 0` got a relay that still let an address
+/// register an identity every hour, which is the footgun pointing the
+/// wrong way -- registration looked closed and was not. Steady traffic at
+/// exactly the refill rate walks through such a bucket indefinitely.
 struct Bucket {
     tokens: f64,
     burst: f64,
@@ -354,9 +368,10 @@ impl Bucket {
         Self::new(burst, burst / 60.0)
     }
 
-    /// `per_hour` units an hour, all of them available at once.
+    /// `per_hour` units an hour, all of them available at once. Zero is
+    /// none, as everywhere else; it used to become one an hour.
     fn per_hour(per_hour: f64) -> Self {
-        let burst = per_hour.max(1.0);
+        let burst = per_hour.max(0.0);
         Self::new(burst, burst / 3600.0)
     }
 
@@ -2891,6 +2906,37 @@ mod lifecycle_tests {
             state.client_address(Some(loopback), &headers),
             "9.9.9.9".parse::<IpAddr>().unwrap(),
         );
+    }
+
+    /// A rate of zero turns the thing off, for hourly limits as well as
+    /// per-minute ones.
+    ///
+    /// `per_hour` clamped its rate up to one, so zero became one an hour.
+    /// An operator closing registration with `--registrations-per-hour 0`
+    /// got a relay that still let each address register an identity every
+    /// hour: the limit read as closed and was not, which is the direction
+    /// a limit must never be wrong in. The per-minute constructor already
+    /// did this correctly, and its comment says why.
+    #[test]
+    fn a_rate_of_zero_turns_the_limit_off_by_the_hour_too() {
+        let mut hourly = Bucket::per_hour(0.0);
+        assert!(!hourly.try_take(), "zero an hour let one through");
+        // And it does not refill into one, however long is waited: the
+        // rate is zero, so the bucket never fills.
+        hourly.last = Instant::now() - std::time::Duration::from_secs(4 * 3600);
+        assert!(!hourly.try_take(), "zero an hour refilled to one an hour");
+
+        // The per-minute side has always been this, and stays it.
+        let mut minutely = Bucket::per_minute(0);
+        assert!(!minutely.try_take(), "zero a minute let one through");
+
+        // A real hourly limit still works, and still refills.
+        let mut two = Bucket::per_hour(2.0);
+        assert!(two.try_take());
+        assert!(two.try_take());
+        assert!(!two.try_take(), "a limit of two an hour is two");
+        two.last = Instant::now() - std::time::Duration::from_secs(3600);
+        assert!(two.try_take(), "and an hour later there are more");
     }
 
     #[test]
