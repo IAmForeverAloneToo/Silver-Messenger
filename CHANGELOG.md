@@ -19,6 +19,20 @@ says so at its head.
 
 ### Security
 
+- `/whois` marks a name that mixes alphabets whose letters look alike.
+  Cyrillic `a` and Greek `o` draw as the Latin ones, so a suggested alias
+  can be made to read as a name you already trust, and the safety number
+  was the only thing that ever said otherwise. Only the *mixture* is
+  marked: a name written wholly in Cyrillic is somebody's actual name,
+  and a Latin name with a digit or an emoji in it is nobody's attack. A
+  prompt to compare safety numbers, not a refusal -- an alias is the
+  user's own to set.
+- The secret types say what serializing them gives you: plaintext keys.
+  `silver-client` writes all of them through the vault, but `Session`,
+  `IdentitySecrets` and `PrekeySecret` are public API, and "serializable
+  so a client can persist it" read as an invitation to persist it as it
+  comes. Whoever reads that output reads the conversation, or in the
+  identity's case is the account. Said plainly at each type now.
 - A file's own numbers are checked where the body is parsed. The group
   half of the protocol has validated blob id, size and chunk count since
   0.9.0 (`BlobRef::validate`); the conversation half checked only

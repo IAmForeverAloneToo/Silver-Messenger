@@ -428,6 +428,53 @@ fn is_invisible(c: char) -> bool {
 /// anything else off the line it shares.
 pub const MAX_ALIAS_CHARS: usize = 40;
 
+/// The scripts this tells apart. Everything else — digits, punctuation,
+/// spaces, emoji, and every script with no Latin lookalikes — is `Other`
+/// and never on its own a reason to mark a name.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Script {
+    Latin,
+    Cyrillic,
+    Greek,
+    Other,
+}
+
+fn script_of(c: char) -> Script {
+    match c {
+        'a'..='z' | 'A'..='Z' => Script::Latin,
+        // Latin-1 letters and the Latin Extended blocks: still Latin.
+        '\u{00C0}'..='\u{024F}' => Script::Latin,
+        '\u{0370}'..='\u{03FF}' | '\u{1F00}'..='\u{1FFF}' => Script::Greek,
+        '\u{0400}'..='\u{04FF}' | '\u{0500}'..='\u{052F}' => Script::Cyrillic,
+        _ => Script::Other,
+    }
+}
+
+/// Whether a name mixes the three scripts whose letters look alike, which
+/// is how one person's name is made to read as another's.
+///
+/// Cyrillic `а`, Greek `ο` and Latin `a`/`o` are different characters
+/// that draw the same, so `аlice` is not `alice` and the safety number is
+/// the only thing that ever said so. What this catches is the *mixture*:
+/// a name written wholly in Cyrillic is somebody's actual name and is not
+/// marked, and neither is a Latin name with an emoji, a digit or a
+/// hyphen in it. Only a name that reaches for two of the three lookalike
+/// alphabets at once, which nobody does by accident.
+///
+/// The marker is a prompt to compare safety numbers, not a refusal:
+/// names are chosen by the person reading them (an alias is local, or
+/// synced from their own devices), so this is about a name that was
+/// *suggested* to them looking like one they already trust.
+pub fn mixes_scripts(name: &str) -> bool {
+    let mut seen: Vec<Script> = Vec::new();
+    for script in name.chars().map(script_of) {
+        if script != Script::Other && !seen.contains(&script) {
+            seen.push(script);
+        }
+    }
+    seen.len() > 1
+}
+
 pub fn printable(text: &str, max_chars: usize) -> String {
     text.chars()
         .filter(|c| !c.is_control() && !is_invisible(*c))
@@ -839,5 +886,36 @@ mod tests {
         assert_eq!(human_size(999), "999 B");
         assert_eq!(human_size(1536), "1.5 KiB");
         assert_eq!(human_size(16 * 1024 * 1024), "16.0 MiB");
+    }
+}
+
+#[cfg(test)]
+mod script_tests {
+    use super::mixes_scripts;
+
+    /// A name that reaches for two lookalike alphabets at once is marked;
+    /// a name that simply is not Latin is not.
+    #[test]
+    fn only_a_mixture_of_lookalike_scripts_is_marked() {
+        // The attack: one Cyrillic character inside a Latin name.
+        assert!(mixes_scripts("\u{0430}lice"), "Cyrillic a in a Latin name");
+        assert!(mixes_scripts("b\u{043E}b"), "Cyrillic o in a Latin name");
+        assert!(mixes_scripts("Ev\u{03B1}"), "Greek alpha in a Latin name");
+
+        // Names, not attacks.
+        for ok in [
+            "alice",
+            "Bob Smith",
+            "jean-luc",
+            "\u{0410}\u{043B}\u{0438}\u{0441}\u{0430}", // wholly Cyrillic
+            "\u{03B1}\u{03BB}\u{03AF}\u{03BA}\u{03B7}", // wholly Greek
+            "\u{4E2D}\u{6587}",                         // no Latin lookalikes at all
+            "alice 42",
+            "alice \u{1F600}",
+            "Ren\u{00E9}e", // Latin-1 accents are Latin
+            "",
+        ] {
+            assert!(!mixes_scripts(ok), "{ok:?} was marked and should not be");
+        }
     }
 }

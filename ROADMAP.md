@@ -710,6 +710,20 @@ those who want to pay for it (46).
         one remainder of a finding otherwise closed: an
         enumeration sweep of `data-key-*` entries for keys orphaned by
         versions before 0.15.0.
+
+        **Two of those wait on one decision.** L-1 needs `mlock` or
+        `VirtualLock`, and the key-store sweep needs `CredEnumerate` and
+        its equivalents, which `keyring` does not expose on any backend.
+        Both are system calls, and `silver-client` — the crate that holds
+        the keys — is `#![forbid(unsafe_code)]`, which the September 2026
+        review named among the reasons the tree reads as it does. So each
+        is a choice between dropping that property in the crate that most
+        wants it, and taking a dependency whose whole job is to hold the
+        unsafe (`region`, `memsec`, or `secmem-alloc`, the last by the
+        author of the `secmem-proc` this project already links on
+        Windows). That is one decision covering both, and it is the
+        maintainer's: neither finding is worth spending
+        `forbid(unsafe_code)` on without saying so out loud.
         The review's other remainder, a non-zero `lock_after_minutes`
         default, is **decided against**: locking after an idle spell is
         the user's choice, not something to switch on for everybody. It

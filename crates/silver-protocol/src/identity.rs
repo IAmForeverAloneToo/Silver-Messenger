@@ -152,6 +152,18 @@ impl fmt::Debug for DhPublic {
 }
 
 /// Secret key material in a form suitable for at-rest storage.
+///
+/// # What serializing this gives you
+///
+/// Plaintext: the signing seed and the Diffie–Hellman secret as base64
+/// in JSON. Whoever holds that output *is* this identity — they sign as
+/// it, start sessions as it, and link and revoke its devices — and no
+/// rotation or lock takes that back, only a revocation does.
+///
+/// "Suitable for at-rest storage" means suitable to be *encrypted* and
+/// stored: `silver-client` writes it through the vault and nowhere else.
+/// A client that writes it as it comes has put the whole account in a
+/// file. The same holds for [`crate::Session`] and the prekey secrets.
 #[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct IdentitySecrets {
     #[serde(with = "b64_array")]
