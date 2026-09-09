@@ -53,6 +53,32 @@ means behaviour or the wire protocol changed in a way worth reading about.
   it has had an invariant test since 0.10.0, and reader mode now has the
   mirror of it, plus the same forgery walked through a real terminal.
 
+- An hourly relay limit of zero allowed one an hour instead of none.
+  Zero turns a limit off everywhere else on this relay -- lookups, file
+  transfer, anonymous submission all say so and all do it -- but the
+  hourly buckets clamped their rate up to one before using it. An
+  operator who closed registration with `--registrations-per-hour 0` got
+  a relay that still let each address register an identity every hour,
+  and the same for `--blob-mib-per-address-per-hour` and
+  `--one-time-prekeys-per-user-per-hour`. A limit that reads as closed
+  and is not is wrong in the one direction a limit must never be wrong
+  in. The per-minute buckets were already right, and their comment says
+  why. `--mailbox-storage-mib` and `--max-identities` are caps rather
+  than rates and keep their documented meaning of no cap at zero.
+- The relay's expiry sweep could corrupt its own accounting. It listed
+  what to remove in a read transaction, ended it, and removed the entries
+  in a write transaction opened afterwards -- and a read transaction
+  blocks no writer, so an acknowledgement arriving in between took its
+  entry out and subtracted its size, after which the sweep subtracted the
+  same size again for an entry that was no longer there. The shortfall
+  came out of the mail still queued: a mailbox's recorded usage fell
+  below the truth, so its quota let a sender past the policy, and the
+  relay's total drifted away from what it actually held, one raced
+  acknowledgement at a time. `saturating_sub` stopped it wrapping and hid
+  it. The sweep now runs in a single write transaction, which removes the
+  window rather than coping with it. The same window let it drop the
+  index of a message queued after the acknowledgement under the same id,
+  which would have let that message be stored twice and delivered twice.
 - A session that lost post-quantum protection said nothing about it. The
   client showed what each new session was -- post-quantum throughout, in
   the handshake only, or classical -- which is no help for the case that

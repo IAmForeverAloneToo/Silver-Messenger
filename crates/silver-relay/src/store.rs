@@ -1793,39 +1793,65 @@ impl Store {
     }
 
     /// Delete every envelope received before `cutoff_ms`. Returns how many.
+    ///
+    /// All of it in one write transaction. It used to list the victims in
+    /// a read transaction, end that, and remove them in a write
+    /// transaction opened afterwards -- and an acknowledgement landing in
+    /// the window between the two had already taken its entry out of the
+    /// mailbox and subtracted its size. The sweep then subtracted the same
+    /// size again, so the mailbox's recorded usage fell below the truth
+    /// (a quota that lets a sender past the policy) and `MAILBOX_BYTES`
+    /// drifted away from the store it describes. `saturating_sub` stopped
+    /// it wrapping and hid it. The same window let the sweep drop a
+    /// `BY_ID` entry that a message queued *after* the acknowledgement had
+    /// since taken over, which would let that message be stored a second
+    /// time and delivered twice.
+    ///
+    /// Holding the writer across the scan is what removes the window;
+    /// there is only one writer, so nothing else can touch the mailbox
+    /// while this runs. The checks below are then belt and braces, and say
+    /// what is being relied on.
     pub fn expire(&self, cutoff_ms: u64) -> anyhow::Result<usize> {
-        let victims: Vec<(Vec<u8>, u64, String, u64)> = {
-            let txn = self.db.begin_read()?;
-            let table = txn.open_table(MAILBOX)?;
-            let mut victims = Vec::new();
-            for item in table.iter()? {
-                let (key, value) = item?;
-                let (received_at, envelope) = decode_entry(value.value())?;
-                if received_at < cutoff_ms {
-                    let (owner, seq) = key.value();
-                    victims.push((owner.to_vec(), seq, envelope.id, value.value().len() as u64));
-                }
-            }
-            victims
-        };
-        if victims.is_empty() {
-            return Ok(0);
-        }
         let txn = self.db.begin_write()?;
+        let mut removed = 0;
         {
             let mut mailbox = txn.open_table(MAILBOX)?;
+            let victims: Vec<(Vec<u8>, u64, String)> = {
+                let mut victims = Vec::new();
+                for item in mailbox.iter()? {
+                    let (key, value) = item?;
+                    let (received_at, envelope) = decode_entry(value.value())?;
+                    if received_at < cutoff_ms {
+                        let (owner, seq) = key.value();
+                        victims.push((owner.to_vec(), seq, envelope.id));
+                    }
+                }
+                victims
+            };
             let mut by_id = txn.open_table(BY_ID)?;
             let mut usage = txn.open_table(USAGE)?;
             let mut meta = txn.open_table(META)?;
-            for (owner, seq, id, size) in &victims {
-                mailbox.remove((owner.as_slice(), *seq))?;
-                by_id.remove(id.as_str())?;
-                adjust_usage(&mut usage, owner, 1, *size)?;
-                take_from(&mut meta, MAILBOX_BYTES, *size)?;
+            for (owner, seq, id) in &victims {
+                // Charge for what this removal actually removed, taking the
+                // size from the entry as stored.
+                let Some(gone) = mailbox.remove((owner.as_slice(), *seq))? else {
+                    continue;
+                };
+                let size = gone.value().len() as u64;
+                // And drop the index only while it still points here.
+                if by_id
+                    .get(id.as_str())?
+                    .is_some_and(|e| e.value() == (owner.as_slice(), *seq))
+                {
+                    by_id.remove(id.as_str())?;
+                }
+                adjust_usage(&mut usage, owner, 1, size)?;
+                take_from(&mut meta, MAILBOX_BYTES, size)?;
+                removed += 1;
             }
         }
         txn.commit()?;
-        Ok(victims.len())
+        Ok(removed)
     }
 
     pub fn stats(&self) -> anyhow::Result<Stats> {
@@ -2986,6 +3012,110 @@ mod tests {
         assert_eq!(
             store.enqueue(&old, 300, Limits::default()).unwrap(),
             Enqueue::Stored
+        );
+    }
+
+    /// An acknowledgement arriving while the sweep runs must not be
+    /// charged for twice.
+    ///
+    /// The sweep used to list its victims in a read transaction, end it,
+    /// and remove them in a write transaction opened afterwards. A read
+    /// transaction blocks no writer, so an acknowledgement could land in
+    /// between, take its entry out of the mailbox and subtract its size --
+    /// and the sweep would subtract the same size again for an entry that
+    /// was no longer there. What that costs is the mail it did *not*
+    /// touch: the over-subtraction comes out of the accounting for
+    /// messages still queued, so the usage a quota is checked against
+    /// sits below the truth and `MAILBOX_BYTES` drifts away from the
+    /// store it describes. `saturating_sub` stopped it wrapping and hid
+    /// it, which is why the mailbox has to be left non-empty here -- with
+    /// everything gone, both the right answer and the wrong one floor at
+    /// zero and the bug is invisible.
+    #[test]
+    fn a_sweep_racing_an_acknowledgement_keeps_the_accounting_exact() {
+        for round in 0..40u64 {
+            let store = std::sync::Arc::new(Store::in_memory().unwrap());
+            let (alice, bob) = (Identity::generate(), Identity::generate());
+            let bob_id = bob.user_id();
+
+            // Old enough to sweep, and all of them acknowledged as it runs.
+            let old: Vec<_> = (0..24)
+                .map(|i| envelope(&alice, &bob, &format!("old{i}")))
+                .collect();
+            for e in &old {
+                store.enqueue(e, 100, Limits::default()).unwrap();
+            }
+            // Too new to sweep, never acknowledged: this is the mail whose
+            // accounting a double subtraction eats into.
+            let kept: Vec<_> = (0..4)
+                .map(|i| envelope(&alice, &bob, &format!("kept{i}")))
+                .collect();
+            for e in &kept {
+                store.enqueue(e, 900, Limits::default()).unwrap();
+            }
+            let sweeper = {
+                let store = std::sync::Arc::clone(&store);
+                std::thread::spawn(move || store.expire(500).unwrap())
+            };
+            let acker = {
+                let store = std::sync::Arc::clone(&store);
+                let ids: Vec<String> = old.iter().map(|e| e.id.clone()).collect();
+                std::thread::spawn(move || {
+                    // Varied per round so the acknowledgements land at
+                    // different points of the sweep's scan.
+                    std::thread::sleep(std::time::Duration::from_micros(round * 15));
+                    for id in ids {
+                        let _ = store.ack(&bob_id, &id);
+                    }
+                })
+            };
+            acker.join().unwrap();
+            sweeper.join().unwrap();
+
+            // However the two interleaved, the four newest are untouched
+            // and the accounting describes exactly them.
+            let left = store.queued(&bob_id).unwrap();
+            assert_eq!(left.len(), 4, "round {round}: the sweep took live mail");
+            let (count, bytes) = store.usage(&bob_id).unwrap();
+            assert_eq!(
+                count, 4,
+                "round {round}: four messages are queued, so usage must say four"
+            );
+            assert_eq!(
+                store.stats().unwrap().bytes,
+                bytes,
+                "round {round}: one mailbox holds everything, so the two agree"
+            );
+            assert!(
+                bytes > 0,
+                "round {round}: four queued messages cannot weigh nothing --                  the sweep charged for mail an acknowledgement had already paid for"
+            );
+        }
+    }
+
+    /// An id is the client's to choose, so the same one can be queued again
+    /// once the first is out of the way. A sweep that then removed the id's
+    /// index would take the *new* entry's index with it, and the message it
+    /// points at could be stored a second time and delivered twice.
+    #[test]
+    fn a_sweep_leaves_the_index_of_a_message_reusing_an_expired_id() {
+        let store = Store::in_memory().unwrap();
+        let (alice, bob) = (Identity::generate(), Identity::generate());
+        let bob_id = bob.user_id();
+        let first = envelope(&alice, &bob, "first");
+        store.enqueue(&first, 100, Limits::default()).unwrap();
+        assert!(store.ack(&bob_id, &first.id).unwrap());
+        // The same id again, after the sweep's cutoff.
+        store.enqueue(&first, 900, Limits::default()).unwrap();
+
+        // The cutoff catches nothing: the only entry is newer than it. The
+        // old victim list is what would have carried the stale id.
+        assert_eq!(store.expire(500).unwrap(), 0);
+        assert_eq!(store.queued(&bob_id).unwrap(), vec![first.clone()]);
+        assert_eq!(
+            store.enqueue(&first, 950, Limits::default()).unwrap(),
+            Enqueue::Duplicate,
+            "the index still covers the queued message, so a resend is caught"
         );
     }
 
