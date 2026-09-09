@@ -407,25 +407,45 @@ fn split_https_url(url: &str) -> anyhow::Result<(String, u16, String)> {
         Some(i) => (&rest[..i], &rest[i..]),
         None => (rest, "/"),
     };
-    // `user@host` is not a shape this understands, and taking the whole
-    // of it as the host makes `release_host` read the part after the `@`
-    // while a reader reads the part before it: `evil.com@api.github.com`
-    // ends with `.github.com` and would pass. Nothing here resolves such
-    // a name, so it failed closed rather than wrongly -- but the check
-    // and the connection should not be looking at different things.
-    if authority.contains('@') {
-        bail!("the releases address may not carry a user name: {url}");
-    }
     let (host, port) = match authority.rsplit_once(':') {
         Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) && !p.is_empty() => {
             (h, p.parse::<u16>().context("port")?)
         }
         _ => (authority, 443),
     };
-    if host.is_empty() {
-        bail!("the releases address has no host: {url}");
+    if !is_host_name(host) {
+        bail!("the releases address does not name a host: {url}");
     }
     Ok((host.to_owned(), port, path.to_owned()))
+}
+
+/// Is `host` a name a host could actually have?
+///
+/// This has to be checked here rather than left to whatever resolves the
+/// name, because [`release_host`] asks whether the host *ends with* one
+/// of the release service's domains — and a string ending in
+/// `.github.com` is not the same thing as a name inside it.
+/// `evil.test@api.github.com` and `\0onto.github.com` both end that way
+/// and are read by a person as something else entirely. Nothing resolves
+/// either, so this failed closed rather than wrongly; but a check and a
+/// connection looking at different things is the shape of the bug, not
+/// its consequence today.
+///
+/// Whole labels, letters, digits and hyphens, which is what a host name
+/// is. A trailing dot is allowed, being the same name written absolutely,
+/// and `may_follow` already trims it.
+fn is_host_name(host: &str) -> bool {
+    let host = host.strip_suffix('.').unwrap_or(host);
+    if host.is_empty() || host.len() > 253 {
+        return false;
+    }
+    host.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+    })
 }
 
 /// Exposed for the fuzz target: this parses an answer from a host, before
@@ -825,15 +845,27 @@ mod tests {
         assert!(split_https_url("http://x/").is_err());
         assert!(split_https_url("https://:1/").is_err());
 
-        // A user name in the authority is refused rather than taken as
-        // part of the host. Read as a host, `evil.test@api.github.com`
-        // ends with `.github.com`, so `may_follow` would wave it through
-        // while a person reading the line sees `evil.test` first. Nothing
-        // resolves such a name, so this failed closed -- but the check
-        // and the connection must not be looking at different things.
+        // Anything that is not a host name is refused rather than taken
+        // as one. Read as hosts, all of these *end with* `.github.com`,
+        // so `may_follow` would wave them through while a person reading
+        // the line sees something else first. Nothing resolves such a
+        // name, so this failed closed -- but the check and the connection
+        // must not be looking at different things. The second of these
+        // came from the fuzz target rather than from thinking of it.
         assert!(split_https_url("https://evil.test@api.github.com/x").is_err());
+        assert!(split_https_url("https://\u{0}onto.github.com/x").is_err());
         assert!(split_https_url("https://api.github.com@evil.test/x").is_err());
         assert!(split_https_url("https://user:pass@api.github.com:443/x").is_err());
+        assert!(split_https_url("https://what ever.github.com/x").is_err());
+        assert!(split_https_url("https://..github.com/x").is_err());
+        assert!(split_https_url("https://-nope.github.com/x").is_err());
+        // And a real name still is one, trailing dot and all.
+        assert_eq!(
+            split_https_url("https://objects.githubusercontent.com./x")
+                .unwrap()
+                .0,
+            "objects.githubusercontent.com."
+        );
 
         let ok = br#"{"tag_name":"v9.9.9","html_url":"https://x/r"}"#;
         let release = parse_release(ok).unwrap();
