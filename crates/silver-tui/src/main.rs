@@ -6,6 +6,7 @@ mod clipboard;
 mod commands;
 mod glyphs;
 mod link;
+mod logfile;
 mod notify;
 mod qr;
 mod reader;
@@ -565,14 +566,10 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
     // The terminal belongs to the UI, so logs go to a file, and only on
     // request; the file is the user's alone.
     if let Ok(filter) = std::env::var("SILVER_LOG") {
-        let mut opts = std::fs::OpenOptions::new();
-        opts.create(true).append(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        let file = opts.open(data_dir.join(silver_client::LOG_FILE))?;
+        // Bounded: see `logfile`. Left at `debug` this is both a file
+        // that fills the disk and a growing record of who this person
+        // talks to.
+        let file = logfile::CappedLog::open(&data_dir.join(silver_client::LOG_FILE))?;
         tracing_subscriber::fmt()
             .with_env_filter(EnvFilter::new(filter))
             .with_writer(file)

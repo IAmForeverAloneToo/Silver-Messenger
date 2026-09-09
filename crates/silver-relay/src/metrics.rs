@@ -342,14 +342,72 @@ pub fn router(state: Arc<RelayState>, tls: Option<Arc<CertStore>>) -> Router {
         .with_state(MetricsState { state, tls })
 }
 
+/// Connections the metrics listener serves at once. It answers one small
+/// document; anything beyond a handful at a time is a scrape that has
+/// stopped reading or something that is not a scraper.
+const METRICS_MAX_CONNECTIONS: usize = 16;
+/// A metrics connection gets this long to make its request and read the
+/// answer, all in.
+const METRICS_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Serve the metrics on `listener` until the task is dropped.
+///
+/// Bounded, unlike the plain `axum::serve` this replaced. The main
+/// listener installs a timer and a header-read timeout for a reason
+/// [`crate::set_http_timeouts`] spells out -- a connection that says
+/// nothing holds a socket and a task until the process runs out of file
+/// descriptors, below every limit the relay counts -- and this listener
+/// was never given either, nor a cap on how many connections it would
+/// take at once. Running out of descriptors stops the relay, not merely
+/// the metrics. The port is meant to be bound to loopback or a management
+/// network; this is what makes an operator who binds it somewhere else
+/// wrong about their monitoring rather than wrong about their relay.
 pub async fn serve(
     listener: TcpListener,
     state: Arc<RelayState>,
     tls: Option<Arc<CertStore>>,
 ) -> anyhow::Result<()> {
-    axum::serve(listener, router(state, tls)).await?;
-    Ok(())
+    let app = router(state, tls);
+    let permits = Arc::new(tokio::sync::Semaphore::new(METRICS_MAX_CONNECTIONS));
+    loop {
+        let (stream, peer) = match listener.accept().await {
+            Ok(accepted) => accepted,
+            // Out of descriptors, or the peer went away between the
+            // kernel accepting and us asking. Neither is a reason to stop
+            // serving metrics for the life of the process.
+            Err(e) => {
+                tracing::debug!("metrics accept failed: {e}");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+        };
+        let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
+            // Dropping the stream closes it. A scraper retries; a client
+            // holding connections open learns nothing.
+            tracing::debug!(%peer, "metrics connection refused: too many at once");
+            continue;
+        };
+        let service = app.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            let mut builder =
+                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+            // The same header-read timeout the main listener sets, for the
+            // same reason its comment gives.
+            crate::set_http_timeouts(&mut builder);
+            let served = tokio::time::timeout(
+                METRICS_TIMEOUT,
+                builder.serve_connection(
+                    hyper_util::rt::TokioIo::new(stream),
+                    hyper_util::service::TowerToHyperService::new(service),
+                ),
+            )
+            .await;
+            if served.is_err() {
+                tracing::debug!(%peer, "metrics connection timed out");
+            }
+        });
+    }
 }
 
 #[cfg(test)]
@@ -358,6 +416,80 @@ mod tests {
 
     fn addr(n: u8) -> IpAddr {
         IpAddr::from([10, 0, 0, n])
+    }
+
+    /// A connection that says nothing must not hold the metrics listener,
+    /// and there is a limit to how many it will hold at once.
+    ///
+    /// This used to be a bare `axum::serve`: no connection cap, and no
+    /// timer installed, so hyper discarded its own header-read default
+    /// and a silent connection held a socket and a task for ever. Enough
+    /// of them and the process runs out of file descriptors, which stops
+    /// the relay and not just its metrics.
+    #[tokio::test]
+    async fn the_metrics_listener_does_not_hold_silent_connections() {
+        use tokio::io::AsyncReadExt as _;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(super::serve(listener, RelayState::new(), None));
+
+        // A scrape works.
+        let body = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+            tokio::io::AsyncWriteExt::write_all(
+                &mut c,
+                b"GET /metrics HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+            let mut out = String::new();
+            c.read_to_string(&mut out).await.unwrap();
+            out
+        })
+        .await
+        .expect("a scrape is answered");
+        assert!(body.contains("silver_relay"), "{body}");
+
+        // Connections that open and say nothing are dropped rather than
+        // held: each read returns end-of-file within the timeout, so none
+        // of them is still occupying the listener at the end.
+        let mut silent = Vec::new();
+        for _ in 0..METRICS_MAX_CONNECTIONS + 8 {
+            if let Ok(c) = tokio::net::TcpStream::connect(addr).await {
+                silent.push(c);
+            }
+        }
+        let opened = silent.len();
+        for (i, mut c) in silent.into_iter().enumerate() {
+            let mut buf = [0u8; 1];
+            // Either the connection is refused outright (past the cap) or
+            // it is closed when it fails to make a request in time. Both
+            // end in end-of-file; the failure this guards against is
+            // neither happening, which reads as a connection that stays
+            // open with nothing to say.
+            let ended = tokio::time::timeout(METRICS_TIMEOUT * 2, c.read(&mut buf)).await;
+            assert!(
+                matches!(ended, Ok(Ok(0))),
+                "silent connection {i} of {opened} was still held: {ended:?}"
+            );
+        }
+
+        // And the listener still serves afterwards, so nothing leaked.
+        let again = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+            tokio::io::AsyncWriteExt::write_all(
+                &mut c,
+                b"GET /metrics HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+            let mut out = String::new();
+            c.read_to_string(&mut out).await.unwrap();
+            out
+        })
+        .await
+        .expect("the listener still answers after a flood of silent connections");
+        assert!(again.contains("silver_relay"), "{again}");
     }
 
     #[test]

@@ -660,6 +660,13 @@ those who want to pay for it (46).
         acknowledgement landing between the two was charged for twice and
         the difference came out of the mail still queued. It runs in one
         write transaction now.
+        The seventh is a batch of the same shape: things bounded in one
+        place and not in the one next to it. A refused frame wrote a log
+        line, so sitting on a rate limit filled the operator's disk; the
+        metrics listener never called the helper that gives the main
+        listener its header-read timeout, so a silent connection held a
+        socket for ever; and `silver.log` grew without limit while being
+        a record of who this device talked to.
 
 63. [ ] **The identity key somewhere the memory is not** (L, undecided).
         The one place where taking a key out of the process would buy

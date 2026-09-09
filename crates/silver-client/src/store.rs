@@ -49,6 +49,8 @@ const PENDING_FILE: &str = "vault.pending";
 /// Where `SILVER_LOG` writes, when it is set. Not under the data key: it
 /// is opened before the directory is unlocked.
 pub const LOG_FILE: &str = "silver.log";
+/// The previous log, kept when `silver.log` is rolled over.
+pub const ROLLED_LOG_FILE: &str = "silver.log.1";
 const IDENTITY_FILE: &str = "identity.json";
 const REVOCATION_FILE: &str = "revocation.json";
 const PREKEYS_FILE: &str = "prekeys.json";
@@ -1625,7 +1627,14 @@ impl Store {
         // `debug` it names envelope ids, contact ids and the relay: a
         // device that has just erased its keys should not be left holding
         // a record of who it talked to.
-        for name in IDENTITY_FILES.iter().copied().chain([VAULT_FILE, LOG_FILE]) {
+        // `silver.log.1` with it: the log is rolled over rather than left
+        // to grow, so the older half is the same record of who this
+        // device talked to and would otherwise survive the erase.
+        for name in IDENTITY_FILES
+            .iter()
+            .copied()
+            .chain([VAULT_FILE, LOG_FILE, ROLLED_LOG_FILE])
+        {
             let path = self.root.join(name);
             if path.exists() {
                 fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
@@ -2598,8 +2607,19 @@ mod tests {
         let name = store.read_vault().unwrap().unwrap().kdf.keystore_name();
         assert!(crate::keystore::load(&name).unwrap().is_some());
 
+        // Both halves of the log, which at `debug` name envelope ids,
+        // contact ids and the relay. The rolled one is the same record
+        // and used not to be removed.
+        fs::write(dir.path().join(LOG_FILE), b"who this device talked to").unwrap();
+        fs::write(dir.path().join(ROLLED_LOG_FILE), b"and who before that").unwrap();
+
         store.wipe().unwrap();
         assert!(!dir.path().join(VAULT_FILE).exists());
+        assert!(!dir.path().join(LOG_FILE).exists());
+        assert!(
+            !dir.path().join(ROLLED_LOG_FILE).exists(),
+            "the rolled log survived the erase"
+        );
         assert!(
             crate::keystore::load(&name).unwrap().is_none(),
             "the wrapping key outlived the directory it wrapped"

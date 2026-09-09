@@ -53,6 +53,32 @@ means behaviour or the wire protocol changed in a way worth reading about.
   it has had an invariant test since 0.10.0, and reader mode now has the
   mirror of it, plus the same forgery walked through a real terminal.
 
+- A client sitting on a relay rate limit wrote a log line per refused
+  frame. A refusal costs the sender nothing and the relay a bucket check,
+  so the cheapest way to fill an operator's disk -- or their journald
+  ring, or the bill for a log service -- was to exceed a limit and keep
+  going, which is the one thing a rate limit is supposed to make safe to
+  ignore. The first refusal of a run is still logged; the rest are
+  counted, and a line a minute says how many went unwritten. The
+  refusals themselves are unchanged.
+- The relay's metrics listener had no connection cap and no timer, so
+  hyper discarded its own header-read default and a connection that said
+  nothing held a socket and a task indefinitely. Enough of them exhaust
+  the process's file descriptors, which stops the relay and not merely
+  its metrics. The main listener has installed that timer since 0.7.0 and
+  the helper that does it was simply never called here; the metrics
+  listener now calls it and serves at most sixteen connections at once,
+  each with a deadline. The port is meant to be bound to loopback or a
+  management network, and this makes an operator who binds it elsewhere
+  wrong about their monitoring rather than wrong about their relay.
+- `silver.log` grew without limit. It is written only when `SILVER_LOG`
+  asks for it, but a client left running at `debug` filled the disk --
+  and worse, the file is a growing record of envelope ids, contact ids
+  and the relay, sitting beside a data directory whose purpose is that no
+  such record exists. It is now rolled over at 8 MiB, keeping one
+  previous file, so it holds the most recent activity and never more than
+  16 MiB. `/wipe` takes the rolled half too, which it could not before
+  because there was nothing to take.
 - An hourly relay limit of zero allowed one an hour instead of none.
   Zero turns a limit off everywhere else on this relay -- lookups, file
   transfer, anonymous submission all say so and all do it -- but the
