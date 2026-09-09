@@ -10,7 +10,7 @@ use silver_relay::{
     DEFAULT_LISTEN, DEFAULT_MESSAGE_TTL, Limits, Policy, RelayState, expire_periodically, serve,
 };
 use tokio::net::TcpListener;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 /// Self-hosted Silver Messenger relay. Stores and forwards encrypted envelopes;
@@ -114,12 +114,18 @@ struct Args {
     #[arg(long, env = "SILVER_RELAY_LOG_IDS")]
     log_ids: bool,
 
-    /// Refuse the older login that signs the challenge alone; clients from
-    /// 0.6.0 on sign the relay's host too, so a hostile relay cannot
-    /// collect logins for this one. Off by default so older clients can
-    /// still connect.
-    #[arg(long, env = "SILVER_RELAY_REQUIRE_BOUND_AUTH")]
-    require_bound_auth: bool,
+    /// Accept the older login that signs the challenge alone, as well as
+    /// the bound one.
+    ///
+    /// Clients have signed the relay's host since 0.6.0, which is what
+    /// stops a hostile relay collecting a login from one of its users and
+    /// presenting it here as them. Accepting the unbound login leaves
+    /// that open, and it was the default for nine releases while clients
+    /// caught up; from 0.15.0 the bound login is required unless this
+    /// says otherwise. Only useful for a relay that still has clients
+    /// older than 0.6.0.
+    #[arg(long, env = "SILVER_RELAY_ALLOW_UNBOUND_AUTH")]
+    allow_unbound_auth: bool,
 
     /// A name clients reach this relay by, for the bound login: the
     /// signature must name one of these. May be given more than once, or
@@ -710,7 +716,7 @@ async fn main() -> anyhow::Result<()> {
         blob_mib_per_address_per_hour: args.blob_mib_per_address_per_hour,
         trusted_proxies: args.trusted_proxy.clone(),
         log_ids: args.log_ids,
-        require_bound_auth: args.require_bound_auth,
+        require_bound_auth: !args.allow_unbound_auth,
         hosts: relay_hosts(&args, &transport),
         one_time_prekeys_per_user_per_hour: args.one_time_prekeys_per_user_per_hour,
         max_groups: args.max_groups,
@@ -718,6 +724,12 @@ async fn main() -> anyhow::Result<()> {
     };
     if policy.require_bound_auth {
         info!("only the bound login is accepted; clients before 0.6.0 cannot connect");
+    } else {
+        warn!(
+            "--allow-unbound-auth: this relay accepts the login that signs the challenge alone, \
+             so another relay can collect one of its users' logins and present it here as them; \
+             drop the flag once every client is 0.6.0 or newer"
+        );
     }
     if policy.hosts.is_empty() {
         info!(

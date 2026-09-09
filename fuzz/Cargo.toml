@@ -94,3 +94,9 @@ path = "fuzz_targets/identifier.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "release"
+path = "fuzz_targets/release.rs"
+test = false
+doc = false

@@ -467,9 +467,13 @@ mod tests {
             // end in end-of-file; the failure this guards against is
             // neither happening, which reads as a connection that stays
             // open with nothing to say.
+            // The read returning at all is the property: end-of-file when
+            // the connection was closed cleanly, an error when it was
+            // reset, which is what a refused one looks like on some
+            // platforms. Only the timeout means it is still being held.
             let ended = tokio::time::timeout(METRICS_TIMEOUT * 2, c.read(&mut buf)).await;
             assert!(
-                matches!(ended, Ok(Ok(0))),
+                ended.is_ok(),
                 "silent connection {i} of {opened} was still held: {ended:?}"
             );
         }

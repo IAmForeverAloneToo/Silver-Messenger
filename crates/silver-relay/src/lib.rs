@@ -256,6 +256,12 @@ pub struct Policy {
     /// Refuse the v1 login (a signature over the nonce alone), which a
     /// hostile relay could collect and replay here. Off, both kinds are
     /// accepted so clients from before 0.6.0 can still connect.
+    ///
+    /// On by default from 0.15.0. It was off for nine releases while
+    /// clients caught up, which is long enough: the cost of leaving it
+    /// off is that any relay a user also talks to can take a login from
+    /// them and use it here, and the cost of turning it on is that a
+    /// client older than 0.6.0 cannot connect.
     pub require_bound_auth: bool,
     /// The names this relay answers to, normalised as `normalize_host`
     /// leaves them: its ACME domains, the names in its certificate, and
@@ -295,7 +301,7 @@ impl Default for Policy {
             blob_mib_per_address_per_hour: 256,
             trusted_proxies: Vec::new(),
             log_ids: false,
-            require_bound_auth: false,
+            require_bound_auth: true,
             hosts: Vec::new(),
             one_time_prekeys_per_user_per_hour: 30,
             max_groups: 100_000,

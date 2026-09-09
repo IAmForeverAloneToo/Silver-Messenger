@@ -297,7 +297,11 @@ async fn a_good_release_is_fetched_and_checked() {
 
     // The download must be runnable where it lands: the last check before
     // a swap is running it, and that happens before anything copies the
-    // replaced binary's mode over it.
+    // replaced binary's mode over it. Unix only, and not merely because
+    // the stand-in binary is a shell script: the failure this guards
+    // against is a download left at 0644, which shipped in 0.12.0 and
+    // made every update fail at that step, and a mode is a Unix thing.
+    // Windows would need a real PE here, which a test cannot make.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -307,15 +311,15 @@ async fn a_good_release_is_fetched_and_checked() {
             mode & 0o077 == 0,
             "the download is readable by others: {mode:o}"
         );
+        let out = std::process::Command::new(&got.path)
+            .arg("--version")
+            .output()
+            .expect("the download runs");
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("9.9.9"),
+            "the download reports its version: {out:?}"
+        );
     }
-    let out = std::process::Command::new(&got.path)
-        .arg("--version")
-        .output();
-    let out = out.expect("the download runs");
-    assert!(
-        String::from_utf8_lossy(&out.stdout).contains("9.9.9"),
-        "the download reports its version: {out:?}"
-    );
 }
 
 /// A build with no `minisign.pub` has nothing to check a release

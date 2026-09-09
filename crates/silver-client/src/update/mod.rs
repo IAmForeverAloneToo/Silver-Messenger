@@ -408,6 +408,20 @@ fn split_https_url(url: &str) -> anyhow::Result<(String, u16, String)> {
     Ok((host.to_owned(), port, path.to_owned()))
 }
 
+/// Exposed for the fuzz target: this parses an answer from a host, before
+/// any signature has been checked, so it is as network-facing as anything
+/// in the protocol.
+#[doc(hidden)]
+pub fn parse_release_for_fuzzing(bytes: &[u8]) -> anyhow::Result<Release> {
+    parse_release(bytes)
+}
+
+/// Exposed for the fuzz target; see [`parse_release_for_fuzzing`].
+#[doc(hidden)]
+pub fn sums_line_for_fuzzing(sums: &[u8], name: &str) -> Option<String> {
+    sums_line(sums, name)
+}
+
 fn parse_release(bytes: &[u8]) -> anyhow::Result<Release> {
     let body: serde_json::Value =
         serde_json::from_slice(bytes).context("the answer is not JSON")?;

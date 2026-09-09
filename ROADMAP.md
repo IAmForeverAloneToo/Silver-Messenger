@@ -682,6 +682,10 @@ those who want to pay for it (46).
         falling back to Mozilla's list alone drops this machine's own
         decisions about what to distrust; and the threat model no longer
         implies the data directory's Unix modes apply on Windows.
+        The eleventh ends the unbound login's nine-release grace period --
+        it is refused by default now, with `--allow-unbound-auth` for a
+        relay that still has clients older than 0.6.0 -- and fuzzes the
+        two parsers the updater runs before any signature is checked.
 
 63. [ ] **The identity key somewhere the memory is not** (L, undecided).
         The one place where taking a key out of the process would buy
