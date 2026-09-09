@@ -69,6 +69,28 @@ Reports that matter most, roughly in order:
    workflow that could put something into a release the source does not
    contain.
 
+### What memory protection is, per platform
+
+A review in September 2026 recovered the data key of an *unlocked* client
+from an ordinary same-user process on Windows 11, in seconds and with no
+elevation. That is the limit the threat model already named, and no
+software on the machine can close it; what the client does is raise the
+cost, and it differs by platform:
+
+| Platform | What the client does | What it leaves |
+| --- | --- | --- |
+| Linux | No core file; the process is not dumpable, so a same-user process may neither trace it nor read `/proc/<pid>/mem` | Root, and anything already attached |
+| Windows (0.15.0) | No core file; the process object carries a restricted access list, so opening it for reading is refused | An attacker who rewrites that list first, which a process's owner may do; and an administrator |
+| macOS | No core file | A debugger run by the same user, which macOS allows for a program it started and which unsigned release builds do not restrict |
+
+Pages of an unlocked client may also reach swap or a hibernation image;
+full-disk encryption is what answers that, not this program. Reading an
+unlocked client is therefore **not a vulnerability** — it is the
+documented limit. `/lock`, the idle lock and quitting are the boundary
+that does hold, because they take the client down rather than mark it
+unreadable. A way *past* those, or key material readable while the
+client is locked, is very much a vulnerability.
+
 Not vulnerabilities, because the design does not claim otherwise: things
 listed under *Out of scope* or *Gaps* in the threat model (a compromised
 operating system or terminal, denial of service against a relay by sheer

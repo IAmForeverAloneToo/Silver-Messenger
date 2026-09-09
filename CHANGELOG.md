@@ -6,6 +6,17 @@ means behaviour or the wire protocol changed in a way worth reading about.
 
 ## 0.15.0 - 2026-09-09
 
+A second independent security review of the 0.14.0 line reported 2 High,
+7 Medium, 18 Low and 2 Informational findings and found no cryptographic
+break. Both Highs, all seven Mediums and eight of the Lows are fixed
+here; the rest are listed, with what leaving each costs, in
+[docs/design/audit-response-2.md](docs/design/audit-response-2.md) and
+scheduled as roadmap item 63. The report is published whole at
+[docs/audits/2026-09-second-security-audit.md](docs/audits/2026-09-second-security-audit.md),
+with identifiers belonging to the maintainer's own machine and relay
+redacted from its live-evidence appendix — the only edit, and the report
+says so at its head.
+
 ### Security
 
 - `/devices link` no longer takes a device in on one line. Linking is not

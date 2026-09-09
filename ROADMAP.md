@@ -691,7 +691,29 @@ those who want to pay for it (46).
         and the response note is held back for the maintainer to review
         first, so this item is ticked for the code and not for the
         disclosure.
-63. [ ] **The identity key somewhere the memory is not** (L, undecided).
+63. [ ] **The second review's remainder** (M). Eight findings the
+        September 2026 review left open, none of them a way for anyone to
+        read a message or forge one, all of them listed with what leaving
+        each costs in
+        [docs/design/audit-response-2.md](docs/design/audit-response-2.md)
+        section 4. In the order they deserve: **I-1**, a claim in
+        `docs/design/updates.md` that the swap is tested under a kill
+        when no such test exists — a false statement about what is
+        tested, which should not survive another release; **L-5**, the
+        mailbox limits that wrap on multiply and silently mean "always
+        full" at zero, the same family as the `per_hour(0)` bug that was
+        fixed; **L-16** and **L-8**, validation at the protocol boundary
+        rather than only where a value is used; **L-1**, locking key
+        buffers out of swap; **L-6**, the uncapped transparency log;
+        **L-10**, secrets that serialize as plaintext for anything that
+        persists them outside the vault; **L-13**, homoglyph names. Plus
+        two remainders of findings otherwise closed: a non-zero
+        `lock_after_minutes` default, which shrinks the window the review
+        demonstrated live and is a user-visible change worth deciding
+        deliberately, and an enumeration sweep of `data-key-*` entries
+        for keys orphaned by versions before 0.15.0.
+
+64. [ ] **The identity key somewhere the memory is not** (L, undecided).
         The one place where taking a key out of the process would buy
         something. Everything else in memory is the conversation itself,
         and hiding the key that decrypts it from a program that can read
