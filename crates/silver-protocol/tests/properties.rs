@@ -93,24 +93,25 @@ fn content() -> impl Strategy<Value = Content> {
                 ids,
             }
         }),
+        // A size within the cap, and the chunk count that size implies:
+        // `Content::check` refuses the rest at the boundary, the way the
+        // group half always has. The refusals are pinned separately, in
+        // `a_file_is_checked_where_it_is_parsed`.
         (
             text(100),
-            any::<u64>(),
+            0..=silver_protocol::blob::MAX_FILE_BYTES,
             hash(),
-            any::<u32>(),
             prop::option::of(message_id())
         )
-            .prop_map(
-                move |(name, size, sha256, chunks, reply_to)| Content::File {
-                    name,
-                    size,
-                    blob: "00112233445566778899aabbccddeeff".into(),
-                    key: BlobKey::from_parts(sha256, [7u8; 24]),
-                    chunks,
-                    sha256,
-                    reply_to,
-                }
-            ),
+            .prop_map(move |(name, size, sha256, reply_to)| Content::File {
+                name,
+                size,
+                blob: "00112233445566778899aabbccddeeff".into(),
+                key: BlobKey::from_parts(sha256, [7u8; 24]),
+                chunks: silver_protocol::blob::chunk_count(size),
+                sha256,
+                reply_to,
+            }),
         any::<u64>().prop_map(move |at| Content::Revocation(alice.revocation(at))),
         any::<u64>().prop_map(move |at| Content::Succession(identity(1).succeed_to(&bob, at))),
         text(500).prop_map(|pad| Content::Cover { pad }),

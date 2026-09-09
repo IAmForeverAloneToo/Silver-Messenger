@@ -19,6 +19,20 @@ says so at its head.
 
 ### Security
 
+- A file's own numbers are checked where the body is parsed. The group
+  half of the protocol has validated blob id, size and chunk count since
+  0.9.0 (`BlobRef::validate`); the conversation half checked only
+  `reply_to` and left the rest to the client, which does check them on
+  every path that fetches a file -- a rule that was real but depended on
+  one caller remembering it. Nothing an honest client sends is refused,
+  including an empty file, which has one chunk and which the group half
+  does refuse; that disagreement is noted rather than settled here.
+- `Session::respond` did not check the signed prekey it was handed
+  against the one the handshake header names. The one-time and
+  post-quantum keys were matched; the signed one, which every handshake
+  uses, was not, so a caller that looked up the wrong id built a session
+  that derived a different root and failed every message's AEAD with
+  nothing to say why. Refused with a reason now.
 - A mailbox cap of zero meant a mailbox that refused everything.
   `--max-mailbox-messages 0` gave a relay that answered "mailbox full" to
   every message for every recipient, because `count >= 0` is true of
