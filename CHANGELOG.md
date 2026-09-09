@@ -8,10 +8,12 @@ means behaviour or the wire protocol changed in a way worth reading about.
 
 A second independent security review of the 0.14.0 line reported 2 High,
 7 Medium, 18 Low and 2 Informational findings and found no cryptographic
-break. Both Highs, all seven Mediums and eight of the Lows are fixed
-here; the rest are listed, with what leaving each costs, in
-[docs/design/audit-response-2.md](docs/design/audit-response-2.md) and
-scheduled as roadmap item 63. The report is published whole at
+break. Both Highs, all seven Mediums, eleven of the eighteen Lows and the
+one Informational that was a real defect are fixed here; three Lows the
+report withdrew itself, and the rest are listed, with what leaving each
+costs and which are declined outright, in
+[docs/design/audit-response-2.md](docs/design/audit-response-2.md).
+The report is published whole at
 [docs/audits/2026-09-second-security-audit.md](docs/audits/2026-09-second-security-audit.md),
 with identifiers belonging to the maintainer's own machine and relay
 redacted from its live-evidence appendix — the only edit, and the report
@@ -94,6 +96,19 @@ says so at its head.
   they left running on purpose. Which of those costs to carry is the
   user's to choose: `lock_after_minutes` and `/lock` are both there, and
   the threat model says what an unlocked client is worth.
+- Key buffers are still not pinned out of swap, and the client still
+  will not sweep the key store for entries a pre-0.15.0 crash orphaned.
+  Both were left open by the review (L-1, and the remainder of M-1) and
+  both are **declined**, on one decision rather than two: each needs a
+  system call -- `mlock`/`VirtualLock`, and `CredEnumerate`, which
+  `keyring` offers on no platform -- and `silver-client`, the crate that
+  holds every secret here, is `#![forbid(unsafe_code)]`. Neither a Low
+  about swap, which full-disk encryption answers and which pinning the
+  key alone would not close while the plaintext beside it stays
+  pageable, nor a dead key left by a version nobody runs any more, is
+  worth that property or a dependency taken to launder it. The FAQ now
+  says what the key store holds and how to clear a stray entry by hand
+  without having to work out which one is live.
 - `/devices link` no longer takes a device in on one line. Linking is not
   the copy of some history its name suggests: the identity signs a
   certificate for the other computer, and from then until it is removed

@@ -716,34 +716,50 @@ those who want to pay for it (46).
         read a message or forge one, all of them listed with what leaving
         each costs in
         [docs/design/audit-response-2.md](docs/design/audit-response-2.md)
-        section 4. In the order they deserve: **I-1**, a claim in
+        section 4. Six are **done** and in 0.15.0: **I-1**, the claim in
         `docs/design/updates.md` that the swap is tested under a kill
-        when no such test exists — a false statement about what is
-        tested, which should not survive another release; **L-5**, the
-        mailbox limits that wrap on multiply and silently mean "always
-        full" at zero, the same family as the `per_hour(0)` bug that was
-        fixed; **L-16** and **L-8**, validation at the protocol boundary
-        rather than only where a value is used; **L-1**, locking key
-        buffers out of swap; **L-6**, the uncapped transparency log;
-        **L-10**, secrets that serialize as plaintext for anything that
-        persists them outside the vault; **L-13**, homoglyph names. Plus
-        one remainder of a finding otherwise closed: an
-        enumeration sweep of `data-key-*` entries for keys orphaned by
-        versions before 0.15.0.
+        when no such test existed — the worst of them, being a false
+        statement about what is tested, and two tests now stand behind
+        it; **L-5**, the mailbox limits that wrapped on multiply and
+        silently meant "always full" at zero; **L-16** and **L-8**,
+        validation at the protocol boundary rather than only where a
+        value is used; **L-6**, the uncapped transparency log; **L-10**,
+        secrets that serialized as plaintext for anything persisting them
+        outside the vault; **L-13**, homoglyph names. **L-1**, locking
+        key buffers out of swap, is declined below, as is the remainder
+        of a finding otherwise closed — an enumeration sweep of
+        `data-key-*` entries for keys orphaned by versions before 0.15.0.
 
-        **Two of those wait on one decision.** L-1 needs `mlock` or
-        `VirtualLock`, and the key-store sweep needs `CredEnumerate` and
-        its equivalents, which `keyring` does not expose on any backend.
-        Both are system calls, and `silver-client` — the crate that holds
-        the keys — is `#![forbid(unsafe_code)]`, which the September 2026
-        review named among the reasons the tree reads as it does. So each
-        is a choice between dropping that property in the crate that most
-        wants it, and taking a dependency whose whole job is to hold the
+        **What is left in this item** is two remainders of findings
+        otherwise closed. **L-14**: the updater's two parsers are fuzzed,
+        being what it reads before checking any signature, and the
+        hand-rolled HTTP response parser, `transparency.rs`, `vault.rs`,
+        `linking.rs` and `Pin::parse` are not. **H-1**: macOS release
+        builds are unsigned unless notarization secrets are set, so the
+        hardened runtime that would restrict a same-user attach is
+        absent; ad-hoc signing with `--options runtime` is the cheap
+        version of it, and belongs here only once somebody has checked on
+        a real macOS that it restricts what it is supposed to, rather
+        than on the strength of the manual page.
+
+        **Two of those are declined, on one decision.** L-1 needs `mlock`
+        or `VirtualLock`, and the key-store sweep needs `CredEnumerate`
+        and its equivalents, which `keyring` does not expose on any
+        backend. Both are system calls, and `silver-client` — the crate
+        that holds the keys — is `#![forbid(unsafe_code)]`, which the
+        September 2026 review named among the reasons the tree reads as it
+        does. Each would therefore cost either that property in the crate
+        that most wants it, or a dependency whose whole job is to hold the
         unsafe (`region`, `memsec`, or `secmem-alloc`, the last by the
         author of the `secmem-proc` this project already links on
-        Windows). That is one decision covering both, and it is the
-        maintainer's: neither finding is worth spending
-        `forbid(unsafe_code)` on without saying so out loud.
+        Windows). **Neither is worth it, and neither will be done.** A Low
+        about swap — which full-disk encryption answers, and which pinning
+        the key alone would not close anyway, since the plaintext beside
+        it stays pageable — and a key left behind by a version older than
+        0.15.0, removable by hand, do not buy back an audited-away
+        invariant across every secret this program handles. If that trade
+        ever changes it will be because something larger wants it, not
+        these two.
         The review's other remainder, a non-zero `lock_after_minutes`
         default, is **decided against**: locking after an idle spell is
         the user's choice, not something to switch on for everybody. It

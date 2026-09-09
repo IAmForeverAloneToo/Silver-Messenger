@@ -258,7 +258,9 @@ fn chain_verifier(options: &ConnectOptions) -> anyhow::Result<Arc<WebPkiServerVe
     if added == 0 {
         tracing::warn!(
             errors = native.errors.len(),
-            "no certificates could be read from this system's store;              falling back to the built-in Mozilla roots alone, so a root this system              distrusts may still be accepted"
+            "no certificates could be read from this system's store; falling back to the \
+             built-in Mozilla roots alone, so a root this system distrusts may still be \
+             accepted"
         );
     }
 
