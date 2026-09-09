@@ -518,9 +518,17 @@ those who want to pay for it (46).
         and the key the names are MACed under cannot be the data key,
         which rotates, nor live in the record, whose loss would then
         leave files that decrypt with nothing to say whose they are.
-        What is left of this item is the two wire changes, which is why
-        they were kept apart: they need every peer to be sending a field
-        before anything requires it. Settled in
+        **The wire pair is in as optional fields**, which is the first of
+        the two releases the note schedules for them: SM-P-14, a
+        message's id sealed inside the body where the AEAD reaches it
+        (the envelope's is picked after the ciphertext is made and bound
+        by nothing), and a device's own signature on its certificate, so
+        an account cannot enroll a key its holder never offered. Both are
+        accepted absent, so clients that do not write them keep working.
+        What is left of this item is making them **required**, one
+        release later, once every client in use is sending them — the
+        changelog for that release has to say plainly that a client older
+        than this one cannot start a session after it. Settled in
         [docs/design/format-changes.md](docs/design/format-changes.md):
         the two on-disk changes go together in one release with one
         migration and need no peer coordination, the two wire changes go
