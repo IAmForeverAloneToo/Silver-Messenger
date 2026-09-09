@@ -284,7 +284,9 @@ fn log_bundle_in(
 /// Limits applied to each recipient's mailbox.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
+    /// Messages one mailbox holds; 0 for no cap.
     pub max_messages: u64,
+    /// Bytes one mailbox holds; 0 for no cap.
     pub max_bytes: u64,
     /// Bytes the relay will hold in every mailbox together; 0 for no cap.
     /// Without it a stranger could queue envelopes for made-up recipients
@@ -1685,9 +1687,24 @@ impl Store {
                 let (count, bytes) = usage.get(user)?.map(|g| g.value()).unwrap_or((0, 0));
                 let mut meta = txn.open_table(META)?;
                 let total = meta.get(MAILBOX_BYTES)?.map(|g| g.value()).unwrap_or(0);
-                if count >= limits.max_messages || bytes + size > limits.max_bytes {
+                // Zero is no cap, as it is for `max_total_bytes` below and
+                // for `--mailbox-storage-mib` and `--max-identities`,
+                // which document it. It used to mean the opposite here:
+                // `count >= 0` is true of every mailbox, so an operator
+                // who wrote `--max-mailbox-messages 0` got a relay that
+                // refused every message to every recipient and said only
+                // "mailbox full". The saturating adds are for the same
+                // reason the multiply below saturates -- a limit near the
+                // top of the range should refuse, not wrap into
+                // accepting.
+                let over_count = limits.max_messages > 0 && count >= limits.max_messages;
+                let over_bytes =
+                    limits.max_bytes > 0 && bytes.saturating_add(size) > limits.max_bytes;
+                if over_count || over_bytes {
                     Enqueue::MailboxFull
-                } else if limits.max_total_bytes > 0 && total + size > limits.max_total_bytes {
+                } else if limits.max_total_bytes > 0
+                    && total.saturating_add(size) > limits.max_total_bytes
+                {
                     Enqueue::StorageFull
                 } else {
                     let seq = meta.get(NEXT_SEQ)?.map(|g| g.value()).unwrap_or(0);
@@ -2994,6 +3011,71 @@ mod tests {
                 .unwrap(),
             Enqueue::Stored,
             "acknowledged mail gives the room back"
+        );
+    }
+
+    /// A mailbox cap of zero is no cap, not a mailbox that refuses
+    /// everything.
+    ///
+    /// `count >= 0` is true of every mailbox, so `--max-mailbox-messages
+    /// 0` used to give a relay that answered "mailbox full" to every
+    /// message for every recipient, silently and with nothing in the log
+    /// to say why. Zero is no cap for `--mailbox-storage-mib` and
+    /// `--max-identities`, which document it; these two now agree.
+    #[test]
+    fn a_mailbox_cap_of_zero_is_no_cap() {
+        let store = Store::in_memory().unwrap();
+        let (alice, bob) = (Identity::generate(), Identity::generate());
+        let no_caps = Limits {
+            max_messages: 0,
+            max_bytes: 0,
+            max_total_bytes: 0,
+        };
+        for i in 0..8 {
+            assert_eq!(
+                store
+                    .enqueue(&envelope(&alice, &bob, &format!("m{i}")), 100, no_caps)
+                    .unwrap(),
+                Enqueue::Stored,
+                "message {i} was refused by a cap that is turned off"
+            );
+        }
+        assert_eq!(store.queued(&bob.user_id()).unwrap().len(), 8);
+
+        // A cap that is set still caps.
+        let one = Limits {
+            max_messages: 1,
+            max_bytes: 0,
+            max_total_bytes: 0,
+        };
+        let carol = Identity::generate();
+        assert_eq!(
+            store
+                .enqueue(&envelope(&alice, &carol, "first"), 100, one)
+                .unwrap(),
+            Enqueue::Stored
+        );
+        assert_eq!(
+            store
+                .enqueue(&envelope(&alice, &carol, "second"), 100, one)
+                .unwrap(),
+            Enqueue::MailboxFull
+        );
+
+        // And a byte cap near the top of the range refuses rather than
+        // wrapping into acceptance.
+        let huge = Limits {
+            max_messages: 0,
+            max_bytes: u64::MAX,
+            max_total_bytes: u64::MAX,
+        };
+        let dave = Identity::generate();
+        assert_eq!(
+            store
+                .enqueue(&envelope(&alice, &dave, "fits"), 100, huge)
+                .unwrap(),
+            Enqueue::Stored,
+            "a cap of u64::MAX accepts; the addition must not wrap"
         );
     }
 
