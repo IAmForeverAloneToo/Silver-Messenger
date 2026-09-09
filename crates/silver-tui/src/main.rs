@@ -99,6 +99,13 @@ struct Args {
     #[arg(long)]
     no_keystore: bool,
 
+    /// Start the record of what this data directory last wrote again, from
+    /// what is on disk. Only for a directory that refuses to open because
+    /// that record is damaged: it gives up being able to tell whether any
+    /// file was replaced with an older copy of itself before now.
+    #[arg(long)]
+    reset_rollback_protection: bool,
+
     /// Write an encrypted backup of your identity and contacts to this file
     /// (asks for a passphrase for the file), then exit.
     #[arg(long, value_name = "FILE")]
@@ -401,6 +408,17 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
                 data_dir.display()
             ),
         }
+        return Ok(());
+    }
+
+    if args.reset_rollback_protection {
+        store.reset_rollback_protection()?;
+        println!(
+            "The record of what {} last wrote was started again from the files that are there \
+             now. Whether any of them was replaced with an older copy of itself before this \
+             moment can no longer be told; from here on it can.",
+            data_dir.display()
+        );
         return Ok(());
     }
 

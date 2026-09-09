@@ -498,6 +498,24 @@ out (a timer) or were deleted are rewritten out of the history files
 rather than marked, so the directory does not hold them; the placeholder
 of a message its author deleted for everyone stays, without the text.
 
+Somebody who can *write* the directory without holding the key is a
+different case from the thief, and a sharper one than it looks. They
+cannot read a file or forge one — the AEAD sees to that — but every file
+is bound only to its own name, so until the change below they could put
+back an older copy of one and it read as current: an old `sessions.json`
+restores ratchet state that has already been used, so the next send
+repeats a message key; an old `contacts.json` undoes a key-change warning
+or a `verified` mark. Each file is now also bound to a **generation**,
+recorded in an encrypted `state` file whose own generation is the one
+number `vault.json` carries in the clear, so a file at the wrong
+generation does not decrypt at all. The bound that this cannot reach, and
+it is worth being exact about: an attacker who rolls back the **whole
+directory** — every file and the anchor together — to a state it really
+was in cannot be told from the passage of time, because every file agrees
+with every other exactly as it once did. Nor does any of it apply to a
+directory with no protection at rest, where there is no AEAD to bind
+anything into and the same attacker can simply edit the plaintext.
+
 With the keys (a thief who also has the key store, the passphrase, or the
 memory of a running, unlocked client), they get the keys the directory
 holds (on the primary the identity key, on a linked device its own device

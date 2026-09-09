@@ -372,6 +372,7 @@ silver --reader            reader mode for a screen reader: one line per event, 
 silver --set-passphrase    encrypt keys, contacts and history under a passphrase (asked at every start)
 silver --remove-passphrase drop the passphrase; files stay encrypted under this computer's key store where there is one
 silver --no-keystore       keep the files unencrypted rather than under a key from this computer's key store; remembered
+silver --reset-rollback-protection  start the record of what the directory last wrote again, when it is damaged and the client refuses to read; gives up telling whether a file was replaced with an older copy before now
 SILVER_PASSPHRASE=…        supplies the passphrase non-interactively (scripts, tests); used once, then forgotten, so /lock asks for it again
 silver --keep-passphrase   keep SILVER_PASSPHRASE in memory so /lock and the idle lock re-open without asking; for runs nobody is sitting at (env SILVER_KEEP_PASSPHRASE)
 silver --export-backup <F> write an encrypted backup of identity and contacts to F (asks for a passphrase for it)

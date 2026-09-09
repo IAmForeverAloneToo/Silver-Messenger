@@ -22,6 +22,7 @@ pub mod linking;
 mod outbox;
 pub mod proxy;
 pub mod receipts;
+mod rollback;
 pub mod sequence;
 pub mod sessions;
 pub mod store;

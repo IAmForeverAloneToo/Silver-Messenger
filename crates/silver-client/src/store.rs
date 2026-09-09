@@ -13,6 +13,8 @@
 //! requests.json        messages from people who are not contacts yet
 //! blocked.json         ids whose messages are dropped
 //! devices.json         the account's linked devices and revocations
+//! state                which version of each file is the current one
+//! state.prev           the version of that before the last write
 //! history/<user>.jsonl one line per message, per peer
 //! ```
 //!
@@ -23,12 +25,16 @@
 //! (see [`crate::vault`]); history files are encrypted line by line. Files
 //! written before the passphrase was set are recognised as plaintext and
 //! re-encrypted when the passphrase is set.
+//!
+//! Each of those files is also written at a generation, recorded in
+//! `state`, so that an older copy of one put back by somebody with write
+//! access is refused rather than read: see [`crate::rollback`].
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
@@ -38,6 +44,7 @@ use silver_protocol::{Identity, IdentitySecrets, KeyBundle, Revocation, Sequence
 
 use crate::devices::{DevicesFile, Linked};
 use crate::files::FileInfo;
+use crate::rollback::{Generations, STATE_FILE, STATE_PREVIOUS_FILE, State};
 use crate::sequence::Seen;
 use crate::sessions::{PrekeyFile, SessionsFile};
 use crate::vault::{FileCipher, Kdf, LINE_PREFIX, VaultError, VaultFile};
@@ -804,6 +811,14 @@ pub enum Protection {
 pub struct Store {
     root: PathBuf,
     cipher: Option<Arc<FileCipher>>,
+    /// Which generation each file should be at, so that an older copy of
+    /// one is refused rather than read (see [`crate::rollback`]).
+    ///
+    /// Shared between clones, because two handles to one directory are
+    /// two views of the same generations and must not drift apart.
+    /// Meaningful only while unlocked: an unprotected directory has
+    /// nothing to bind a generation into, and says so at start.
+    generations: Arc<Mutex<Generations>>,
 }
 
 impl Store {
@@ -847,7 +862,11 @@ impl Store {
         let root = root.into();
         create_private_dir(&root, Some(HISTORY_DIR))?;
         create_private_dir(&root.join(HISTORY_DIR), None)?;
-        let store = Self { root, cipher: None };
+        let store = Self {
+            root,
+            cipher: None,
+            generations: Arc::new(Mutex::new(Generations::default())),
+        };
         // Before anything else looks at the directory, and before any
         // unlock: a change that a crash cut short may have left a key in
         // the key store that nothing here needs. Reads no key and asks the
@@ -1007,7 +1026,154 @@ impl Store {
         self.cipher = Some(Arc::new(FileCipher::unlock(&vault, passphrase)?));
         self.seal_stragglers().map_err(VaultError::Other)?;
         self.finish_rotation(&vault).map_err(VaultError::Other)?;
+        self.load_generations().map_err(VaultError::Other)?;
         Ok(())
+    }
+
+    // --- rollback binding ----------------------------------------------------
+
+    /// Read `state` and check it against the anchor in `vault.json`,
+    /// adopting generations if this directory has none yet.
+    ///
+    /// Called once the cipher is in place, and after the two repairs that
+    /// run first: sealing files a protection left plain, and finishing a
+    /// half-done key rotation. Both rewrite files, and they do it in the
+    /// unbound shape, so they must happen before anything is stamped.
+    fn load_generations(&self) -> anyhow::Result<()> {
+        let Some(cipher) = self.cipher.clone() else {
+            return Ok(());
+        };
+        let Some(vault) = self.read_vault()? else {
+            return Ok(());
+        };
+        let Some(anchor) = vault.state_generation else {
+            return self.adopt_generations(&cipher);
+        };
+        // A record that cannot be read is not a reason to fail the
+        // unlock: the person still has to be able to run the reset that
+        // gets out of it, and that needs the key. Every read and write
+        // refuses with the reason until then.
+        *self.generations.lock().unwrap_or_else(|e| e.into_inner()) =
+            match self.read_generations(&cipher, anchor) {
+                Ok(state) => Generations::Bound(state),
+                Err(e) => {
+                    tracing::error!("{e}");
+                    Generations::Unreadable(e.to_string())
+                }
+            };
+        Ok(())
+    }
+
+    /// The `state` file, or the version before it if the last write was
+    /// interrupted.
+    fn read_generations(&self, cipher: &FileCipher, anchor: u64) -> anyhow::Result<State> {
+        let mut trouble = Vec::new();
+        for name in [STATE_FILE, STATE_PREVIOUS_FILE] {
+            let path = self.root.join(name);
+            if !path.exists() {
+                trouble.push(format!("{name} is missing"));
+                continue;
+            }
+            let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+            let state = match cipher.decrypt(STATE_FILE, &bytes) {
+                Ok(plain) => serde_json::from_slice::<State>(&plain)
+                    .with_context(|| format!("parsing {name}")),
+                Err(e) => Err(e),
+            };
+            match state {
+                // The anchor is raised after `state` is written, so a
+                // state one generation ahead of the anchor is the write
+                // that was interrupted between the two, and is the newer
+                // truth. Behind the anchor is an older copy put back.
+                Ok(state) if state.generation == anchor || state.generation == anchor + 1 => {
+                    return Ok(state);
+                }
+                Ok(state) => trouble.push(format!(
+                    "{name} is from generation {} where the vault says {anchor}",
+                    state.generation
+                )),
+                Err(e) => trouble.push(format!("{name}: {e}")),
+            }
+        }
+        bail!(
+            "the record of what this directory last wrote cannot be read ({}), so an older copy \
+             of a file could not be told from the current one. Nothing has been opened. \
+             `silver --reset-rollback-protection` starts the record again from what is on disk, \
+             which gives up being able to prove anything about what happened to this directory \
+             before now.",
+            trouble.join("; ")
+        )
+    }
+
+    /// Give a directory written before generations existed its first one.
+    ///
+    /// Every file is rewritten at generation 1 and recorded, and the
+    /// anchor follows. A crash part-way leaves some files rewritten and
+    /// some not, and no anchor, so the next unlock runs this again --
+    /// which is why it reads each file both ways round.
+    fn adopt_generations(&self, cipher: &FileCipher) -> anyhow::Result<()> {
+        const FIRST: u64 = 1;
+        let mut state = State {
+            generation: FIRST,
+            ..State::default()
+        };
+        for name in recrypted_files() {
+            let path = self.root.join(name);
+            if !path.exists() {
+                continue;
+            }
+            let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+            if !FileCipher::is_encrypted(&bytes) {
+                // Still plain; `seal_stragglers` has already had its turn,
+                // so leave it and let the next write bind it.
+                continue;
+            }
+            // Either shape: name-only for a file this has not reached
+            // yet, generation-bearing for one a run that did not finish
+            // already converted.
+            let opened = cipher.open_file(name, &bytes)?;
+            let at = opened.generation.unwrap_or(FIRST);
+            if opened.generation.is_none() {
+                write_atomic(&path, &cipher.encrypt_at(name, at, &opened.plain))?;
+            }
+            state.wrote(name, at);
+            state.generation = state.generation.max(at);
+        }
+        self.persist_generations(&state, cipher)?;
+        *self.generations.lock().unwrap_or_else(|e| e.into_inner()) = Generations::Bound(state);
+        tracing::info!(
+            "this data directory now records what it last wrote, so an older copy of one of its \
+             files is refused rather than read"
+        );
+        Ok(())
+    }
+
+    /// Start the record again from what is on disk, forfeiting what it
+    /// could have proved about the past.
+    ///
+    /// For the case in `docs/design/format-changes.md` section 5.5: both
+    /// `state` and `state.prev` unreadable, which without this would leave
+    /// a directory that opens for nobody. It is deliberately a thing a
+    /// person asks for by name.
+    pub fn reset_rollback_protection(&self) -> anyhow::Result<()> {
+        let Some(cipher) = self.cipher.clone() else {
+            bail!("the data directory is not unlocked");
+        };
+        for name in [STATE_FILE, STATE_PREVIOUS_FILE] {
+            let path = self.root.join(name);
+            if path.exists() {
+                fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+            }
+        }
+        let mut vault = self.read_vault()?.context("reading the vault")?;
+        vault.state_generation = None;
+        self.write_vault(&vault)?;
+        *self.generations.lock().unwrap_or_else(|e| e.into_inner()) = Generations::Unbound;
+        tracing::warn!(
+            "the record of what this directory last wrote was started again; whether any of its \
+             files was replaced with an older copy before now can no longer be told"
+        );
+        self.adopt_generations(&cipher)
     }
 
     /// Unlock a directory whose wrapping key lives in this computer's key
@@ -1030,6 +1196,7 @@ impl Store {
         self.cipher = Some(Arc::new(cipher));
         self.seal_stragglers()?;
         self.finish_rotation(&vault)?;
+        self.load_generations()?;
         Ok(())
     }
 
@@ -1122,7 +1289,9 @@ impl Store {
 
     fn seal_under_kek(&mut self, kek: &[u8; 32], kdf: Kdf) -> anyhow::Result<()> {
         let (_, cipher) = FileCipher::create_with_kek(kek);
-        let vault = cipher.wrap_under_kek(kek, kdf);
+        // A directory that was unprotected has no generations yet; the
+        // rewrite below gives it its first.
+        let vault = cipher.wrap_under_kek(kek, kdf, None);
         let cipher = Arc::new(cipher);
         // The vault first. It holds the only copy of the data key, and a
         // reader takes a plain file as itself, so a crash between the two
@@ -1135,7 +1304,10 @@ impl Store {
         self.recrypt_all(None, Some(&cipher)).context(
             "the data directory is now protected, but not every file could be encrypted; \
              the rest are sealed the next time it is unlocked",
-        )
+        )?;
+        // Now that there is an AEAD to bind them into, the directory gets
+        // its generations; until this it had nowhere to keep them.
+        self.load_generations()
     }
 
     /// Drop a key-encryption key made for a change that then failed.
@@ -1194,8 +1366,9 @@ impl Store {
                 // record that the superseded key is still in the store.
                 let old_name = old.kdf.keystore_name();
                 self.add_pending(&old_name)?;
+                let anchor = self.anchor();
                 self.rotate_key(&cipher, |c| {
-                    c.wrap_under_passphrase(passphrase, kdf.clone())
+                    c.wrap_under_passphrase(passphrase, kdf.clone(), anchor)
                 })?;
                 // The files are under a new key now, so the old one opens
                 // nothing current -- but it still opens a copy of the
@@ -1217,7 +1390,8 @@ impl Store {
                 self.recrypt_all(None, Some(&cipher)).context(
                     "the passphrase is set, but not every file could be encrypted; the rest \
                      are sealed the next time the directory is unlocked",
-                )
+                )?;
+                self.load_generations()
             }
         }
     }
@@ -1239,7 +1413,9 @@ impl Store {
             let name = kdf.keystore_name();
             self.add_pending(&name)?;
             let kek = crate::keystore::create(&name)?;
-            let rotated = self.rotate_key(&cipher, |c| Ok(c.wrap_under_kek(&kek, kdf.clone())));
+            let anchor = self.anchor();
+            let rotated =
+                self.rotate_key(&cipher, |c| Ok(c.wrap_under_kek(&kek, kdf.clone(), anchor)));
             self.drop_unused_kek(&name);
             rotated?;
             return Ok(Protection::Keystore);
@@ -1333,8 +1509,45 @@ impl Store {
                 continue;
             }
             let bytes = fs::read(&path)?;
-            let plain = decode_file(from, name, &bytes)?;
-            write_atomic(&path, &encode_file(to, name, &plain))?;
+            // Keeps whichever generation the file already carries: a
+            // rotation changes the key, not what was written.
+            let (generation, plain) = match from {
+                Some(c) if FileCipher::is_encrypted(&bytes) => {
+                    let opened = c.open_file(name, &bytes)?;
+                    (opened.generation, opened.plain.to_vec())
+                }
+                _ => (None, decode_file(from, name, &bytes)?),
+            };
+            let out = match (to, generation) {
+                (Some(c), Some(at)) => c.encrypt_at(name, at, &plain),
+                (to, _) => encode_file(to, name, &plain),
+            };
+            write_atomic(&path, &out)?;
+        }
+        // The record of those generations moves with them, or the new key
+        // would open every file and not the one that says which version of
+        // each is the right one. Bound to its name alone, so it needs no
+        // generation of its own here.
+        let state_path = self.root.join(STATE_FILE);
+        if state_path.exists() {
+            let bytes = fs::read(&state_path)?;
+            let plain = decode_file(from, STATE_FILE, &bytes)?;
+            match to {
+                Some(c) => write_atomic(&state_path, &c.encrypt(STATE_FILE, &plain))?,
+                // Going back to plaintext: there is nothing to bind a
+                // generation into any more, so the record goes with the
+                // encryption rather than being left readable.
+                None => {
+                    for name in [STATE_FILE, STATE_PREVIOUS_FILE] {
+                        let path = self.root.join(name);
+                        if path.exists() {
+                            fs::remove_file(&path)?;
+                        }
+                    }
+                    *self.generations.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Generations::Unbound;
+                }
+            }
         }
         // Files received while `encrypted_downloads` was on are bound to
         // their own name, not to a path under the data directory, and sit
@@ -1390,17 +1603,112 @@ impl Store {
             return Ok(None);
         }
         let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-        Ok(Some(decode_file(self.cipher.as_deref(), name, &bytes)?))
+        let Some(cipher) = self.cipher.as_deref() else {
+            return Ok(Some(decode_file(None, name, &bytes)?));
+        };
+        if !FileCipher::is_encrypted(&bytes) {
+            // Left plain by a protection a crash cut short; `seal_stragglers`
+            // takes care of it, and until then it reads as itself.
+            return Ok(Some(bytes));
+        }
+        let generations = self.generations();
+        if let Some(why) = generations.refusal() {
+            bail!("{why}");
+        }
+        let opened = cipher.open_file(name, &bytes)?;
+        // The generation the file carries is its own -- it is bound into
+        // the tag, so it opened only because it is what was written -- and
+        // the question here is whether it is the one that *should* have
+        // been written.
+        if let Some(state) = generations.state() {
+            let acceptable = state.acceptable(name);
+            if !opened.generation.is_some_and(|at| acceptable.contains(&at)) {
+                bail!(
+                    "{name} is not the version this directory last wrote ({}, where it should be \
+                     {acceptable:?}): it has been replaced with another copy of itself, which is \
+                     what the generation in the vault is there to catch. Nothing has been read \
+                     from it.",
+                    match opened.generation {
+                        Some(at) => format!("generation {at}"),
+                        None => "no generation at all".to_owned(),
+                    }
+                );
+            }
+        }
+        Ok(Some(opened.plain.to_vec()))
     }
 
     /// Write one of the store's files whole. Every one of them is
     /// owner-only: `config.json` holds the proxy's credentials and the
     /// invite token, `contacts.json` and the history are the contact
     /// graph, and neither is anyone else's on a shared machine.
+    ///
+    /// With the directory protected, the write also raises the file's
+    /// generation and records it, so that this version of the file is the
+    /// only one that will be read back. The file is written **before** the
+    /// record is: a crash between them leaves a file one generation ahead,
+    /// which [`State::acceptable`] allows, where the other order would
+    /// leave one behind — indistinguishable from an older copy put back.
     fn write_file(&self, name: &str, bytes: &[u8]) -> anyhow::Result<()> {
         self.ensure_unlocked()?;
-        let out = encode_file(self.cipher.as_deref(), name, bytes);
-        write_atomic(&self.root.join(name), &out)
+        let Some(cipher) = self.cipher.clone() else {
+            return write_atomic(&self.root.join(name), bytes);
+        };
+        let mut generations = self.generations.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(why) = generations.refusal() {
+            bail!("{why}");
+        }
+        let Generations::Bound(state) = &mut *generations else {
+            let out = cipher.encrypt(name, bytes);
+            return write_atomic(&self.root.join(name), &out);
+        };
+        let at = state.generation + 1;
+        let out = cipher.encrypt_at(name, at, bytes);
+        write_atomic(&self.root.join(name), &out)?;
+        state.wrote(name, at);
+        state.generation = at;
+        let state = state.clone();
+        drop(generations);
+        self.persist_generations(&state, &cipher)
+    }
+
+    /// The generation `vault.json` should be pointing at, for a rewrite
+    /// of the vault that is not itself a write of the directory.
+    fn anchor(&self) -> Option<u64> {
+        self.generations().state().map(|state| state.generation)
+    }
+
+    /// The generations as they stand, for a read.
+    fn generations(&self) -> Generations {
+        self.generations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Write `state` and then raise the anchor in `vault.json` to match.
+    ///
+    /// The previous `state` is kept beside it first, so an interrupted
+    /// write has something to fall back to; see
+    /// `docs/design/format-changes.md` section 5.5.
+    fn persist_generations(&self, state: &State, cipher: &FileCipher) -> anyhow::Result<()> {
+        let path = self.root.join(STATE_FILE);
+        if path.exists() {
+            let previous = self.root.join(STATE_PREVIOUS_FILE);
+            let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+            write_atomic(&previous, &bytes)?;
+        }
+        let bytes = serde_json::to_vec(state).context("encoding the file generations")?;
+        // Bound to its own name only: what stops an older `state` being
+        // read as this one is the generation inside it, checked against
+        // the number in `vault.json`, which is the anchor everything else
+        // hangs from.
+        write_atomic(&path, &cipher.encrypt(STATE_FILE, &bytes))?;
+        let mut vault = self
+            .read_vault()?
+            .context("the vault is gone; the directory cannot record what it wrote")?;
+        vault.state_generation = Some(state.generation);
+        self.write_vault(&vault)
     }
 
     pub(crate) fn read_json_or_default<T: Default + for<'de> Deserialize<'de>>(
@@ -1633,7 +1941,16 @@ impl Store {
         for name in IDENTITY_FILES
             .iter()
             .copied()
-            .chain([VAULT_FILE, LOG_FILE, ROLLED_LOG_FILE])
+            // The record of what this directory last wrote goes with the
+            // directory: it names every file and, once history is in it,
+            // every conversation.
+            .chain([
+                VAULT_FILE,
+                LOG_FILE,
+                ROLLED_LOG_FILE,
+                STATE_FILE,
+                STATE_PREVIOUS_FILE,
+            ])
         {
             let path = self.root.join(name);
             if path.exists() {
@@ -2500,7 +2817,7 @@ mod tests {
         let old = store.cipher().unwrap();
         let rotating = Arc::new(old.rotating());
         let vault = rotating
-            .wrap_under_passphrase("first", Kdf::fast())
+            .wrap_under_passphrase("first", Kdf::fast(), None)
             .unwrap();
         store.write_vault(&vault).unwrap();
         assert!(store.read_vault().unwrap().unwrap().previous_key.is_some());
@@ -2517,6 +2834,238 @@ mod tests {
         let mut third = Store::open(dir.path()).unwrap();
         third.unlock("first").unwrap();
         assert_eq!(third.load_history(&peer).unwrap().len(), 1);
+    }
+
+    // --- rollback binding ---------------------------------------------------
+
+    /// A directory protected by the key store, with generations adopted
+    /// and a couple of writes behind it.
+    fn bound_store() -> (Store, tempfile::TempDir) {
+        crate::keystore::use_mock_store();
+        let (mut store, dir) = temp_store();
+        store.load_or_create_identity().unwrap();
+        store.protect_with_keystore().unwrap();
+        (store, dir)
+    }
+
+    /// The finding SM-C-24 is about: somebody with write access to a live
+    /// directory puts back an older `sessions.json`, so the next send
+    /// reuses ratchet state that has already been used.
+    #[test]
+    fn an_older_copy_of_a_file_put_back_is_refused_rather_than_read() {
+        let (store, dir) = bound_store();
+        let path = dir.path().join(CONTACTS_FILE);
+
+        let peer = Identity::generate();
+        store
+            .save_contacts(&[Contact::new(peer.user_id())])
+            .unwrap();
+        let older = fs::read(&path).unwrap();
+        // Something changes -- a key-change warning, a `verified` mark --
+        // and the file moves on.
+        store.save_contacts(&[]).unwrap();
+        assert!(store.load_contacts().unwrap().is_empty());
+
+        // The old copy goes back. It has the right name and the right
+        // key, and until generations it read as the current file.
+        fs::write(&path, &older).unwrap();
+        let err = store.load_contacts().unwrap_err().to_string();
+        assert!(
+            err.contains("not the version this directory last wrote"),
+            "an older copy was accepted: {err}"
+        );
+    }
+
+    /// The other direction: the anchor put back while the files move on.
+    /// Every file is then further ahead than one interrupted write, which
+    /// is the same tampering seen from the other side.
+    #[test]
+    fn an_older_record_of_what_was_written_is_refused_too() {
+        let (store, dir) = bound_store();
+        let vault_path = dir.path().join(VAULT_FILE);
+        let state_path = dir.path().join(STATE_FILE);
+        let old_vault = fs::read(&vault_path).unwrap();
+        let old_state = fs::read(&state_path).unwrap();
+
+        // Several writes on, so the anchor is well past where it was.
+        for _ in 0..4 {
+            store.save_contacts(&[]).unwrap();
+        }
+        fs::write(&vault_path, &old_vault).unwrap();
+        fs::write(&state_path, &old_state).unwrap();
+        // `state.prev` is one behind the state that was just replaced, so
+        // it is not a way back in either.
+        let _ = fs::remove_file(dir.path().join(STATE_PREVIOUS_FILE));
+
+        let mut again = Store::open(dir.path()).unwrap();
+        again.unlock_with_keystore().unwrap();
+        let err = again.load_contacts().unwrap_err().to_string();
+        assert!(
+            err.contains("not the version this directory last wrote"),
+            "a file well ahead of a rolled-back anchor was accepted: {err}"
+        );
+    }
+
+    /// A crash between writing a file and raising the anchor leaves the
+    /// file one generation ahead. That is the ordinary interrupted write
+    /// and must still open, or an ill-timed power cut would lose the
+    /// directory.
+    #[test]
+    fn a_write_interrupted_before_the_anchor_rose_still_opens() {
+        let (store, dir) = bound_store();
+        // Written once first, so the record knows the file and the case
+        // under test is a *recorded* file one generation ahead rather
+        // than one the record has never heard of.
+        store.save_contacts(&[]).unwrap();
+        let vault_path = dir.path().join(VAULT_FILE);
+        let state_path = dir.path().join(STATE_FILE);
+        let before_vault = fs::read(&vault_path).unwrap();
+        let before_state = fs::read(&state_path).unwrap();
+
+        let peer = Identity::generate();
+        store
+            .save_contacts(&[Contact::new(peer.user_id())])
+            .unwrap();
+        // Wind the record back to just before that write: the file landed,
+        // nothing that records it did.
+        fs::write(&vault_path, &before_vault).unwrap();
+        fs::write(&state_path, &before_state).unwrap();
+
+        let mut again = Store::open(dir.path()).unwrap();
+        again.unlock_with_keystore().unwrap();
+        assert_eq!(
+            again.load_contacts().unwrap().len(),
+            1,
+            "the file the interrupted write left behind should still open"
+        );
+    }
+
+    /// A directory written by a version before any of this still opens,
+    /// and comes out the other side bound.
+    #[test]
+    fn a_directory_without_generations_adopts_them_on_the_next_unlock() {
+        let (store, dir) = bound_store();
+        let peer = Identity::generate();
+        store
+            .save_contacts(&[Contact::new(peer.user_id())])
+            .unwrap();
+
+        // Put the directory back into the shape an older version wrote:
+        // files bound to their names alone, and no anchor.
+        let cipher = store.cipher.clone().unwrap();
+        for name in recrypted_files() {
+            let path = dir.path().join(name);
+            if !path.exists() {
+                continue;
+            }
+            let opened = cipher.open_file(name, &fs::read(&path).unwrap()).unwrap();
+            fs::write(&path, cipher.encrypt(name, &opened.plain)).unwrap();
+        }
+        let mut vault = store.read_vault().unwrap().unwrap();
+        vault.state_generation = None;
+        store.write_vault(&vault).unwrap();
+        fs::remove_file(dir.path().join(STATE_FILE)).unwrap();
+        let _ = fs::remove_file(dir.path().join(STATE_PREVIOUS_FILE));
+
+        let mut again = Store::open(dir.path()).unwrap();
+        again.unlock_with_keystore().unwrap();
+        assert_eq!(
+            again.load_contacts().unwrap().len(),
+            1,
+            "an older directory should still be readable"
+        );
+        assert!(
+            again
+                .read_vault()
+                .unwrap()
+                .unwrap()
+                .state_generation
+                .is_some(),
+            "it should be bound afterwards"
+        );
+        // And bound means bound: the same rollback is refused now.
+        let path = dir.path().join(CONTACTS_FILE);
+        let older = fs::read(&path).unwrap();
+        again.save_contacts(&[]).unwrap();
+        fs::write(&path, &older).unwrap();
+        assert!(
+            again.load_contacts().is_err(),
+            "adoption should leave the directory actually protected"
+        );
+    }
+
+    /// Changing what protects the directory rewrites every file under a
+    /// new key. The generations have to come with them, or the new key
+    /// would open files with nothing left to say which version of each is
+    /// the current one.
+    #[test]
+    fn changing_the_protection_carries_the_generations_over() {
+        let (mut store, dir) = bound_store();
+        let peer = Identity::generate();
+        store
+            .save_contacts(&[Contact::new(peer.user_id())])
+            .unwrap();
+
+        store.set_passphrase_with("hunter2", Kdf::fast()).unwrap();
+        assert_eq!(store.protection(), Protection::Passphrase);
+        assert_eq!(store.load_contacts().unwrap().len(), 1);
+
+        let mut again = Store::open(dir.path()).unwrap();
+        again.unlock("hunter2").unwrap();
+        assert_eq!(again.load_contacts().unwrap().len(), 1);
+        let path = dir.path().join(CONTACTS_FILE);
+        let older = fs::read(&path).unwrap();
+        again.save_contacts(&[]).unwrap();
+        fs::write(&path, &older).unwrap();
+        assert!(
+            again.load_contacts().is_err(),
+            "the protection changed and took the rollback binding with it"
+        );
+    }
+
+    /// Losing both copies of the record refuses everything rather than
+    /// carrying on unprotected -- and there is a way out that says what
+    /// it gives up.
+    #[test]
+    fn a_lost_record_refuses_the_directory_until_it_is_reset() {
+        let (store, dir) = bound_store();
+        let peer = Identity::generate();
+        store
+            .save_contacts(&[Contact::new(peer.user_id())])
+            .unwrap();
+        fs::write(dir.path().join(STATE_FILE), b"not a state file").unwrap();
+        let _ = fs::remove_file(dir.path().join(STATE_PREVIOUS_FILE));
+
+        // The unlock itself goes through -- the reset needs the key, and
+        // refusing to unlock would leave no way to run it -- but nothing
+        // is read or written until the question is answered.
+        let mut again = Store::open(dir.path()).unwrap();
+        again.unlock_with_keystore().unwrap();
+        let err = again.load_contacts().unwrap_err().to_string();
+        assert!(
+            err.contains("reset-rollback-protection"),
+            "the way out should be named: {err}"
+        );
+        assert!(
+            again.save_contacts(&[]).is_err(),
+            "writing must refuse too, or the record would be rebuilt around a rollback"
+        );
+
+        again.reset_rollback_protection().unwrap();
+        assert_eq!(
+            again.load_contacts().unwrap().len(),
+            1,
+            "the directory should open again after the reset"
+        );
+        // And be protected again from here on.
+        let path = dir.path().join(CONTACTS_FILE);
+        let older = fs::read(&path).unwrap();
+        again.save_contacts(&[]).unwrap();
+        fs::write(&path, &older).unwrap();
+        assert!(
+            again.load_contacts().is_err(),
+            "the reset should leave the directory bound again"
+        );
     }
 
     #[test]

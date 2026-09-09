@@ -168,12 +168,30 @@ plaintext, which is the leak SM-C-25 exists to close.
 So the anchoring is two-level:
 
 * **`state`**, a new encrypted file beside the others, bound to its own
-  name and its own generation like every other file. It holds the
-  generation of every file, and the conversation index (§5.4).
+  name. It holds the generation of every file, and the conversation
+  index (§5.4). What stops an older `state` being read as the current one
+  is not its own generation in its AAD but the generation *inside* it,
+  checked against the number below — which is the same strength (an
+  attacker cannot forge either) and is simpler, because reading the
+  kept-back copy then needs no guess about which generation it was at.
 * **`vault.json`** gains exactly one new number: the generation of
   `state`. A plaintext integer that says "the state file must be at
   version N" leaks how many times the directory has been written, which
   the modification times already say.
+
+Each file carries its own generation too, in its header, in the clear.
+That is not a weakening — the number is also in the associated data, so
+changing the header makes the tag fail, and a header that cannot lie is
+as good as one that is encrypted. It is what makes §5.5 possible: a
+reader that has lost `state` can still open the files, which it could not
+if the only way to know a file's generation were the record that was
+lost. Two magic numbers distinguish the shapes, so nothing has to guess.
+
+**A directory with no protection at rest is not bound at all.** There is
+no AEAD to put a generation into, and an attacker who can write the
+directory can simply edit the plaintext; a counter there would be
+decoration. The client already says at start that such a directory is
+not protected, and that statement now covers this too.
 
 Each write is then: write the file, write `state`, write `vault.json`,
 in that order, each atomically and each fsynced with its parent
@@ -237,15 +255,20 @@ loss refuses the whole directory. `write_atomic` plus the fsync of the
 parent makes losing it unlikely, and the previous version is kept as
 `state.prev` so an interrupted write has something to fall back to.
 
-If both are unreadable the client says so and stops, rather than
-quietly carrying on without the protection it claims to have. The way
-out is a documented `--reset-rollback-protection`, which rebuilds
-`state` from what is on disk and says plainly, in the log and to the
-person running it, that whatever happened to the directory before that
-moment is now unprovable. A directory that cannot be opened at all
-would be a worse answer than one that can be opened with its history
-of tampering forfeited, and the choice belongs to the person whose
-messages they are.
+If both are unreadable the client says so and stops, rather than quietly
+carrying on without the protection it claims to have. Precisely: the
+**unlock still succeeds** and every read and write then refuses with the
+reason. Failing the unlock would be the tidier-looking choice and the
+wrong one — the way out needs the data key, so a directory that would not
+unlock would be a directory with no way out.
+
+That way out is `--reset-rollback-protection`, which rebuilds `state`
+from the generations the files themselves carry and says plainly, in the
+log and to the person running it, that whatever happened to the directory
+before that moment is now unprovable. From the next write on it is bound
+again. A directory that cannot be opened at all would be a worse answer
+than one that can be opened with its history of tampering forfeited, and
+the choice belongs to the person whose messages they are.
 
 ### 5.6 The migration
 
