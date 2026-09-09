@@ -475,8 +475,14 @@ throw away the key that opens every file in the directory. Where
 there is neither (no key store and no passphrase), the files are plain and
 the client says so at start. Plain or not, the data directory and every
 file in it are the owner's alone (0.11.0: the directory 0700, the files
-0600, an existing directory tightened on the way), so a shared machine's
-other users do not read the settings — which hold the proxy's credentials
+0600, an existing directory tightened on the way) — on Unix. Those are
+Unix permissions and the code that sets them is compiled only there;
+on Windows the data directory takes the access rules it inherits, which
+under a user profile keep other unprivileged users out and, for a
+`--data-dir` placed somewhere world-writable, do not. This is the same
+shape as the process hardening of 0.15.0: said plainly rather than
+implied to be the same everywhere. Where the permissions do apply, a
+shared machine's other users do not read the settings — which hold the proxy's credentials
 and the invite token — the contact list, or the history. Received files in `downloads/` are saved
 as ordinary files so other programs can open them, unless `/files
 encrypt on` was chosen (0.10.0), which writes them under the data key

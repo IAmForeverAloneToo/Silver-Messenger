@@ -677,6 +677,11 @@ those who want to pay for it (46).
         recovery copies when it cannot rename, and says what to rename by
         hand when it can do neither. Rollback shared the window and now
         shares the recovery.
+        The tenth is two residuals: a system trust store that will not
+        load is now a warning rather than a debug line nobody sees, since
+        falling back to Mozilla's list alone drops this machine's own
+        decisions about what to distrust; and the threat model no longer
+        implies the data directory's Unix modes apply on Windows.
 
 63. [ ] **The identity key somewhere the memory is not** (L, undecided).
         The one place where taking a key out of the process would buy
