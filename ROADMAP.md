@@ -597,7 +597,7 @@ those who want to pay for it (46).
         and names swap and hibernation as a path out of memory that
         full-disk encryption answers and this program does not.
 
-62. [ ] **What the second audit found** (M). A second outside review, run
+62. [x] **What the second audit found** (M). A second outside review, run
         adversarially over the whole tree and reconciled across three
         rounds, found no cryptographic break: every chain built against
         the protocol failed against a check that was already there. What
@@ -687,6 +687,10 @@ those who want to pay for it (46).
         relay that still has clients older than 0.6.0 -- and fuzzes the
         two parsers the updater runs before any signature is checked.
 
+        All twelve are done and in 0.15.0. Publishing the review itself
+        and the response note is held back for the maintainer to review
+        first, so this item is ticked for the code and not for the
+        disclosure.
 63. [ ] **The identity key somewhere the memory is not** (L, undecided).
         The one place where taking a key out of the process would buy
         something. Everything else in memory is the conversation itself,
