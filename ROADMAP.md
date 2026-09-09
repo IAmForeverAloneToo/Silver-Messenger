@@ -667,6 +667,10 @@ those who want to pay for it (46).
         listener its header-read timeout, so a silent connection held a
         socket for ever; and `silver.log` grew without limit while being
         a record of who this device talked to.
+        The eighth is the ratchet body being the one body version that
+        went from JSON to a value unchecked, while v0/v1 and v5 had
+        validated at the boundary for versions. Its rules existed, further
+        in, where only the bodies that got that far met them.
 
 63. [ ] **The identity key somewhere the memory is not** (L, undecided).
         The one place where taking a key out of the process would buy
