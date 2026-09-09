@@ -424,18 +424,26 @@ async fn a_login_holds_only_for_the_relay_it_was_made_for() {
         &login(&mut ws, &identity, Some("other.example")).await,
         ErrorCode::BadSignature
     ));
-    // The v1 login is still taken by default, for older clients...
+    // The v1 login, which signs the challenge alone: refused by default
+    // from 0.15.0. Clients have signed the host since 0.6.0, and while
+    // this was accepted, any relay one of this relay's users also talked
+    // to could take a login from them and present it here as them.
     let mut ws = open(&url, None).await;
+    assert!(is_refusal(
+        &login(&mut ws, &identity, None).await,
+        ErrorCode::Unauthenticated
+    ));
+    // An operator with clients older than 0.6.0 can still take it.
+    let (old_url, _) = start(Policy {
+        require_bound_auth: false,
+        ..Policy::default()
+    })
+    .await;
+    let mut ws = open(&old_url, None).await;
     assert!(matches!(
         login(&mut ws, &identity, None).await,
         Some(ServerFrame::AuthOk { .. })
     ));
-    // ...but not once the operator says so.
-    let (url, _) = start(Policy {
-        require_bound_auth: true,
-        ..Policy::default()
-    })
-    .await;
     let mut ws = open(&url, None).await;
     assert!(is_refusal(
         &login(&mut ws, &identity, None).await,

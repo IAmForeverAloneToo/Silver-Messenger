@@ -53,6 +53,19 @@ means behaviour or the wire protocol changed in a way worth reading about.
   it has had an invariant test since 0.10.0, and reader mode now has the
   mirror of it, plus the same forgery walked through a real terminal.
 
+- Relays now require the bound login by default. A client has signed the
+  relay's host since 0.6.0, which is what stops another relay collecting
+  one of its users' logins and presenting it here as them; accepting the
+  older login that signs the challenge alone left that open, and was the
+  default for nine releases while clients caught up. That is long
+  enough. An operator who still has clients older than 0.6.0 can pass
+  `--allow-unbound-auth`, which says in the log what it costs.
+  `--require-bound-auth` is gone, being the default.
+- The updater's own parsers are fuzzed. Everything else facing the
+  network has had a target since 0.10.0; the release description and the
+  checksum list did not, though they are parsed before any signature has
+  been checked -- finding `SHA256SUMS` means parsing the release
+  description first -- on the path to replacing the running binary.
 - A system certificate store that could not be read was reported only at
   `debug`, a level nothing runs at, and the client carried on with the
   built-in Mozilla roots alone. That list is the floor, not the whole
