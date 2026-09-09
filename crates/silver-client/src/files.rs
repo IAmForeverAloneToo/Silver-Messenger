@@ -406,6 +406,17 @@ fn is_invisible(c: char) -> bool {
             | 0x1D173..=0x1D17A
             | 0xE0001
             | 0xE0020..=0xE007F
+            // Fillers: not format characters, so no property marks them,
+            // but every one of them draws as blank. A name made of them
+            // is a name that is there and cannot be seen.
+            | 0x115F
+            | 0x1160
+            | 0x3164
+            | 0xFFA0
+            // The rest of the tag block. Unassigned today, so a terminal
+            // draws nothing for them; assigning one later should not
+            // quietly widen what a peer may send.
+            | 0xE0080..=0xE00FF
     )
 }
 

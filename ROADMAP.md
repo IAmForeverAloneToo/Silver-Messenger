@@ -620,6 +620,15 @@ those who want to pay for it (46).
         always was. `docs/design/consequential-commands.md` records which
         commands ask, which are guarded, which are neither, and why the
         list is meant to stay short.
+        The second is done too: in reader mode a line break inside a
+        message bought its sender a journal line of their own, which a
+        screen reader hears as another person speaking, or as a warning
+        this program never made. The filter that exists for exactly this
+        was applied at two call sites and missed by two others, so it
+        moved to the one door every line goes through, and took the
+        invisible and bidirectional characters with it. Reader mode now
+        has the mirror of the invariant test the full mode has had since
+        0.10.0.
 
 63. [ ] **The identity key somewhere the memory is not** (L, undecided).
         The one place where taking a key out of the process would buy

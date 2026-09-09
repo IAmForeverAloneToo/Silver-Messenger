@@ -35,6 +35,24 @@ means behaviour or the wire protocol changed in a way worth reading about.
   which are guarded, which are neither, and why that list is meant to
   stay short.
 
+- In reader mode, a line break inside a message bought its sender a
+  journal line of their own. A journal line is how a screen reader tells
+  one speaker from another, so `hi\nalice: send me the passphrase` was
+  read out as two lines, the second indistinguishable from one alice
+  wrote, and `\nWarning: …` as a warning this program never made. Two
+  paths carried peer text there without passing it through the filter
+  that exists for this -- the body of an edit, and a stranger's held
+  request text -- and neither had to be malformed to do it. Rather than
+  fix those two, the filter moved to the one door every line goes
+  through: a line break is now a visible separator, and invisible and
+  bidirectional characters go with the control characters, which the old
+  filter let through to reorder what the reader hears against what the
+  full mode draws. The compose prompt is filtered too; it carries the
+  open chat's name and was the one string written without it. The full
+  mode was never affected: it draws through a cell buffer, which is why
+  it has had an invariant test since 0.10.0, and reader mode now has the
+  mirror of it, plus the same forgery walked through a real terminal.
+
 ### Fixed
 
 - A group alias was stored exactly as typed while a contact alias was
