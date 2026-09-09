@@ -19,6 +19,17 @@ says so at its head.
 
 ### Security
 
+- `docs/design/updates.md` said the update swap was tested under a kill
+  and no such test existed -- a false claim about what is tested, in the
+  document about the path that replaces the running binary, found by the
+  September 2026 review (I-1). The test exists now, and writing it
+  corrected the claim as well: a kill lands in a window microseconds wide
+  about never, so a second test watches the path from another thread
+  across four hundred swaps and requires that the name never resolves to
+  nothing. Both are Unix-only, and so is the guarantee -- Windows cannot
+  replace a running image, so its swap has a window where the name is
+  absent, which `install.rs` makes small and recoverable rather than
+  closing. The old claim covered neither of those.
 - The idle lock stays off by default. The review recommended switching it
   on for passphrase-protected directories, which would shorten the window
   its live exercise used -- and would also lock people out of a program
