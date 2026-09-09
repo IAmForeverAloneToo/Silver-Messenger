@@ -349,6 +349,10 @@ struct Bucket {
     burst: f64,
     per_second: f64,
     last: Instant,
+    /// When a refusal was last written to the log, and how many have been
+    /// refused since. See [`Bucket::should_warn`].
+    warned_at: Option<Instant>,
+    suppressed: u64,
 }
 
 impl Bucket {
@@ -358,6 +362,8 @@ impl Bucket {
             burst,
             per_second,
             last: Instant::now(),
+            warned_at: None,
+            suppressed: 0,
         }
     }
 
@@ -377,6 +383,32 @@ impl Bucket {
 
     fn try_take(&mut self) -> bool {
         self.try_take_n(1.0)
+    }
+
+    /// Whether this refusal should be written to the log, and how many
+    /// went unwritten since the last one that was.
+    ///
+    /// A refusal is the cheapest frame a client can send: it costs the
+    /// relay a bucket check and costs the sender nothing, and every one
+    /// of them used to write a line. So the way to fill an operator's
+    /// disk -- or their journald ring, or the bill for a log service --
+    /// was to sit on a rate limit and keep going, which is exactly what
+    /// the limit is supposed to make cheap to ignore. The first refusal
+    /// of a run is logged and the rest are counted, until the run goes
+    /// quiet for `WARN_EVERY` or a summary is due.
+    fn should_warn(&mut self) -> Option<u64> {
+        const WARN_EVERY: Duration = Duration::from_secs(60);
+        let now = Instant::now();
+        match self.warned_at {
+            Some(at) if now.duration_since(at) < WARN_EVERY => {
+                self.suppressed += 1;
+                None
+            }
+            _ => {
+                self.warned_at = Some(now);
+                Some(std::mem::take(&mut self.suppressed))
+            }
+        }
     }
 
     fn try_take_n(&mut self, amount: f64) -> bool {
@@ -2117,9 +2149,11 @@ impl RelayState {
             };
         }
         if !bucket.try_take() {
-            match who {
-                Some(me) => warn!(who = %self.who(me), "send rate limit hit"),
-                None => warn!("send rate limit hit on an anonymous connection"),
+            if let Some(quiet) = bucket.should_warn() {
+                match who {
+                    Some(me) => warn!(who = %self.who(me), quiet, "send rate limit hit"),
+                    None => warn!(quiet, "send rate limit hit on an anonymous connection"),
+                }
             }
             return ServerFrame::Rejected {
                 id,
@@ -2562,7 +2596,9 @@ fn handle_frame(state: &RelayState, me: &UserId, frame: ClientFrame, conn: &mut 
             // entry, which a fresh signed prekey makes different every
             // time).
             if !conn.publishes.try_take() {
-                warn!(who = %state.who(me), "publish rate limit hit");
+                if let Some(quiet) = conn.publishes.should_warn() {
+                    warn!(who = %state.who(me), quiet, "publish rate limit hit");
+                }
                 return Answer::from(ServerFrame::error(
                     ErrorCode::RateLimited,
                     "too many bundle publishes; slow down",
@@ -2592,7 +2628,9 @@ fn handle_frame(state: &RelayState, me: &UserId, frame: ClientFrame, conn: &mut 
         }
         ClientFrame::LogSince { index } => {
             if !conn.lookups.try_take() {
-                warn!(who = %state.who(me), "lookup rate limit hit");
+                if let Some(quiet) = conn.lookups.should_warn() {
+                    warn!(who = %state.who(me), quiet, "lookup rate limit hit");
+                }
                 return Answer::from(ServerFrame::error(
                     ErrorCode::RateLimited,
                     "too many lookups; slow down",
@@ -2603,7 +2641,9 @@ fn handle_frame(state: &RelayState, me: &UserId, frame: ClientFrame, conn: &mut 
         }
         ClientFrame::Lookup { user_id } => {
             if !conn.lookups.try_take() {
-                warn!(who = %state.who(me), "lookup rate limit hit");
+                if let Some(quiet) = conn.lookups.should_warn() {
+                    warn!(who = %state.who(me), quiet, "lookup rate limit hit");
+                }
                 return Answer::from(ServerFrame::error(
                     ErrorCode::RateLimited,
                     "too many lookups; slow down",
@@ -2662,7 +2702,9 @@ fn handle_frame(state: &RelayState, me: &UserId, frame: ClientFrame, conn: &mut 
                 ));
             }
             if !conn.acks.try_take() {
-                warn!(who = %state.who(me), "ack rate limit hit");
+                if let Some(quiet) = conn.acks.should_warn() {
+                    warn!(who = %state.who(me), quiet, "ack rate limit hit");
+                }
                 return Answer::from(ServerFrame::error(
                     ErrorCode::RateLimited,
                     "too many acknowledgements; slow down",
@@ -2917,6 +2959,39 @@ mod lifecycle_tests {
     /// hour: the limit read as closed and was not, which is the direction
     /// a limit must never be wrong in. The per-minute constructor already
     /// did this correctly, and its comment says why.
+    /// A client sitting on a rate limit must not write a log line per
+    /// refusal.
+    ///
+    /// A refused frame costs the sender nothing and the relay a bucket
+    /// check, and every one of them used to write a `warn!`. So the
+    /// cheapest way to fill an operator's disk, or their journald ring,
+    /// or the bill for a log service, was to exceed a limit and keep
+    /// going -- which is the one thing a rate limit is meant to make safe
+    /// to ignore. The refusals still all happen; only the writing about
+    /// them is bounded.
+    #[test]
+    fn a_client_sitting_on_a_rate_limit_does_not_fill_the_log() {
+        let mut bucket = Bucket::per_minute(1);
+        assert!(bucket.try_take(), "the first goes through");
+
+        // The first refusal is worth a line, with nothing yet suppressed.
+        assert!(!bucket.try_take());
+        assert_eq!(bucket.should_warn(), Some(0));
+
+        // Ten thousand more in the same window are counted, not written.
+        for _ in 0..10_000 {
+            assert!(!bucket.try_take());
+            assert_eq!(bucket.should_warn(), None);
+        }
+
+        // A minute on, one line says how many went unwritten, and the
+        // count starts again.
+        bucket.warned_at = Some(Instant::now() - Duration::from_secs(61));
+        assert_eq!(bucket.should_warn(), Some(10_000));
+        assert!(!bucket.try_take());
+        assert_eq!(bucket.should_warn(), None, "and it goes quiet again");
+    }
+
     #[test]
     fn a_rate_of_zero_turns_the_limit_off_by_the_hour_too() {
         let mut hourly = Bucket::per_hour(0.0);

@@ -44,7 +44,7 @@ axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
 # For the server-side HTTP builder: the timer and the header-read timeout
 # the relay sets on both listeners (a connection that never finishes its
 # request must not hold a socket for ever).
-hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "service"] }
 
 # Checking the release signature in `silver update`: Ed25519 over
 # BLAKE2b, the minisign format, from minisign's own author. No
