@@ -220,6 +220,22 @@ struct SkippedKey {
 
 /// One side's Double Ratchet state for one session. Serializable so a
 /// client can persist it; every secret inside is wiped on drop.
+///
+/// # What serializing this gives you
+///
+/// Plaintext. The root key, the chain keys and every skipped message key
+/// come out as base64 in JSON, because that is what a client needs in
+/// order to write them somewhere it controls. Whoever reads that output
+/// reads the conversation.
+///
+/// `silver-client` writes it through the vault, so it reaches disk
+/// encrypted under the data key and never otherwise. A client that does
+/// not do the same has no forward secrecy on disk at all: the point of
+/// a ratchet is that keys are discarded, and a file that keeps them
+/// undoes it. `Zeroize` covers the copy in memory and says nothing about
+/// where the bytes were written.
+///
+/// The same holds for [`crate::Identity`] and the prekey secrets.
 #[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct Session {
     #[serde(with = "b64_array")]

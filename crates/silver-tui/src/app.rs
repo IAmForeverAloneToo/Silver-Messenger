@@ -2024,6 +2024,16 @@ impl App {
                 Some(alias) => format!("alias: {alias} (yours; /alias changes it)"),
                 None => "alias: none (/alias gives one)".to_owned(),
             });
+            // A name reaching for two lookalike alphabets at once is how
+            // one person's name is made to read as another's. Said here
+            // rather than refused: the name is the user's own to change,
+            // and a wholly non-Latin name is somebody's actual name.
+            if silver_client::files::mixes_scripts(&self.contact_name(&id)) {
+                lines.push(
+                    "name: mixes alphabets whose letters look alike (Latin with Cyrillic or                      Greek), so it can be made to read as someone else's — compare safety                      numbers with /verify before trusting it"
+                        .to_owned(),
+                );
+            }
             lines.push(if contact.verified {
                 "verified: yes, by comparing safety numbers".to_owned()
             } else {

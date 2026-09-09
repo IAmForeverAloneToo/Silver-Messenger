@@ -106,6 +106,15 @@ impl Prekeys {
 
 /// The private half of a prekey, as kept on the owning client.
 #[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+/// The private half of a published prekey.
+///
+/// # What serializing this gives you
+///
+/// Plaintext, as with [`crate::Session`] and [`crate::IdentitySecrets`]:
+/// whoever reads it can complete a handshake addressed to this prekey and
+/// read the session it starts. Written through the vault by
+/// `silver-client`, and by anything else that wants the forward secrecy
+/// these keys exist for.
 pub struct PrekeySecret {
     pub id: u32,
     #[serde(with = "b64_array")]

@@ -79,7 +79,7 @@ be tighter, a defence in depth, or a documentation defect.
   gets written or the claim goes; it should not survive another release.
 * **L-1 — no `mlock`/`VirtualLock` on key buffers.** Keys can reach swap
   or a hibernation image. The threat model says so; locking the small
-  fixed-size buffers would narrow it.
+  fixed-size buffers would narrow it. Blocked on the decision below.
 * **L-5 — `--max-mailbox-mib` can wrap on multiply, and
   `--max-mailbox-messages 0` silently means "always full".** Both are
   operator footguns of the same family as M-4, which was fixed; these
@@ -104,9 +104,26 @@ be tighter, a defence in depth, or a documentation defect.
   `CS_RESTRICT` without notarization.
 * **M-1 remainder — no enumeration sweep of `data-key-*` entries.** The
   pending list covers every key orphaned from 0.15.0 on; keys orphaned by
-  *earlier* versions stay until removed by hand, because `keyring` offers
-  no portable enumeration and the platform-specific calls
-  (`CredEnumerate` and friends) are a per-platform piece of work.
+  *earlier* versions stay until removed by hand. Blocked on the same
+  decision as L-1.
+
+### The one decision those two wait on
+
+Both want a system call — `mlock`/`VirtualLock` for L-1, `CredEnumerate`
+and its equivalents for the sweep, which `keyring` exposes on no backend
+— and `silver-client`, the crate holding the keys, is
+`#![forbid(unsafe_code)]`. The review counted that among the reasons the
+tree reads as it does. So the choice is: drop the property in the crate
+that most wants it, or take a dependency whose whole job is to hold the
+unsafe (`region`, `memsec`, `secmem-alloc` — the last from the author of
+the `secmem-proc` already linked on Windows for the process access
+list).
+
+One decision, covering both, and not one to make quietly. A Low finding
+about swap and a leftover key from before 0.15.0 are not obviously worth
+either an audited-away invariant or a new dependency in the crate that
+handles every secret. Recorded here so the trade is visible rather than
+resolved by whoever touches it next.
 
 ### The idle lock stays off by default
 
