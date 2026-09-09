@@ -48,6 +48,24 @@ nothing else -- and carried by whatever comes after it.
   A file longer than the record says is the ordinary interrupted append
   and is read, for the same reason a whole file one generation ahead is:
   a line that opens where it sits is one somebody encrypted there.
+- A message carries its own id inside the body, where the AEAD covers it
+  (SM-P-14, from the first review). The envelope's id is chosen after the
+  ciphertext is made and no signature or AEAD reaches it, so a relay
+  could put any value there -- and a recipient reading the id from the
+  envelope filed the message under the relay's name, leaving the
+  sender's later edits, deletions, reactions and receipts, which all
+  name the sender's id, matching nothing. The sender mints the id first
+  now and puts it in both places; the recipient takes the body's, which
+  it already did whenever the body had one. A body without one is still
+  read under the envelope's id, so clients that do not yet send it keep
+  working -- the field is required a release later, as the design note
+  schedules.
+  The note said to compare the two and refuse a mismatch, following the
+  report. That is wrong here and would have broken something that works:
+  a copy of a message to one of the sender's own devices carries the
+  original id in its body and a fresh one on its envelope, deliberately,
+  because the envelope id is what the relay de-duplicates on. The note
+  now says so.
 - A conversation's log is no longer filed under the name of who it is
   with (SM-C-25). `history/<user id>.jsonl` put the contact in the file
   name, so a listing of the data directory was the contact and group

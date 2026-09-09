@@ -139,6 +139,20 @@ pub fn is_valid_message_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= MAX_MESSAGE_ID_BYTES && id.bytes().all(|b| b.is_ascii_graphic())
 }
 
+/// A fresh id for a message, in the shape an envelope id has.
+///
+/// The sender mints this *before* sealing so that the same value can go
+/// inside the body, where the AEAD covers it, and on the envelope, where
+/// it does not. That is SM-P-14: the envelope id is chosen after the
+/// ciphertext is made and is bound by nothing, so a relay can rename a
+/// message — and a recipient that took its id from there would file the
+/// message under the relay's name, leaving the sender's later edits,
+/// deletions, reactions and receipts, which all name the sender's id,
+/// with nothing to match.
+pub fn new_message_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
 /// Longest reaction, in bytes of UTF-8: an emoji with its modifiers and
 /// joiners (a family is 18 bytes), or a few characters.
 pub const MAX_REACTION_BYTES: usize = 32;
@@ -958,6 +972,54 @@ mod tests {
 
     fn text(s: &str) -> Content {
         Content::text(s)
+    }
+
+    /// SM-P-14. The envelope id is chosen after the ciphertext is made
+    /// and is covered by neither the AEAD nor the signature, so a relay
+    /// can put any id it likes on a message in flight. What stops that
+    /// mattering is the id inside the body: a recipient that takes it
+    /// from there files the message under the name its sender gave it,
+    /// which is the name the sender's own edits, deletions, reactions
+    /// and receipts will use.
+    #[test]
+    fn a_relay_that_renames_an_envelope_does_not_rename_the_message() {
+        let alice = Identity::generate();
+        let bob = Identity::generate();
+        let bundle = bob.key_bundle();
+
+        let id = new_message_id();
+        assert!(is_valid_message_id(&id));
+        let body = Body::plain(text("on Tuesday"), 1, Sequence::default())
+            .as_copy_of(Some(id.clone()))
+            .encode()
+            .unwrap();
+        let mut envelope = seal_bytes(&alice, &bundle, &body).unwrap();
+        // As the sender leaves it: the two agree.
+        envelope.id = id.clone();
+
+        // A relay rewrites the one part it can.
+        envelope.id = "not-the-senders-id".to_owned();
+        let message = open(&bob, &envelope).unwrap();
+        assert_eq!(
+            message.id, id,
+            "the message must keep the id its sender sealed into it"
+        );
+    }
+
+    /// The transition the design note asks for: while the field is
+    /// optional, a body from a client that does not send it still opens,
+    /// and the envelope id stands in.
+    #[test]
+    fn a_body_without_an_id_still_opens_under_the_envelopes() {
+        let alice = Identity::generate();
+        let bob = Identity::generate();
+        let bundle = bob.key_bundle();
+        let body = Body::plain(text("hello"), 1, Sequence::default())
+            .encode()
+            .unwrap();
+        let envelope = seal_bytes(&alice, &bundle, &body).unwrap();
+        let message = open(&bob, &envelope).unwrap();
+        assert_eq!(message.id, envelope.id);
     }
 
     #[test]

@@ -1111,6 +1111,23 @@ impl Client {
             .devices
             .as_ref()
             .and_then(|d| lock(d).certificate().cloned());
+        // SM-P-14: the id goes inside the body, where the AEAD covers it,
+        // rather than being read off the envelope, where nothing does --
+        // the envelope id is chosen after the ciphertext is made and is
+        // bound by neither the signature nor the AEAD, so a relay can
+        // rename a message and leave the sender's later edits, deletions
+        // and reactions, which all name the sender's id, matching
+        // nothing.
+        //
+        // For a copy to another device this is the id of the message it
+        // copies, and the envelope keeps its own fresh id, which is what
+        // the relay de-duplicates on. For the message itself the id is
+        // minted here and put on the envelope too, so the two agree and a
+        // recipient may take either.
+        let copy_of_another = message_id.is_some();
+        let carried_id = message_id
+            .map(str::to_owned)
+            .unwrap_or_else(silver_protocol::envelope::new_message_id);
         let plain = Body::plain_with_caps_and_head(
             content.clone(),
             now_ms(),
@@ -1119,7 +1136,7 @@ impl Client {
             self.gossip_head(),
         )
         .with_device(certificate)
-        .as_copy_of(message_id.map(str::to_owned))
+        .as_copy_of(Some(carried_id.clone()))
         .encode()?;
         // Whether the body carries its own signature at the sealed layer.
         // A protocol-v4 ratchet body does not (it is deniable); every other
@@ -1180,11 +1197,18 @@ impl Client {
             // construction, and says so wherever it is set up.
             None => plain,
         };
-        let envelope = if deniable {
+        let mut envelope = if deniable {
             seal_bytes_unsigned(&self.identity, to, &body)?
         } else {
             seal_bytes(&self.identity, to, &body)?
         };
+        if !copy_of_another {
+            // The envelope wears the id the body carries. Safe to set
+            // after sealing because the envelope id is outside the AEAD
+            // and the signature -- which is the whole of SM-P-14, and why
+            // the body's copy is the one that counts.
+            envelope.id = carried_id;
+        }
         Ok((envelope, forward_secret))
     }
 
