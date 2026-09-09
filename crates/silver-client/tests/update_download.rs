@@ -178,9 +178,100 @@ async fn fixture(page: Page) -> Fixture {
 }
 
 /// Fetch and check, returning whatever the client decided.
+///
+/// Against the key compiled in, which is the project's own: these can
+/// show that a release is refused and never that one is accepted, since
+/// producing a signature this key accepts is the thing it exists to
+/// prevent. [`try_download_with`] is for the accepting half.
 async fn try_download(f: &Fixture) -> anyhow::Result<update::Downloaded> {
     let release = update::latest_release(&f.url, &f.options).await?;
     update::download_client(&release, &f.options, f.dir.path()).await
+}
+
+/// Fetch and check against `key` instead.
+async fn try_download_with(f: &Fixture, key: &str) -> anyhow::Result<update::Downloaded> {
+    let release = update::latest_release(&f.url, &f.options).await?;
+    update::download_client_with_key(&release, &f.options, f.dir.path(), key).await
+}
+
+/// A minisign key pair, so a test can sign what it serves.
+///
+/// minisign is Ed25519 over BLAKE2b-512 of the message, with the halves
+/// wrapped in its own small format: the public key is
+/// `alg || key_id || public`, the signature file is a comment, then
+/// `alg || key_id || signature`, then a trusted comment, then a signature
+/// over the first signature and that comment.
+struct SigningKey {
+    signing: ed25519_dalek::SigningKey,
+    key_id: [u8; 8],
+}
+
+impl SigningKey {
+    fn new() -> Self {
+        let mut seed = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+        let mut key_id = [0u8; 8];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut key_id);
+        Self {
+            signing: ed25519_dalek::SigningKey::from_bytes(&seed),
+            key_id,
+        }
+    }
+
+    /// The `minisign.pub` body: what would be compiled in.
+    fn public(&self) -> String {
+        let mut bin = Vec::with_capacity(42);
+        bin.extend_from_slice(b"ED");
+        bin.extend_from_slice(&self.key_id);
+        bin.extend_from_slice(self.signing.verifying_key().as_bytes());
+        base64(&bin)
+    }
+
+    /// A `.minisig` over `message`.
+    fn sign(&self, message: &[u8]) -> String {
+        use blake2::Digest as _;
+        use ed25519_dalek::Signer as _;
+        let hashed = blake2::Blake2b512::digest(message);
+        let signature = self.signing.sign(&hashed).to_bytes();
+
+        let mut bin = Vec::with_capacity(74);
+        bin.extend_from_slice(b"ED");
+        bin.extend_from_slice(&self.key_id);
+        bin.extend_from_slice(&signature);
+
+        let trusted = "trusted comment: signed by the test";
+        let mut global = Vec::new();
+        global.extend_from_slice(&signature);
+        global.extend_from_slice(trusted.trim_start_matches("trusted comment: ").as_bytes());
+        let global_signature = self.signing.sign(&global).to_bytes();
+
+        format!(
+            "untrusted comment: minisign signature\n{}\n{trusted}\n{}\n",
+            base64(&bin),
+            base64(&global_signature)
+        )
+    }
+}
+
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = u32::from(b[0]) << 16 | u32::from(b[1]) << 8 | u32::from(b[2]);
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ALPHABET[(n >> (18 - 6 * i)) as usize & 0x3f] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
 }
 
 /// Nothing may be left behind by a refusal.
@@ -194,20 +285,14 @@ fn nothing_left(f: &Fixture) {
 
 #[tokio::test]
 async fn a_good_release_is_fetched_and_checked() {
-    let page = good_page("9.9.9");
+    let key = SigningKey::new();
+    let mut page = good_page("9.9.9");
+    page.signature = Some(key.sign(page.sums.as_bytes()));
     let want = sha256_hex(&page.binary);
     let f = fixture(page).await;
 
-    // Without a signing key compiled in there is no signature to check,
-    // and the client says so rather than pretending it checked one.
-    if !MINISIGN_PUB.is_empty() {
-        // This repository publishes a key, so an unsigned release is
-        // refused outright -- which is the next test.
-        return;
-    }
-    let got = try_download(&f).await.unwrap();
+    let got = try_download_with(&f, &key.public()).await.unwrap();
     assert_eq!(got.sha256, want);
-    assert!(!got.signature_checked);
     assert!(got.path.exists());
 
     // The download must be runnable where it lands: the last check before
@@ -231,6 +316,67 @@ async fn a_good_release_is_fetched_and_checked() {
         String::from_utf8_lossy(&out.stdout).contains("9.9.9"),
         "the download reports its version: {out:?}"
     );
+}
+
+/// A build with no `minisign.pub` has nothing to check a release
+/// against: the digest on the releases page and the digest in
+/// `SHA256SUMS` are both answers from the host serving the bytes, so they
+/// agree with each other for anything that host cares to hand out. This
+/// used to download it, run it, swap it in, and print a line afterwards
+/// saying no signature had been checked -- a note in the log of a machine
+/// already running someone else's code. The comment on `MINISIGN_PUB`
+/// said it refused; now it does, and before it fetches anything.
+#[tokio::test]
+async fn a_build_with_no_signing_key_refuses_to_update() {
+    let key = SigningKey::new();
+    let mut page = good_page("9.9.9");
+    // Everything else about the release is in order, including a
+    // signature -- there is just no key here to check it with.
+    page.signature = Some(key.sign(page.sums.as_bytes()));
+    let f = fixture(page).await;
+
+    let err = try_download_with(&f, "").await.unwrap_err();
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("no minisign.pub") && text.contains("will not install"),
+        "a keyless build should refuse and say why, got: {text}"
+    );
+    nothing_left(&f);
+}
+
+/// The signature has to be the one this client's key made, not merely a
+/// well-formed one: a release host that can serve the binary can serve a
+/// signature over it too.
+#[tokio::test]
+async fn a_signature_by_another_key_is_refused() {
+    let theirs = SigningKey::new();
+    let mut page = good_page("9.9.9");
+    page.signature = Some(theirs.sign(page.sums.as_bytes()));
+    let f = fixture(page).await;
+
+    let ours = SigningKey::new();
+    let err = try_download_with(&f, &ours.public()).await.unwrap_err();
+    assert!(
+        format!("{err:#}").contains("signature"),
+        "a signature by the wrong key should be refused, got: {err:#}"
+    );
+    nothing_left(&f);
+}
+
+/// A signature over something else does not carry to this release.
+#[tokio::test]
+async fn a_signature_over_other_bytes_is_refused() {
+    let key = SigningKey::new();
+    let mut page = good_page("9.9.9");
+    page.signature = Some(key.sign(b"some other SHA256SUMS entirely"));
+    let f = fixture(page).await;
+
+    let err = try_download_with(&f, &key.public()).await.unwrap_err();
+    assert!(
+        format!("{err:#}").contains("signature"),
+        "a signature over other bytes should be refused, got: {err:#}"
+    );
+    nothing_left(&f);
 }
 
 #[tokio::test]

@@ -151,15 +151,10 @@ async fn install_release(
 
     println!(
         "\nSilver Messenger {current} → {}\n  {}\n\n\
-         Checked against the releases page, SHA256SUMS{}.\n\
+         Checked against the releases page, SHA256SUMS and the project's signature.\n\
          The previous binary is at {}; `silver update --rollback` puts it back.",
         release.version(),
         exe.display(),
-        if downloaded.signature_checked {
-            " and the project's signature"
-        } else {
-            " (this client was built without a signing key, so no signature was checked)"
-        },
         backup.display()
     );
     Ok(())
