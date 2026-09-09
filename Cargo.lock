@@ -4239,6 +4239,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustix-linux-procfs"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2fc84bf7e9aa16c4f2c758f27412dc9841341e16aa682d9c7ac308fe3ee12056"
+dependencies = [
+ "once_cell",
+ "rustix",
+]
+
+[[package]]
 name = "rustls"
 version = "0.23.43"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4360,6 +4370,21 @@ dependencies = [
  "pkcs8 0.10.2",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "secmem-proc"
+version = "0.3.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca48b73b5429ef7a6e951cd0f215ef2c3c7eb60a852bda40fe41b6a6846422bb"
+dependencies = [
+ "anyhow",
+ "cfg-if",
+ "libc",
+ "rustix",
+ "rustix-linux-procfs",
+ "thiserror 2.0.20",
+ "windows",
 ]
 
 [[package]]
@@ -4669,7 +4694,7 @@ dependencies = [
 
 [[package]]
 name = "silver-client"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -4713,7 +4738,7 @@ dependencies = [
 
 [[package]]
 name = "silver-protocol"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "base64 0.22.1",
  "bs58",
@@ -4735,7 +4760,7 @@ dependencies = [
 
 [[package]]
 name = "silver-relay"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -4765,7 +4790,7 @@ dependencies = [
 
 [[package]]
 name = "silver-tui"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -4778,6 +4803,7 @@ dependencies = [
  "ratatui",
  "rlimit",
  "rpassword",
+ "secmem-proc",
  "silver-client",
  "silver-protocol",
  "tauri-winrt-notification",

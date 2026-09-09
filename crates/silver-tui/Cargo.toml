@@ -45,3 +45,8 @@ zbus = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 tauri-winrt-notification = { workspace = true }
+# The restricted process DACL that keeps another process of the same user
+# from reading this one's memory (docs/THREAT_MODEL.md, "Stranger with
+# code on your computer"). Used for that one call; the `windows` crate it
+# links is the version already in the tree.
+secmem-proc = "0.3"

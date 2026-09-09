@@ -578,6 +578,46 @@ those who want to pay for it (46).
         reply, `/whois`, the completed `/copy id`, the title click,
         `/block` and `/unblock`.
 
+61. [ ] **What the keys are worth on your own computer** (S). An outside
+        review dumped the memory of an unlocked 0.14.0 client on Windows
+        11 from an ordinary program of the same user, with no elevation,
+        and read the keys. Reading an unlocked client is the documented
+        limit and no software on that machine can close it, but the
+        review showed the limit was not the same on every platform and
+        that two other things were wrong. `harden_process` had no Windows
+        branch at all, so what took root on Linux took nothing on
+        Windows; the process now carries an access list that refuses
+        being opened for reading, which is cost rather than prevention,
+        since the owner of a process may rewrite it. Erasing a device
+        left its wrapping key in the key store, where a copy of the
+        directory taken beforehand still had something to be opened
+        with, and a key made for a change that then failed was left there
+        too; both are removed now. The threat model gains the actor this
+        describes, says what each platform manages and what it leaves,
+        and names swap and hibernation as a path out of memory that
+        full-disk encryption answers and this program does not.
+
+62. [ ] **The identity key somewhere the memory is not** (L, undecided).
+        The one place where taking a key out of the process would buy
+        something. Everything else in memory is the conversation itself,
+        and hiding the key that decrypts it from a program that can read
+        the decrypted text achieves nothing; the identity key is
+        different, because it signs, and a copy taken once impersonates
+        the account for as long as the key stands, outliving the lock and
+        the session. Keeping it in a token or a platform enclave would
+        bound a memory dump to the session it was taken in.
+        What stops this being a small change is the algorithm. The
+        identity key is Ed25519, and it signs bundles, prekeys,
+        revocations, successions and MLS credentials; the Secure Enclave
+        holds P-256 only, TPMs commonly the same, and PIV tokens only in
+        recent firmware, so hardware custody means either a second
+        signature algorithm across the protocol or a hybrid, and every
+        peer has to accept it. That is a protocol change with a design
+        note in front of it, not a hardening pass. Worth doing only if
+        the answer to "a key stolen once, for good" is judged to be worth
+        that, and the revocation certificate and `/rotate` are the cheap
+        answer standing in the meantime.
+
 ## Continuous
 
 - [ ] Every new parser gets a fuzz target; the terminal matrix, the
