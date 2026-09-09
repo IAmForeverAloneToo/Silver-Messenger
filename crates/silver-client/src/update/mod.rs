@@ -66,6 +66,13 @@ const MAX_REDIRECTS: usize = 5;
 /// repository root at build time (see `build.rs`). Empty in a checkout
 /// that publishes no key, which makes an update refuse rather than
 /// accept whatever the release host serves.
+///
+/// That last sentence was written before the code did it: until 0.15.0 an
+/// empty key skipped the signature and installed the binary anyway,
+/// saying so in a line printed after the swap. The other two checks are
+/// no substitute, both being answers from the host serving the bytes.
+/// [`download_client`] now refuses before it fetches anything, and
+/// [`verify`] refuses again at the point of use.
 pub const MINISIGN_PUB: &str = env!("SILVER_MINISIGN_PUB");
 
 /// The target this binary was built for, which names its release asset.
@@ -464,11 +471,6 @@ pub struct Downloaded {
     pub path: PathBuf,
     /// Its SHA-256, lower-case hex.
     pub sha256: String,
-    /// Whether the project's signature over `SHA256SUMS` was checked.
-    ///
-    /// False only when this client was built from a checkout with no
-    /// `minisign.pub`, which the caller reports.
-    pub signature_checked: bool,
 }
 
 /// Fetch the client for this platform out of `release`, check it every
@@ -481,11 +483,44 @@ pub async fn download_client(
     options: &ConnectOptions,
     dir: &Path,
 ) -> anyhow::Result<Downloaded> {
+    download_client_with_key(release, options, dir, MINISIGN_PUB).await
+}
+
+/// [`download_client`] against a given signing key rather than the one
+/// compiled in.
+///
+/// Only so the tests can hold a private key and check that a correct
+/// signature is *accepted*: with the project's own key they can check
+/// refusals and nothing else, since minting a signature it would accept
+/// is what the key exists to prevent.
+#[doc(hidden)]
+pub async fn download_client_with_key(
+    release: &Release,
+    options: &ConnectOptions,
+    dir: &Path,
+    key: &str,
+) -> anyhow::Result<Downloaded> {
     let version = release.version();
     if target_triple().is_empty() {
         bail!(
             "this client was built for a platform the releases page does not carry, \
              so it cannot update itself"
+        );
+    }
+    // Before a single byte is fetched. Without the key there is nothing
+    // to check a release against that the release host does not also
+    // serve: the digest on the page and the digest in SHA256SUMS come
+    // from whoever is answering, so both agree with each other for any
+    // binary that host cares to hand out. This used to download, install
+    // and run it, and print a line saying no signature had been checked
+    // -- which is a note in the log of a machine that is already running
+    // someone else's code.
+    if key.is_empty() {
+        bail!(
+            "this client was built from a checkout with no minisign.pub, so it has no key to \
+             check a release against and will not install one; build from a checkout that \
+             publishes the key, or install the new version by hand from {}",
+            release.url
         );
     }
     let name = client_asset_name(version);
@@ -520,13 +555,8 @@ pub async fn download_client(
     }
 
     // From here on a failure must not leave the download lying about.
-    let checked = verify(release, options, asset, &sha256).await;
-    match checked {
-        Ok(signature_checked) => Ok(Downloaded {
-            path,
-            sha256,
-            signature_checked,
-        }),
+    match verify(release, options, asset, &sha256, key).await {
+        Ok(()) => Ok(Downloaded { path, sha256 }),
         Err(e) => {
             let _ = std::fs::remove_file(&path);
             Err(e)
@@ -554,13 +584,16 @@ fn make_runnable(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The three checks that do not involve running anything.
+/// The three checks that do not involve running anything. All three, or
+/// an error: there is no longer a way for this to return having skipped
+/// the signature.
 async fn verify(
     release: &Release,
     options: &ConnectOptions,
     asset: &Asset,
     sha256: &str,
-) -> anyhow::Result<bool> {
+    key: &str,
+) -> anyhow::Result<()> {
     // 1. Against the digest the API gave, which came from another origin.
     match &asset.digest {
         Some(want) if want != sha256 => bail!(
@@ -595,9 +628,12 @@ async fn verify(
         );
     }
 
-    // 3. Against the project's signature over SHA256SUMS.
-    if MINISIGN_PUB.is_empty() {
-        return Ok(false);
+    // 3. Against the project's signature over SHA256SUMS. `download_client`
+    // refuses an empty key before it gets here; this is the same rule at
+    // the place that would otherwise have to be trusted to have applied
+    // it, so that no path through this function ends without a signature.
+    if key.is_empty() {
+        bail!("this client has no signing key compiled in, so it cannot check a release");
     }
     let sig_asset = release.asset("SHA256SUMS.minisig").ok_or_else(|| {
         anyhow::anyhow!(
@@ -608,8 +644,8 @@ async fn verify(
     let sig = get(&sig_asset.url, options, MAX_SUMS, None)
         .await
         .context("fetching SHA256SUMS.minisig")?;
-    verify_minisign(&sums, &sig).context("checking the signature over SHA256SUMS")?;
-    Ok(true)
+    verify_minisign(&sums, &sig, key).context("checking the signature over SHA256SUMS")?;
+    Ok(())
 }
 
 /// The hash `SHA256SUMS` lists for `name`, in either coreutils format
@@ -633,8 +669,8 @@ fn sums_line(sums: &[u8], name: &str) -> Option<String> {
 }
 
 /// Check a minisign signature over `message` against the key compiled in.
-fn verify_minisign(message: &[u8], signature: &[u8]) -> anyhow::Result<()> {
-    let key = minisign_verify::PublicKey::from_base64(MINISIGN_PUB).map_err(|e| {
+fn verify_minisign(message: &[u8], signature: &[u8], key: &str) -> anyhow::Result<()> {
+    let key = minisign_verify::PublicKey::from_base64(key).map_err(|e| {
         anyhow::anyhow!("the signing key compiled into this client is not one: {e}")
     })?;
     let text = std::str::from_utf8(signature).context("the signature is not text")?;
@@ -885,8 +921,10 @@ mod tests {
             "minisign.pub does not parse: {MINISIGN_PUB}"
         );
         // Nothing verifies against it but a real signature.
-        assert!(verify_minisign(b"message", b"not a signature").is_err());
+        assert!(verify_minisign(b"message", b"not a signature", MINISIGN_PUB).is_err());
         let wrong = "untrusted comment: x\n                     RUQxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n                     trusted comment: x\n                     xxxx\n";
-        assert!(verify_minisign(b"message", wrong.as_bytes()).is_err());
+        assert!(verify_minisign(b"message", wrong.as_bytes(), MINISIGN_PUB).is_err());
+        // And an empty key verifies nothing at all, whatever it is given.
+        assert!(verify_minisign(b"message", wrong.as_bytes(), "").is_err());
     }
 }

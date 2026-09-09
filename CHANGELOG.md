@@ -53,6 +53,20 @@ means behaviour or the wire protocol changed in a way worth reading about.
   it has had an invariant test since 0.10.0, and reader mode now has the
   mirror of it, plus the same forgery walked through a real terminal.
 
+- A client built from a checkout with no `minisign.pub` installed
+  whatever the release host served. Both the design note and the
+  constant's own comment had said since 0.12.0 that such a build refuses
+  to update; the code skipped the signature, installed the binary, ran
+  it, and printed a line afterwards saying no signature had been checked
+  -- which is a note in the log of a machine already running someone
+  else's code. The two remaining checks are no substitute: the digest on
+  the releases page and the digest in `SHA256SUMS` are both answers from
+  the host serving the bytes, so they agree with each other for anything
+  that host cares to hand out. It now refuses, before it fetches
+  anything, and again at the point of use so no path through the check
+  can end without a signature. Releases built from this repository are
+  unaffected -- it publishes a key, and those clients were checking the
+  signature all along.
 - The key store could keep a wrapping key that nothing needed. 0.15.0
   already dropped a key made for a change that then failed, but only by
   running the failure path -- and the key is written to the store before

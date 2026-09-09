@@ -638,6 +638,12 @@ those who want to pay for it (46).
         the device, which had the same gap on the other side. And the
         check that decides no longer reads "I cannot tell" as "no": that
         would have deleted the key opening every file in the directory.
+        The fourth is the updater keeping a promise it had made twice in
+        writing and never in code: a build with no `minisign.pub` skipped
+        the signature and installed whatever the release host served. It
+        refuses now, before fetching. The tests gained a signing key of
+        their own, so the accepting half of the check is exercised too --
+        with the project's key they could only ever show refusals.
 
 63. [ ] **The identity key somewhere the memory is not** (L, undecided).
         The one place where taking a key out of the process would buy

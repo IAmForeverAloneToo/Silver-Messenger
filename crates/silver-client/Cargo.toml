@@ -43,6 +43,12 @@ unicode-normalization = { workspace = true }
 keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "async-secret-service", "async-io", "crypto-rust"] }
 
 [dev-dependencies]
+# Both already build as part of this crate's tree (argon2 pulls blake2,
+# openmls pulls ed25519-dalek); the update tests use them to mint a
+# minisign signature, which is Ed25519 over BLAKE2b-512, so that the
+# accepting half of the check is tested and not only the refusals.
+blake2 = "0.11"
+ed25519-dalek = { workspace = true }
 rcgen = { workspace = true }
 axum = { workspace = true }
 axum-server = { workspace = true }
