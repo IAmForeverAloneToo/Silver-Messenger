@@ -578,7 +578,7 @@ those who want to pay for it (46).
         reply, `/whois`, the completed `/copy id`, the title click,
         `/block` and `/unblock`.
 
-61. [ ] **What the keys are worth on your own computer** (S). An outside
+61. [x] **What the keys are worth on your own computer** (S). An outside
         review dumped the memory of an unlocked 0.14.0 client on Windows
         11 from an ordinary program of the same user, with no elevation,
         and read the keys. Reading an unlocked client is the documented
@@ -707,11 +707,17 @@ those who want to pay for it (46).
         buffers out of swap; **L-6**, the uncapped transparency log;
         **L-10**, secrets that serialize as plaintext for anything that
         persists them outside the vault; **L-13**, homoglyph names. Plus
-        two remainders of findings otherwise closed: a non-zero
-        `lock_after_minutes` default, which shrinks the window the review
-        demonstrated live and is a user-visible change worth deciding
-        deliberately, and an enumeration sweep of `data-key-*` entries
-        for keys orphaned by versions before 0.15.0.
+        one remainder of a finding otherwise closed: an
+        enumeration sweep of `data-key-*` entries for keys orphaned by
+        versions before 0.15.0.
+        The review's other remainder, a non-zero `lock_after_minutes`
+        default, is **decided against**: locking after an idle spell is
+        the user's choice, not something to switch on for everybody. It
+        would shorten the window the review demonstrated, and it would
+        also lock people out of a program they left open on purpose. The
+        setting is there, `/lock` is there, and the threat model says
+        what an unlocked client is worth; which of those to use is the
+        person's call.
 
 64. [ ] **The identity key somewhere the memory is not** (L, undecided).
         The one place where taking a key out of the process would buy

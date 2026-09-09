@@ -19,6 +19,12 @@ says so at its head.
 
 ### Security
 
+- The idle lock stays off by default. The review recommended switching it
+  on for passphrase-protected directories, which would shorten the window
+  its live exercise used -- and would also lock people out of a program
+  they left running on purpose. Which of those costs to carry is the
+  user's to choose: `lock_after_minutes` and `/lock` are both there, and
+  the threat model says what an unlocked client is worth.
 - `/devices link` no longer takes a device in on one line. Linking is not
   the copy of some history its name suggests: the identity signs a
   certificate for the other computer, and from then until it is removed
