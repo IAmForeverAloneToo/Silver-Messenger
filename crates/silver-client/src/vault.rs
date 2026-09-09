@@ -13,13 +13,21 @@ use anyhow::{Context, bail};
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
+use hmac::{Hmac, Mac};
 use rand::RngCore;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use silver_protocol::encoding::{b64, b64_array, b64_opt, from_base64, to_base64};
 use zeroize::Zeroizing;
 
 const VAULT_AAD: &[u8] = b"silver-messenger/v1/vault";
+/// Associated data for the naming key, so that it and the data key cannot
+/// be swapped for one another inside the vault.
+const NAMING_AAD: &[u8] = b"silver-messenger/v1/vault/naming";
+/// In front of the id when naming a history file, so that this use of the
+/// naming key stands apart from any other.
+const HISTORY_NAME_DOMAIN: &[u8] = b"silver-messenger/v1/history-name\0";
 pub(crate) const FILE_MAGIC: &[u8; 4] = b"SMV1";
 /// A file that carries the generation it was written at, in the eight
 /// bytes after this. Its own magic rather than a flag inside the first,
@@ -126,6 +134,19 @@ pub struct VaultFile {
     /// something is in `state`, encrypted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state_generation: Option<u64>,
+    /// The key history file names are MACed under (SM-C-25), wrapped
+    /// under the same key-encryption key as the data key.
+    ///
+    /// A key of its own, and kept here rather than derived from the data
+    /// key, because the data key rotates: a passphrase set or dropped
+    /// moves every file onto a fresh one, and a name derived from it
+    /// would rename every conversation on disk each time. It is also not
+    /// in `state`, so that losing that record does not lose the names —
+    /// the files would still decrypt and nobody would know which was
+    /// which. Wrapping it here means a rotation re-wraps it and leaves it
+    /// alone.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "b64_opt")]
+    pub wrapped_naming_key: Option<Vec<u8>>,
 }
 
 /// A file that opened, and the generation it says it was written at.
@@ -136,10 +157,12 @@ pub struct OpenedFile {
     pub plain: Zeroizing<Vec<u8>>,
 }
 
-/// The unlocked data key, and — during a rotation — the one before it.
+/// The unlocked data key, the key history names are MACed under, and —
+/// during a rotation — the data key before it.
 pub struct FileCipher {
     key: Zeroizing<[u8; 32]>,
     previous: Option<Zeroizing<[u8; 32]>>,
+    naming_key: Zeroizing<[u8; 32]>,
 }
 
 impl fmt::Debug for FileCipher {
@@ -155,6 +178,7 @@ impl FileCipher {
         OsRng.fill_bytes(key.as_mut_slice());
         let kek = derive(&kdf, passphrase)?;
         let wrapped_key = seal(&kek, VAULT_AAD, key.as_slice());
+        let naming_key = fresh_naming_key();
         Ok((
             VaultFile {
                 version: 1,
@@ -164,10 +188,12 @@ impl FileCipher {
                 // A fresh directory has no `state` yet; the store writes
                 // one and stamps this on the first write.
                 state_generation: None,
+                wrapped_naming_key: Some(seal(&kek, NAMING_AAD, naming_key.as_slice())),
             },
             Self {
                 key,
                 previous: None,
+                naming_key,
             },
         ))
     }
@@ -189,6 +215,7 @@ impl FileCipher {
         let cipher = Self {
             key,
             previous: None,
+            naming_key: fresh_naming_key(),
         };
         // A fresh directory, so no `state` to point at yet.
         let vault = cipher.wrap_under_kek(kek, Kdf::keystore(), None);
@@ -212,9 +239,25 @@ impl FileCipher {
                 .map_err(|_| anyhow::anyhow!("vault holds a key of the wrong size"))?;
             Ok(Zeroizing::new(key))
         };
+        // A vault written before history names moved has no naming key,
+        // and gets one now: it has no history under a MACed name to
+        // orphan, so a fresh key costs nothing. It reaches the file at
+        // the next write of the vault, which the adoption does.
+        let naming_key = match &vault.wrapped_naming_key {
+            Some(wrapped) => {
+                let key = open(kek, NAMING_AAD, wrapped).ok_or(VaultError::WrongPassphrase)?;
+                let key: [u8; 32] = key
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("vault holds a naming key of the wrong size"))?;
+                Zeroizing::new(key)
+            }
+            None => fresh_naming_key(),
+        };
         Ok(Self {
             key: unwrap_one(&vault.wrapped_key)?,
             previous: vault.previous_key.as_deref().map(unwrap_one).transpose()?,
+            naming_key,
         })
     }
 
@@ -227,6 +270,9 @@ impl FileCipher {
         Self {
             key,
             previous: Some(self.key.clone()),
+            // Unchanged by a rotation, which is the point of keeping it
+            // apart from the data key: the files keep their names.
+            naming_key: self.naming_key.clone(),
         }
     }
 
@@ -236,6 +282,7 @@ impl FileCipher {
         Self {
             key: self.key.clone(),
             previous: None,
+            naming_key: self.naming_key.clone(),
         }
     }
 
@@ -278,7 +325,34 @@ impl FileCipher {
                 .as_ref()
                 .map(|old| seal(kek, VAULT_AAD, old.as_slice())),
             state_generation,
+            wrapped_naming_key: Some(seal(kek, NAMING_AAD, self.naming_key.as_slice())),
         }
+    }
+
+    /// What the history of `id` is filed under.
+    ///
+    /// `history/<user id>.jsonl` named the contact in the file name, so a
+    /// directory listing was the contact and group list and the
+    /// modification times were the activity times, with every file
+    /// encrypted (SM-C-25). A MAC of the id under the naming key says
+    /// nothing to somebody without it, and is the same name every time
+    /// for the client that has it.
+    ///
+    /// What is *not* hidden, and is documented rather than padded: how
+    /// many conversations there are, how big each is, and when each was
+    /// last written. Padding history to hide lengths from somebody who
+    /// already has the directory is a lot of disk for an attacker who, in
+    /// the cases that matter, also has the key.
+    pub fn history_name(&self, id: &str) -> String {
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(self.naming_key.as_slice())
+            .expect("HMAC takes a key of any length");
+        mac.update(HISTORY_NAME_DOMAIN);
+        mac.update(id.as_bytes());
+        mac.finalize()
+            .into_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
     }
 
     pub fn is_encrypted(bytes: &[u8]) -> bool {
@@ -418,6 +492,13 @@ fn file_aad(name: &str, at: Option<u64>) -> Vec<u8> {
             aad
         }
     }
+}
+
+/// A random key for MACing history file names.
+fn fresh_naming_key() -> Zeroizing<[u8; 32]> {
+    let mut key = Zeroizing::new([0u8; 32]);
+    OsRng.fill_bytes(key.as_mut_slice());
+    key
 }
 
 /// Most a stored `Kdf` may ask for. The parameters live outside the AEAD

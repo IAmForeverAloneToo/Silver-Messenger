@@ -48,6 +48,27 @@ nothing else -- and carried by whatever comes after it.
   A file longer than the record says is the ordinary interrupted append
   and is read, for the same reason a whole file one generation ahead is:
   a line that opens where it sits is one somebody encrypted there.
+- A conversation's log is no longer filed under the name of who it is
+  with (SM-C-25). `history/<user id>.jsonl` put the contact in the file
+  name, so a listing of the data directory was the contact and group
+  list and the modification times were the activity times -- with every
+  file in it encrypted. The name is now a MAC of the conversation's id
+  under a key of its own, and `state` says which file is whose, so the
+  expiry sweep and the history export still see every conversation --
+  including one with somebody who is not a contact, which rebuilding the
+  list from `contacts.json` would miss. Existing directories are moved
+  over on the next unlock, a file at a time, old name removed only once
+  the new one is written.
+  The naming key is kept in `vault.json`, wrapped like the data key,
+  rather than derived from it or kept in `state`: derived from the data
+  key it would rename every conversation each time a passphrase was set
+  or dropped, and in `state` a lost record would leave files that still
+  decrypt with nothing to say whose they are.
+  What is still visible, and documented rather than padded: how many
+  conversations there are, how big each is, and when each was last
+  written. A directory with no protection at rest keeps the old names,
+  there being no key to compute anything else with and nothing to
+  protect.
 - `silver --reset-rollback-protection`, for the new failure this
   introduces: `state` and the copy kept beside it both unreadable. The
   directory then unlocks -- refusing to unlock would leave no way to run

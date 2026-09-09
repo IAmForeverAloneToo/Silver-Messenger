@@ -29,6 +29,9 @@ rand = { workspace = true }
 zeroize = { workspace = true }
 chacha20poly1305 = { workspace = true }
 sha2 = { workspace = true }
+# For the name a history file is filed under, which is a MAC of the
+# conversation's id so that a directory listing is not the contact list.
+hmac = { workspace = true }
 uuid = { workspace = true }
 bs58 = { workspace = true }
 argon2 = { workspace = true }

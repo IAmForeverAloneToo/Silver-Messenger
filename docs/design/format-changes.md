@@ -29,8 +29,8 @@ failing.
 **SM-C-25, history file names.** `history/<user id>.jsonl` names the
 contact in the file name, so a directory listing is the contact and group
 list and the modification times are the activity times — with every file
-encrypted. The names become `history/<HMAC of the id under the data
-key>.jsonl`. Line lengths still approximate message lengths and that
+encrypted. The names become `history/<MAC of the id>.jsonl` (§5.4 says
+under which key, which is not the data key). Line lengths still approximate message lengths and that
 stays documented rather than padded: padding history to hide lengths from
 somebody who already has the directory is a lot of disk for an attacker
 who, in the cases that matter, also has the key.
@@ -255,10 +255,19 @@ is not the same set — history outlives a contact who was removed, and
 that is exactly the history a sweeper must still reach.
 
 So `state` carries the index: for each history file, its name and the
-conversation it belongs to. It is written before the file it names, so a
-crash leaves an index entry with no file — which reads as an empty
-conversation and is harmless — rather than a file no sweeper will ever
-look at again.
+conversation it belongs to.
+
+The **key** those names are MACed under does not live there, though —
+it lives in `vault.json`, wrapped under the same key-encryption key as
+the data key. Two reasons, both found by writing it. It cannot be
+derived from the data key, because that key rotates whenever a
+passphrase is set or dropped, and every conversation on disk would be
+renamed each time. And it must not be in `state`, because losing that
+record would then lose the names: the files would still decrypt and
+nobody would know which was whose. In the vault it is re-wrapped by a
+rotation and left alone, and a lost `state` costs the index, which can
+be rebuilt for every conversation whose contact or group is still
+known.
 
 ### 5.5 A `state` file that will not open
 
