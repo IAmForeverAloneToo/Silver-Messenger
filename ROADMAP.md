@@ -496,7 +496,17 @@ those who want to pay for it (46).
 56. [ ] **Stable** (S). Protocol v4 frozen and documented as such, a
         support policy for what a stable release promises and for how
         long, and the first 1.0 release.
-57. [ ] **What the review left for a format change** (L). The four
+57. [ ] **What the review left for a format change** (L). Settled in
+        [docs/design/format-changes.md](docs/design/format-changes.md):
+        the two on-disk changes go together in one release with one
+        migration and need no peer coordination, the two wire changes go
+        in as optional fields for a release before anything requires
+        them, and SM-P-04 is a decision rather than a change — binding
+        the identity key freshly costs v4 the deniability it exists for,
+        so the note puts the two properties side by side and leaves the
+        choice. Its minimum, correcting the threat model, is done: that
+        document said the Diffie–Hellman key only decrypts, and has said
+        since 0.15.0 that from v4 it impersonates too. The four
         findings of the report's section 13.3 that 0.11.0 could not
         take, each with a design note before code: a message's own id
         inside the authenticated body (SM-P-14); rollback protection for

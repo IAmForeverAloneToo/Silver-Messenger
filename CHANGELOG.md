@@ -19,6 +19,16 @@ says so at its head.
 
 ### Security
 
+- The threat model said a compromised long-term Diffie–Hellman key only
+  decrypts, and left impersonation to the identity key. That has been
+  wrong since protocol v4: a v4 message carries no signature at the
+  sealed layer, so what identifies the initiator is their *published*
+  signature over their own Diffie–Hellman key -- a public value -- plus
+  the handshake needing that key's secret. Whoever holds the secret alone
+  can start v4 sessions as its owner. The first review raised this
+  (SM-P-04) and its minimum was to correct the document; done, with the
+  reasoning and the choice it leaves in the new
+  `docs/design/format-changes.md`.
 - The transparency log had no bound on how fast one identity could grow
   it. Every publish whose bundle differs from the last logged one appends
   an entry that is kept for good -- and a fresh signed prekey makes every
