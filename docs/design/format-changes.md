@@ -46,7 +46,11 @@ is what the vault version field is for and what it already does.
 
 **Neither needs the wire to change**, so they need no protocol bump and
 no coordination with peers. They should ship first, on their own, for
-exactly that reason.
+exactly that reason. Section 5 settles how they are built, which this
+section deliberately did not: where a counter that an attacker cannot
+also roll back is supposed to live, what it costs to raise one on every
+message, and how a directory of files named after nothing is still
+enumerable.
 
 ## 2. The two that change what goes on the wire
 
@@ -119,3 +123,145 @@ the documentation is no longer wrong in the meantime.
 
 Nothing above is a reason to delay 1.0 except its own schedule: none of
 these is a break, and the on-disk pair can land without touching a peer.
+
+## 5. How the on-disk pair is built
+
+Section 1 said what SM-C-24 and SM-C-25 become. Writing them turns out to
+need four things settled first, and none of them is obvious enough to
+decide in the code.
+
+### 5.1 What a rollback counter can and cannot catch
+
+The counter has to live somewhere the attacker cannot put back along with
+the file it protects — and everything this program writes is in one
+directory that the attacker, by assumption, can write to. So there is a
+limit here, and it should be stated rather than implied away: **an
+attacker who rolls the whole directory back to a consistent earlier
+state cannot be caught from inside it.** Every file agrees with every
+other, because they did once.
+
+What the counter catches is the *partial* rollback, which is the finding:
+one file put back while the rest moves on. Put `sessions.json` back and
+its counter is behind what the anchor says, so it is refused; put the
+anchor back too and now every *other* file is ahead of it, which is the
+same signal from the other side. Both directions are tampering and both
+are refused. That is a real narrowing — it is the difference between
+"replace one file" and "replay a whole directory from a backup you
+already had" — and it is all a local counter can be.
+
+Two things sit outside it and stay documented rather than closed. Full
+directory replay, above. And deleting the directory, which no counter
+prevents and which is not a rollback: a fresh directory has no anchor to
+disagree with.
+
+### 5.2 Where the counters live: not in `vault.json`
+
+Section 1 said "kept in the vault", and that is nearly right and wrong in
+one important way. `vault.json` is **not encrypted** — it holds the KDF
+parameters and the wrapped data key, both of which have to be readable
+before anything can be decrypted. Putting a per-file counter map there
+would put the *file names* there, and under SM-C-25 those names are what
+we just went to the trouble of making meaningless. Worse, anything that
+mapped a name back to a conversation would hand over the contact list in
+plaintext, which is the leak SM-C-25 exists to close.
+
+So the anchoring is two-level:
+
+* **`state`**, a new encrypted file beside the others, bound to its own
+  name and its own generation like every other file. It holds the
+  generation of every file, and the conversation index (§5.4).
+* **`vault.json`** gains exactly one new number: the generation of
+  `state`. A plaintext integer that says "the state file must be at
+  version N" leaks how many times the directory has been written, which
+  the modification times already say.
+
+Each write is then: write the file, write `state`, write `vault.json`,
+in that order, each atomically and each fsynced with its parent
+directory, as `write_atomic` has done since 0.15.0. **The file goes
+first and the anchor is raised after it**, which is worth spelling out
+because the opposite order is the tempting one and is wrong.
+
+A crash between the two leaves the file one generation ahead of the
+anchor. So *ahead by one* is the interrupted-write case, accepted with a
+line in the log; *behind*, or ahead by more than one, is refused. Raising
+the anchor first would invert that — the crash case would be a file one
+generation behind, which would have to be accepted, and a file one
+generation behind is precisely the old copy the attacker is putting
+back. It would hand away the whole point.
+
+Accepting "ahead by one" costs nothing, because a file at a generation
+the anchor has not reached is one the attacker would have to encrypt,
+and the key is what they do not have. The only way to produce one is to
+have seen the directory at that generation and rolled the anchor *back*
+— and an anchor rolled back leaves every other file ahead of it by more
+than one, which is refused, unless the whole directory went back
+together, which §5.1 has already said is outside what this can see.
+
+### 5.3 What history costs, and why the counter is a line count
+
+`append_history_line` is an append with no fsync today. A generation
+raised per line would make every message a `state` write, a `vault.json`
+write and two fsyncs — for a log that a person adds to at conversational
+speed, that is affordable; for a client collecting five hundred queued
+messages after a week offline, it is five hundred of them.
+
+So the unit is the **write operation, not the line**: a batch of appends
+raises the counter once, by the number of lines. Which means the natural
+counter for a history file is its **line count**, and that makes the
+check exact rather than approximate — a file with fewer lines than the
+anchor says has been truncated, one with more has been added to behind
+the client's back, and the line index in each line's AAD (section 1)
+already refuses a reorder, a drop in the middle, or a duplicate.
+
+### 5.4 Enumerating a directory of meaningless names
+
+`conversations()` reads the history directory and parses each file name
+back into a contact or group id. Under SM-C-25 there is nothing to parse,
+and the two callers both need the *complete* set: `sweep_expired` deletes
+messages whose timer ran out, so a conversation it cannot see is one
+whose disappearing messages never disappear, and `export_history` writes
+what it can find. Rebuilding the list from the contacts and groups files
+is not the same set — history outlives a contact who was removed, and
+that is exactly the history a sweeper must still reach.
+
+So `state` carries the index: for each history file, its name and the
+conversation it belongs to. It is written before the file it names, so a
+crash leaves an index entry with no file — which reads as an empty
+conversation and is harmless — rather than a file no sweeper will ever
+look at again.
+
+### 5.5 A `state` file that will not open
+
+This is the new failure that did not exist before: one small file whose
+loss refuses the whole directory. `write_atomic` plus the fsync of the
+parent makes losing it unlikely, and the previous version is kept as
+`state.prev` so an interrupted write has something to fall back to.
+
+If both are unreadable the client says so and stops, rather than
+quietly carrying on without the protection it claims to have. The way
+out is a documented `--reset-rollback-protection`, which rebuilds
+`state` from what is on disk and says plainly, in the log and to the
+person running it, that whatever happened to the directory before that
+moment is now unprovable. A directory that cannot be opened at all
+would be a worse answer than one that can be opened with its history
+of tampering forfeited, and the choice belongs to the person whose
+messages they are.
+
+### 5.6 The migration
+
+One pass on first unlock of a directory written by an older version,
+resumable and idempotent, in the shape of the data-key rotation the
+vault already does:
+
+1. For each `history/<id>.jsonl`, decrypt each line under the old name,
+   re-encrypt it under the new name with its index in the AAD, and write
+   it to `history/<HMAC>.jsonl` atomically. Record the id in the index.
+2. Remove the old file only once the new one is written and fsynced.
+3. Stamp every file's generation into `state`, then write `vault.json`.
+
+A crash leaves an old-named file whose new-named counterpart may or may
+not exist; on the next unlock, one that exists means step 2 was
+interrupted and the old file is removed, and one that does not means
+step 1 was, and it is done again. The vault version field carries the
+change, so an older client refuses the directory rather than reading half
+of it — which is what that field has always been for.
