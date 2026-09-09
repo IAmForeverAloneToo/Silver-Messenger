@@ -11,12 +11,6 @@ import re
 from harness import *
 
 
-def flat(term):
-    """The screen as one line, with the box borders, the scrollbar and the
-    wrap indents taken out, for a sentence that wraps."""
-    return re.sub(r"[│║█┌┐└┘─\s]+", " ", " ".join(term.sc.display))
-
-
 def main():
     pair = Pair("requests")
     a, b = pair.alice, pair.bob

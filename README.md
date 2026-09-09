@@ -223,11 +223,15 @@ MLS (RFC 9420) with a post-quantum hybrid suite and need a relay on
 One identity can run on several computers. On the new one run `silver
 --link` (or answer yes when a first start asks whether to link this
 computer to an identity you already have): it prints a link and a QR
-code. On the computer you already use, `/devices link <link>` takes it
-in: the new device gets your contacts, your groups and the last thirty
-days of history, and from then on every message reaches both, what you
-send on one shows on the other, and contacts see one person with one id
-and one safety number. `/devices` lists your devices, `/devices remove
+code. On the computer you already use, `/devices link <link>` says what
+that computer would be given — your identity signs a certificate for it,
+so from then until you remove it that computer reads what is sent to you
+and writes in your name — and shows its id to compare against the one it
+printed. `/devices link confirm`, typed rather than pasted, takes it in:
+the new device gets your contacts, your groups and the last thirty days
+of history, and from then on every message reaches both, what you send on
+one shows on the other, and contacts see one person with one id and one
+safety number. `/devices` lists your devices, `/devices remove
 <n>` cuts one off for good (a lost laptop, say), and `/devices leave
 confirm` on a linked computer erases it. Your identity key stays on the
 computer it was made on; a linked device holds keys of its own and a
@@ -281,16 +285,16 @@ message dressed up to look like a saved file elsewhere opens nothing.
 | `/group new <name>`             | Make a group (needs a relay on 0.9.0); its pane opens after the contacts |
 | `/group add <contact>` / `remove <member>` / `leave` | Membership, by an admin; anyone may leave |
 | `/group members` / `info` / `rename <name>` / `admin add\|remove <member>` | List, describe, rename, appoint |
-| `/group invite [copy]` / `link reset` / `join <link>` | Show or copy the group's invite link (and its QR code), void old links, or ask to join by one |
+| `/group invite [copy]` / `link reset` / `join <link>` | Show or copy the group's invite link (and its QR code), void old links, or ask to join by one (says who learns your id, then `/group join confirm`) |
 | `/group rejoin` / `forget`      | Ask the admins to re-add you after a missed change; drop a group you left or were removed from |
 | `/block [n, alias or id]`       | Drop everything from that id from now on: the open chat or request's, or one by number, alias or id |
 | `/unblock <id>`, `/blocked`     | Undo a block (enough of the id will do); list blocked ids    |
 | `/me`                           | Show your own id                                             |
 | `/devices`                      | List your identity's devices: their names, when each was linked, and which one this is |
-| `/devices link <link> [days]`   | Take in a computer that printed a link with `silver --link`, sending it that many days of history (default 30, 0 for none) |
+| `/devices link <link> [days]`   | Say what taking in a computer that printed a link with `silver --link` would grant it, and how much history goes with it (default 30 days, 0 for none); `/devices link confirm` goes ahead |
 | `/devices remove <n>` / `name <n> <name>` / `join` | Revoke a device, rename one, or add your devices to the groups they are not in yet (all on the primary) |
 | `/devices leave confirm`        | On a linked device: ask the primary to revoke it, erase its keys, contacts and history, and exit |
-| `/relay <ws-url>`               | Change the relay (used on next start)                        |
+| `/relay <ws-url>`               | Say what moving to another relay costs; `/relay confirm` writes it (used on next start) |
 | `/lock`                         | Forget the keys until the passphrase is typed again (needs one; `lock_after_minutes` in config.json does it by itself) |
 | `/help`, `/quit`                |                                                              |
 

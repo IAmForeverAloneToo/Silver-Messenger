@@ -19,6 +19,7 @@ import fcntl
 import json
 import os
 import pty
+import re
 import select
 import shutil
 import socket
@@ -289,6 +290,19 @@ CTRL_C, CTRL_Q, CTRL_V = b"\x03", b"\x11", b"\x16"
 F1, PGUP, PGDN = b"\x1bOP", b"\x1b[5~", b"\x1b[6~"
 SHIFT_UP, SHIFT_DOWN, SHIFT_INSERT = b"\x1b[1;2A", b"\x1b[1;2B", b"\x1b[2;2~"
 FOCUS_IN, FOCUS_OUT = b"\x1b[I", b"\x1b[O"
+
+
+def flat(term):
+    """The screen as one line, with the box borders, the scrollbar and the
+    wrap indents taken out, for asserting on a sentence that wraps."""
+    return re.sub(r"[│║█┌┐└┘─\s]+", " ", " ".join(term.sc.display))
+
+
+def wait_flat(term, needle, timeout=15):
+    """Wait for `needle` to appear in [`flat`] of the screen."""
+    return term.wait_for(
+        lambda: needle in flat(term), timeout=timeout, what=repr(needle)
+    )
 
 
 def wait_osc52(t, timeout=5):

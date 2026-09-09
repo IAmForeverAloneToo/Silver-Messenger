@@ -16,10 +16,12 @@ use ratatui::crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use ratatui::layout::Rect;
+use silver_client::files::MAX_ALIAS_CHARS;
 use silver_client::sequence::{self, SequenceCheck};
 use silver_client::{
-    Client, ClientError, ClientEvent, Contact, ContactRequest, Conversation, Delivery, Direction,
-    FileInfo, HeldMessage, HistoryEntry, InviteLink, Progress, Reaction, ReceiptQueue, Store,
+    Client, ClientError, ClientEvent, Contact, ContactRequest, Conversation, Delivery, DeviceLink,
+    Direction, FileInfo, HeldMessage, HistoryEntry, InviteLink, Progress, Reaction, ReceiptQueue,
+    Store,
 };
 use silver_protocol::envelope::{ReceiptKind, capability};
 use silver_protocol::{Content, KeyBundle, Message, UserId, now_ms};
@@ -326,8 +328,11 @@ const MAX_REQUESTS: usize = 50;
 const MAX_HELD_PER_SENDER: usize = 20;
 /// Characters kept of a held message.
 const MAX_HELD_CHARS: usize = 4000;
-/// Characters an alias may have.
-const MAX_ALIAS_CHARS: usize = 40;
+/// How long a command held at its confirmation step waits for the line
+/// that goes ahead with it. A confirmation is an answer to a question
+/// just asked; after this the question is forgotten rather than left
+/// lying around for a later line to answer by accident.
+const CONFIRM_PATIENCE: Duration = Duration::from_secs(120);
 /// Message ids remembered for de-duplication.
 const KNOWN_IDS_CAP: usize = 20_000;
 /// Blob ids of parked group messages already fetched, remembered so that
@@ -340,6 +345,37 @@ const FUTURE_SLACK_MS: u64 = 2 * 60 * 1000;
 /// A peer's claimed send time, kept from placing a message in the future.
 fn claimed_time(sent_at_ms: u64) -> u64 {
     sent_at_ms.min(now_ms().saturating_add(FUTURE_SLACK_MS))
+}
+
+/// A command stopped at its confirmation step.
+///
+/// Three commands take something pasted — a device link, a group link, a
+/// relay URL — and have an effect beyond this computer. The paste guard
+/// ([`App::typed_it_themselves`]) cannot hold those on its own, because
+/// its remedy is "type it out" and nobody types out a link carrying a
+/// user id and a secret; a guard whose only answer is impossible is a
+/// guard people learn to route around. So the first line parses the
+/// argument, checks it, and says what it would do; a short second line
+/// goes ahead, and the guard sits on *that* line, where typing three
+/// words is a fair thing to ask.
+///
+/// One slot rather than one per command: asking for a second thing
+/// forgets the first, so a confirmation always answers the question last
+/// put, never an older one still lying about.
+#[derive(Clone, Debug)]
+enum Pending {
+    /// `/devices link`: the identity is about to sign a certificate for
+    /// another computer.
+    LinkDevice {
+        link: Box<DeviceLink>,
+        name: String,
+        days: u32,
+    },
+    /// `/group join`: a stranger is about to be told this id and asked
+    /// to add it to a group.
+    JoinGroup(Box<silver_client::groups::GroupLink>),
+    /// `/relay`: the account is about to move to another operator.
+    Relay(String),
 }
 
 /// The most recent message ids, for telling a re-delivery from a new
@@ -637,6 +673,13 @@ pub struct App {
     /// [`App::looks_pasted`]).
     line_started: Instant,
     pasted_line: bool,
+    /// A command held at its confirmation step, and when it was held; see
+    /// [`Pending`].
+    pending: Option<(Pending, Instant)>,
+    /// How long `pending` waits: [`CONFIRM_PATIENCE`], except in tests,
+    /// which shorten it rather than sit out two minutes to watch a stale
+    /// confirmation be refused.
+    confirm_patience: Duration,
     /// `/lock` was asked for, or the idle time ran out.
     lock_requested: bool,
     /// `/rotate` handed over to a new identity this session. The data
@@ -861,6 +904,8 @@ impl App {
             last_activity: Instant::now(),
             line_started: Instant::now(),
             pasted_line: false,
+            pending: None,
+            confirm_patience: CONFIRM_PATIENCE,
             lock_requested: false,
             rotated: false,
             next_expiry: None,
@@ -2338,6 +2383,38 @@ impl App {
         false
     }
 
+    /// Hold a command at its confirmation step. The caller has already
+    /// said, in System, what the command would do; this asks for the
+    /// line that goes ahead with it.
+    fn confirm_step(&mut self, pending: Pending, line: &str) {
+        self.system(Level::Warn, format!("Run {line} to go ahead."));
+        self.toast(format!("Type {line} to go ahead."));
+        self.pending = Some((pending, Instant::now()));
+    }
+
+    /// Take the command held at its confirmation step, when the line just
+    /// submitted confirms *that* command, it was held recently enough,
+    /// and it was typed rather than pasted.
+    ///
+    /// `what` names the act for the paste guard ("linking a device");
+    /// `first` is the line that puts the command up for confirmation, for
+    /// somebody who typed the confirmation with nothing waiting.
+    fn confirm(&mut self, what: &str, first: &str, is_it: fn(&Pending) -> bool) -> Option<Pending> {
+        if let Some((_, at)) = &self.pending
+            && at.elapsed() >= self.confirm_patience
+        {
+            self.pending = None;
+        }
+        if !self.pending.as_ref().is_some_and(|(p, _)| is_it(p)) {
+            self.toast(format!("Nothing waiting: run {first} first."));
+            return None;
+        }
+        if !self.typed_it_themselves(what) {
+            return None;
+        }
+        self.pending.take().map(|(pending, _)| pending)
+    }
+
     // --- commands ----------------------------------------------------------
 
     fn run_command(&mut self, command: &str) {
@@ -3080,8 +3157,11 @@ impl App {
 
     fn cmd_alias(&mut self, args: &[&str]) {
         if let Some(group) = self.selected_group() {
-            let alias = args.join(" ");
-            let alias = (!alias.trim().is_empty()).then_some(alias);
+            // `set_alias` filters too, for the copies that arrive from
+            // this identity's other devices; this keeps the two branches
+            // of the command the same shape.
+            let alias = silver_client::files::printable(&args.join(" "), MAX_ALIAS_CHARS);
+            let alias = (!alias.is_empty()).then_some(alias);
             match self.groups.set_alias(&group, alias) {
                 Ok(()) => self.toast(format!("Now shown as {}.", self.group_name(&group))),
                 Err(e) => self.toast(format!("Could not set the alias: {e}")),
@@ -3130,13 +3210,32 @@ impl App {
         );
     }
 
+    /// `/relay <url>`: say what moving would cost, and stop. `/relay
+    /// confirm` writes it.
+    ///
+    /// A URL is pasted, and the move is quiet: it takes effect at the
+    /// next start, so a line slipped into somebody's terminal would show
+    /// its work only once they had already restarted somewhere else.
     fn cmd_relay(&mut self, args: &[&str]) {
+        if args
+            .first()
+            .is_some_and(|a| a.eq_ignore_ascii_case("confirm") || a.eq_ignore_ascii_case("yes"))
+        {
+            if let Some(Pending::Relay(url)) =
+                self.confirm("moving to another relay", "/relay <url>", |p| {
+                    matches!(p, Pending::Relay(_))
+                })
+            {
+                self.relay_now(&url);
+            }
+            return;
+        }
         let Some(url) = args.first() else {
             let current = self.relay_url.clone();
             self.toast(format!("Relay: {current}. Usage: /relay <ws-url>"));
             return;
         };
-        let mut config = self.store.load_config().unwrap_or_default();
+        let config = self.store.load_config().unwrap_or_default();
         if let Some(host) = config.downgrade(url) {
             self.system(
                 Level::Warn,
@@ -3149,7 +3248,26 @@ impl App {
             self.toast("Refused: that relay speaks wss://; see System.");
             return;
         }
-        config.relay_url = Some(url.to_string());
+        if url.trim_end_matches('/') == self.relay_url.trim_end_matches('/') {
+            self.toast("You are on that relay already.");
+            return;
+        }
+        self.system(
+            Level::Warn,
+            "One relay is one network. Moving takes your whole account: you register again there, and until your contacts move too you cannot reach them and they cannot reach you. Anything waiting for you on the relay you are leaving stays on it.",
+        );
+        self.system(Level::Info, format!("  from     {}", self.relay_url));
+        self.system(Level::Info, format!("  to       {url}"));
+        self.confirm_step(Pending::Relay((*url).to_owned()), "/relay confirm");
+    }
+
+    fn relay_now(&mut self, url: &str) {
+        let mut config = self.store.load_config().unwrap_or_default();
+        if let Some(host) = config.downgrade(url) {
+            self.toast(format!("Refused: {host} speaks wss://."));
+            return;
+        }
+        config.relay_url = Some(url.to_owned());
         match self.store.save_config(&config) {
             Ok(()) => self.system(
                 Level::Info,
@@ -4740,6 +4858,13 @@ impl App {
     /// Send a file to the selected contact: upload it, then a message that
     /// says where it is and how to read it.
     fn cmd_send(&mut self, args: &[&str]) {
+        // A path is something a person can type, so here the paste guard
+        // is the whole control and no confirmation step is wanted: one
+        // pasted `/send ~/.ssh/id_ed25519` is the file gone, and the
+        // transfer report arrives too late to be an answer.
+        if !args.is_empty() && !self.typed_it_themselves("sending a file") {
+            return;
+        }
         if let Some(group) = self.selected_group() {
             self.send_group_file(group, args);
             return;
@@ -6202,5 +6327,122 @@ mod tests {
         app.drop_trust_from(&phone);
         assert_eq!(app.contacts[index].bundle, Some(bundle));
         assert!(app.contacts[index].verified);
+    }
+
+    // --- the confirmation step ---------------------------------------------
+    //
+    // `/relay` stands in for the mechanism in these: it is the one of the
+    // three commands whose effect is a local file, so the tests can read
+    // the outcome without a relay to talk to. `/devices link`, whose
+    // grant is the reason the step exists, is covered end to end by
+    // tests/tui/test_devices.py.
+
+    const ELSEWHERE: &str = "ws://elsewhere.example:7777/ws";
+
+    fn relay_in_config(app: &App) -> Option<String> {
+        app.store.load_config().unwrap().relay_url
+    }
+
+    #[tokio::test]
+    async fn moving_relay_says_what_it_costs_and_waits_for_a_second_line() {
+        let (mut app, _dir) = app();
+        app.cmd_relay(&[ELSEWHERE]);
+        assert_ne!(
+            relay_in_config(&app).as_deref(),
+            Some(ELSEWHERE),
+            "the first line changes nothing"
+        );
+        assert!(
+            app.system
+                .iter()
+                .any(|line| line.text.contains("One relay is one network")),
+            "and says what moving would cost"
+        );
+        app.cmd_relay(&["confirm"]);
+        assert_eq!(relay_in_config(&app).as_deref(), Some(ELSEWHERE));
+        assert!(app.pending.is_none(), "the question is answered and gone");
+    }
+
+    #[tokio::test]
+    async fn a_pasted_confirmation_is_refused_but_leaves_the_question_standing() {
+        let (mut app, _dir) = app();
+        app.cmd_relay(&[ELSEWHERE]);
+        app.pasted_line = true;
+        app.cmd_relay(&["confirm"]);
+        assert_ne!(relay_in_config(&app).as_deref(), Some(ELSEWHERE));
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|(t, _)| t.contains("type it out")),
+            "and the remedy is the one the user can act on"
+        );
+        // The remedy has to work: refusing a pasted confirmation must not
+        // throw away what it was confirming, or "type it out" would be
+        // advice to start over.
+        app.pasted_line = false;
+        app.cmd_relay(&["confirm"]);
+        assert_eq!(relay_in_config(&app).as_deref(), Some(ELSEWHERE));
+    }
+
+    #[tokio::test]
+    async fn a_confirmation_with_nothing_waiting_does_nothing() {
+        let (mut app, _dir) = app();
+        let before = relay_in_config(&app);
+        app.cmd_relay(&["confirm"]);
+        assert_eq!(relay_in_config(&app), before);
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|(t, _)| t.contains("Nothing waiting")),
+        );
+    }
+
+    #[tokio::test]
+    async fn a_confirmation_answers_the_question_last_asked() {
+        let (mut app, _dir) = app();
+        app.cmd_relay(&["ws://first.example:7777/ws"]);
+        app.cmd_relay(&[ELSEWHERE]);
+        app.cmd_relay(&["confirm"]);
+        assert_eq!(
+            relay_in_config(&app).as_deref(),
+            Some(ELSEWHERE),
+            "asking a second thing forgets the first"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_confirmation_that_comes_too_late_is_refused() {
+        let (mut app, _dir) = app();
+        app.confirm_patience = Duration::ZERO;
+        app.cmd_relay(&[ELSEWHERE]);
+        app.cmd_relay(&["confirm"]);
+        assert_ne!(relay_in_config(&app).as_deref(), Some(ELSEWHERE));
+        assert!(app.pending.is_none(), "and the stale question is dropped");
+    }
+
+    #[tokio::test]
+    async fn moving_to_the_relay_already_in_use_asks_nothing() {
+        let (mut app, _dir) = app();
+        let here = app.relay_url.clone();
+        app.cmd_relay(&[&here]);
+        assert!(app.pending.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_pasted_send_does_not_put_a_file_on_the_relay() {
+        let (mut app, _dir) = app();
+        let peer = Identity::generate();
+        let mut contact = Contact::new(peer.user_id());
+        contact.bundle = Some(peer.key_bundle());
+        app.contacts.push(contact);
+        app.select_pane(Pane::Thread(peer.user_id()));
+        app.pasted_line = true;
+        app.cmd_send(&["/etc/hostname"]);
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|(t, _)| t.contains("type it out")),
+            "a path is typeable, so the guard is the whole control here"
+        );
     }
 }

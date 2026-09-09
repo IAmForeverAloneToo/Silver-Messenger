@@ -110,7 +110,7 @@ pub const COMMANDS: &[CommandInfo] = &[
         "group",
         &["g"],
         "<what> …",
-        "groups: new <name>, add <contact>, remove <member>, leave, members, invite [copy], join <link>, link reset, admin add|remove <member>, rename <name>, info, rejoin, forget",
+        "groups: new <name>, add <contact>, remove <member>, leave, members, invite [copy], join <link> (then /group join confirm), link reset, admin add|remove <member>, rename <name>, info, rejoin, forget",
     ),
     cmd_taking(
         Arg::Person,
@@ -298,13 +298,13 @@ pub const COMMANDS: &[CommandInfo] = &[
         "devices",
         &["device"],
         "[link <link> [days] | remove <n> | name <n> <name> | join | leave]",
-        "your identity's devices: list them; link one that printed a link with silver --link (with that many days of history, default 30), unlink or rename one, add them to your groups, or unlink this one",
+        "your identity's devices: list them; link one that printed a link with silver --link, which says what the device would be given and needs /devices link confirm; unlink or rename one, add them to your groups, or unlink this one",
     ),
     cmd(
         "relay",
         &[],
         "<ws-url>",
-        "change the relay (takes effect on next start)",
+        "change the relay: says what moving costs, then needs /relay confirm (takes effect on next start)",
     ),
     cmd(
         "revoke",

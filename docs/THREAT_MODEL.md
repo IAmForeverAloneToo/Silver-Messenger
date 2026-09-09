@@ -54,6 +54,9 @@ problem is in [SECURITY.md](../SECURITY.md).
   account as the client, with no elevation and no debugger sent by an
   administrator. Against an unlocked client it reads what the client
   holds.
+- **A line you did not write**: someone who gets a command onto the input
+  line without the user reading it, by way of the clipboard, on a
+  terminal that hands a paste over as keystrokes.
 - **Holder of a compromised key**: the attacker has a user's long-term
   Diffie–Hellman key or identity key.
 - **Future quantum adversary**: someone who records traffic today and
@@ -568,6 +571,46 @@ full-disk encryption is what answers this one. And an attacker who can
 write where the client is read from replaces the program itself, against
 which a signature on a release is worth only as much as the check the
 person makes before running it.
+
+### A line you did not write
+
+Not on your computer at all: someone who gets a command onto your input
+line without your reading it. The clipboard is the way in — a web page
+whose copy button hands over more than it showed, a "paste this to fix
+the error" in a support chat, a clipboard-history tool with an entry from
+somewhere else — and it works because a terminal without bracketed paste
+(the Linux console, older Windows consoles, some multiplexer setups)
+delivers a paste as ordinary keystrokes, so a carriage return inside it
+submits the line and starts the next one.
+
+Two controls answer this, and which one applies is a judgement about the
+command's argument rather than about its blast radius.
+
+Where the argument is something a person can type — a file path — the
+paste guard is the whole answer. The client measures how fast the line
+arrived: a paste is microseconds a character, four milliseconds a
+character is three thousand words a minute, and a line that came in
+faster than anyone types is refused with the remedy of typing it out.
+`/send`, `/revoke`, `/rotate` and `/devices leave` are guarded this way.
+
+Where the argument is itself pasted by design — a device link, a group
+link, a relay URL, all of which carry ids and secrets nobody types — the
+guard alone would be a control that cannot be satisfied, so the command
+is split. The first line parses it, checks it, and says what it would do:
+`/devices link` names the certificate the identity would sign and that
+the device thereafter reads and writes as the account; `/relay` names the
+network being left; `/group join` names who learns your id. Then it
+stops, and a short second line goes ahead — and that line, three words
+long, is the one the guard sits on. The held command is forgotten after
+two minutes and replaced by any later one, so a confirmation always
+answers the question last put.
+
+What this does not cover: a person who reads the sentence and confirms
+anyway, and a terminal where the attacker can drive the keyboard rather
+than the clipboard, which is the *Program running as you* case above.
+`docs/design/consequential-commands.md` records which commands take which
+control and why the list is meant to stay short — a confirmation answered
+by reflex spends the attention the three commands above need.
 
 ### Holder of a compromised long-term Diffie–Hellman key
 

@@ -412,6 +412,11 @@ fn is_invisible(c: char) -> bool {
 /// `text` without control or invisible characters, at most `max_chars`
 /// long: what a peer chose (an alias, a message shown in a notification)
 /// reduced to what a person can see.
+/// Characters a name the user chose — a contact alias, a group alias —
+/// is cut to. Long enough for a name; short enough that one cannot push
+/// anything else off the line it shares.
+pub const MAX_ALIAS_CHARS: usize = 40;
+
 pub fn printable(text: &str, max_chars: usize) -> String {
     text.chars()
         .filter(|c| !c.is_control() && !is_invisible(*c))

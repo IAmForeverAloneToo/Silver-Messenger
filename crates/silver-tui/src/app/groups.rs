@@ -86,7 +86,7 @@ impl App {
     pub fn group_name(&self, group: &GroupId) -> String {
         self.groups
             .get(group)
-            .map(|r| r.display_name().to_owned())
+            .map(|r| r.display_name())
             .unwrap_or_else(|| format!("group {}…", group.short()))
     }
 
@@ -535,7 +535,27 @@ impl App {
         }
     }
 
+    /// `/group join <link>`: say who the link would tell about this
+    /// identity, and stop. `/group join confirm` asks to be let in.
+    ///
+    /// A group link is pasted, so the paste guard alone would only make
+    /// the command unusable. What is worth a second look is the
+    /// disclosure: the id goes to whoever the link names, and to the
+    /// members if they let it in.
     fn group_join(&mut self, args: &[&str]) {
+        if args
+            .first()
+            .is_some_and(|a| a.eq_ignore_ascii_case("confirm") || a.eq_ignore_ascii_case("yes"))
+        {
+            if let Some(Pending::JoinGroup(link)) =
+                self.confirm("joining a group", "/group join <link>", |p| {
+                    matches!(p, Pending::JoinGroup(_))
+                })
+            {
+                self.group_join_now(*link);
+            }
+            return;
+        }
         let Some(text) = args.first() else {
             self.toast("Usage: /group join <link>");
             return;
@@ -562,6 +582,25 @@ impl App {
                 Level::Warn,
                 format!("The link names another relay ({relay}). Relays do not talk to each other, so the admin has to be on yours."),
             );
+        }
+        self.system(
+            Level::Warn,
+            "Asking to join tells the admin your id, whether or not they let you in, and if they do, every member sees it and can write to you.",
+        );
+        self.system(
+            Level::Info,
+            format!("  admin    {} ({})", self.contact_name(&link.via), link.via),
+        );
+        self.confirm_step(Pending::JoinGroup(Box::new(link)), "/group join confirm");
+    }
+
+    fn group_join_now(&mut self, link: GroupLink) {
+        if !self.relay_serves_groups() {
+            return;
+        }
+        if self.groups.get(&link.group).is_some() {
+            self.toast("You are in this group already (or were; /group forget it first).");
+            return;
         }
         let via = link.via;
         let client = self.client.clone();

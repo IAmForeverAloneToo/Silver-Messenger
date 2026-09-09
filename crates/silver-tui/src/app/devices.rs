@@ -23,6 +23,12 @@ const DEVICE_JOIN_ATTEMPTS: u32 = 12;
 /// How long a leaving device waits for the relay to take its word to the
 /// primary before it wipes itself anyway.
 const LEAVE_PATIENCE: Duration = Duration::from_secs(15);
+/// Days of history `/devices link` will send at most: ten years, longer
+/// than this program has existed. Nothing breaks above it — `gather`
+/// saturates and sends everything — but the confirmation line says how
+/// many days the device is being given, and that sentence should read as
+/// a number somebody chose.
+const MAX_HISTORY_DAYS: u32 = 3650;
 
 impl App {
     /// Read the device state, when the client keeps one.
@@ -193,9 +199,29 @@ impl App {
         self.select(0);
     }
 
-    /// `/devices link <link> [days]`: take a device in, with a snapshot of
-    /// the contacts, the groups and the last `days` days of history.
+    /// `/devices link <link> [days]`: say what taking a device in would
+    /// grant it, and stop. `/devices link confirm` goes ahead.
+    ///
+    /// The line is not a copy of some history: `Identity::certify_device`
+    /// signs a certificate with the account key, and from then until the
+    /// device is removed it reads and writes as the account. That is too
+    /// much to hand over on one line whose argument arrives by paste, so
+    /// this half checks everything, prices the grant in the terms the
+    /// person is being asked about, and waits.
     fn devices_link(&mut self, args: &[&str]) {
+        if args
+            .first()
+            .is_some_and(|a| a.eq_ignore_ascii_case("confirm") || a.eq_ignore_ascii_case("yes"))
+        {
+            if let Some(Pending::LinkDevice { link, name, days }) =
+                self.confirm("linking a device", "/devices link <link>", |p| {
+                    matches!(p, Pending::LinkDevice { .. })
+                })
+            {
+                self.devices_link_now(*link, name, days);
+            }
+            return;
+        }
         if self.linked {
             self.toast("Only your primary links devices; run /devices link there.");
             return;
@@ -222,9 +248,14 @@ impl App {
         let days = match args.get(1) {
             None => DEFAULT_HISTORY_DAYS,
             Some(d) => match d.parse::<u32>() {
-                Ok(days) => days,
-                Err(_) => {
-                    self.toast("The second argument is the days of history to send (0 for none).");
+                Ok(days) if days <= MAX_HISTORY_DAYS => days,
+                // Not clamped: the line below is going to say how much
+                // history the device gets, and a number nobody asked for
+                // would make that sentence a lie.
+                _ => {
+                    self.toast(format!(
+                        "The second argument is the days of history to send: 0 for none, up to {MAX_HISTORY_DAYS}."
+                    ));
                     return;
                 }
             },
@@ -253,6 +284,42 @@ impl App {
             .map(|n| silver_client::files::printable(&n, MAX_DEVICE_NAME_BYTES))
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| format!("device {}", self.device_list().len() + 1));
+        let counted = self
+            .snapshot_of(days)
+            .map(|s| (s.contacts.len(), s.groups.len(), s.message_count()));
+        let Some((contacts, groups, messages)) = counted else {
+            return;
+        };
+        self.system(
+            Level::Warn,
+            "Linking a device is not a one-off copy of anything. Your identity signs a certificate for it, and from then until you remove it that device is you: it reads everything sent to you and writes in your name, to your contacts and in your groups.",
+        );
+        self.system(Level::Info, format!("  device   {}", link.device));
+        self.system(Level::Info, format!("  name     {name}"));
+        self.system(
+            Level::Info,
+            format!(
+                "  history  {contacts} contact(s), {groups} group(s), {messages} message(s) of the last {days} day(s)"
+            ),
+        );
+        self.system(
+            Level::Info,
+            "Check that device id against the one the other computer printed; a link you did not get from that screen is somebody else's device.",
+        );
+        self.confirm_step(
+            Pending::LinkDevice {
+                link: Box::new(link),
+                name,
+                days,
+            },
+            "/devices link confirm",
+        );
+        self.select(0);
+    }
+
+    /// The snapshot `/devices link` would send, or a toast saying why it
+    /// could not be gathered.
+    fn snapshot_of(&mut self, days: u32) -> Option<Snapshot> {
         let groups: Vec<SnapshotGroup> = self
             .groups
             .list()
@@ -264,12 +331,41 @@ impl App {
                 expire_after_s: r.expire_after_s,
             })
             .collect();
-        let snapshot = match Snapshot::gather(&self.store, &groups, days, now_ms()) {
-            Ok(snapshot) => snapshot,
+        match Snapshot::gather(&self.store, &groups, days, now_ms()) {
+            Ok(snapshot) => Some(snapshot),
             Err(e) => {
                 self.toast(format!("Could not gather the snapshot: {e}"));
-                return;
+                None
             }
+        }
+    }
+
+    /// `/devices link confirm`: sign the certificate and send the
+    /// snapshot.
+    ///
+    /// The checks the first half ran are run again rather than carried
+    /// over. A couple of minutes passed, and in them a device may have
+    /// been linked, the relay may have gone, and history has certainly
+    /// moved; the line that says what was sent should describe what was
+    /// sent, not what would have been sent earlier.
+    fn devices_link_now(&mut self, link: DeviceLink, name: String, days: u32) {
+        if self.linked {
+            self.toast("Only your primary links devices; run /devices link there.");
+            return;
+        }
+        if !self.client.relay_supports(feature::DEVICES) {
+            self.toast("The relay does not keep devices.");
+            return;
+        }
+        if let Err(e) = self
+            .with_devices(|d| d.can_link(&link.device))
+            .unwrap_or_else(|| Ok(()))
+        {
+            self.toast(format!("Cannot link that device: {e}"));
+            return;
+        }
+        let Some(snapshot) = self.snapshot_of(days) else {
+            return;
         };
         let bytes = if snapshot.is_empty() {
             None

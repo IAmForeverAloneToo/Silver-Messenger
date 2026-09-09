@@ -6,8 +6,46 @@ means behaviour or the wire protocol changed in a way worth reading about.
 
 ## 0.15.0 - 2026-09-09
 
+### Security
+
+- `/devices link` no longer takes a device in on one line. Linking is not
+  the copy of some history its name suggests: the identity signs a
+  certificate for the other computer, and from then until it is removed
+  that computer reads everything sent to the account and writes in its
+  name. The command now says exactly that, along with the device's id in
+  full to compare against the one that computer printed, its name, and
+  the contacts, groups and messages that would go with it -- and then
+  stops. `/devices link confirm` goes ahead. That second line is where
+  the paste guard sits, which is the point: a device link is pasted by
+  design, so a guard on the first line would have had a remedy -- "type
+  it out" -- that nobody can carry out for a line containing a user id
+  and a secret. Refusing a pasted confirmation leaves the question
+  standing, so typing it out really is the answer. The days of history
+  are bounded rather than clamped, so the sentence saying how many days
+  the device is being given names a number somebody chose.
+- `/relay` and `/group join` ask the same way, for the same reason: their
+  arguments are pasted, and their effects reach past this computer.
+  Moving relays says that one relay is one network and what being
+  unreachable to unmoved contacts costs; joining a group says that the
+  admin learns your id whether or not they let you in.
+- `/send <path>` takes the paste guard, its argument being a path a
+  person can type. `/unblock` takes neither, since its argument must be a
+  prefix of an id already on your own blocked list.
+  `docs/design/consequential-commands.md` records which commands ask,
+  which are guarded, which are neither, and why that list is meant to
+  stay short.
+
 ### Fixed
 
+- A group alias was stored exactly as typed while a contact alias was
+  filtered, four lines apart in the same command. It mattered because a
+  group's display name is what the reader-mode compose prompt is built
+  from, and that prompt is written to the terminal without passing
+  through the cell buffer, so an alias carrying an escape sequence
+  reached it intact. Group aliases are now filtered where contact aliases
+  are: on the way in, including the copies that arrive from your own
+  other devices, and on the way out, because a data directory written by
+  an earlier version already holds whatever was typed then.
 - Erasing a device left the key that wrapped its files in the operating
   system's key store. The files went, the key stayed, and a copy of the
   data directory taken before the erase still had something to be opened

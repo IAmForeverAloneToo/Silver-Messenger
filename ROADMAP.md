@@ -597,7 +597,31 @@ those who want to pay for it (46).
         and names swap and hibernation as a path out of memory that
         full-disk encryption answers and this program does not.
 
-62. [ ] **The identity key somewhere the memory is not** (L, undecided).
+62. [ ] **What the second audit found** (M). A second outside review, run
+        adversarially over the whole tree and reconciled across three
+        rounds, found no cryptographic break: every chain built against
+        the protocol failed against a check that was already there. What
+        it did find clusters in the places where a command does more than
+        it looks like, where a promise the documentation makes is kept
+        only on one path, and where the relay's bookkeeping disagrees with
+        itself. The findings and this project's answers are published in
+        `docs/audits/` when the work is done, unedited, as the first
+        audit's were — including the three of the reviewer's claims this
+        project argued down and the two the reviewer argued back.
+        The first piece is done: `/devices link` no longer signs a device
+        certificate on one pasted line. It says what the device would be
+        given — that the identity signs for it and it thereafter reads and
+        writes as the account — and waits for a short second line, which
+        is where the paste guard belongs, because a link is pasted by
+        design and a guard whose remedy is "type it out" cannot be met on
+        one. `/relay` and `/group join` ask the same way; `/send` takes
+        the guard alone, its argument being a path a person can type; and
+        a group alias is filtered on the way in and out, as a contact's
+        always was. `docs/design/consequential-commands.md` records which
+        commands ask, which are guarded, which are neither, and why the
+        list is meant to stay short.
+
+63. [ ] **The identity key somewhere the memory is not** (L, undecided).
         The one place where taking a key out of the process would buy
         something. Everything else in memory is the conversation itself,
         and hiding the key that decrypts it from a program that can read

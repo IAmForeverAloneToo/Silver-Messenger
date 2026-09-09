@@ -404,7 +404,9 @@ and a QR code. `key` is `HMAC-SHA256(invite_key, "silver-messenger/v1/group-invi
 truncated to 16 bytes, so the link does not carry the invite key itself
 and a rotated invite key voids every link.
 
-`/group join <link>`: the joiner looks the admin up (as `/add` does),
+`/group join <link>`, then `/group join confirm` (the first line says who
+learns the joiner's id; see `docs/design/consequential-commands.md`): the
+joiner looks the admin up (as `/add` does),
 generates a key package for the purpose, and sends a `join` body to the
 admin with `join.proof = HMAC-SHA256(key, "silver-messenger/v1/group-join" || group_id || joiner id)`.
 The admin's client verifies the proof against its current invite key,
