@@ -694,7 +694,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let limits = Limits {
         max_messages: args.max_mailbox_messages,
-        max_bytes: args.max_mailbox_mib * 1024 * 1024,
+        max_bytes: args.max_mailbox_mib.saturating_mul(1024 * 1024),
         max_total_bytes: args.mailbox_storage_mib.saturating_mul(1024 * 1024),
     };
     // Before the policy: the transport says which names this relay

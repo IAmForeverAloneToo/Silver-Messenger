@@ -19,6 +19,15 @@ says so at its head.
 
 ### Security
 
+- A mailbox cap of zero meant a mailbox that refused everything.
+  `--max-mailbox-messages 0` gave a relay that answered "mailbox full" to
+  every message for every recipient, because `count >= 0` is true of
+  every mailbox -- silently, with nothing in the log to say why. Zero is
+  no cap for `--mailbox-storage-mib` and `--max-identities`, which
+  document it, and these two now agree. `--max-mailbox-mib` also did a
+  plain multiply to bytes where its neighbour on the next line
+  saturates, so a large enough value wrapped to a small cap; it
+  saturates now, as do the additions it is compared against.
 - `docs/design/updates.md` said the update swap was tested under a kill
   and no such test existed -- a false claim about what is tested, in the
   document about the path that replaces the running binary, found by the
