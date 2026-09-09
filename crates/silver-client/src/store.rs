@@ -996,9 +996,18 @@ impl Store {
             bail!("the data directory is already protected");
         }
         let kdf = Kdf::keystore();
-        let kek = crate::keystore::create(&kdf.keystore_name())?;
-        let (_, cipher) = FileCipher::create_with_kek(&kek);
-        let vault = cipher.wrap_under_kek(&kek, kdf);
+        let name = kdf.keystore_name();
+        let kek = crate::keystore::create(&name)?;
+        let sealed = self.seal_under_kek(&kek, kdf);
+        if sealed.is_err() {
+            self.drop_unused_kek(&name);
+        }
+        sealed
+    }
+
+    fn seal_under_kek(&mut self, kek: &[u8; 32], kdf: Kdf) -> anyhow::Result<()> {
+        let (_, cipher) = FileCipher::create_with_kek(kek);
+        let vault = cipher.wrap_under_kek(kek, kdf);
         let cipher = Arc::new(cipher);
         // The vault first. It holds the only copy of the data key, and a
         // reader takes a plain file as itself, so a crash between the two
@@ -1012,6 +1021,24 @@ impl Store {
             "the data directory is now protected, but not every file could be encrypted; \
              the rest are sealed the next time it is unlocked",
         )
+    }
+
+    /// Drop a key-encryption key made for a change that then failed.
+    ///
+    /// The key store is written before the vault that would make the key
+    /// needed, so a failure in between used to leave a key nobody reads --
+    /// and an entry nobody reads is still an extractable key sitting beside
+    /// a directory somebody may have copied. Kept only when the vault on
+    /// disk names it, which is when the directory does need it.
+    fn drop_unused_kek(&self, name: &str) {
+        let needed = self
+            .read_vault()
+            .ok()
+            .flatten()
+            .is_some_and(|vault| vault.kdf.is_keystore() && vault.kdf.keystore_name() == name);
+        if !needed {
+            let _ = crate::keystore::delete(name);
+        }
     }
 
     /// Protect the directory with `passphrase`, encrypting everything in it.
@@ -1037,7 +1064,14 @@ impl Store {
                 self.rotate_key(&cipher, |c| {
                     c.wrap_under_passphrase(passphrase, kdf.clone())
                 })?;
-                crate::keystore::delete(&old.kdf.keystore_name())?;
+                // The files are under a new key now, so the old one opens
+                // nothing current -- but it still opens a copy of the
+                // directory taken before the change, which is exactly what
+                // a changed passphrase is meant to close.
+                crate::keystore::delete(&old.kdf.keystore_name()).context(
+                    "the passphrase is set and the files are under a new key, but the old key \
+                     could not be taken out of the key store; remove it by hand",
+                )?;
                 Ok(())
             }
             Protection::None => {
@@ -1068,8 +1102,12 @@ impl Store {
             .context("the data directory is locked")?;
         if crate::keystore::available() {
             let kdf = Kdf::keystore();
-            let kek = crate::keystore::create(&kdf.keystore_name())?;
-            self.rotate_key(&cipher, |c| Ok(c.wrap_under_kek(&kek, kdf.clone())))?;
+            let name = kdf.keystore_name();
+            let kek = crate::keystore::create(&name)?;
+            if let Err(e) = self.rotate_key(&cipher, |c| Ok(c.wrap_under_kek(&kek, kdf.clone()))) {
+                self.drop_unused_kek(&name);
+                return Err(e);
+            }
             return Ok(Protection::Keystore);
         }
         self.remove_protection()
@@ -1118,7 +1156,12 @@ impl Store {
         self.recrypt_all(Some(&cipher), None)?;
         fs::remove_file(self.root.join(VAULT_FILE)).context("removing vault.json")?;
         if vault.kdf.is_keystore() {
-            let _ = crate::keystore::delete(&vault.kdf.keystore_name());
+            // As in `set_passphrase_with`: the files are plain now, but the
+            // key still opens a copy taken while they were not.
+            crate::keystore::delete(&vault.kdf.keystore_name()).context(
+                "the files are stored unencrypted now, but the old key could not be taken out \
+                 of the key store; remove it by hand",
+            )?;
         }
         Ok(Protection::None)
     }
@@ -1421,6 +1464,16 @@ impl Store {
     /// belongs to the identity, keeping the settings and the files saved
     /// in `downloads/`: what a device does once it is unlinked.
     pub fn wipe(&self) -> anyhow::Result<()> {
+        // Read before the vault goes: it names the key store entry, and
+        // that key has to go too. A wipe that left it behind left an
+        // extractable key beside a directory somebody may have copied
+        // first, so the copy went on opening long after the erase.
+        let keystore_entry = self
+            .read_vault()
+            .ok()
+            .flatten()
+            .filter(|vault| vault.kdf.is_keystore())
+            .map(|vault| vault.kdf.keystore_name());
         // `silver.log` goes with the rest. It is written only when
         // SILVER_LOG asks for it, it is outside the data key, and at
         // `debug` it names envelope ids, contact ids and the relay: a
@@ -1441,6 +1494,12 @@ impl Store {
                         .with_context(|| format!("removing {}", path.display()))?;
                 }
             }
+        }
+        // Last, so that a failure earlier leaves a directory whose key is
+        // still where its vault says. A key store that cannot be reached
+        // is not worth failing the wipe over: the files are already gone.
+        if let Some(name) = keystore_entry {
+            let _ = crate::keystore::delete(&name);
         }
         Ok(())
     }
@@ -2358,6 +2417,56 @@ mod tests {
             Store::open(dir.path()).unwrap().protection(),
             Protection::None
         );
+    }
+
+    /// A wipe erases the files; the key that wrapped them has to go with
+    /// them. Left behind, it went on opening a copy of the directory taken
+    /// before the wipe -- which is the one thing a wipe promises it will
+    /// not do.
+    #[test]
+    fn a_wipe_takes_the_key_store_key_with_it() {
+        crate::keystore::use_mock_store();
+        let (mut store, dir) = temp_store();
+        store.load_or_create_identity().unwrap();
+        store.protect_with_keystore().unwrap();
+        let name = store.read_vault().unwrap().unwrap().kdf.keystore_name();
+        assert!(crate::keystore::load(&name).unwrap().is_some());
+
+        store.wipe().unwrap();
+        assert!(!dir.path().join(VAULT_FILE).exists());
+        assert!(
+            crate::keystore::load(&name).unwrap().is_none(),
+            "the wrapping key outlived the directory it wrapped"
+        );
+    }
+
+    /// The key store is written before the vault that makes the key
+    /// needed, so a failure in between must not leave a key nobody reads.
+    /// A key the vault does name is left alone.
+    #[test]
+    fn a_key_made_for_a_change_that_failed_is_not_left_behind() {
+        crate::keystore::use_mock_store();
+        let (mut store, dir) = temp_store();
+        store.load_or_create_identity().unwrap();
+
+        // No vault at all: a key made for a directory that never got one.
+        let stray = "data-key-0000000000000000000000000000000f";
+        crate::keystore::create(stray).unwrap();
+        store.drop_unused_kek(stray);
+        assert!(crate::keystore::load(stray).unwrap().is_none());
+
+        // The key the vault names stays, whatever else failed.
+        store.protect_with_keystore().unwrap();
+        let name = store.read_vault().unwrap().unwrap().kdf.keystore_name();
+        store.drop_unused_kek(&name);
+        assert!(crate::keystore::load(&name).unwrap().is_some());
+
+        // A key for some other vault does not survive being looked at.
+        crate::keystore::create(stray).unwrap();
+        store.drop_unused_kek(stray);
+        assert!(crate::keystore::load(stray).unwrap().is_none());
+        assert!(crate::keystore::load(&name).unwrap().is_some());
+        drop(dir);
     }
 
     fn entry(i: u64) -> HistoryEntry {

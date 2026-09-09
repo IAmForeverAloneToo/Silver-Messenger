@@ -408,8 +408,17 @@ files are plain and the System pane says so at start. Received files go to
 `downloads/` inside it; they are ordinary files, not encrypted at rest, so
 other programs can open them, unless `/files encrypt on` keeps them
 encrypted too, in which case `/open` decrypts a private copy for the
-program that opens the file. The client keeps its keys out of core dumps
-and, on Linux, away from debuggers of the same user.
+program that opens the file. The client keeps its keys out of core dumps, and out of reach of another
+program running under your account as far as the platform allows: on
+Linux the process cannot be traced or read, on Windows it carries an
+access list that refuses being opened for reading, and on macOS neither
+is available, so a debugger you started yourself can still attach. None
+of that defends an unlocked client against a program running as you,
+which no software on the same machine can; `/lock` and the idle lock are
+what close it, by taking the client down and asking for the passphrase
+again. `SILVER_NO_PROCESS_HARDENING=1` turns the process hardening off
+if it gets in the way of a debugger or a tool you trust. The threat model
+sets this out under "Program running as you".
 
 ## Deploying a relay
 

@@ -307,8 +307,19 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// Keep the keys in memory out of core dumps and away from other
-/// processes of the same user: no core file, and on Linux no ptrace.
+/// processes of the same user: no core file, on Linux no ptrace, and on
+/// Windows a process nobody may open for reading.
+///
+/// What each platform can manage differs, and the threat model says so
+/// rather than promising one thing everywhere. None of it helps against
+/// a process that is already attached, or against root or an
+/// administrator; it raises the cost of reading the keys out of a
+/// running, unlocked client, which is a documented limit and not a
+/// promise this program can keep.
 fn harden_process() {
+    if std::env::var_os("SILVER_NO_PROCESS_HARDENING").is_some() {
+        return;
+    }
     #[cfg(unix)]
     {
         let _ = rlimit::setrlimit(rlimit::Resource::CORE, 0, 0);
@@ -316,6 +327,19 @@ fn harden_process() {
     #[cfg(target_os = "linux")]
     {
         let _ = nix::sys::prctl::set_dumpable(false);
+    }
+    #[cfg(windows)]
+    {
+        // Windows has no non-dumpable flag: until 0.15.0 an ordinary
+        // process of the same user could open this one with
+        // PROCESS_VM_READ and read the keys straight out of memory, no
+        // debugger and no administrator token needed. The process object
+        // gets a DACL that allows only what a process must leave open --
+        // asking its identity, ending it, waiting on it -- so that call
+        // is turned away. It is cost, not prevention: the owner of a
+        // process may rewrite its DACL, so an attacker who knows to do
+        // that first is back where they were.
+        let _ = secmem_proc::components::set_default_dacl_winapi();
     }
 }
 

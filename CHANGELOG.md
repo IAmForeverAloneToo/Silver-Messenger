@@ -4,6 +4,44 @@ Notable changes to Silver Messenger. Versions follow [semantic
 versioning](https://semver.org); while the major version is 0, a minor bump
 means behaviour or the wire protocol changed in a way worth reading about.
 
+## 0.15.0 - 2026-09-09
+
+### Fixed
+
+- Erasing a device left the key that wrapped its files in the operating
+  system's key store. The files went, the key stayed, and a copy of the
+  data directory taken before the erase still had something to be opened
+  with -- which is the one thing erasing is meant to prevent. A wipe now
+  reads the vault before the files go and takes that key with them. A key
+  made for a change that failed before the vault naming it was written is
+  dropped in the same way, rather than left in the store with nothing
+  reading it; and where a key is taken out at the end of a change, a
+  failure to remove it is now reported rather than passed over, since the
+  key still opens a copy of the directory from before the change.
+
+### Changed
+
+- On Windows the client keeps other programs of the same user out of its
+  memory. `harden_process` disabled core files everywhere and stopped
+  tracing on Linux, and had no Windows branch at all: an ordinary program
+  started under the same account, with no elevation and no debugger,
+  could open the running client and read the keys out of it, which an
+  outside review demonstrated against 0.14.0 on Windows 11. The process
+  object now carries an access list that allows only what a process must
+  leave open -- asking its identity, ending it, waiting on it -- so that
+  call is refused. This is cost rather than prevention: the owner of a
+  process may rewrite its access list, so an attacker who knows to do
+  that first is back where they were, and reading an unlocked client
+  remains a limit no software on the same machine can close. macOS has
+  neither protection and the threat model now says so.
+  `SILVER_NO_PROCESS_HARDENING=1` turns it off where it gets in the way.
+- The threat model gains "Program running as you" as an actor of its own:
+  what such a program reads, what each platform manages against it and
+  what each leaves, that the lock is the boundary that does hold because
+  the client is torn down rather than marked unreadable, and that pages
+  of an unlocked client may reach swap or a hibernation image, which
+  full-disk encryption answers and this program does not.
+
 ## 0.14.0 - 2026-09-08
 
 ### Added

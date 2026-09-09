@@ -50,6 +50,10 @@ problem is in [SECURITY.md](../SECURITY.md).
   without the running program's memory. From 0.9.0 that directory may be
   the primary's, which holds the identity key, or a linked device's,
   which holds a device key and a certificate and no identity key.
+- **Program running as you**: an ordinary program started under the same
+  account as the client, with no elevation and no debugger sent by an
+  administrator. Against an unlocked client it reads what the client
+  holds.
 - **Holder of a compromised key**: the attacker has a user's long-term
   Diffie–Hellman key or identity key.
 - **Future quantum adversary**: someone who records traffic today and
@@ -437,7 +441,13 @@ Changing the passphrase, or moving between it and the key store, moves
 the files onto a fresh data key (0.11.0), so somebody holding an old copy
 of `vault.json` and the passphrase that was in force when they took it
 reads nothing written after the change — which is what changing a
-passphrase is for. Where
+passphrase is for. The key that is moved off is taken out of the key
+store as part of the change, and from 0.15.0 so is the key of a directory
+that is erased and the key of a change that failed before the vault
+naming it was written: until then, erasing a device left its wrapping key
+in the key store, where an old copy of the directory taken before the
+erase still had something to be opened with, and a program of the same
+user could read it. Where
 there is neither (no key store and no passphrase), the files are plain and
 the client says so at start. Plain or not, the data directory and every
 file in it are the owner's alone (0.11.0: the directory 0700, the files
@@ -473,8 +483,10 @@ messages recorded in transit stay closed, since MLS deletes each
 message key after use and the epoch secrets of past epochs after three
 epochs; the key package private halves in the same file let them accept
 an invitation meant for you until those packages are used up or expire. `/lock` and the idle lock drop the
-keys from memory; core dumps are off, and on Linux the process is not
-dumpable or traceable by other processes of the same user. To retire the
+keys from memory, along with the contacts and history that were decrypted
+beside them, since the client is torn down and built again; core dumps
+are off, and a process of the same user is kept from reading this one's
+memory as far as each platform allows ("Program running as you"). To retire the
 identity itself there is a pre-signed revocation certificate (`/revoke`,
 protocol section 10), minted on first run and kept aside so the key can be
 declared dead even after it is lost; contacts that see it stop trusting the
@@ -518,6 +530,44 @@ one takes no text, so this holds by construction rather than by care. The
 unread count stays in the terminal's window title, which does not leave
 the terminal. Design note
 [docs/design/notifications.md](design/notifications.md).
+
+### Program running as you
+
+Not the operating system's owner and not a debugger sent by an
+administrator: an ordinary program, started under the same account as the
+client, of the kind a user runs by accident. Against a client that is
+unlocked it wins, and that is a property of the machine rather than of
+this program: to show a message the client must hold it in memory, and
+memory belonging to your account is in reach of your account. It reads
+the keys, the contacts and the history without needing the passphrase or
+the key store, and the data directory is its to copy in any case. This
+was demonstrated on Windows 11 against 0.14.0 by a program with no
+elevation, which read the keys out of the running client.
+
+What the client does anyway is raise the cost, and it differs by platform
+because what the platforms offer differs:
+
+| Platform | What is done | What it leaves |
+| --- | --- | --- |
+| Linux | No core file, and the process is not dumpable, so a process of the same user may neither trace it nor read `/proc/<pid>/mem` | Root, and anything already attached |
+| Windows (0.15.0) | No core file, and the process object carries a restricted access list, so opening it for reading is refused | An attacker who rewrites that list first, which the owner of a process may do; and an administrator |
+| macOS | No core file | A debugger run by the same user, which macOS allows for a program it started; this is an open gap with no good answer short of signing the program and asking Apple for the hardened runtime |
+
+None of it touches a program that attached before the client started, and
+none of it is prevention. The boundary that does hold is the lock:
+`/lock`, the idle lock and quitting take the whole client down and build
+it again from the passphrase, so the keys, the decrypted contacts and the
+history are gone from memory and not merely marked unreadable. A client
+left unlocked and unattended is the case none of this covers.
+
+Two further paths lead out of memory and are not closed here. Pages of an
+unlocked client may be written to swap or to a hibernation image and
+outlive the process; the client does not pin its pages in memory, and
+pinning the key alone would not cover the messages beside it, so
+full-disk encryption is what answers this one. And an attacker who can
+write where the client is read from replaces the program itself, against
+which a signature on a release is worth only as much as the check the
+person makes before running it.
 
 ### Holder of a compromised long-term Diffie–Hellman key
 
@@ -900,6 +950,11 @@ change that.
 
 ## Out of scope
 
+- Reading the memory of a client that is unlocked and running, by a
+  program of the same user or anything above it. The cost of that is
+  raised as far as each platform allows and the limit is described under
+  "Program running as you"; it is not defended against, and no software
+  on the same machine could.
 - Compromise of the operating system or terminal of a running client.
 - A relay that is itself the target of denial of service.
 - Hiding the fact that someone uses Silver Messenger at all.
