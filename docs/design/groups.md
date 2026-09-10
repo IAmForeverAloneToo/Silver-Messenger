@@ -126,7 +126,11 @@ re-initialisation path to the hybrid suite later; it was not needed.
   by the leaf's signature, so a member learns every other member's sealing
   key from the tree, verified by the identity that owns it, without one
   lookup per member and without the relay in the loop. A member whose
-  sealing key changes has a new identity (succession) and is re-added.
+  sealing key changes refreshes its leaf with a self-update commit,
+  which the other members verify as any Update (same identity, same
+  device, a sealing key present) and take the new key from; until
+  0.18.0 the only way the key changed was a new identity, re-added,
+  and this line said so (`docs/design/dh-rotation.md` section 6).
 * Capabilities in every key package and leaf: protocol version `mls10`,
   the one ciphersuite, extensions `0xF000` and `0xF001`, credential type
   basic, no non-default proposal types.

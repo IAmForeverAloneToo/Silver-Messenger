@@ -136,6 +136,20 @@ compromised Diffie–Hellman key listed only what it decrypts, and has
 listed impersonation since. Whichever of the two above is chosen later,
 the documentation is no longer wrong in the meantime.
 
+**Decided, September 2026: the first.** v4 stays deniable. The
+observation is the defining property of deniable authentication rather
+than a defect in this implementation — the authenticator has to be a
+Diffie–Hellman secret, and a secret that authenticates you impersonates
+you when stolen; Signal's identity key has the same shape. What the
+observation does call for is that the key be *replaceable* without a new
+identity, and that a responder accept only the key an identity currently
+publishes — without which rotation would be hollow, since the old key's
+bundle signature stays valid forever.
+[docs/design/dh-rotation.md](dh-rotation.md) is the design for both:
+`/rekey`, a grace window for what was sealed to the old key, a
+responder-side check against the published key with delivery deferred
+until it is made, and a leaf refresh in every group.
+
 ## 4. Order and versions
 
 1. **The on-disk pair**, in the next minor release. No peer coordination,
