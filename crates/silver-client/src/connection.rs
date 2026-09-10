@@ -1136,7 +1136,7 @@ impl Client {
             self.gossip_head(),
         )
         .with_device(certificate)
-        .as_copy_of(Some(carried_id.clone()))
+        .with_id(carried_id.clone())
         .encode()?;
         // Whether the body carries its own signature at the sealed layer.
         // A protocol-v4 ratchet body does not (it is deniable); every other
@@ -3145,7 +3145,9 @@ struct Received {
     caps: Vec<String>,
     head: Option<silver_protocol::LogHead>,
     device: Option<silver_protocol::DeviceCertificate>,
-    message_id: Option<String>,
+    /// The body's own id, which is the message's (SM-P-14). The envelope
+    /// id is kept for the log line only: it is the relay's to choose.
+    message_id: String,
 }
 
 /// Attribute a plain body and report it (`docs/PROTOCOL.md` section 14):
@@ -3178,7 +3180,10 @@ async fn plain_received(
     } = received;
     let account = match &device {
         Some(certificate) => {
-            if certificate.verify().is_err() || certificate.device != from {
+            // Presented by the device for itself, so both signatures
+            // (section 14.1): a certificate the account minted for a key
+            // whose holder never signed it is not the sender's.
+            if certificate.verify_presented().is_err() || certificate.device != from {
                 warn!(
                     "envelope {envelope_id} carries a device certificate that is not the sender's; dropped"
                 );
@@ -3200,7 +3205,7 @@ async fn plain_received(
         }
         None => from,
     };
-    let id = message_id.unwrap_or(envelope_id);
+    let id = message_id;
     match content {
         Content::Sync(sync) => {
             let ours = setup.devices.as_ref().is_some_and(|d| {

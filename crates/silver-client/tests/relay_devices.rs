@@ -8,14 +8,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
+use silver_client::{Client, ClientEvent, ConnectOptions};
 use silver_protocol::bundle::capability;
 use silver_protocol::transparency::{EntryKind, subject};
 use silver_protocol::wire::{ClientFrame, ErrorCode, ServerFrame, auth_signature_bound, feature};
 use silver_protocol::{
-    Content, DeviceCertificate, Identity, KeyBundle, PrekeySecret, Prekeys, seal,
+    Body, Content, DeviceCertificate, Identity, KeyBundle, PrekeySecret, Prekeys, Sequence, seal,
+    seal_bytes,
 };
 use silver_relay::{Limits, Policy, RelayState, Store};
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
 type Ws =
@@ -145,10 +148,13 @@ async fn linked(url: &str) -> (Ws, Identity, Ws, Identity, DeviceCertificate) {
     let certificate = primary
         .certify_device(&device.user_id(), "laptop", 1)
         .unwrap();
+    // The device presents the certificate with its own signature added
+    // (section 14.1); the primary's list keeps the account's copy.
     assert_eq!(
         publish(
             &mut device_ws,
-            bundle_of(&device, &[capability::DEVICES]).as_device_of(certificate.clone())
+            bundle_of(&device, &[capability::DEVICES])
+                .as_device_of(device.countersign_device(&certificate).unwrap())
         )
         .await,
         ServerFrame::Published
@@ -220,7 +226,12 @@ async fn a_linked_device_is_served_with_its_account() {
     assert_eq!(bundle.prekeys.unwrap().one_time.len(), 1);
     assert_eq!(device_bundles.len(), 1);
     assert_eq!(device_bundles[0].user_id, device.user_id());
-    assert_eq!(device_bundles[0].device_of, Some(certificate.clone()));
+    // The device's bundle carries the certificate as the device presents
+    // it, signed by both; the list above keeps the account's copy.
+    assert_eq!(
+        device_bundles[0].device_of,
+        Some(device.countersign_device(&certificate).unwrap())
+    );
     assert_eq!(
         device_bundles[0].prekeys.as_ref().unwrap().one_time.len(),
         1
@@ -253,7 +264,12 @@ async fn a_linked_device_is_served_with_its_account() {
     else {
         panic!("not a lookup result");
     };
-    assert_eq!(bundle.unwrap().device_of, Some(certificate));
+    // As the device published it: with its own signature, which the
+    // account's list copy (`certificate`) does not carry.
+    assert_eq!(
+        bundle.unwrap().device_of,
+        Some(device.countersign_device(&certificate).unwrap())
+    );
     assert!(device_bundles.is_empty());
 }
 
@@ -265,7 +281,8 @@ async fn a_device_claim_is_checked_on_publish() {
     let certificate = primary
         .certify_device(&device.user_id(), "laptop", 1)
         .unwrap();
-    let claim = || bundle_of(&device, &[capability::DEVICES]).as_device_of(certificate.clone());
+    let presented = device.countersign_device(&certificate).unwrap();
+    let claim = || bundle_of(&device, &[capability::DEVICES]).as_device_of(presented.clone());
     // The account is not on this relay.
     let reply = publish(&mut device_ws, claim()).await;
     assert!(is_error(&reply, ErrorCode::Forbidden), "{reply:?}");
@@ -274,6 +291,13 @@ async fn a_device_claim_is_checked_on_publish() {
     let mut forged = claim();
     forged.device_of.as_mut().unwrap().name = "phone".into();
     let reply = publish(&mut device_ws, forged).await;
+    assert!(is_error(&reply, ErrorCode::BadSignature), "{reply:?}");
+    // So is the certificate as the account minted it, without the
+    // device's own signature (section 14.1, required from 0.17.0): a
+    // device from before 0.16.0 presents exactly this, and is refused
+    // until it updates -- the one older client a relay stops taking.
+    let bare = bundle_of(&device, &[capability::DEVICES]).as_device_of(certificate.clone());
+    let reply = publish(&mut device_ws, bare).await;
     assert!(is_error(&reply, ErrorCode::BadSignature), "{reply:?}");
     // Registered: taken. Revoked: refused.
     let mut primary_ws = connect(&url, &primary).await;
@@ -329,6 +353,84 @@ async fn a_device_claim_is_checked_on_publish() {
     let mut again = open(&url).await;
     let reply = login(&mut again, &device).await;
     assert!(is_error(&reply, ErrorCode::Forbidden), "{reply:?}");
+}
+
+async fn wait_for(
+    rx: &mut mpsc::Receiver<ClientEvent>,
+    what: &str,
+    mut pred: impl FnMut(&ClientEvent) -> bool,
+) -> ClientEvent {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let ev = tokio::time::timeout_at(deadline, rx.recv())
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for {what}"))
+            .unwrap_or_else(|| panic!("client stopped while waiting for {what}"));
+        if pred(&ev) {
+            return ev;
+        }
+    }
+}
+
+/// The recipient's half of the requirement (section 14.1): a body whose
+/// device certificate lacks the device's own signature is dropped, and
+/// the recipient says so. A body is opaque to the relay, so whatever the
+/// relay let through, this is the one check on that path -- and the
+/// account's bare copy is exactly what a device from before 0.16.0
+/// puts in every body it sends.
+#[tokio::test]
+async fn a_body_carrying_the_accounts_bare_certificate_is_dropped() {
+    let (url, _state) = start().await;
+    let (_primary_ws, primary, mut device_ws, device, certificate) = linked(&url).await;
+    let bob = Arc::new(Identity::generate());
+    let (_bob_c, mut bob_ev) =
+        Client::spawn(url.clone(), bob.clone(), ConnectOptions::default()).unwrap();
+    wait_for(&mut bob_ev, "bob connected", |e| {
+        matches!(e, ClientEvent::Connected { .. })
+    })
+    .await;
+    let from_device = |certificate: DeviceCertificate, text: &str| {
+        let body = Body::plain(Content::text(text), 1, Sequence::default())
+            .with_device(Some(certificate))
+            .encode()
+            .unwrap();
+        ClientFrame::Send {
+            envelope: seal_bytes(&device, &bob.key_bundle(), &body).unwrap(),
+        }
+    };
+    // The account's copy: the relay carries it, bob refuses it.
+    assert!(matches!(
+        ask(&mut device_ws, &from_device(certificate.clone(), "bare")).await,
+        ServerFrame::Sent { .. }
+    ));
+    let ClientEvent::Error(said) = wait_for(&mut bob_ev, "bob's refusal", |e| {
+        matches!(e, ClientEvent::Error(_))
+    })
+    .await
+    else {
+        unreachable!("matched above");
+    };
+    assert!(said.contains("does not verify; dropped"), "{said}");
+    // Signed by the device as well, the same body is the account's
+    // message, from that device.
+    let presented = device.countersign_device(&certificate).unwrap();
+    assert!(matches!(
+        ask(&mut device_ws, &from_device(presented, "signed")).await,
+        ServerFrame::Sent { .. }
+    ));
+    let ClientEvent::Message(message) = wait_for(&mut bob_ev, "the signed text", |e| {
+        matches!(e, ClientEvent::Message(_))
+    })
+    .await
+    else {
+        unreachable!("matched above");
+    };
+    assert_eq!(message.from, primary.user_id());
+    assert_eq!(
+        message.device.as_ref().map(|c| c.device),
+        Some(device.user_id())
+    );
+    assert!(matches!(&message.content, Content::Text { body, .. } if body == "signed"));
 }
 
 #[tokio::test]
@@ -397,7 +499,10 @@ async fn revoke_device_cuts_the_device_off() {
     else {
         panic!("not a lookup result");
     };
-    assert_eq!(bundle.unwrap().device_of, Some(certificate.clone()));
+    assert_eq!(
+        bundle.unwrap().device_of,
+        Some(device.countersign_device(&certificate).unwrap())
+    );
     assert_eq!(device_revocations, vec![revocation.clone()]);
     // Logged as a revocation of the device.
     let entries = state.store().log_since(0, 100).unwrap();

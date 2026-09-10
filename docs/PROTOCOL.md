@@ -177,9 +177,11 @@ to a multiple of 160 bytes (clients from 0.6.0). JSON ignores trailing
 whitespace, so a padded body decodes like an unpadded one and vice versa,
 which is what keeps older and newer clients talking. The ciphertext is the
 body plus a fixed 112 bytes, so a relay sees envelope sizes in 160-byte
-steps: a receipt, a short and a medium message are the same size on the
-wire. A ratchet body is padded twice, once as the inner plain body and once
-around it.
+steps: a medium message and a read receipt for one message are the same
+size on the wire, two blocks, and only a text of a dozen characters or
+so is a block smaller. (Until 0.16.0 put the message's id inside every
+body, a receipt fitted in one block too.) A ratchet body is padded twice,
+once as the inner plain body and once around it.
 
 ### 4.1 Plain body (v1)
 
@@ -201,7 +203,8 @@ the sender last verified it, for the recipient to compare with its own
 (section 11); inside the encrypted body, the relay can neither read nor
 alter it. `device` (absent from a primary and from clients before
 0.9.0) is the sender's device certificate when the sender is a linked
-device (section 14), and `id` the id the message goes by.
+device (section 14), and `id` the id the message goes by, required since
+0.17.0.
 
 `id` is the message's own name, sealed inside the body where the AEAD
 covers it. The envelope's `id` is not: it is chosen after the ciphertext
@@ -214,9 +217,12 @@ both places; a recipient takes the body's. The two are equal for a
 message, and *differ by design* for a copy to one of the sender's own
 devices (section 14), where the body names the message being copied and
 the envelope keeps a fresh id of its own, which is what the relay
-de-duplicates on. Clients before this wrote `id` only on those copies;
-a body without one is read under the envelope's id, so that they keep
-working while they are still about. `content.type` is one of `text`, `receipt` (4.4), `file` (4.5),
+de-duplicates on. Clients before 0.16.0 wrote `id` only on those copies,
+and 0.16.0 read a body without one under the envelope's id for that one
+release, so that every client was sending it before anything required
+it. Since 0.17.0 a body without `id` is refused: the only id left to
+read would be the envelope's, and that one is the relay's to choose,
+which is the whole point. `content.type` is one of `text`, `receipt` (4.4), `file` (4.5),
 `revocation` and `succession` (section 10), `sync`, `provision` and
 `device_revocation` (section 14); unknown types are rejected by this
 implementation, which is why a sender uses a kind beyond `text` only
@@ -1859,11 +1865,18 @@ it can name. A device adds this when it accepts the provisioning
 message (14.3) and presents the counter-signed certificate from then
 on, so an account cannot enroll a key its holder never offered. A
 domain of its own, so neither key's signature over these bytes can be
-lifted into the other's place. The field is absent from certificates
-minted before it existed and from clients that do not write it, and
-such a certificate verifies on the account's signature alone; one that
-carries a *wrong* device signature is refused. It becomes required a
-release after every client in use is writing it.
+lifted into the other's place. One that carries a *wrong* device
+signature is refused wherever it appears. Since 0.17.0 the field is
+**required wherever a device presents a certificate as its own**: the
+`device_of` in its bundle, which the relay checks when the bundle is
+published and every client when it looks the device up, and the
+`device` in each body it sends, which the recipient checks; a
+certificate without it is refused there, which is what a device from a
+client older than 0.16.0 presents. It is not required — it cannot be —
+on the account's own copies of the certificate, which the next
+paragraph describes, nor in the MLS leaf, whose encoding never carried
+it (below). 0.16.0 accepted its absence everywhere, so that every client
+was sending it before anything required it.
 
 The account's signed device list below keeps the certificate as the
 account minted it, without this half — the account cannot produce it,

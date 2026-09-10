@@ -159,6 +159,27 @@ impl DeviceCertificate {
         self.device_signature.is_some()
     }
 
+    /// [`verify`](Self::verify), and the device's own signature must be
+    /// there. For a certificate a device *presents* as its own — the
+    /// `device_of` in its bundle, the `device` in a body it sends — which
+    /// from 0.17.0 has to carry both halves (section 14.1).
+    ///
+    /// Not for the account's copies of the same certificate: its signed
+    /// device list, a provisioning message, a `sync`. The account cannot
+    /// produce the device's signature, so those verify with
+    /// [`verify`](Self::verify) alone; and not for the MLS leaf, whose
+    /// encoding never carried it and whose own signature by the device
+    /// key proves the same thing.
+    pub fn verify_presented(&self) -> Result<(), ProtocolError> {
+        self.verify()?;
+        if !self.is_countersigned() {
+            return Err(ProtocolError::Malformed(
+                "the device certificate carries no signature by the device".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// The certificate as bytes, for the MLS leaf extension
     /// ([`crate::group::EXTENSION_DEVICE`]): the signed bytes followed by
     /// the signature.
@@ -629,6 +650,32 @@ mod tests {
         );
         let unnamed = account.certify_device(&device.user_id(), "", 5).unwrap();
         assert!(!serde_json::to_string(&unnamed).unwrap().contains("name"));
+    }
+
+    /// Where a device presents a certificate as its own, both halves are
+    /// required (section 14.1, from 0.17.0); `verify` alone goes on
+    /// serving the account's copies, which cannot carry the second.
+    #[test]
+    fn a_presented_certificate_carries_both_signatures() {
+        let account = Identity::generate();
+        let device = Identity::generate();
+        let minted = account
+            .certify_device(&device.user_id(), "mine", 1)
+            .unwrap();
+        assert!(minted.verify().is_ok(), "the account's copy verifies");
+        let err = minted.verify_presented().unwrap_err();
+        assert!(
+            matches!(&err, ProtocolError::Malformed(m) if m.contains("no signature by the device")),
+            "{err:?}"
+        );
+        let presented = device.countersign_device(&minted).unwrap();
+        presented.verify_presented().unwrap();
+        // A wrong second signature is refused by both, so it cannot be
+        // dressed up for the presented check either.
+        let mut wrong = presented.clone();
+        wrong.device_signature.as_mut().unwrap()[0] ^= 1;
+        assert!(wrong.verify().is_err());
+        assert!(wrong.verify_presented().is_err());
     }
 
     /// The account's signature says the account meant to enroll *a*

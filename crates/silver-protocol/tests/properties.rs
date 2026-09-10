@@ -167,6 +167,11 @@ proptest! {
             &cap_refs,
             head,
         );
+        // Minted by the constructor: from 0.17.0 every plain body has one.
+        let minted = match &body {
+            Body::Plain { id, .. } => id.clone(),
+            Body::Ratchet(_) | Body::Group(_) => unreachable!("built as plain"),
+        };
         match body.encode() {
             Ok(encoded) => {
                 prop_assert_eq!(encoded.len() % PAD_BLOCK, 0);
@@ -185,7 +190,8 @@ proptest! {
                         prop_assert_eq!(c, content);
                         prop_assert_eq!(cs, caps);
                         prop_assert_eq!(h, head);
-                        prop_assert!(device.is_none() && id.is_none());
+                        prop_assert!(device.is_none());
+                        prop_assert_eq!(id, minted);
                     }
                     Body::Ratchet(_) | Body::Group(_) => {
                         prop_assert!(false, "a plain body decoded as another kind")
@@ -766,7 +772,12 @@ proptest! {
                 .find(|c| c.device == laptop.user_id())
                 .unwrap()
                 .clone();
-            let device_bundle = laptop.key_bundle().as_device_of(certificate.clone());
+            // Presented with the device's own signature; the account's copy
+            // alone, which is what the list above carries, is refused.
+            prop_assert!(laptop.key_bundle().as_device_of(certificate.clone()).verify().is_err());
+            let device_bundle = laptop
+                .key_bundle()
+                .as_device_of(laptop.countersign_device(&certificate).unwrap());
             prop_assert!(device_bundle.verify().is_ok());
             prop_assert_eq!(device_bundle.account(), Some(&alice.user_id()));
             prop_assert_ne!(device_bundle.transparency_leaf(), laptop.key_bundle().transparency_leaf());

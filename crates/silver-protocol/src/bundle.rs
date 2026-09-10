@@ -137,7 +137,10 @@ impl KeyBundle {
             )?;
         }
         if let Some(certificate) = &self.device_of {
-            certificate.verify()?;
+            // The device presents this as its own, so both signatures:
+            // the account's that it is enrolled, and its own that it
+            // offered the key (section 14.1; required from 0.17.0).
+            certificate.verify_presented()?;
             if certificate.device != self.user_id {
                 return Err(ProtocolError::Malformed(
                     "the device certificate names another key".into(),
@@ -299,6 +302,39 @@ mod tests {
             .with_caps(&id, vec![bad.to_owned()]);
             assert!(odd.verify().is_err(), "{bad:?} is not a capability name");
         }
+    }
+
+    /// A linked device's bundle presents its certificate as its own, so
+    /// `device_of` needs the device's signature as well as the account's
+    /// (section 14.1, from 0.17.0). The certificate as the account minted
+    /// it -- what a device from before 0.16.0 publishes -- is refused.
+    #[test]
+    fn a_linked_devices_bundle_carries_both_signatures() {
+        let account = Identity::generate();
+        let device = Identity::generate();
+        let minted = account
+            .certify_device(&device.user_id(), "laptop", 1)
+            .unwrap();
+        let bare = device.key_bundle().as_device_of(minted.clone());
+        assert!(
+            matches!(bare.verify(), Err(ProtocolError::Malformed(m)) if m.contains("no signature by the device")),
+            "{:?}",
+            bare.verify()
+        );
+        let presented = device
+            .key_bundle()
+            .as_device_of(device.countersign_device(&minted).unwrap());
+        presented.verify().unwrap();
+        assert_eq!(presented.account(), Some(&account.user_id()));
+        // Still a certificate for this key and nobody else's.
+        let other = Identity::generate();
+        assert!(
+            other
+                .key_bundle()
+                .as_device_of(device.countersign_device(&minted).unwrap())
+                .verify()
+                .is_err()
+        );
     }
 
     #[test]

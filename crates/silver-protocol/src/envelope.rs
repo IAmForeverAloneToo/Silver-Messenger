@@ -389,14 +389,14 @@ struct PlainBody {
     /// primary and from clients before 0.9.0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     device: Option<crate::device::DeviceCertificate>,
-    /// The id the message goes by, when this body is a copy of it sealed
-    /// for another device than the one the message was first sealed for
-    /// (section 14): a message to an account with several devices is one
-    /// message under one id, whatever envelope each copy travels in, so
-    /// every device's receipts name the same id. Absent when the
-    /// envelope's id is the message's.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    id: Option<String>,
+    /// The id the message goes by, sealed here where the AEAD covers it
+    /// (SM-P-14; section 4.1). For a copy sealed for another device than
+    /// the one the message was first sealed for (section 14) it is the id
+    /// of the message being copied, so every device's receipts name the
+    /// same id whatever envelope each copy travels in. Required from
+    /// 0.17.0: a body without one is refused, since the only id left to
+    /// read would be the envelope's, which the relay chooses.
+    id: String,
 }
 
 /// A ratchet body: a plain body encrypted again under a session.
@@ -424,9 +424,10 @@ pub enum Body {
         head: Option<crate::transparency::LogHead>,
         /// The sender's device certificate, when it is a linked device.
         device: Option<Box<crate::device::DeviceCertificate>>,
-        /// The message's id, when this is a copy for another device and
-        /// the envelope's id is not it.
-        id: Option<String>,
+        /// The message's id: its own, or for a copy to another of the
+        /// recipient's devices the id of the message it copies. Never
+        /// the envelope's, which is the relay's to choose.
+        id: String,
     },
     Ratchet(RatchetBody),
     /// One MLS message for one group (v5); see [`crate::group`].
@@ -491,6 +492,10 @@ impl Body {
 
     /// A plain body that advertises capabilities and carries the sender's
     /// last verified transparency log head for the recipient to compare.
+    ///
+    /// The body is given a fresh id ([`new_message_id`]); a sender that
+    /// has one already — the message a copy is of — sets it with
+    /// [`Body::with_id`].
     pub fn plain_with_caps_and_head(
         content: Content,
         sent_at_ms: u64,
@@ -505,7 +510,7 @@ impl Body {
             caps: caps.iter().map(|c| (*c).to_owned()).collect(),
             head,
             device: None,
-            id: None,
+            id: new_message_id(),
         }
     }
 
@@ -518,9 +523,11 @@ impl Body {
         self
     }
 
-    /// The same plain body as a copy of the message `message_id`, for a
-    /// device other than the one the message was first sealed for.
-    pub fn as_copy_of(mut self, message_id: Option<String>) -> Self {
+    /// The same plain body under `message_id`: the id the sender put on
+    /// the envelope too, or, for a copy to a device other than the one
+    /// the message was first sealed for, the id of the message it copies.
+    /// A ratchet or group body is returned unchanged.
+    pub fn with_id(mut self, message_id: String) -> Self {
         if let Self::Plain { id, .. } = &mut self {
             *id = message_id;
         }
@@ -539,9 +546,7 @@ impl Body {
                 device,
                 id,
             } => {
-                if let Some(id) = id
-                    && !is_valid_message_id(id)
-                {
+                if !is_valid_message_id(id) {
                     return Err(ProtocolError::Malformed("message id".into()));
                 }
                 content.check()?;
@@ -575,10 +580,12 @@ impl Body {
         let version: Version = serde_json::from_slice(bytes).map_err(malformed)?;
         match version.v {
             0 | 1 => {
+                // A body without an `id` fails here, in serde, as a missing
+                // field: from 0.17.0 the id is required (SM-P-14), and the
+                // envelope's id is not a fallback -- it is the relay's to
+                // choose, which is the whole finding.
                 let body: PlainBody = serde_json::from_slice(bytes).map_err(malformed)?;
-                if let Some(id) = &body.id
-                    && !is_valid_message_id(id)
-                {
+                if !is_valid_message_id(&body.id) {
                     return Err(ProtocolError::Malformed("message id".into()));
                 }
                 body.content.check()?;
@@ -673,8 +680,16 @@ pub fn seal_with(
     sent_at_ms: u64,
     sequence: Sequence,
 ) -> Result<Envelope, ProtocolError> {
-    let body = Body::plain(content, sent_at_ms, sequence).encode()?;
-    seal_bytes(sender, recipient, &body)
+    // One id, minted first and put in both places (SM-P-14): inside the
+    // body, where the AEAD covers it and a recipient reads it, and on the
+    // envelope, which the relay de-duplicates on.
+    let id = new_message_id();
+    let body = Body::plain(content, sent_at_ms, sequence)
+        .with_id(id.clone())
+        .encode()?;
+    let mut envelope = seal_bytes(sender, recipient, &body)?;
+    envelope.id = id;
+    Ok(envelope)
 }
 
 /// Seal an already encoded [`Body`] for `recipient`, signed by `sender` at
@@ -832,7 +847,9 @@ pub fn open(recipient: &Identity, envelope: &Envelope) -> Result<Message, Protoc
             device,
             id,
         } => Ok(Message {
-            id: id.unwrap_or(opened.id),
+            // The body's id, never the envelope's: that one is the
+            // relay's to choose (SM-P-14).
+            id,
             from: opened.from,
             to: opened.to,
             sent_at_ms,
@@ -990,7 +1007,7 @@ mod tests {
         let id = new_message_id();
         assert!(is_valid_message_id(&id));
         let body = Body::plain(text("on Tuesday"), 1, Sequence::default())
-            .as_copy_of(Some(id.clone()))
+            .with_id(id.clone())
             .encode()
             .unwrap();
         let mut envelope = seal_bytes(&alice, &bundle, &body).unwrap();
@@ -1006,20 +1023,37 @@ mod tests {
         );
     }
 
-    /// The transition the design note asks for: while the field is
-    /// optional, a body from a client that does not send it still opens,
-    /// and the envelope id stands in.
+    /// The second half of the transition the design note asks for: from
+    /// 0.17.0 a body without an id is refused, and the envelope's id does
+    /// not stand in -- it is the relay's to choose, which is the finding.
+    /// The bytes are what a client before 0.16.0 sent.
     #[test]
-    fn a_body_without_an_id_still_opens_under_the_envelopes() {
+    fn a_body_without_an_id_is_refused() {
+        let json = r#"{"sent_at_ms":1,"epoch":0,"seq":0,"content":{"type":"text","body":"hello"}}"#;
+        let mut bytes = json.as_bytes().to_vec();
+        pad(&mut bytes);
+        let err = Body::decode(&bytes)
+            .err()
+            .expect("a body without an id is refused");
+        assert!(
+            matches!(&err, ProtocolError::Malformed(m) if m.contains("id")),
+            "{err:?}"
+        );
+        // Sealed and opened, the same: the envelope's id is not read.
         let alice = Identity::generate();
         let bob = Identity::generate();
-        let bundle = bob.key_bundle();
+        let envelope = seal_bytes(&alice, &bob.key_bundle(), &bytes).unwrap();
+        assert!(open(&bob, &envelope).is_err());
+        // With one, the body's id is the message's, whatever the envelope
+        // says: a relay that renames the envelope renames nothing.
+        let id = new_message_id();
         let body = Body::plain(text("hello"), 1, Sequence::default())
+            .with_id(id.clone())
             .encode()
             .unwrap();
-        let envelope = seal_bytes(&alice, &bundle, &body).unwrap();
-        let message = open(&bob, &envelope).unwrap();
-        assert_eq!(message.id, envelope.id);
+        let mut envelope = seal_bytes(&alice, &bob.key_bundle(), &body).unwrap();
+        envelope.id = "the-relay's-name-for-it".into();
+        assert_eq!(open(&bob, &envelope).unwrap().id, id);
     }
 
     #[test]
@@ -1259,12 +1293,13 @@ mod tests {
     #[test]
     fn plain_body_encoding_is_v1_json_padded_with_spaces() {
         let bytes = Body::plain(text("hi"), 5, Sequence { epoch: 1, seq: 2 })
+            .with_id("0f0e0d0c-0b0a-4908-8706-050403020100".into())
             .encode()
             .unwrap();
         let json = String::from_utf8(bytes.clone()).unwrap();
         assert_eq!(
             json.trim_end(),
-            r#"{"sent_at_ms":5,"epoch":1,"seq":2,"content":{"type":"text","body":"hi"}}"#
+            r#"{"sent_at_ms":5,"epoch":1,"seq":2,"content":{"type":"text","body":"hi"},"id":"0f0e0d0c-0b0a-4908-8706-050403020100"}"#
         );
         assert_eq!(bytes.len(), PAD_BLOCK);
         assert!(matches!(Body::decode(&bytes), Ok(Body::Plain { .. })));
@@ -1281,33 +1316,42 @@ mod tests {
     fn bodies_come_in_size_steps() {
         let alice = Identity::generate();
         let bob = Identity::generate();
-        let size = |s: &str| {
-            seal(&alice, &bob.key_bundle(), text(s), 0)
+        // With the values a message really carries: a 13-digit time and a
+        // random 64-bit epoch. With zeros in their place every body came
+        // out a block smaller than on the wire, and this test went on
+        // saying a receipt fits in one block after 0.16.0 put the
+        // message's id inside every body and it no longer did.
+        let at = 1_700_000_000_000;
+        let sequence = Sequence {
+            epoch: 0x0123_4567_89ab_cdef,
+            seq: 42,
+        };
+        let size = |content: Content| {
+            seal_with(&alice, &bob.key_bundle(), content, at, sequence)
                 .unwrap()
                 .ciphertext
                 .len()
         };
-        // A short and a somewhat longer message are the same size on the
-        // wire; a receipt too.
-        assert_eq!(size("hi"), size("see you at eight, bring the papers"));
-        let receipt = seal(
-            &alice,
-            &bob.key_bundle(),
-            Content::Receipt {
-                kind: ReceiptKind::Read,
-                ids: vec!["0".repeat(36)],
-            },
-            0,
-        )
-        .unwrap();
-        assert_eq!(receipt.ciphertext.len(), size("hi"));
+        // A medium message and a read receipt for one message are the
+        // same size on the wire, two blocks; only a text of a dozen
+        // characters or so fits in one. The id (36 bytes and its framing)
+        // is what moved the receipt up a block: before it a receipt and a
+        // short text were the same size.
+        let short = size(text("hi"));
+        let medium = size(text("see you at eight, bring the papers"));
+        let receipt = size(Content::Receipt {
+            kind: ReceiptKind::Read,
+            ids: vec!["0".repeat(36)],
+        });
+        assert_eq!(medium, short + PAD_BLOCK, "short {short}, medium {medium}");
+        assert_eq!(receipt, medium, "receipt {receipt}, medium {medium}");
         // Every body is a whole number of blocks, plus the envelope's fixed
         // overhead (sender id, signature, tag).
         for n in [1, 100, 200, 1000] {
-            let len = size(&"x".repeat(n));
+            let len = size(text(&"x".repeat(n)));
             assert_eq!((len - 96 - 16) % PAD_BLOCK, 0, "{n} chars gave {len} bytes");
         }
-        assert!(size(&"x".repeat(1000)) > size("hi"));
+        assert!(size(text(&"x".repeat(1000))) > medium);
     }
 
     #[test]

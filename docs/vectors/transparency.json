@@ -185,7 +185,8 @@
             "device": "HKXbhy1hMGH6XtJVNqLTeKnKC76BLADeWhurDyrrVD3p",
             "created_at_ms": 1700000003000,
             "name": "laptop",
-            "signature": "2JdA1z2KLwIcT3Js9XMm8ruwlOmaH1eWe11gTcgbDfks+zEzuLDVgn38cOTBYUDM7A0ZrmS9aWSuD7YIEqfvBA=="
+            "signature": "2JdA1z2KLwIcT3Js9XMm8ruwlOmaH1eWe11gTcgbDfks+zEzuLDVgn38cOTBYUDM7A0ZrmS9aWSuD7YIEqfvBA==",
+            "device_signature": "nt/ChbxALRmGOMyLwZUdWlN2OElYwLrLjAgxlBpnoeJLeY2EqUpGILUVRhE0kem2t8FJ2GPirH2LB/zOdWBaAw=="
           }
         }
       },

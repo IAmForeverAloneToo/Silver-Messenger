@@ -139,9 +139,12 @@ async fn household(url: &str) -> Household {
     )
     .unwrap();
     connected(&mut alice_ev, "alice").await;
+    // As linking leaves it: the account's certificate with the laptop's
+    // own signature, which everything it sends carries and every
+    // recipient requires (section 14.1).
     let linked = Linked {
         account: alice.user_id(),
-        certificate,
+        certificate: laptop.countersign_device(&certificate).unwrap(),
     };
     let (laptop_c, mut laptop_ev) = Client::spawn(
         url.to_owned(),
@@ -545,11 +548,7 @@ async fn sync_is_taken_from_ones_own_devices_only() {
 fn stored(store: &Store, identity: &Identity) -> ConnectOptions {
     ConnectOptions {
         sessions: Some(SessionStore::ephemeral(identity.user_id()).shared()),
-        devices: Some(
-            DeviceState::load(store, identity.user_id())
-                .unwrap()
-                .shared(),
-        ),
+        devices: Some(DeviceState::load(store, identity).unwrap().shared()),
         ..Default::default()
     }
 }

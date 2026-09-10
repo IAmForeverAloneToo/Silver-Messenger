@@ -52,15 +52,26 @@ pub struct DeviceState {
 impl DeviceState {
     /// Load from the data directory: `linked` from `identity.json`, the
     /// list from `devices.json` (missing files mean a primary with no
-    /// devices).
-    pub fn load(store: &Store, me: UserId) -> anyhow::Result<Self> {
-        let linked = store.load_linked()?;
-        if let Some(linked) = &linked {
-            check_linked(linked, &me)?;
+    /// devices). `me` is this device's key.
+    ///
+    /// A device linked before 0.16.0 holds its certificate as the account
+    /// minted it, without its own signature, and from 0.17.0 presents
+    /// both halves (`docs/PROTOCOL.md` section 14.1). The key that signs
+    /// is this one, so a stored certificate that lacks the signature is
+    /// signed here, once, and written back: a device that skipped 0.16.0
+    /// is not stranded by having to.
+    pub fn load(store: &Store, me: &Identity) -> anyhow::Result<Self> {
+        let mut linked = store.load_linked()?;
+        if let Some(linked) = &mut linked {
+            check_linked(linked, &me.user_id())?;
+            if !linked.certificate.is_countersigned() {
+                linked.certificate = me.countersign_device(&linked.certificate)?;
+                store.save_linked(Some(linked))?;
+            }
         }
         Ok(Self {
             store: Some(store.clone()),
-            me,
+            me: me.user_id(),
             linked,
             list: store.load_devices()?,
         })
@@ -506,6 +517,44 @@ mod tests {
             Content::Sync(Sync::Devices { devices, revoked })
                 if devices.len() == 7 && revoked.len() == 1
         ));
+    }
+
+    /// A device linked before 0.16.0 holds the certificate as the account
+    /// minted it, without its own signature. Loaded under 0.17.0 it signs
+    /// the stored copy and writes it back, so what it presents from then
+    /// on carries both halves and it is not stranded by having skipped a
+    /// release (`docs/design/format-changes.md` section 6.3).
+    #[test]
+    fn a_device_linked_before_the_signature_signs_its_stored_certificate_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let alice = Identity::generate();
+        // The device's key is the store's own: `linked` lives in
+        // identity.json beside it.
+        let (laptop, _) = store.load_or_create_identity().unwrap();
+        let minted = certified(&alice, &laptop, "laptop");
+        store
+            .save_linked(Some(&Linked {
+                account: alice.user_id(),
+                certificate: minted.clone(),
+            }))
+            .unwrap();
+
+        let state = DeviceState::load(&store, &laptop).unwrap();
+        let presented = state.certificate().expect("linked");
+        presented.verify_presented().expect("both signatures");
+        assert_eq!(*presented, laptop.countersign_device(&minted).unwrap());
+        assert_eq!(
+            store.load_linked().unwrap().unwrap().certificate,
+            *presented,
+            "written back, so the next start reads the signed copy"
+        );
+        // Loaded again, it is what it was.
+        let again = DeviceState::load(&store, &laptop).unwrap();
+        assert_eq!(again.certificate(), Some(presented));
+        // The key has to be this device's: another identity's store is
+        // refused, as it always was, rather than signed for.
+        assert!(DeviceState::load(&store, &alice).is_err());
     }
 
     #[test]

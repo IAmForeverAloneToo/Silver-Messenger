@@ -1885,6 +1885,11 @@ fn opaque_v4_body() -> Vec<u8> {
     .unwrap()
 }
 
+/// The id a message carries as its own (SM-P-14; required from 0.17.0). A
+/// copy for a second device names the message it copies instead
+/// (`text_copy_for_a_device` in body.json).
+const MESSAGE_ID: &str = "00000000-0000-4000-8000-000000000001";
+
 #[test]
 fn envelope() {
     run(
@@ -1901,6 +1906,7 @@ fn envelope() {
                     recipient: bob(),
                     body: Bytes(
                         Body::plain(text("hello, bob"), 1_700_000_000_000, Sequence::default())
+                            .with_id(MESSAGE_ID.into())
                             .encode()
                             .unwrap(),
                     ),
@@ -1944,8 +1950,9 @@ enum BodyIn {
         head: Option<LogHead>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         device: Option<DeviceCertificate>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        id: Option<String>,
+        /// Required from 0.17.0 (SM-P-14): the message's own id, or for
+        /// a copy to a second device the id of the message it copies.
+        id: String,
     },
     Ratchet(RatchetBody),
     /// Wrapped in a field: a group body has a `kind` of its own.
@@ -1972,7 +1979,7 @@ fn body() {
         caps: caps.into_iter().map(str::to_owned).collect(),
         head,
         device: None,
-        id: None,
+        id: MESSAGE_ID.into(),
     };
     let alice_id = alice().identity();
     let (a, init) = Session::initiate_with_rng(
@@ -2086,8 +2093,8 @@ fn body() {
                     seq: 43,
                     caps: vec![capability::DEVICES.to_owned()],
                     head: None,
-                    device: Some(laptop_certificate()),
-                    id: None,
+                    device: Some(laptop_presented_certificate()),
+                    id: MESSAGE_ID.into(),
                 },
             ),
             (
@@ -2100,7 +2107,7 @@ fn body() {
                     caps: vec![capability::DEVICES.to_owned()],
                     head: None,
                     device: None,
-                    id: Some("0f0e0d0c-0b0a-4908-8706-050403020100".into()),
+                    id: "0f0e0d0c-0b0a-4908-8706-050403020100".into(),
                 },
             ),
             (
@@ -2278,7 +2285,7 @@ fn body() {
                     *head,
                 )
                 .with_device(device.clone())
-                .as_copy_of(id.clone()),
+                .with_id(id.clone()),
                 BodyIn::Ratchet(body) => Body::Ratchet(body.clone()),
                 BodyIn::Group { body } => Body::Group(body.clone()),
             };
@@ -2316,7 +2323,9 @@ fn body() {
                         (c, cs, h, d, i)
                     );
                     if let Some(device) = &device {
-                        device.verify().unwrap();
+                        // A body's certificate is the device's own word,
+                        // so both signatures (section 14.1).
+                        device.verify_presented().unwrap();
                     }
                 }
                 (Body::Ratchet(decoded), BodyIn::Ratchet(body)) => assert_eq!(&decoded, body),
@@ -2659,6 +2668,16 @@ fn laptop_certificate() -> DeviceCertificate {
         .unwrap()
 }
 
+/// The same certificate as the laptop presents it: with its own signature
+/// added (section 14.1), which its bundle's `device_of` and the `device`
+/// in every body it sends carry. The account's list keeps the copy above.
+fn laptop_presented_certificate() -> DeviceCertificate {
+    seeds("alice laptop")
+        .identity()
+        .countersign_device(&laptop_certificate())
+        .unwrap()
+}
+
 fn sha256_with_domain(domain: &[u8], preimage: &[u8]) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(domain);
@@ -2752,7 +2771,7 @@ fn transparency() {
                         seeds("alice laptop")
                             .identity()
                             .key_bundle()
-                            .as_device_of(laptop_certificate()),
+                            .as_device_of(laptop_presented_certificate()),
                     ),
                 },
             ),

@@ -3400,7 +3400,7 @@ mod lifecycle_tests {
             .put_bundle(
                 &alice
                     .key_bundle()
-                    .with_devices(&alice, vec![certificate])
+                    .with_devices(&alice, vec![certificate.clone()])
                     .unwrap(),
             )
             .unwrap();
@@ -3412,12 +3412,14 @@ mod lifecycle_tests {
         // moment that bundle claims alice.
         assert!(!state.is_revoked_device(&phone.user_id()));
         assert_eq!(state.login_refusal(&phone.user_id()), None);
+        // Presented properly, with the phone's own signature, so what
+        // refuses it is the revocation and nothing else.
         let (code, _) = state
             .publish(
                 &phone.user_id(),
                 phone
                     .key_bundle()
-                    .as_device_of(alice.certify_device(&phone.user_id(), "phone", 4).unwrap()),
+                    .as_device_of(phone.countersign_device(&certificate).unwrap()),
                 None,
                 here,
             )
@@ -3449,7 +3451,9 @@ mod lifecycle_tests {
         state
             .publish(
                 &laptop.user_id(),
-                laptop.key_bundle().as_device_of(certificate.clone()),
+                laptop
+                    .key_bundle()
+                    .as_device_of(laptop.countersign_device(&certificate).unwrap()),
                 None,
                 here,
             )
@@ -3521,7 +3525,8 @@ mod lifecycle_tests {
         let certificate = alice
             .certify_device(&laptop.user_id(), "laptop", 1)
             .unwrap();
-        let claim = || laptop.key_bundle().as_device_of(certificate.clone());
+        let presented = laptop.countersign_device(&certificate).unwrap();
+        let claim = || laptop.key_bundle().as_device_of(presented.clone());
         // An account the relay does not know.
         let (code, _) = state
             .publish(&laptop.user_id(), claim(), None, here)
