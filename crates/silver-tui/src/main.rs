@@ -631,7 +631,7 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
                     .shared(),
             ),
             devices: Some(
-                silver_client::DeviceState::load(store, identity.user_id())
+                silver_client::DeviceState::load(store, identity)
                     .context("loading the device list")?
                     .shared(),
             ),

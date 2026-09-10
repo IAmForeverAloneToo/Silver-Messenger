@@ -97,7 +97,9 @@ Both add a field. The transition is the usual one and is why they go
 together: the field is optional for one minor release, during which a
 client sends it and accepts its absence; then required, at which point a
 client that never sent it cannot start a session. Two releases, not one,
-and the second is the one that may not be skipped in an upgrade.
+and the second is the one that may not be skipped in an upgrade. Section
+6 says what the second release requires where, since "required" is not
+the same answer at every site a certificate appears.
 
 ## 3. The one that is a decision, not a change
 
@@ -143,7 +145,9 @@ the documentation is no longer wrong in the meantime.
    client in use is sending them before anything requires them.
 3. **The wire pair as required**, one release later, with the changelog
    saying plainly that a client older than the first of those two cannot
-   start a session after it.
+   start a session after it. Done in 0.17.0; what "required" turned out
+   to mean at each site, and the decision to cut it the same day as
+   0.16.0, are in section 6.
 4. **SM-P-04**, whenever the deniability question is answered, and not
    before.
 
@@ -335,3 +339,87 @@ interrupted and the old file is removed, and one that does not means
 step 1 was, and it is done again. The vault version field carries the
 change, so an older client refuses the directory rather than reading half
 of it — which is what that field has always been for.
+
+## 6. How the wire pair becomes required
+
+Section 2 said the two fields go in optional and become required a
+release later, and section 4 put that release third. Making them
+required turned out to need four things said that neither section says,
+and one decision recorded.
+
+### 6.1 The id: every plain body, no fallback
+
+A plain body carries `id`, full stop. The type carries it as a string
+rather than an option, so a body cannot be built without one; the
+decoder refuses a body that arrives without one as malformed. The
+fallback to the envelope's id goes with that. It was only ever reachable
+for a body from a client older than 0.16.0 — a relay cannot remove the
+id from inside the AEAD — and it is exactly the path that lets a relay
+choose a message's name, so leaving it in "for compatibility" would leave
+the finding open for precisely the messages it could still be used on.
+
+What that costs is plain: a message from a client older than 0.16.0 is
+dropped, and that includes one already queued on the relay before the
+recipient updated. The body's version does not move. A field stopped
+being optional; the shape is the same, and a v2 plain body would make
+every reader dispatch on a version to learn nothing.
+
+### 6.2 The counter-signature: where a device speaks for itself
+
+The counter-signature is required where a device *presents* a
+certificate as its own: the `device_of` in its bundle, which the relay
+checks when the bundle is published and every client checks when it
+looks the device up, and the `device` in each body it sends, which the
+recipient checks. It is not required — it cannot be — on the account's
+own copies of the same certificate: the signed device list, the
+provisioning message, a `sync` of the list. The account has no way to
+produce the device's signature, and section 2 already settled that the
+list keeps the certificate as the account minted it. Nor is it required
+in the MLS leaf encoding, which never carried it: the leaf is signed by
+the device key itself, and a reader refuses a leaf whose certificate
+names any other key, so the leaf already proves what the
+counter-signature proves elsewhere.
+
+So `verify` goes on doing what it did — the account's signature always,
+the device's whenever it is there, so a *wrong* one is refused on every
+path — and a second check, `verify_presented`, adds "and it is there".
+The two call sites that present get the second; everything else keeps
+the first. One check that required it everywhere would have refused the
+account's own list.
+
+### 6.3 A device linked before 0.16.0
+
+Such a device holds, in `identity.json`, the certificate as the account
+minted it, without its own signature — nothing before 0.16.0 wrote one.
+Under this release it would present that certificate and be refused by
+its own relay. It does not need to be: the key that signs is its own. On
+first start it signs the stored certificate and writes it back, and from
+then on presents the signed form. A device that skips 0.16.0 altogether
+is therefore not stranded, and nothing else in the directory migrates.
+
+### 6.4 The relay, and the one promise it stops keeping
+
+The operator's guide says a relay accepts older clients, so a relay is
+upgraded first and its users update at their pace. That stays true for
+every client but one kind: a linked device from before 0.16.0, whose
+bundle carries no counter-signature, is refused when it publishes to a
+relay on this release, and stays unreachable until it updates and
+re-publishes — which 6.3 makes a matter of starting it once. A primary or
+an unlinked client on 0.14.0 registers and is served as before; the id
+is inside the AEAD, which the relay never opens. It is that client's
+peers on this release that drop its messages, not the relay. The upgrade
+guide's note for this version says both halves.
+
+### 6.5 The gap between the two releases
+
+Section 4 put a release between the optional fields and the required
+ones "so every client in use is sending them before anything requires
+them". The length of that gap is a decision, and the decision on record
+is that there is none: 0.16.0 and this release are cut the same day.
+What that costs falls on whoever does not update at all — `silver
+update` takes anyone on 0.12.0 or later straight to this release, which
+sends both fields, so a client that updates never spends time in the
+state the gap was meant to protect. What the gap would have bought is a
+window in which a 0.16.0 client and a 0.14.0 one still talked; with no
+window, they do not. The changelog says so in as many words, which is
+what section 4 required of it.
