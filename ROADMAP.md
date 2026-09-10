@@ -435,6 +435,15 @@ those who want to pay for it (46).
         people would trust instead of checking it, which is the failure
         this program keeps trying not to build. Left open rather than
         dropped: the condition is real and may yet be met.
+        If it is, the shape to build is not a username. It is an
+        unlisted, changeable, disposable handle for first contact — a
+        discovery token somebody hands to a stranger and can retire
+        afterwards, never shown as identity, never searchable, so it
+        does not compete with the safety number for the trust people
+        put in a name. Signal arrived at that shape after years without
+        usernames, for the reasons this item gives; whoever picks the
+        item up should start there, not at the thing it was right to
+        fear.
 
 ## Phase 10: a finished terminal client
 
@@ -540,8 +549,13 @@ those who want to pay for it (46).
         in as optional fields for a release before anything requires
         them, and SM-P-04 is a decision rather than a change — binding
         the identity key freshly costs v4 the deniability it exists for,
-        so the note puts the two properties side by side and leaves the
-        choice. Its minimum, correcting the threat model, is done: that
+        so the note put the two properties side by side. **Decided:**
+        v4 stays deniable, and what the finding calls for instead is
+        `/rekey` — the Diffie–Hellman key replaceable without a new
+        identity, and a responder that accepts only the key an
+        identity currently publishes, designed in
+        [docs/design/dh-rotation.md](docs/design/dh-rotation.md).
+        Its minimum, correcting the threat model, is done: that
         document said the Diffie–Hellman key only decrypts, and has said
         since 0.16.0 that from v4 it impersonates too. The four
         findings of the report's section 13.3 that 0.11.0 could not
@@ -840,6 +854,16 @@ those who want to pay for it (46).
         its own design note, for a benefit that only bites after a
         compromise the revocation certificate already answers. Still
         undecided, and still not a condition of 1.0.
+        One dependency the question has, recorded so the order is not
+        got wrong: this only pays off under a deniable v4 with the
+        Diffie–Hellman key rotating on its own (SM-P-04 as decided,
+        `/rekey`). Then the identity key signs rarely — bundles,
+        revocations, certificates — which is the workload an enclave is
+        good for, and a memory read is worth only as much as the time
+        until the owner rekeys from a key the reader cannot reach. Had
+        handshakes been bound with identity signatures, the hardware key
+        would sign every session start, with a P-256 signature every
+        peer must verify, and the item would cost more for less.
 
 ## Continuous
 
