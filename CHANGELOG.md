@@ -4,6 +4,43 @@ Notable changes to Silver Messenger. Versions follow [semantic
 versioning](https://semver.org); while the major version is 0, a minor bump
 means behaviour or the wire protocol changed in a way worth reading about.
 
+## Unreleased
+
+### Security
+
+- `/rekey` replaces the encryption (Diffie–Hellman) key under the same
+  identity, which settles the second review's SM-P-04 the other way from
+  its recommendation. v4 stays deniable: the finding -- that the X25519
+  secret alone starts v4 sessions as its owner -- is the defining
+  property of deniable authentication rather than a defect, and binding
+  the identity key freshly into the handshake would give up what item 42
+  chose on purpose. What the finding does call for is the key being
+  *replaceable* without a new identity, and a responder that accepts
+  only the key an identity currently publishes, and both are here
+  ([docs/design/dh-rotation.md](docs/design/dh-rotation.md)). A rekey
+  keeps the safety number and needs no restart. Once the relay has the
+  new key the sessions are retired, not forgotten: the next message to
+  each contact starts a fresh handshake under it, which the contact
+  takes as a key change after asking the relay, while whatever they
+  send on the old session before then still reads. It refreshes this
+  identity's entry in every group, and costs each contact a key-change
+  notice and a `/verify`. The old secret is kept 30 days -- the relay's mailbox
+  retention, held equal by a test -- so nothing already sealed to it is
+  lost, then erased.
+- A session a peer starts on a key that is not the one pinned for them
+  is held back until the relay has been asked (through the transparency
+  check) which key the peer publishes now: a legitimate rekey is taken
+  as a key change, a handshake made with a key the peer has since
+  replaced is refused, and one on a key the relay does not know is
+  refused as before. A session on the pinned key, or from a peer with no
+  pin, is delivered at once as it always was; the lookup is spent on the
+  contradiction only. Holding the message back is what keeps a read
+  receipt from going into a session the check is about to refuse.
+- A responder answers a handshake computed against the key it replaced,
+  while that key is held: the handshake's associated data binds the
+  responder's public key, so the wrong one fails at the first tag and
+  the other is tried.
+
 ## 0.17.0 - 2026-09-10
 
 The second of the two releases roadmap item 57 schedules for its wire

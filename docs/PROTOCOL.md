@@ -70,6 +70,14 @@ What a relay stores for a user and serves on lookup:
 * `signature = sign("silver-messenger/v1/key-bundle", dh_public)` (the raw
   32 bytes). This is unchanged from v1 and does not cover `prekeys`, so a v1
   reader verifies a v2 bundle after ignoring the field it does not know.
+* An identity may replace `dh_public` without becoming a new identity
+  (`docs/design/dh-rotation.md`): it publishes a bundle with the new key
+  under a fresh `signature`, and the relay logs the change like any other
+  (section 11). A reader that has the identity pinned treats a different
+  `dh_public` as a **key change** — sessions with that peer are dropped
+  and the person is told — whichever way it learns of it: from a lookup
+  before sending, or from a session the peer started (section 5.4). The
+  identity key is what the safety number is made of, so it does not move.
 * `prekeys.signed.signature = sign("silver-messenger/v2/signed-prekey",
   id (4 BE) || public (32) || created_at_ms (8 BE))`.
 * One-time prekeys are not signed. A relay cannot use a substituted one to
@@ -161,6 +169,14 @@ a WebSocket frame at most 131 072 bytes. The `body` limit is on the bytes
 after padding (section 4), which round up to a multiple of 160, so the
 most a body can carry before padding is 32 640 bytes; an encoded body
 between the two is refused as too large rather than truncated.
+
+A recipient that has replaced its Diffie–Hellman key keeps the old one
+for 30 days — the time a relay holds an undelivered message
+(`DEFAULT_MESSAGE_TTL`) — and opens an envelope under whichever of the
+two the key derivation's binding of the recipient key makes work, so an
+envelope a sender sealed to the old key before seeing the change, or
+that sat in the mailbox, still opens. The old secret is then erased
+(`docs/design/dh-rotation.md` section 5).
 
 ## 4. Body
 
@@ -549,6 +565,35 @@ follow it, while a v4 body refreshes an ML-KEM secret at every ratchet
 step (section 6.1), so it heals against such an attacker within a round
 trip. A v4 body also adds `init.identity_dh_signature` (4.2.1), since its
 sealed layer is unsigned.
+
+### 5.4 Which of the initiator's keys a responder accepts
+
+A handshake carries the initiator's long-term key (`identity_dh`), and
+from v4 a signature over it by the initiator's identity key (4.2.1).
+The signature proves whoever built the handshake holds the identity key
+that signed that Diffie–Hellman key; it does not prove the key is the
+one the identity publishes *now* — a signature over a replaced key stays
+valid forever. So a responder that has the initiator pinned compares:
+
+* `identity_dh` equal to the pinned key: the session is taken at once.
+* `identity_dh` different from the pinned key: the responder looks the
+  initiator up (through the transparency check, section 11) **before**
+  delivering the message that came with the handshake, and takes the
+  session only if the key the relay publishes is the key the handshake
+  claimed — a key change, reported as one. A handshake on any other key
+  is refused: the session is dropped, and the message shown with a
+  warning that it may not be from the person named. If the relay cannot
+  be asked, or its answer fails the transparency check, the pinned key
+  alone decides, as it did before this rule.
+* No pin: the session is taken, and the person is asked whether to
+  answer the stranger, whose key is looked up when they do.
+
+Holding the message back on a contradiction is what keeps a read
+receipt from going into a session the check is about to refuse. A
+responder that has replaced its own key answers a handshake computed
+against the old one under that key while it is held (section 3), since
+the handshake's associated data binds the responder's public key and
+the wrong one fails cleanly at the first tag.
 
 ## 6. Double Ratchet
 

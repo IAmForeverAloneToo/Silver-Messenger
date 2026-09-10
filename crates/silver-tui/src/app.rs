@@ -985,6 +985,9 @@ impl App {
         }
         // Plain copies a previous run left behind (a crash, a kill).
         app.remove_open_copies();
+        // Seed the receive path with the keys pinned for each contact
+        // (`docs/design/dh-rotation.md` section 4.2).
+        app.client.sync_contact_keys(&app.contacts);
         Ok(app)
     }
 
@@ -1031,6 +1034,7 @@ impl App {
                     self.flush_receipts();
                     self.flush_cover();
                     self.maintain_groups();
+                    self.maintain_identity();
                     self.tick_leave();
                     self.sweep_if_due();
                     self.prune_late();
@@ -2494,6 +2498,7 @@ impl App {
             "relay" => self.cmd_relay(&rest),
             "revoke" => self.cmd_revoke(&rest),
             "rotate" => self.cmd_rotate(&rest),
+            "rekey" => self.cmd_rekey(&rest),
             "log" | "keylog" => self.cmd_log(),
             "lock" => self.cmd_lock(),
             "update" => self.cmd_update(),
@@ -3105,17 +3110,27 @@ impl App {
     /// The relay served a different long-term key for a contact than the
     /// one pinned: adopt it, but say so loudly.
     fn note_key_change(&mut self, index: usize, new: KeyBundle) {
+        let user_id = self.contacts[index].user_id;
+        // Sessions were agreed with the old key; they cannot continue.
+        self.client.forget_sessions(&user_id);
+        self.note_key_change_keeping_sessions(index, new);
+    }
+
+    /// The key-change notice without dropping the sessions: for a change
+    /// learned from a session the peer just started with the key they now
+    /// publish, which is a session made with the right key and stays
+    /// (`docs/design/dh-rotation.md` section 4.2). Older sessions with
+    /// the old key were made inactive when that one was established.
+    fn note_key_change_keeping_sessions(&mut self, index: usize, new: KeyBundle) {
         let name = self.contacts[index].display_name();
         let was_verified = self.contacts[index].verified;
-        let user_id = self.contacts[index].user_id;
         self.contacts[index].pin(Some(new));
         self.contacts[index].set_verified(false);
         self.persist_contacts();
-        self.client.forget_sessions(&user_id);
         self.system(
             Level::Warn,
             format!(
-                "KEY CHANGE: {name}'s encryption key is different from the one you had. It is signed by their identity, so either they rotated it or their identity key is compromised. Confirm with them and run /verify before trusting it{}.",
+                "KEY CHANGE: {name}'s encryption key is different from the one you had. It is signed by their identity, so either they replaced it (/rekey, or a reinstall) or their identity key is compromised. Confirm with them and run /verify before trusting it{}.",
                 if was_verified { " (verified mark cleared)" } else { "" }
             ),
         );
@@ -3453,10 +3468,109 @@ impl App {
         self.toast("Rotation announced. Restart to use the new identity.");
     }
 
+    /// Replace the encryption (Diffie–Hellman) key under the same identity
+    /// (`docs/design/dh-rotation.md` section 7). Needs `/rekey confirm`.
+    fn cmd_rekey(&mut self, args: &[&str]) {
+        if self.linked {
+            self.toast("The encryption key is rekeyed on your primary.");
+            return;
+        }
+        if self.rotated {
+            self.system(
+                Level::Warn,
+                "You handed over to a new identity this session. Restart to run as it before rekeying; a key published now would be signed by an identity your contacts have not pinned yet.",
+            );
+            self.toast("Restart first: a rotation is pending.");
+            return;
+        }
+        let confirmed = matches!(
+            args.first().map(|a| a.to_ascii_lowercase()).as_deref(),
+            Some("confirm") | Some("yes")
+        );
+        if !confirmed {
+            self.system(
+                Level::Warn,
+                "This replaces your encryption key and keeps your identity: your safety number does not change, and no restart is needed. Your next message to each contact starts a fresh session under the new key, and they see a KEY CHANGE notice with their verified mark for you cleared, so tell them and /verify again; every group refreshes your entry. Do it if your encryption key may have been read (the threat model says what it is worth); nothing you already received is lost, and the old key goes on opening what was sealed to it for 30 days. Run /rekey confirm to go ahead.",
+            );
+            self.toast("Type /rekey confirm to replace your encryption key.");
+            return;
+        }
+        if !self.typed_it_themselves("replacing your encryption key") {
+            return;
+        }
+        let identity = self.client.identity_arc();
+        identity.rotate_dh(now_ms());
+        // On disk before it is published: a key nobody holds must not be
+        // told to the world.
+        if let Err(e) = self.store.save_identity(&identity) {
+            identity.unrotate_dh();
+            self.toast(format!("Could not save the new key; nothing changed: {e}"));
+            return;
+        }
+        // Once the relay has the new key, the sessions are retired, not
+        // forgotten: the next message to each contact starts a fresh
+        // handshake under the new key, which is how a contact with a live
+        // session learns of the change (it looks nobody up while it has
+        // one), while whatever they send on the old session before then
+        // still reads. Retiring before the relay has the key would hand a
+        // contact a handshake it cannot yet confirm and would refuse
+        // (`docs/design/dh-rotation.md` sections 4.2 and 7). Retired
+        // whether or not the publish went through: a publish that failed
+        // is one the next connection makes on its way in, before it
+        // sends anything queued, so a handshake made under the new key
+        // reaches nobody before the relay has it.
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            let _ = client.republish().await;
+            client.retire_sessions();
+        });
+        let groups = match self.groups.mark_leaves_stale() {
+            Ok(n) => n,
+            Err(e) => {
+                self.system(
+                    Level::Warn,
+                    format!(
+                        "New key saved and published, but the groups could not be marked for a refresh: {e}. Each will refresh its entry on its own schedule."
+                    ),
+                );
+                0
+            }
+        };
+        if groups > 0 {
+            self.maintain_groups_now();
+        }
+        self.system(
+            Level::Info,
+            format!(
+                "Encryption key replaced; your identity and safety number are what they were. Your next message to each contact starts a fresh session under the new key; they see a KEY CHANGE notice and their verified mark for you clears, so tell them, and /verify again. {groups} group{} will refresh your entry. The old key goes on opening what was sealed to it for 30 days, then is erased.",
+                if groups == 1 { "" } else { "s" },
+            ),
+        );
+        self.toast("Encryption key replaced. See System.");
+    }
+
+    /// Forget the previous encryption key once its grace has run out
+    /// (`docs/design/dh-rotation.md` section 5).
+    fn maintain_identity(&mut self) {
+        let identity = self.client.identity_arc();
+        if identity.expire_previous_dh(now_ms())
+            && let Err(e) = self.store.save_identity(&identity)
+        {
+            self.system(
+                Level::Warn,
+                format!("The previous encryption key is past its grace but could not be erased from disk: {e}"),
+            );
+        }
+    }
+
     fn persist_contacts(&mut self) {
         if let Err(e) = self.store.save_contacts(&self.contacts) {
             self.toast(format!("Could not save contacts: {e}"));
         }
+        // The receive path checks a peer-started session's key against the
+        // pin; keep its copy of the pins in step with every change to a
+        // contact's bundle (`docs/design/dh-rotation.md` section 4.2).
+        self.client.sync_contact_keys(&self.contacts);
     }
 
     /// Record what a new session with `peer` is worth against a quantum
@@ -4074,31 +4188,71 @@ impl App {
                 peer,
                 initiated_by_us,
                 identity_dh,
+                published,
             } => {
                 let name = self.contact_name(&peer);
                 // A session they started carries the long-term key their
-                // handshake claimed. Whoever built it holds their identity
-                // key, which is not the same as it being the key they
-                // published: somebody with a copy of the identity key can
-                // sign a fresh one, and nothing else on this path would
-                // have noticed. Against the pinned bundle it shows.
-                let mismatch = identity_dh.is_some_and(|used| {
-                    self.contact_index(&peer)
+                // handshake claimed, and, when the relay could be asked,
+                // the bundle it publishes for them now. Whoever built the
+                // handshake holds their identity key, which is not the
+                // same as it being the key they publish: somebody with a
+                // copy of the identity key can sign a fresh one, and
+                // somebody with a copy of a key they have since replaced
+                // holds a signature that stays valid. The rule is the
+                // key they publish; the pin decides only what could not
+                // be checked (`docs/design/dh-rotation.md` section 4.2).
+                if let Some(used) = identity_dh {
+                    let index = self.contact_index(&peer);
+                    let pinned = index
                         .and_then(|i| self.contacts[i].bundle.as_ref())
-                        .is_some_and(|pinned| pinned.dh_public != used)
-                });
-                if mismatch {
-                    // Nothing is replied into it: the next message to them
-                    // starts a session against the key they published.
-                    self.client.forget_sessions(&peer);
-                    self.system(
-                        Level::Warn,
-                        format!(
-                            "A message from {name} started a session with a long-term key that is not the one pinned for them. Somebody holding their identity key can do that, and the message may not be from {name}; the session has been dropped, so nothing you send goes into it. Compare safety numbers with {name} over another channel before trusting the message, and /remove and re-add them if their key really did change."
-                        ),
-                    );
-                    self.toast(format!("{name}'s key does not match the pin; see System."));
-                    return;
+                        .map(|b| b.dh_public);
+                    match published {
+                        Some(now) if now.dh_public != used => {
+                            // Nothing is replied into it: the next message
+                            // to them starts a session against the key
+                            // they publish.
+                            self.client.forget_sessions(&peer);
+                            let why = if pinned == Some(used) {
+                                format!(
+                                    "A message from {name} started a session with an encryption key they have since replaced: the relay publishes a different one for them, signed by their identity. Somebody holding a copy of their old key can do that, and the message may not be from {name}; the session has been dropped, so nothing you send goes into it. Your next message to them starts afresh under the key they publish."
+                                )
+                            } else {
+                                format!(
+                                    "A message from {name} started a session with an encryption key that is neither the one the relay publishes for them nor the one pinned here. Somebody holding their identity key can do that, and the message may not be from {name}; the session has been dropped, so nothing you send goes into it. Compare safety numbers with {name} over another channel before trusting the message."
+                                )
+                            };
+                            self.system(Level::Warn, why);
+                            self.toast(format!(
+                                "{name}'s key is not the one they publish; see System."
+                            ));
+                            return;
+                        }
+                        Some(now) => {
+                            if let Some(i) = index
+                                && pinned.is_some_and(|pin| pin != used)
+                            {
+                                // The key they publish, and not the one
+                                // pinned: a key change, learned from their
+                                // side rather than from a lookup of ours.
+                                self.note_key_change_keeping_sessions(i, *now);
+                            }
+                        }
+                        None => {
+                            if pinned.is_some_and(|pin| pin != used) {
+                                self.client.forget_sessions(&peer);
+                                self.system(
+                                    Level::Warn,
+                                    format!(
+                                        "A message from {name} started a session with a long-term key that is not the one pinned for them, and the relay could not be asked which key they publish now. Somebody holding their identity key can do that, and the message may not be from {name}; the session has been dropped, so nothing you send goes into it. Compare safety numbers with {name} over another channel before trusting the message, and /remove and re-add them if their key really did change."
+                                    ),
+                                );
+                                self.toast(format!(
+                                    "{name}'s key does not match the pin; see System."
+                                ));
+                                return;
+                            }
+                        }
+                    }
                 }
                 let info = self.client.session_info(&peer);
                 let note = match info {

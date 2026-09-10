@@ -22,6 +22,7 @@ use crate::linking::{DeviceLink, Provisioning};
 use crate::outbox::Outbox;
 use crate::proxy::Proxy;
 use crate::sessions::{SessionError, SessionInfo, SharedSessions};
+use crate::store::Contact;
 use crate::submitter::{SubmitEvent, Submitter};
 use crate::tail::{Answer, Step, Tail};
 use crate::tls::{ConnectOptions, Connectors, Observed, connectors, observing_connector};
@@ -81,20 +82,25 @@ pub enum ClientEvent {
     Disconnected { reason: String, retry_in: Duration },
     /// A decrypted, signature-verified incoming message.
     Message(Box<Message>),
-    /// A forward-secret session with `peer` came into being.
     /// A forward-secret session with `peer` now exists.
     ///
     /// For one they started, `identity_dh` is the long-term X25519 key
-    /// their handshake claimed as their own. Whoever built the handshake
+    /// their handshake claimed as their own, and `published` is the key
+    /// the relay publishes for them, looked up (through the transparency
+    /// check) before this event and the message that came with the
+    /// handshake were delivered — `None` when the relay could not be
+    /// asked or its answer failed the check. Whoever built the handshake
     /// holds the identity key it is signed with, but that is not the same
-    /// as it being the key the peer *published*: somebody with a copy of
-    /// the identity key can sign a fresh one. The front end, which holds
-    /// the pinned bundle, compares the two and says so when they differ
-    /// (`docs/PROTOCOL.md` section 5).
+    /// as it being the key the peer publishes *now*: somebody with a copy
+    /// of the identity key can sign a fresh one, and somebody with a copy
+    /// of a key the peer has since replaced holds a signature that stays
+    /// valid. The front end, which holds the pinned bundle, decides from
+    /// the three (`docs/design/dh-rotation.md` section 4.2).
     SessionEstablished {
         peer: UserId,
         initiated_by_us: bool,
         identity_dh: Option<silver_protocol::DhPublic>,
+        published: Option<Box<KeyBundle>>,
     },
     /// An envelope opened at the sealed-sender layer but its body could
     /// not be read, usually because one side lost its session state.
@@ -551,6 +557,11 @@ pub struct Client {
     device_checks: DeviceChecks,
     /// The device each contact last wrote from, which cover traffic goes to.
     last_device: LastDevice,
+    /// The Diffie–Hellman key pinned for each contact, kept in step with
+    /// the front end's contacts so the receive path can tell a key it
+    /// already trusts from one it does not
+    /// (`docs/design/dh-rotation.md` section 4.2).
+    contact_keys: Option<SharedContactKeys>,
 }
 
 type DeviceBundles = Arc<Mutex<HashMap<UserId, KeyBundle>>>;
@@ -627,6 +638,7 @@ impl Client {
             device_bundles: Arc::new(Mutex::new(HashMap::new())),
             device_checks: Arc::new(Mutex::new(HashMap::new())),
             last_device: Arc::new(Mutex::new(HashMap::new())),
+            contact_keys: options.contact_keys.clone(),
         };
         // The task's handle must not keep the task alive: a front end that
         // drops every handle ends it.
@@ -653,6 +665,7 @@ impl Client {
                 device_bundles: client.device_bundles.clone(),
                 device_checks: client.device_checks.clone(),
                 last_device: client.last_device.clone(),
+                contact_keys: options.contact_keys,
                 handle,
             },
             outbox,
@@ -964,6 +977,46 @@ impl Client {
         }
     }
 
+    /// Replace what the receive path knows of each contact's pinned
+    /// Diffie–Hellman key with what `contacts` hold now
+    /// (`docs/design/dh-rotation.md` section 4.2). Called by the front
+    /// end after it changes a pin. A no-op on a client that keeps no such
+    /// map (one that makes its own trust decisions).
+    pub fn sync_contact_keys(&self, contacts: &[Contact]) {
+        let Some(map) = &self.contact_keys else {
+            return;
+        };
+        let mut map = map.lock().unwrap_or_else(|e| e.into_inner());
+        map.clear();
+        for contact in contacts {
+            if let Some(bundle) = &contact.bundle {
+                map.insert(contact.user_id, bundle.dh_public);
+            }
+        }
+    }
+
+    /// Retire every session with everybody, keeping them for what still
+    /// arrives on them: after a rekey, so that the next message to each
+    /// peer starts a fresh handshake under the new key
+    /// (`docs/design/dh-rotation.md` section 7). Returns the peers that
+    /// had one.
+    pub fn retire_sessions(&self) -> Vec<UserId> {
+        let Some(sessions) = &self.sessions else {
+            return Vec::new();
+        };
+        match sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retire_all()
+        {
+            Ok(peers) => peers,
+            Err(e) => {
+                warn!("could not retire the sessions: {e:#}");
+                Vec::new()
+            }
+        }
+    }
+
     /// Tell the relay this identity is revoked (dead). The statement
     /// authenticates itself, so the relay takes it and serves it on
     /// lookups; contacts also learn from a copy pushed into their mailbox.
@@ -1160,6 +1213,7 @@ impl Client {
                                     peer: to.user_id,
                                     initiated_by_us: true,
                                     identity_dh: None,
+                                    published: None,
                                 })
                                 .await;
                         }
@@ -1887,6 +1941,7 @@ struct Setup {
     device_bundles: DeviceBundles,
     device_checks: DeviceChecks,
     last_device: LastDevice,
+    contact_keys: Option<SharedContactKeys>,
     handle: WeakClient,
 }
 
@@ -1910,7 +1965,25 @@ async fn run(
         fanouts: FanOuts::default(),
     };
     loop {
-        let outcome = session(&setup, &mut queues, &mut cmd_rx, &ev_tx, &mut backoff).await;
+        let mut checks = KeyChecks::new();
+        let outcome = session(
+            &setup,
+            &mut queues,
+            &mut cmd_rx,
+            &ev_tx,
+            &mut backoff,
+            &mut checks,
+        )
+        .await;
+        // A message parked for its key check when the connection went is
+        // delivered under the pin rule rather than lost: the lookup it was
+        // waiting for cannot be answered now (`docs/design/dh-rotation.md`
+        // section 4.2).
+        while let Some(done) = checks.join_next().await {
+            if let Ok((_, parked)) = done {
+                checked_delivery(&setup, parked, None, &ev_tx, &mut None).await;
+            }
+        }
         let reason = match outcome {
             Ok(Exit::Shutdown) => return,
             Ok(Exit::Disconnected(reason)) => reason,
@@ -1985,6 +2058,11 @@ async fn run(
 }
 
 type Lookups = HashMap<UserId, Vec<oneshot::Sender<Result<Lookup, ClientError>>>>;
+
+/// The Diffie–Hellman key pinned for each contact, shared with the front
+/// end so the receive path can tell a key it already trusts from one it
+/// does not (`docs/design/dh-rotation.md` section 4.2).
+pub type SharedContactKeys = Arc<Mutex<HashMap<UserId, silver_protocol::DhPublic>>>;
 
 /// What the relay's next `published` answers: a publish of ours (with
 /// whoever asked for it to be confirmed), or a device revocation, which
@@ -2066,6 +2144,7 @@ async fn session(
     cmd_rx: &mut mpsc::Receiver<Command>,
     ev_tx: &mpsc::Sender<ClientEvent>,
     backoff: &mut Duration,
+    checks: &mut KeyChecks,
 ) -> anyhow::Result<Exit> {
     let Queues {
         outbox,
@@ -2366,6 +2445,18 @@ async fn session(
                     refused(id, code, message, outbox, pending, fanouts, setup, ev_tx, &mut retry_at).await;
                 }
             },
+            Some(done) = checks.join_next(), if !checks.is_empty() => {
+                let Ok((published, parked)) = done else {
+                    continue;
+                };
+                let mut peer_head = None;
+                checked_delivery(setup, parked, published, ev_tx, &mut peer_head).await;
+                if let Some((peer, head)) = peer_head
+                    && !dispatch(tail.on_peer_head(peer, head), &mut sink, ev_tx).await
+                {
+                    return Ok(Exit::Disconnected("send failed".into()));
+                }
+            }
             frame = read_frame(&mut stream) => {
                 let frame = match frame {
                     Ok(f) => f,
@@ -2376,8 +2467,33 @@ async fn session(
                         let id = envelope.id.clone();
                         debug!(%id, "envelope delivered by the relay");
                         let mut peer_head = None;
-                        deliver(setup, envelope, ev_tx, &mut peer_head).await;
-                        debug!(%id, "envelope handed to the front end; acknowledging");
+                        let parked = deliver(setup, envelope, ev_tx, &mut peer_head).await;
+                        if let Some(parked) = parked {
+                            // A session the peer started: the key its
+                            // handshake claimed is checked against the
+                            // key the relay publishes for them before the
+                            // message is delivered, so nothing is shown
+                            // and no receipt goes into a session the check
+                            // may refuse (`docs/design/dh-rotation.md`
+                            // section 4.2). The answer arrives as a frame
+                            // in this loop, so the wait happens off it.
+                            let from = parked.received.from;
+                            debug!(%id, "a new session from {from}; checking its key against the published one");
+                            let (tx, rx) = oneshot::channel();
+                            if sink.send(text(&ClientFrame::Lookup { user_id: from })).await.is_err() {
+                                return Ok(Exit::Disconnected("send failed".into()));
+                            }
+                            lookups.entry(from).or_default().push(tx);
+                            checks.spawn(async move {
+                                let published = match tokio::time::timeout(KEY_CHECK_TIMEOUT, rx).await {
+                                    Ok(Ok(Ok(lookup))) => lookup.bundle,
+                                    _ => None,
+                                };
+                                (published, parked)
+                            });
+                        } else {
+                            debug!(%id, "envelope handed to the front end; acknowledging");
+                        }
                         // The sender's view of the relay's log, to compare.
                         if let Some((peer, head)) = peer_head
                             && !dispatch(tail.on_peer_head(peer, head), &mut sink, ev_tx).await
@@ -2961,12 +3077,17 @@ fn lifecycle_event(content: &Content) -> Option<ClientEvent> {
 
 /// Open an incoming envelope and report what it held. `peer_head` is set
 /// to the sender and the transparency log head their message carried.
+///
+/// A plain body that arrived with a handshake the peer started is not
+/// reported but returned parked, for the caller to deliver once the key
+/// the handshake claimed has been checked against the one the relay
+/// publishes (`docs/design/dh-rotation.md` section 4.2).
 async fn deliver(
     setup: &Setup,
     envelope: Envelope,
     ev_tx: &mpsc::Sender<ClientEvent>,
     peer_head: &mut Option<(UserId, silver_protocol::LogHead)>,
-) {
+) -> Option<Parked> {
     let id = envelope.id.clone();
     let opened = match open_bytes(&setup.identity, &envelope) {
         Ok(opened) => opened,
@@ -2977,10 +3098,14 @@ async fn deliver(
                     "could not open envelope {id}: {e}"
                 )))
                 .await;
-            return;
+            return None;
         }
     };
     let from = opened.from;
+    // The key a handshake the peer started claimed as theirs, when this
+    // envelope carried one. Set on the one path that continues past the
+    // match, the session body; every other path returns from inside it.
+    let claimed: Option<silver_protocol::DhPublic>;
     let (plain, forward_secret) = match Body::decode(&opened.body) {
         Ok(Body::Plain {
             sent_at_ms,
@@ -3011,7 +3136,7 @@ async fn deliver(
                 peer_head,
             )
             .await;
-            return;
+            return None;
         }
         Ok(Body::Ratchet(body)) => {
             let Some(sessions) = &setup.sessions else {
@@ -3024,7 +3149,7 @@ async fn deliver(
                                 .into(),
                     })
                     .await;
-                return;
+                return None;
             };
             let result = sessions.lock().unwrap_or_else(|e| e.into_inner()).decrypt(
                 &setup.identity,
@@ -3034,15 +3159,7 @@ async fn deliver(
             );
             match result {
                 Ok((plain, established)) => {
-                    if let Some(identity_dh) = established {
-                        let _ = ev_tx
-                            .send(ClientEvent::SessionEstablished {
-                                peer: from,
-                                initiated_by_us: false,
-                                identity_dh: Some(identity_dh),
-                            })
-                            .await;
-                    }
+                    claimed = established;
                     (plain, true)
                 }
                 Err(e) => {
@@ -3058,7 +3175,7 @@ async fn deliver(
                             reason: e.to_string(),
                         })
                         .await;
-                    return;
+                    return None;
                 }
             }
         }
@@ -3070,7 +3187,7 @@ async fn deliver(
                     body: Box::new(body),
                 })
                 .await;
-            return;
+            return None;
         }
         Err(e) => {
             warn!("malformed body in envelope {id} from {from}: {e}");
@@ -3079,7 +3196,7 @@ async fn deliver(
                     "could not read envelope {id}: {e}"
                 )))
                 .await;
-            return;
+            return None;
         }
     };
     match Body::decode(&plain) {
@@ -3092,28 +3209,47 @@ async fn deliver(
             device,
             id: message_id,
         }) => {
-            plain_received(
-                setup,
-                Received {
-                    envelope_id: id,
-                    from,
-                    to: opened.to,
-                    signed: opened.signed,
-                    forward_secret,
-                    sent_at_ms,
-                    sequence,
-                    content,
-                    caps,
-                    head,
-                    device: device.map(|d| *d),
-                    message_id,
-                },
-                ev_tx,
-                peer_head,
-            )
-            .await;
+            let received = Received {
+                envelope_id: id,
+                from,
+                to: opened.to,
+                signed: opened.signed,
+                forward_secret,
+                sent_at_ms,
+                sequence,
+                content,
+                caps,
+                head,
+                device: device.map(|d| *d),
+                message_id,
+            };
+            if let Some(claimed) = claimed {
+                // A session the peer started. When the key it claimed is
+                // not the one pinned for them, hold the message back for
+                // the caller to check against the key the relay publishes
+                // (`docs/design/dh-rotation.md` section 4.2); a key that
+                // matches the pin, or a peer with no pin, is a session to
+                // report and a message to deliver at once.
+                let pinned = setup
+                    .contact_keys
+                    .as_ref()
+                    .and_then(|m| lock(m).get(&from).copied());
+                if pinned.is_some_and(|p| p != claimed) {
+                    return Some(Parked { received, claimed });
+                }
+                let _ = ev_tx
+                    .send(ClientEvent::SessionEstablished {
+                        peer: from,
+                        initiated_by_us: false,
+                        identity_dh: Some(claimed),
+                        published: None,
+                    })
+                    .await;
+            }
+            plain_received(setup, received, ev_tx, peer_head).await;
         }
         Ok(Body::Ratchet(_) | Body::Group(_)) => {
+            unchecked_session(claimed, from, ev_tx).await;
             let _ = ev_tx
                 .send(ClientEvent::Error(format!(
                     "envelope {id} nests another body inside a session; dropped"
@@ -3121,12 +3257,77 @@ async fn deliver(
                 .await;
         }
         Err(e) => {
+            unchecked_session(claimed, from, ev_tx).await;
             let _ = ev_tx
                 .send(ClientEvent::Error(format!(
                     "could not read envelope {id}: {e}"
                 )))
                 .await;
         }
+    }
+    None
+}
+
+/// A plain body that came with a handshake the peer started, held back
+/// until the key the handshake claimed has been checked against the key
+/// the relay publishes for them.
+struct Parked {
+    received: Received,
+    claimed: silver_protocol::DhPublic,
+}
+
+/// The checks in flight: each resolves to the bundle the relay publishes
+/// for the peer (`None` when it could not be had) and the message waiting
+/// on it. The whole bundle, so the front end can pin it when the check
+/// turns out to be a key change.
+type KeyChecks = tokio::task::JoinSet<(Option<KeyBundle>, Parked)>;
+
+/// How long a message waits for the relay to answer the lookup its key
+/// check needs before it is delivered under the pin rule instead. A relay
+/// answers a lookup in one round trip; this is for one that has stopped
+/// answering without the connection knowing yet.
+const KEY_CHECK_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Report a session the peer started and deliver the message that came
+/// with it, `published` being the key the relay publishes for them
+/// (`docs/design/dh-rotation.md` section 4.2) or `None` when that could
+/// not be had.
+async fn checked_delivery(
+    setup: &Setup,
+    parked: Parked,
+    published: Option<KeyBundle>,
+    ev_tx: &mpsc::Sender<ClientEvent>,
+    peer_head: &mut Option<(UserId, silver_protocol::LogHead)>,
+) {
+    let Parked { received, claimed } = parked;
+    let _ = ev_tx
+        .send(ClientEvent::SessionEstablished {
+            peer: received.from,
+            initiated_by_us: false,
+            identity_dh: Some(claimed),
+            published: published.map(Box::new),
+        })
+        .await;
+    plain_received(setup, received, ev_tx, peer_head).await;
+}
+
+/// A session the peer started came with a body that is not a plain one,
+/// so there is nothing to hold back for the check: report the session as
+/// unchecked, and the front end applies the pin rule.
+async fn unchecked_session(
+    claimed: Option<silver_protocol::DhPublic>,
+    from: UserId,
+    ev_tx: &mpsc::Sender<ClientEvent>,
+) {
+    if let Some(claimed) = claimed {
+        let _ = ev_tx
+            .send(ClientEvent::SessionEstablished {
+                peer: from,
+                initiated_by_us: false,
+                identity_dh: Some(claimed),
+                published: None,
+            })
+            .await;
     }
 }
 

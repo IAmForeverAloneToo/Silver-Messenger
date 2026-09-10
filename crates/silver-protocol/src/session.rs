@@ -32,7 +32,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 use crate::ProtocolError;
 use crate::bundle::KeyBundle;
 use crate::encoding::{b64, b64_array, b64_opt};
-use crate::identity::{DhPublic, Identity, UserId};
+use crate::identity::{DhKey, DhPublic, Identity, UserId};
 use crate::pq::{
     KEM_CIPHERTEXT_LEN, KEM_PUBLIC_LEN, KEM_SECRET_LEN, KemPublic, KemRatchetKey, PqPrekeySecret,
 };
@@ -409,6 +409,40 @@ impl Session {
         init: &InitHeader,
         pq_ratchet: bool,
     ) -> Result<Self, ProtocolError> {
+        Self::respond_with(
+            me,
+            DhKey::Current,
+            initiator,
+            signed,
+            one_time,
+            pq,
+            init,
+            pq_ratchet,
+        )
+    }
+
+    /// [`Self::respond`] with one of our Diffie–Hellman keys named: the
+    /// initiator computed its handshake against the key it had for us,
+    /// which after a rekey may be the one we held before
+    /// (`docs/design/dh-rotation.md` section 5). Refused when `which` is
+    /// a previous key that is not held. A handshake against the wrong key
+    /// does not fail here — it derives a session whose first decryption
+    /// fails its tag, since the associated data binds our public key —
+    /// so the caller tries the current key, then the previous.
+    #[allow(clippy::too_many_arguments)]
+    pub fn respond_with(
+        me: &Identity,
+        which: DhKey,
+        initiator: &UserId,
+        signed: &PrekeySecret,
+        one_time: Option<&PrekeySecret>,
+        pq: Option<&PqPrekeySecret>,
+        init: &InitHeader,
+        pq_ratchet: bool,
+    ) -> Result<Self, ProtocolError> {
+        let (me_dh, me_dh_public) = me.dh_pair(which).ok_or_else(|| {
+            ProtocolError::Malformed("no previous Diffie–Hellman key is held".into())
+        })?;
         // The header names which signed prekey the initiator used, and
         // the caller looks it up and hands it in. If the two disagree the
         // handshake computes a different secret on each side and the
@@ -458,11 +492,11 @@ impl Session {
         let spk = signed.x25519();
         let ephemeral = init.ephemeral.as_x25519();
         let dh1 = spk.diffie_hellman(&init.identity_dh.as_x25519());
-        let dh2 = me.dh_secret().diffie_hellman(&ephemeral);
+        let dh2 = me_dh.diffie_hellman(&ephemeral);
         let dh3 = spk.diffie_hellman(&ephemeral);
         let dh4 = one_time.map(|o| o.x25519().diffie_hellman(&ephemeral));
         let secret = x3dh_secret(&dh1, &dh2, &dh3, dh4.as_ref(), kem.as_deref())?;
-        let ad = x3dh_ad(initiator, &init.identity_dh, &me.user_id(), &me.dh_public());
+        let ad = x3dh_ad(initiator, &init.identity_dh, &me.user_id(), &me_dh_public);
         let id = session_id(&init.ephemeral, &signed.public());
 
         Ok(Self {
@@ -1336,6 +1370,77 @@ mod tests {
         let m = a.encrypt(b"x").unwrap();
         assert!(m.header.kem.is_none() && m.header.kem_ct.is_none());
         let _ = b;
+    }
+
+    /// `docs/design/dh-rotation.md` section 5: a handshake computed
+    /// against the key we published before a rekey derives a session that
+    /// fails its first tag under the current key and opens under the
+    /// previous one, while that is held; a previous key not held is
+    /// refused outright.
+    #[test]
+    fn a_handshake_against_a_replaced_key_opens_under_the_previous_one() {
+        let alice = Identity::generate();
+        let bob = Peer::new();
+        let old_bundle = bob.bundle_pq_ratchet(true);
+        let (mut a, init) = Session::initiate(&alice, &old_bundle).unwrap();
+        let first = a.encrypt(b"made against the old key").unwrap();
+        bob.identity.rotate_dh(1_000);
+        assert_ne!(bob.identity.dh_public(), old_bundle.dh_public);
+
+        // The current key derives a session that does not read it: the
+        // associated data binds our public key, so the tag fails.
+        let mut wrong = Session::respond(
+            &bob.identity,
+            &alice.user_id(),
+            &bob.signed,
+            Some(&bob.one_time),
+            bob.pq_secret(init.pq_prekey_id.unwrap()),
+            &init,
+            true,
+        )
+        .unwrap();
+        assert!(wrong.decrypt(&first).is_err());
+
+        // The previous key reads it, and the session goes on both ways.
+        let mut b = Session::respond_with(
+            &bob.identity,
+            DhKey::Previous,
+            &alice.user_id(),
+            &bob.signed,
+            Some(&bob.one_time),
+            bob.pq_secret(init.pq_prekey_id.unwrap()),
+            &init,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            b.decrypt(&first).unwrap().as_slice(),
+            b"made against the old key"
+        );
+        let reply = b.encrypt(b"read under the key you had for me").unwrap();
+        assert_eq!(
+            a.decrypt(&reply).unwrap().as_slice(),
+            b"read under the key you had for me"
+        );
+
+        // Once the previous key is gone there is nothing to try.
+        assert!(
+            bob.identity
+                .expire_previous_dh(1_000 + crate::identity::DH_ROTATION_GRACE_MS)
+        );
+        assert!(matches!(
+            Session::respond_with(
+                &bob.identity,
+                DhKey::Previous,
+                &alice.user_id(),
+                &bob.signed,
+                Some(&bob.one_time),
+                bob.pq_secret(init.pq_prekey_id.unwrap()),
+                &init,
+                true,
+            ),
+            Err(ProtocolError::Malformed(_))
+        ));
     }
 
     #[test]

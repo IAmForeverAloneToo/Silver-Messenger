@@ -42,7 +42,7 @@ it does it.
 | --- | --- |
 | What the two-step shape is | The first line parses its argument and runs every check, then says in the System pane what the command would do, in the terms the person is being asked about, and stops. A short second line — `/devices link confirm`, `/relay confirm`, `/group join confirm` — goes ahead, and `typed_it_themselves` sits on that line. |
 | Which commands get it | The three whose argument arrives by paste and whose effect reaches beyond this computer: `/devices link`, `/relay`, `/group join`. |
-| Which get the paste guard alone | `/send <path>`, whose argument is a path a person can type. One pasted `/send ~/.ssh/id_ed25519` in an attacker's chat is the file gone, and the transfer report arrives too late to be an answer. Also the three that already had it: `/revoke`, `/rotate`, `/devices leave`. |
+| Which get the paste guard alone | `/send <path>`, whose argument is a path a person can type. One pasted `/send ~/.ssh/id_ed25519` in an attacker's chat is the file gone, and the transfer report arrives too late to be an answer. Also the three that already had it: `/revoke`, `/rotate`, `/devices leave` — and `/rekey`, added with them in mind: it costs every contact a `/verify`, which is the same size of thing as `/rotate` from where the contacts sit. |
 | Which get neither | `/unblock`, whose argument must be a prefix of an id *already on the blocked list*, so the worst a pasted line achieves is undoing a block the user themselves made, in a command the user can redo. Friction here would buy nothing and teach the reflex that confirmations are noise. `/alias` likewise: see below. |
 | What a held command remembers | One slot, not one per command. Asking for a second thing forgets the first, so a confirmation always answers the question last put and never an older one still lying about. |
 | How long it waits | Two minutes. A confirmation is an answer to a question just asked; after that the question is dropped rather than left for a later line to answer by accident. |
@@ -120,5 +120,9 @@ a paste, and against the file on disk.
   one burst — as a terminal without bracketed paste would deliver a paste
   — is refused, and the same line typed out goes ahead.
 - `/group join` end to end in `tests/tui/test_groups.py`.
+- `/rekey` end to end in `tests/tui/test_rekey.py`: the first line
+  explains and changes nothing, the second replaces the key, and the
+  contact's next message shows the key-change notice rather than the
+  alarm for a key that is not theirs.
 - `/send`'s guard, and the group alias on the way in, on the way out, cut
   to length, and read back from a record that reached disk unfiltered.

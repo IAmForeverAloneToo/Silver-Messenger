@@ -700,7 +700,7 @@ async fn clients_with_prekeys_talk_over_forward_secret_sessions() {
     })
     .await;
     wait_for(&mut bob_ev, "bob's session", |e| {
-        matches!(e, ClientEvent::SessionEstablished { peer, initiated_by_us: false, identity_dh: Some(dh) } if *peer == alice.user_id() && *dh == alice.dh_public())
+        matches!(e, ClientEvent::SessionEstablished { peer, initiated_by_us: false, identity_dh: Some(dh), published: None } if *peer == alice.user_id() && *dh == alice.dh_public())
     })
     .await;
     let got = wait_for(&mut bob_ev, "bob's message", |e| message(e).is_some()).await;

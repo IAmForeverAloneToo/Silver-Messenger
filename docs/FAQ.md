@@ -67,7 +67,24 @@ messages), and the fact that you talk to the relay at all. The threat
 model is the honest list, including the gaps that remain, and the code
 has not yet had an independent review; the roadmap says when it will.
 
-## What happens if I lose my laptop?
+## My encryption key may have been read. What do I do?
+
+`/rekey confirm`. It replaces the key messages are sealed to and the
+key that starts conversations, and keeps your identity: your safety
+number does not change, contacts stay contacts, nothing needs a
+restart. Each contact sees a **KEY CHANGE** notice for you the next time
+you talk and their verified mark for you clears, so tell them, and
+`/verify` again when you can. What the old key was worth afterwards is
+bounded: it still opens what was sealed to it, but it can no longer
+start a conversation as you with anybody on a current client, because
+their client checks a key it has not seen against the one the relay
+publishes for you. The old key is kept for 30 days so that nothing
+already on its way to you is lost, then erased.
+
+If it is your *identity* key that may have been read — the one your
+safety number is made of — that is `/revoke` or `/rotate`, which the
+next answer is about.
+
 
 If your data directory was under a passphrase (`silver
 --set-passphrase`) or the computer's key store, the thief has encrypted

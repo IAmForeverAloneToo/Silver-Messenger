@@ -36,9 +36,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tracing::debug;
+
 use silver_protocol::prekey::Prekeys;
 use silver_protocol::{
-    DhPublic, Identity, InitHeader, KeyBundle, PqPrekeySecret, PrekeySecret, ProtocolError,
+    DhKey, DhPublic, Identity, InitHeader, KeyBundle, PqPrekeySecret, PrekeySecret, ProtocolError,
     RatchetBody, Session, UserId,
 };
 use zeroize::Zeroizing;
@@ -609,19 +611,48 @@ impl SessionStore {
                 }
             }
         };
-        let mut session = Session::respond(
-            identity,
-            &from,
-            &signed,
-            one_time.as_ref(),
-            pq.as_ref(),
-            init,
-            body.v == 4,
-        )?;
-        if *session.id() != body.session {
-            return Err(SessionError::SessionMismatch);
+        // Against the key we publish; failing that, against the one we
+        // published before a rekey, while it is still held: the initiator
+        // computed its handshake against the key it had for us, and the
+        // associated data binds that key, so the wrong one fails at the
+        // first tag and the other is tried (`docs/design/dh-rotation.md`
+        // section 5). A session that opened under the previous key is a
+        // session all the same; the key it was made against is in the
+        // past either way once the ratchet turns.
+        let mut attempt = None;
+        for which in [DhKey::Current, DhKey::Previous] {
+            if which == DhKey::Previous && identity.previous_dh_public().is_none() {
+                break;
+            }
+            let mut session = Session::respond_with(
+                identity,
+                which,
+                &from,
+                &signed,
+                one_time.as_ref(),
+                pq.as_ref(),
+                init,
+                body.v == 4,
+            )?;
+            if *session.id() != body.session {
+                return Err(SessionError::SessionMismatch);
+            }
+            match session.decrypt(&body.message) {
+                Ok(plaintext) => {
+                    attempt = Some((session, plaintext));
+                    break;
+                }
+                Err(e) if which == DhKey::Current && identity.previous_dh_public().is_some() => {
+                    debug!(
+                        "a handshake from {from} does not open under the current key ({e}); trying the previous"
+                    );
+                }
+                Err(e) => return Err(SessionError::InSession(e)),
+            }
         }
-        let plaintext = session.decrypt(&body.message)?;
+        let Some((session, plaintext)) = attempt else {
+            return Err(SessionError::UnknownSession);
+        };
 
         // The handshake worked: the one-time keys have served their purpose.
         if let Some(i) = one_time_index {
@@ -675,6 +706,28 @@ impl SessionStore {
             self.persist_sessions()?;
         }
         Ok(())
+    }
+
+    /// Retire every session with everybody, keeping them: after a rekey,
+    /// so that the next message to each peer starts a fresh handshake
+    /// under the new key, while whatever a peer sends on the old session
+    /// before learning of the change still reads — a session is looked up
+    /// by its id to decrypt, active or not (`docs/design/dh-rotation.md`
+    /// section 7). Returns the peers with a session to retire.
+    pub fn retire_all(&mut self) -> anyhow::Result<Vec<UserId>> {
+        let mut peers = Vec::new();
+        for (peer, entry) in &mut self.peers {
+            if entry.sessions.iter().any(|s| s.active) {
+                peers.push(*peer);
+            }
+            for s in &mut entry.sessions {
+                s.active = false;
+            }
+        }
+        if !peers.is_empty() {
+            self.persist_sessions()?;
+        }
+        Ok(peers)
     }
 
     /// Make room for a session with `peer`: drop peers whose sessions

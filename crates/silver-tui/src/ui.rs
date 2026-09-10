@@ -1142,6 +1142,7 @@ mod tests {
             Identity::from_secrets(&silver_protocol::identity::IdentitySecrets {
                 signing_seed: [seed; 32],
                 dh_secret: [seed; 32],
+                previous_dh: None,
             })
             .user_id()
         };

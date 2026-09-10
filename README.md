@@ -749,6 +749,12 @@ it does not, is in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
   see it stop trusting the key, and the relay refuses to publish it ever
   again. `/rotate` moves to a fresh identity with a handover signed by both
   the old and the new key, so contacts re-pin to the new key on their own.
+  `/rekey` is the smaller remedy: it replaces your encryption key and
+  keeps your identity, so the safety number stays and nothing needs a
+  restart; contacts see a key-change notice and their verified mark for
+  you clears, your next message to each of them starts afresh under the
+  new key, and the old key goes on opening what was already sealed to it
+  for 30 days.
   A revoked contact is marked and cannot be messaged; a rotated one is
   re-pinned and its conversation carried across, with a nudge to compare
   safety numbers again. Needs a relay on 0.8.0; older relays still pass on
