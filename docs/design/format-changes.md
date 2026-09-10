@@ -115,7 +115,7 @@ whoever decides what the program is for:
   handshakes while keeping it for v4 bodies.
 
 The review's *minimum* is neither: say so in the threat model. That is
-done as of 0.15.0 and was overdue — the threat model's section on a
+done as of 0.16.0 and was overdue — the threat model's section on a
 compromised Diffie–Hellman key listed only what it decrypts, and has
 listed impersonation since. Whichever of the two above is chosen later,
 the documentation is no longer wrong in the meantime.
@@ -207,7 +207,7 @@ not protected, and that statement now covers this too.
 
 Each write is then: write the file, write `state`, write `vault.json`,
 in that order, each atomically and each fsynced with its parent
-directory, as `write_atomic` has done since 0.15.0. **The file goes
+directory, as `write_atomic` has done since 0.16.0. **The file goes
 first and the anchor is raised after it**, which is worth spelling out
 because the opposite order is the tempting one and is wrong.
 

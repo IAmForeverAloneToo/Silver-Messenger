@@ -148,7 +148,7 @@ with that name as the account; on Linux a Secret Service tool such as
 `silver --set-passphrase`, `silver --remove-passphrase` and `--wipe` all
 look after it: the entry follows the vault, or goes with it.
 
-You may still find more than one. From 0.15.0 the client writes down any
+You may still find more than one. From 0.16.0 the client writes down any
 key a half-finished change could orphan and clears it at the next start,
 so a crash mid-change settles itself. A crash under an *earlier* version
 left no such note, and that entry stays until you remove it. The client

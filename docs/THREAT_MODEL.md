@@ -131,7 +131,7 @@ Can:
   nor forge the capability signature: all are signed. Either downgrade
   only removes protection the session would have added; the client shows
   which handshake and ratchet a session got, and `/session` says why.
-  From 0.15.0 it also says when that is *less* than a session with the
+  From 0.16.0 it also says when that is *less* than a session with the
   same contact used to get. Showing the new session's protection was not
   enough on its own: a classical session with somebody whose sessions had
   all been post-quantum read exactly like a classical session with
@@ -457,13 +457,13 @@ the files onto a fresh data key (0.11.0), so somebody holding an old copy
 of `vault.json` and the passphrase that was in force when they took it
 reads nothing written after the change — which is what changing a
 passphrase is for. The key that is moved off is taken out of the key
-store as part of the change, and from 0.15.0 so is the key of a directory
+store as part of the change, and from 0.16.0 so is the key of a directory
 that is erased and the key of a change that failed before the vault
 naming it was written: until then, erasing a device left its wrapping key
 in the key store, where an old copy of the directory taken before the
 erase still had something to be opened with, and a program of the same
 user could read it. That last part only held while the process lived to
-run its own error paths, so 0.15.0 also writes the name of a key whose
+run its own error paths, so 0.16.0 also writes the name of a key whose
 fate is undecided to `vault.pending` *before* the step that could orphan
 it — creating the key, or removing the vault that names it — and the next
 start takes out anything that file names and the vault does not need. A
@@ -480,7 +480,7 @@ Unix permissions and the code that sets them is compiled only there;
 on Windows the data directory takes the access rules it inherits, which
 under a user profile keep other unprivileged users out and, for a
 `--data-dir` placed somewhere world-writable, do not. This is the same
-shape as the process hardening of 0.15.0: said plainly rather than
+shape as the process hardening of 0.16.0: said plainly rather than
 implied to be the same everywhere. Where the permissions do apply, a
 shared machine's other users do not read the settings — which hold the proxy's credentials
 and the invite token — the contact list, or the history. Received files in `downloads/` are saved
@@ -598,8 +598,8 @@ because what the platforms offer differs:
 | Platform | What is done | What it leaves |
 | --- | --- | --- |
 | Linux | No core file, and the process is not dumpable, so a process of the same user may neither trace it nor read `/proc/<pid>/mem` | Root, and anything already attached |
-| Windows (0.15.0) | No core file, and the process object carries a restricted access list, so opening it for reading is refused | An attacker who rewrites that list first, which the owner of a process may do; and an administrator |
-| macOS | No core file | A debugger run by the same user, which macOS allows for a program it started; this is an open gap with no good answer short of signing the program and asking Apple for the hardened runtime |
+| Windows (0.16.0) | No core file, and the process object carries a restricted access list, so opening it for reading is refused | An attacker who rewrites that list first, which the owner of a process may do; and an administrator |
+| macOS | No core file. Release builds are signed ad hoc with the hardened runtime asked for (0.16.0), which *should* make macOS refuse a same-user attach — **unverified**: nobody has watched it do so on a real Mac, so this table still counts macOS as unprotected | A debugger run by the same user, which macOS allows for a program it started; a Developer ID signature and notarisation are what would settle it |
 
 None of it touches a program that attached before the client started, and
 none of it is prevention. The boundary that does hold is the lock:
@@ -674,7 +674,7 @@ signature over their own Diffie–Hellman key, which is a public value
 anybody can copy, together with the handshake needing the initiator's
 X25519 secret. Whoever holds that secret alone can therefore start v4
 sessions as its owner with every one of their contacts, without the
-identity key. Until 0.15.0 this section listed only what the key
+identity key. Until 0.16.0 this section listed only what the key
 decrypts and left impersonation to the identity key's section, which was
 wrong for v4. Both keys do live in the same file, so this is usually the
 device-thief case above — but not always: the review of September 2026

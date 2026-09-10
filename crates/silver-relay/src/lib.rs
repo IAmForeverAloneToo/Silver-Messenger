@@ -257,7 +257,7 @@ pub struct Policy {
     /// hostile relay could collect and replay here. Off, both kinds are
     /// accepted so clients from before 0.6.0 can still connect.
     ///
-    /// On by default from 0.15.0. It was off for nine releases while
+    /// On by default from 0.16.0. It was off for nine releases while
     /// clients caught up, which is long enough: the cost of leaving it
     /// off is that any relay a user also talks to can take a login from
     /// them and use it here, and the cost of turning it on is that a

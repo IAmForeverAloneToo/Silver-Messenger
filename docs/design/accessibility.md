@@ -100,7 +100,7 @@ what is pushed:
 Lines are cut at the terminal width by the terminal, not wrapped by the
 client, since wrapping would put cursor movements into the stream.
 
-**One call is one line, and that is a security property** (0.15.0, from
+**One call is one line, and that is a security property** (0.16.0, from
 finding M-6 of the September 2026 audit). The full mode is safe because
 every glyph reaches the screen through ratatui's cell buffer, which draws
 a character or does not; reader mode has no cell buffer, so whatever the

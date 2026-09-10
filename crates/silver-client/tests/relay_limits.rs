@@ -425,7 +425,7 @@ async fn a_login_holds_only_for_the_relay_it_was_made_for() {
         ErrorCode::BadSignature
     ));
     // The v1 login, which signs the challenge alone: refused by default
-    // from 0.15.0. Clients have signed the host since 0.6.0, and while
+    // from 0.16.0. Clients have signed the host since 0.6.0, and while
     // this was accepted, any relay one of this relay's users also talked
     // to could take a login from them and present it here as them.
     let mut ws = open(&url, None).await;

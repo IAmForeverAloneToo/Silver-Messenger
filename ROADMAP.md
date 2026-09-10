@@ -425,7 +425,7 @@ those who want to pay for it (46).
         and each of those carries the relay. The item stays open for
         the day people who use groups and devices ask for names, and is
         not a condition of 1.0.
-        Re-examined in 0.15.0 and still gated. Groups (47) and devices
+        Re-examined in 0.16.0 and still gated. Groups (47) and devices
         (48) have both shipped, which is the condition this item was
         waiting on, and neither produced the need: a group is joined by
         its link, a device by the link it prints, a person by an invite
@@ -507,7 +507,7 @@ those who want to pay for it (46).
         support policy for what a stable release promises and for how
         long, and the first 1.0 release.
 57. [ ] **What the review left for a format change** (L). **The on-disk
-        pair is done**, in the release after 0.15.0: SM-C-24, so an older
+        pair is done**, in the release after 0.16.0: SM-C-24, so an older
         copy of a file put back into a live directory is refused rather
         than read, and SM-C-25, so a conversation's log is no longer
         filed under the name of who it is with. Section 5 of the note
@@ -538,7 +538,7 @@ those who want to pay for it (46).
         so the note puts the two properties side by side and leaves the
         choice. Its minimum, correcting the threat model, is done: that
         document said the Diffie–Hellman key only decrypts, and has said
-        since 0.15.0 that from v4 it impersonates too. The four
+        since 0.16.0 that from v4 it impersonates too. The four
         findings of the report's section 13.3 that 0.11.0 could not
         take, each with a design note before code: a message's own id
         inside the authenticated body (SM-P-14); rollback protection for
@@ -671,7 +671,7 @@ those who want to pay for it (46).
         invisible and bidirectional characters with it. Reader mode now
         has the mirror of the invariant test the full mode has had since
         0.10.0.
-        The third closes the key store paths 0.15.0 left half shut. The
+        The third closes the key store paths 0.16.0 left half shut. The
         key is written before the vault that needs it, so dropping an
         unneeded one on the failure path only worked if the process lived
         to take that path; a crash in the window left a key for good. The
@@ -729,7 +729,7 @@ those who want to pay for it (46).
         relay that still has clients older than 0.6.0 -- and fuzzes the
         two parsers the updater runs before any signature is checked.
 
-        All twelve are done and in 0.15.0. Publishing the review itself
+        All twelve are done and in 0.16.0. Publishing the review itself
         and the response note is held back for the maintainer to review
         first, so this item is ticked for the code and not for the
         disclosure.
@@ -738,7 +738,7 @@ those who want to pay for it (46).
         read a message or forge one, all of them listed with what leaving
         each costs in
         [docs/design/audit-response-2.md](docs/design/audit-response-2.md)
-        section 4. Six are **done** and in 0.15.0: **I-1**, the claim in
+        section 4. Six are **done** and in 0.16.0: **I-1**, the claim in
         `docs/design/updates.md` that the swap is tested under a kill
         when no such test existed — the worst of them, being a false
         statement about what is tested, and two tests now stand behind
@@ -750,7 +750,7 @@ those who want to pay for it (46).
         outside the vault; **L-13**, homoglyph names. **L-1**, locking
         key buffers out of swap, is declined below, as is the remainder
         of a finding otherwise closed — an enumeration sweep of
-        `data-key-*` entries for keys orphaned by versions before 0.15.0.
+        `data-key-*` entries for keys orphaned by versions before 0.16.0.
 
         **L-14** is done too, and wider than the report asked. Its five
         remaining parsers — the hand-rolled HTTP response head, with the
@@ -765,13 +765,17 @@ those who want to pay for it (46).
         which ends with `.github.com` and so passed the redirect check
         while naming another host to anybody reading it. Refused now.
 
-        **What is left in this item** is one remainder. **H-1**: macOS
-        release builds are unsigned unless notarization secrets are set,
-        so the hardened runtime that would restrict a same-user attach is
-        absent; ad-hoc signing with `--options runtime` is the cheap
-        version of it, and belongs here only once somebody has checked on
-        a real macOS that it restricts what it is supposed to, rather
-        than on the strength of the manual page.
+        **What is left in this item** is one verification. **H-1**: a
+        macOS release built without the notarization secrets is now
+        signed ad hoc with the hardened runtime asked for, and the
+        release job fails if the flag is missing from the signature it
+        made. What nobody has done is watch that refuse a same-user
+        attach on a real Mac, so the threat model and SECURITY.md go on
+        counting macOS as unprotected. That check is the whole of what is
+        left here — and it is left rather than assumed because this
+        program has already been caught once by a document describing a
+        check the code did not do (I-1), and the answer to that was a
+        test, not better prose.
 
         **Two of those are declined, on one decision.** L-1 needs `mlock`
         or `VirtualLock`, and the key-store sweep needs `CredEnumerate`
@@ -787,7 +791,7 @@ those who want to pay for it (46).
         about swap — which full-disk encryption answers, and which pinning
         the key alone would not close anyway, since the plaintext beside
         it stays pageable — and a key left behind by a version older than
-        0.15.0, removable by hand, do not buy back an audited-away
+        0.16.0, removable by hand, do not buy back an audited-away
         invariant across every secret this program handles. If that trade
         ever changes it will be because something larger wants it, not
         these two.

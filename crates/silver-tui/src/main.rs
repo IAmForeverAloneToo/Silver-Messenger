@@ -338,7 +338,7 @@ fn harden_process() {
     }
     #[cfg(windows)]
     {
-        // Windows has no non-dumpable flag: until 0.15.0 an ordinary
+        // Windows has no non-dumpable flag: until 0.16.0 an ordinary
         // process of the same user could open this one with
         // PROCESS_VM_READ and read the keys straight out of memory, no
         // debugger and no administrator token needed. The process object
