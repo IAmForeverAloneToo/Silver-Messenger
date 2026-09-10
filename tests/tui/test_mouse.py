@@ -60,7 +60,9 @@ def main():
     a.drag(35, 6)
     a.release(35, 6)
     assert a.sc.display[0][35] == "┐" and a.sc.display[0][36] == "┌", "resized to 36 columns"
-    assert config(pair.a_dir)["sidebar_width"] == 36, "width saved"
+    # The screen follows the drag; the file follows the release, which may
+    # not have been read yet when the drag's redraw has -- wait for it.
+    a.wait_for(lambda: config(pair.a_dir)["sidebar_width"] == 36, what="width saved")
     a.press(35, 6)
     a.drag(25, 6)
     a.release(25, 6)
