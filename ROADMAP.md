@@ -507,13 +507,13 @@ those who want to pay for it (46).
         support policy for what a stable release promises and for how
         long, and the first 1.0 release.
 57. [ ] **What the review left for a format change** (L). **The on-disk
-        pair is done**, in the release after 0.16.0: SM-C-24, so an older
-        copy of a file put back into a live directory is refused rather
-        than read, and SM-C-25, so a conversation's log is no longer
-        filed under the name of who it is with. Section 5 of the note
-        settles how, and was corrected three times while it was being
-        written — the counter cannot live in plaintext `vault.json`
-        without publishing the file names, the file has to be written
+        pair is done**, in 0.16.0: SM-C-24, so an older copy of a file
+        put back into a live directory is refused rather than read, and
+        SM-C-25, so a conversation's log is no longer filed under the
+        name of who it is with. Section 5 of the note settles how, and
+        was corrected three times while it was being written — the
+        counter cannot live in plaintext `vault.json` without
+        publishing the file names, the file has to be written
         before the anchor is raised or the crash case becomes the attack,
         and the key the names are MACed under cannot be the data key,
         which rotates, nor live in the record, whose loss would then
