@@ -506,7 +506,7 @@ those who want to pay for it (46).
 56. [ ] **Stable** (S). Protocol v4 frozen and documented as such, a
         support policy for what a stable release promises and for how
         long, and the first 1.0 release.
-57. [ ] **What the review left for a format change** (L). **The on-disk
+57. [x] **What the review left for a format change** (L). **The on-disk
         pair is done**, in 0.16.0: SM-C-24, so an older copy of a file
         put back into a live directory is refused rather than read, and
         SM-C-25, so a conversation's log is no longer filed under the
@@ -523,12 +523,17 @@ those who want to pay for it (46).
         message's id sealed inside the body where the AEAD reaches it
         (the envelope's is picked after the ciphertext is made and bound
         by nothing), and a device's own signature on its certificate, so
-        an account cannot enroll a key its holder never offered. Both are
-        accepted absent, so clients that do not write them keep working.
-        What is left of this item is making them **required**, one
-        release later, once every client in use is sending them — the
-        changelog for that release has to say plainly that a client older
-        than this one cannot start a session after it. Settled in
+        an account cannot enroll a key its holder never offered. 0.16.0
+        accepted both absent, so clients that did not write them kept
+        working for that release. **Required in 0.17.0**, cut the same
+        day as 0.16.0 by decision, with the changelog saying in as many
+        words that a client older than 0.16.0 cannot be read and a device
+        linked by one cannot publish until it updates. Section 6 of the
+        note says what "required" means at each site, which is not the
+        same answer everywhere a certificate appears: the account's own
+        copies cannot carry the device's signature and are not asked to,
+        and a device linked before 0.16.0 signs its stored certificate on
+        first start rather than being stranded. Settled in
         [docs/design/format-changes.md](docs/design/format-changes.md):
         the two on-disk changes go together in one release with one
         migration and need no peer coordination, the two wire changes go

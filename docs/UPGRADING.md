@@ -111,6 +111,22 @@ routine step.
 
 ## Version notes
 
+### 0.17.0
+
+* **The one older client a relay stops taking.** The schema stays at 3
+  and the backup format at 2, and nothing about the database changes. A
+  linked device from a client older than 0.16.0 publishes its
+  certificate without its own signature, which this relay refuses as a
+  `bad_signature`, so such a device is unreachable until it updates --
+  and once it does, it signs its stored certificate on first start and
+  publishes again with nothing more to do. Every other client is
+  accepted as before: a primary or an unlinked identity on 0.14.0
+  registers and is served, since what changed for it is inside the
+  encrypted body, which the relay never opens. It is that client's
+  *peers* on 0.17.0 that drop its messages, a message queued before they
+  updated included. Upgrade the relay first, as ever, and tell your
+  users that a client older than 0.16.0 has to update to be read.
+
 ### 0.10.1
 
 * **Upgrade the relay.** The schema stays at 3 and the backup format at
