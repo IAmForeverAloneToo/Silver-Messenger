@@ -2897,6 +2897,19 @@ async fn next_frame(stream: &mut Stream) -> Option<Result<ClientFrame, String>> 
 
 #[cfg(test)]
 mod lifecycle_tests {
+    /// `docs/design/dh-rotation.md` section 5: a client keeps a replaced
+    /// Diffie–Hellman key exactly as long as a relay keeps an undelivered
+    /// message, so nothing sealed to the old key can still arrive once
+    /// the key is gone. The two are one number in two crates; this is
+    /// what keeps them so.
+    #[test]
+    fn the_rekey_grace_is_the_mailbox_retention() {
+        assert_eq!(
+            DEFAULT_MESSAGE_TTL.as_millis() as u64,
+            silver_protocol::DH_ROTATION_GRACE_MS
+        );
+    }
+
     use super::*;
     use silver_protocol::Identity;
 

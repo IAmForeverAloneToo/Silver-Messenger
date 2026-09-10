@@ -16,10 +16,12 @@ fn sessions() -> &'static (Session, Session) {
         let alice = Identity::from_secrets(&IdentitySecrets {
             signing_seed: [1; 32],
             dh_secret: [2; 32],
+            previous_dh: None,
         });
         let bob = Identity::from_secrets(&IdentitySecrets {
             signing_seed: [3; 32],
             dh_secret: [4; 32],
+            previous_dh: None,
         });
         let signed = PrekeySecret::generate(1, 0);
         let bundle = bob.key_bundle_with(Prekeys::classical(signed.signed_by(&bob), Vec::new()));

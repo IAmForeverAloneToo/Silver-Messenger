@@ -1805,6 +1805,16 @@ impl App {
     }
 
     /// Once a tick: a deposit that fell due, and one self-update that is.
+    /// Run the maintenance pass now rather than at its next interval:
+    /// after a rekey, so the leaves marked stale for it are refreshed
+    /// without waiting (`docs/design/dh-rotation.md` section 6).
+    pub(super) fn maintain_groups_now(&mut self) {
+        self.last_group_maintenance = Instant::now()
+            .checked_sub(MAINTENANCE_EVERY)
+            .unwrap_or_else(Instant::now);
+        self.maintain_groups();
+    }
+
     pub(super) fn maintain_groups(&mut self) {
         if self.connection != Connection::Connected {
             return;

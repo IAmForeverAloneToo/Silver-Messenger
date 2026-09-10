@@ -1447,6 +1447,25 @@ impl Groups {
         due
     }
 
+    /// Mark every active group's leaf as due for a refresh, so the next
+    /// self-update pass commits a leaf carrying what this identity holds
+    /// now — after a rekey, its new sealing key
+    /// (`docs/design/dh-rotation.md` section 6). Returns how many groups
+    /// that is.
+    pub fn mark_leaves_stale(&mut self) -> Result<usize> {
+        let mut n = 0;
+        for record in self.file.groups.values_mut() {
+            if record.state == GroupState::Active {
+                record.leaf_updated_ms = 0;
+                n += 1;
+            }
+        }
+        if n > 0 {
+            self.persist()?;
+        }
+        Ok(n)
+    }
+
     /// The members whose client is older than this kind of message: the
     /// identities with a leaf in the tree that does not declare the
     /// everyday extension type. Empty when an edit, a deletion, a

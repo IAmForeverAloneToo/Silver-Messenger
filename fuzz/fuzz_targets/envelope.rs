@@ -11,6 +11,7 @@ fuzz_target!(|data: &[u8]| {
     let me = Identity::from_secrets(&IdentitySecrets {
         signing_seed: [7; 32],
         dh_secret: [8; 32],
+        previous_dh: None,
     });
     if let Ok(envelope) = serde_json::from_slice::<Envelope>(data) {
         let _ = open(&me, &envelope);

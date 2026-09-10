@@ -448,6 +448,11 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
     }
 
     let (mut identity, mut created) = store.load_or_create_identity()?;
+    // A previous encryption key past its grace is erased on the way in
+    // (`docs/design/dh-rotation.md` section 5).
+    if identity.expire_previous_dh(silver_protocol::now_ms()) {
+        store.save_identity(&identity)?;
+    }
     // A first run may be a second computer: offer to link it rather than
     // start an identity of its own.
     let link = args.link || (created && offer_link(&secrets)?);
@@ -635,6 +640,8 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
                     .context("loading the device list")?
                     .shared(),
             ),
+            // Set by the caller, which shares it with the front end.
+            contact_keys: None,
         })
     };
 
@@ -678,7 +685,13 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
     // The client runs until it quits or locks; a lock drops everything that
     // holds keys and starts over from the passphrase.
     loop {
-        let options = connect_options(&store, &identity)?;
+        let mut options = connect_options(&store, &identity)?;
+        // The receive path shares this with the front end so it can tell a
+        // contact's pinned key from a key it has not seen
+        // (`docs/design/dh-rotation.md` section 4.2).
+        options.contact_keys = Some(std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )));
         let (client, events) = Client::spawn(relay_url.clone(), Arc::new(identity), options)?;
         let mut app = app::App::new(
             store,

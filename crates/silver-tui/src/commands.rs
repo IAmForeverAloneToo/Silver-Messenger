@@ -319,6 +319,12 @@ pub const COMMANDS: &[CommandInfo] = &[
         "move to a new identity; contacts re-pin automatically, then restart (needs /rotate confirm)",
     ),
     cmd(
+        "rekey",
+        &[],
+        "confirm",
+        "replace your encryption key, keeping your identity; contacts see a key change (needs /rekey confirm)",
+    ),
+    cmd(
         "log",
         &["keylog"],
         "",

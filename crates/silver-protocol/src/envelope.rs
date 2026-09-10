@@ -28,7 +28,7 @@ use crate::blob::{BlobKey, MAX_CHUNKS, MAX_FILE_BYTES, chunk_count, is_valid_blo
 use crate::bundle::KeyBundle;
 use crate::encoding::{b64, b64_array};
 use crate::group::GroupBody;
-use crate::identity::{DhPublic, Identity, UserId};
+use crate::identity::{DhKey, DhPublic, Identity, UserId};
 use crate::session::{InitHeader, RatchetMessage, SessionId};
 
 pub const ENVELOPE_DOMAIN: &[u8] = b"silver-messenger/v1/envelope";
@@ -878,30 +878,38 @@ pub fn open_bytes(recipient: &Identity, envelope: &Envelope) -> Result<Opened, P
         return Err(ProtocolError::TooLarge(envelope.ciphertext.len()));
     }
 
-    let shared = recipient
-        .dh_secret()
-        .diffie_hellman(&envelope.ephemeral_public.as_x25519());
-    if !shared.was_contributory() {
-        return Err(ProtocolError::WeakKey);
+    // The current key first; then, while one is held, the key this
+    // identity published before its last rekey — a sender that had not
+    // seen the change sealed to that one, and the relay may have held
+    // the envelope since (`docs/design/dh-rotation.md` section 5). The
+    // key derivation binds the recipient's public key, so the wrong one
+    // fails at the tag and says nothing else.
+    let mut plaintext = None;
+    for which in [DhKey::Current, DhKey::Previous] {
+        let Some((secret, public)) = recipient.dh_pair(which) else {
+            continue;
+        };
+        let shared = secret.diffie_hellman(&envelope.ephemeral_public.as_x25519());
+        if !shared.was_contributory() {
+            return Err(ProtocolError::WeakKey);
+        }
+        let key = derive_key(shared.as_bytes(), &envelope.ephemeral_public.0, &public.0);
+        let cipher = XChaCha20Poly1305::new(Key::from_slice(key.as_slice()));
+        match cipher.decrypt(
+            XNonce::from_slice(&envelope.nonce),
+            Payload {
+                msg: &envelope.ciphertext,
+                aad: &aad(&envelope.to, &envelope.ephemeral_public.0),
+            },
+        ) {
+            Ok(bytes) => {
+                plaintext = Some(Zeroizing::new(bytes));
+                break;
+            }
+            Err(_) => continue,
+        }
     }
-    let key = derive_key(
-        shared.as_bytes(),
-        &envelope.ephemeral_public.0,
-        &recipient.dh_public().0,
-    );
-
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(key.as_slice()));
-    let plaintext = Zeroizing::new(
-        cipher
-            .decrypt(
-                XNonce::from_slice(&envelope.nonce),
-                Payload {
-                    msg: &envelope.ciphertext,
-                    aad: &aad(&envelope.to, &envelope.ephemeral_public.0),
-                },
-            )
-            .map_err(|_| ProtocolError::DecryptFailed)?,
-    );
+    let plaintext = plaintext.ok_or(ProtocolError::DecryptFailed)?;
 
     if plaintext.len() < 96 {
         return Err(ProtocolError::Malformed("plaintext too short".into()));
@@ -984,6 +992,7 @@ fn signed_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::identity::DH_ROTATION_GRACE_MS;
     use crate::prekey::{PrekeySecret, Prekeys};
     use crate::session::Session;
 
@@ -1222,6 +1231,42 @@ mod tests {
         assert_eq!(msg.content, text("hello bob"));
         assert_eq!(msg.id, env.id);
         assert!(!msg.forward_secret);
+    }
+
+    /// `docs/design/dh-rotation.md` section 5: an envelope sealed to the
+    /// key a recipient has since replaced opens while the old key is
+    /// held, and not after it is expired; one sealed to the new key opens
+    /// throughout.
+    #[test]
+    fn an_envelope_sealed_to_a_replaced_key_opens_during_the_grace() {
+        let alice = Identity::generate();
+        let bob = Identity::generate();
+        let old_bundle = bob.key_bundle();
+        let to_old = seal(&alice, &old_bundle, text("before the rekey"), 1).unwrap();
+        bob.rotate_dh(1_000);
+        let to_new = seal(&alice, &bob.key_bundle(), text("after"), 2).unwrap();
+        assert_eq!(
+            open(&bob, &to_old).unwrap().content,
+            text("before the rekey")
+        );
+        assert_eq!(open(&bob, &to_new).unwrap().content, text("after"));
+        // A sender still sealing to the old key, as one that could not
+        // reach the relay does, is read too.
+        let late = seal(&alice, &old_bundle, text("still the old key"), 3).unwrap();
+        assert_eq!(
+            open(&bob, &late).unwrap().content,
+            text("still the old key")
+        );
+        assert!(bob.expire_previous_dh(1_000 + DH_ROTATION_GRACE_MS));
+        assert!(matches!(
+            open(&bob, &to_old),
+            Err(ProtocolError::DecryptFailed)
+        ));
+        assert!(matches!(
+            open(&bob, &late),
+            Err(ProtocolError::DecryptFailed)
+        ));
+        assert_eq!(open(&bob, &to_new).unwrap().content, text("after"));
     }
 
     #[test]

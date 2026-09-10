@@ -82,12 +82,16 @@ key nobody holds.
 
 ### 4.1 When it sends to the rekeyed identity
 
-Nothing new. The send path already looks the peer up (through the
-transparency check), compares the answer with the pinned bundle, and on
-a difference drops its sessions with that peer and re-pins with a
-**KEY CHANGE** notice that clears the verified mark (`key_changed` in
-`Client::send`, `note_key_change` in the front end). The next message
-starts a session against the new key. The notice's wording gains the
+Nothing new. The send path looks the peer up (through the transparency
+check) whenever it has no session with them, compares the answer with
+the pinned bundle, and on a difference drops its sessions with that
+peer and re-pins with a **KEY CHANGE** notice that clears the verified
+mark (`key_changed` in `Client::send`, `note_key_change` in the front
+end). The next message starts a session against the new key. While it
+*has* a session it looks nobody up, so a contact mid-conversation
+learns of the rekey from the other direction: the rekeyed identity's
+next message to them, which is a fresh handshake (section 7), taken
+under 4.2. The notice's wording gains the
 routine reason — "they ran `/rekey`, reinstalled, or their identity key
 is compromised" — but the action is the one it was: confirm and
 `/verify`.
@@ -97,47 +101,63 @@ is compromised" — but the action is the one it was: confirm and
 A session the *peer* started carries the long-term key the handshake
 claimed as the peer's own. The rule becomes:
 
-> **A responder accepts a peer-started session only if the key it
-> claimed is the key the peer currently publishes.**
+> **A responder accepts a peer-started session on a key it already
+> trusts at once; a key that contradicts what it has pinned is checked
+> against the key the peer currently publishes before the message is
+> delivered.**
 
-Concretely, when a body with a handshake opens and the connection has
-just derived a new session from it:
+The check is on the contradiction, not on every session — a lookup for
+every first message a stranger sends would be latency for nothing, and
+the common case (a session on the very key the contact publishes) is
+the one to keep fast. So the connection is given the front end's pins,
+in a small shared map it keeps in step (`Client::sync_contact_keys`,
+one `UserId → DhPublic`), and when a body with a handshake opens and a
+new session is derived from it:
 
-1. The connection **defers** delivering that message and the
-   `SessionEstablished` event, sends a lookup for the peer, and parks
-   the message until the relay answers. The lookup goes through the
-   transparency check like any other, so a relay serving a key it never
-   logged is refused rather than believed.
-2. When the answer arrives, the event carries the verdict alongside the
-   claimed key: `published: Some(<the relay's current key>)`, or
-   `None` when there was no answer to trust (the relay could not be
-   asked, or the answer failed the transparency check).
+1. **The claimed key is the one pinned for the peer, or the peer has no
+   pin.** Deliver at once, reporting the session with `published: None`.
+   No lookup, no wait. This is every ordinary first message, and the
+   behaviour is what it was before the check existed. A peer with no pin
+   is a stranger whose first message becomes a request; the user's
+   decision to answer it looks the peer up anyway, which is where an
+   old-key impersonation of a rekeyed identity is caught for a stranger.
+2. **The claimed key contradicts the pin.** This is the one case worth a
+   round trip: either the peer legitimately rekeyed, or somebody is
+   starting a session with a key its owner has retired. The connection
+   **defers** delivering the message and the `SessionEstablished` event,
+   sends a lookup for the peer, and parks the message until the relay
+   answers. The lookup goes through the transparency check like any
+   other, so a relay serving a key it never logged is refused rather
+   than believed. When the answer arrives the event carries the verdict:
+   `published: Some(<the relay's current key>)`, or `None` when there
+   was no answer to trust (the relay could not be asked, or the answer
+   failed the transparency check).
 3. The front end, which holds the pin, decides:
 
-   | claimed vs published | claimed vs pinned | Outcome |
-   |---|---|---|
-   | equal | equal | Ordinary. |
-   | equal | differs | **Key change**, the same as 4.1: re-pin, clear the verified mark, say so. The session stands — it was made with the key they publish. |
-   | differs | equal | **Refused**: "started a session with a key they have since replaced". The session is dropped and the message shown with that warning. This is the old-key attacker after a rekey. |
-   | differs | differs | **Refused**: "a key that is not the one they publish, nor the one pinned" — today's warning, now with the relay's word behind it. |
-   | unknown (`None`) | equal | Ordinary; the check was not made and the pin is what there is. |
-   | unknown (`None`) | differs | **Refused**, as today: a key that is not the pinned one and cannot be checked. |
+   (The claimed key always differs from the pin here — a match was
+   delivered at step 1 and never reaches this table.)
 
-   The two `None` rows are exactly today's behaviour, so a client that
+   | claimed vs published | Outcome |
+   |---|---|
+   | equal | **Key change**, the same as 4.1: re-pin, clear the verified mark, say so. The session stands — it was made with the key they publish. |
+   | differs | **Refused**: "started a session with a key they have since replaced". The session is dropped and the message shown with that warning. This is the old-key attacker after a rekey. |
+   | unknown (`None`) | **Refused**, as today: a key that is not the pinned one and cannot be checked, so the safety number must be compared out of band. |
+
+   The `None` row is exactly today's pin-only behaviour, so a client that
    cannot reach its relay loses nothing it had.
 
-Why defer rather than deliver and warn afterwards, which is what the
-pin-only check does today: the first message of a peer-started session
-arrives *with* the handshake, and displaying it sends a read receipt
-into the session it came in on. Delivering before the verdict would
-hand an attacker who started the session one receipt — small, but it is
-a message encrypted to somebody the check is about to refuse, and the
-point of checking at the boundary (item 62.9) is that nothing is acted
-on before it is checked. The cost is one relay round trip before the
-first message of a new session from a peer shows, which is a latency
-nobody will see. A disconnect while a message is parked flushes it with
-`published: None`, so a message is never lost to the check; it is
-delivered under the pin rule instead.
+Why defer the contradicting case rather than deliver and warn
+afterwards, which is what the pin-only check does today: the first
+message of a peer-started session arrives *with* the handshake, and
+displaying it sends a read receipt into the session it came in on.
+Delivering before the verdict would hand an attacker who started the
+session one receipt — small, but it is a message encrypted to somebody
+the check is about to refuse, and the point of checking at the boundary
+(item 62.9) is that nothing is acted on before it is checked. The cost
+is one relay round trip, and only on a key that already disagrees with
+the pin, which is a latency nobody will see. A disconnect while a
+message is parked flushes it with `published: None`, so a message is
+never lost to the check; it is delivered under the pin rule instead.
 
 This check is a policy on which key a responder accepts. It changes no
 message, no format and no signature, so the formal model and the
@@ -218,7 +238,8 @@ not be one argument away from the one that changes their safety number.
 
 * Two-step, with the paste guard: `/rekey` says what will happen
   (contacts see a key-change notice and their verified mark for you
-  clears; every conversation restarts under the new key; groups refresh)
+  clears; your next message to each contact starts afresh under the new
+  key; groups refresh)
   and stops; `/rekey confirm` goes ahead, and `typed_it_themselves` sits
   on that line, as `docs/design/consequential-commands.md` has it for
   `/rotate`. The verified marks other people hold for you are what makes
@@ -228,10 +249,27 @@ not be one argument away from the one that changes their safety number.
   refuses a second handover: a key signed by an identity contacts have
   not pinned yet.
 * What it does, in order: new key; `identity.json` saved with the old
-  secret under `previous_dh`; every session dropped, so each
-  conversation restarts with a handshake under the new key; bundle
-  republished; every active group's leaf marked due and the self-update
-  pass run at once; a System line saying what contacts will see.
+  secret under `previous_dh`; bundle republished; every active group's
+  leaf marked due and the self-update pass run at once; a System line
+  saying what contacts will see.
+* **Existing sessions are retired, not forgotten**, once the publish
+  has been tried. Retired means the next message to each
+  contact starts a fresh handshake under the new key — which is how a
+  contact with a live session learns of the change at all, since the
+  send path looks nobody up while it has a session with them (4.1) —
+  while the old session is kept and still decrypts whatever the contact
+  sends on it before switching, a session being found by its id to
+  read, active or not. Forgetting them instead would lose exactly those
+  messages, and buys nothing: a session's security rests on its
+  ratchet, and of X3DH's three Diffie–Hellman terms only the first
+  involves the initiator's long-term key, the other two needing the
+  ephemeral secret, so the key being replaced never enters a session
+  after its handshake and an attacker holding it cannot read one.
+  Retiring before the relay has the key would hand a contact a
+  handshake it cannot yet confirm and would refuse (4.2), which is why
+  the retire follows the publish; a publish that failed — the client
+  was offline — is made again by the next connection on its way in,
+  before anything queued is sent, so the order holds either way.
 
 If saving fails, the in-memory key is put back and nothing is published:
 a key that is not on disk is not a key this identity has.
@@ -271,11 +309,13 @@ it; it bounds what the key is worth afterwards.
 * Relay: `DEFAULT_MESSAGE_TTL` equals the grace window.
 * Client: after a rekey the bundle on the relay carries the new key
   under a valid signature; a contact's next send reports `key_changed`
-  and the message arrives; a handshake the rekeyed identity starts
-  reaches the contact with `published == claimed`; a handshake made with
-  the *old* key after the rekey reaches the contact with `published !=
-  claimed`; a message parked for the check is delivered with `None` when
-  the connection drops before the answer.
+  and the message arrives; a session a peer starts on the key pinned for
+  them is delivered at once with `published: None` (no lookup); a
+  handshake whose key contradicts the pin is held until the lookup
+  answers, and delivered with `published == claimed` for a legitimate
+  rekey and `published != claimed` for a handshake made with the retired
+  key; a message parked for the check is delivered with `None` when the
+  connection drops before the answer.
 * Groups: after a rekey and the self-update pass, the other members'
   record of the sealing key is the new one, and a message sealed to it
   opens.

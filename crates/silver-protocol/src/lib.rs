@@ -81,7 +81,9 @@ pub use envelope::{
 };
 pub use error::ProtocolError;
 pub use group::{GroupBody, GroupId, GroupKind, GroupPlaintext, SilverGroup};
-pub use identity::{DhPublic, Identity, IdentitySecrets, UserId};
+pub use identity::{
+    DH_ROTATION_GRACE_MS, DhKey, DhPublic, Identity, IdentitySecrets, PreviousDhSecret, UserId,
+};
 pub use lifecycle::{Revocation, Succession};
 pub use pq::{KemPublic, KemRatchetKey, PqPrekeySecret, SignedPqPrekey};
 pub use prekey::{OneTimePrekey, PrekeySecret, Prekeys, SignedPrekey};

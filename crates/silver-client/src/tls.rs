@@ -80,6 +80,15 @@ pub struct ConnectOptions {
     /// its certificate) and advertises `devices`; without one it is a
     /// client of one device that neither links nor is sent to per device.
     pub devices: Option<crate::devices::SharedDevices>,
+    /// The long-term Diffie–Hellman key this client has pinned for each
+    /// contact, kept in step by the front end. A session a peer starts
+    /// with a key that is not the one pinned for them is checked against
+    /// the key the relay publishes before it is delivered
+    /// (`docs/design/dh-rotation.md` section 4.2); one that matches the
+    /// pin, or a peer with no pin, is delivered at once. Without this map
+    /// nothing is pinned, so nothing is deferred — a library client that
+    /// keeps its own trust decides for itself.
+    pub contact_keys: Option<crate::connection::SharedContactKeys>,
 }
 
 impl std::fmt::Debug for ConnectOptions {
@@ -93,6 +102,7 @@ impl std::fmt::Debug for ConnectOptions {
             .field("invite_token", &self.invite_token.is_some())
             .field("sessions", &self.sessions.is_some())
             .field("devices", &self.devices.is_some())
+            .field("contact_keys", &self.contact_keys.is_some())
             .field("submit_authenticated", &self.submit_authenticated)
             .field("require_anonymous", &self.require_anonymous)
             .field("groups", &self.groups)

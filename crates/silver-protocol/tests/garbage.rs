@@ -43,6 +43,7 @@ fn identity(seed: u8) -> Identity {
     Identity::from_secrets(&IdentitySecrets {
         signing_seed: [seed; 32],
         dh_secret: [seed.wrapping_add(100); 32],
+        previous_dh: None,
     })
 }
 

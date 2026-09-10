@@ -241,6 +241,7 @@ impl Seeds {
         Identity::from_secrets(&IdentitySecrets {
             signing_seed: self.signing_seed,
             dh_secret: self.dh_secret,
+            previous_dh: None,
         })
     }
 }
