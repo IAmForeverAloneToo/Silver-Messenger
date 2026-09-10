@@ -121,7 +121,7 @@ struct Args {
     /// stops a hostile relay collecting a login from one of its users and
     /// presenting it here as them. Accepting the unbound login leaves
     /// that open, and it was the default for nine releases while clients
-    /// caught up; from 0.15.0 the bound login is required unless this
+    /// caught up; from 0.16.0 the bound login is required unless this
     /// says otherwise. Only useful for a relay that still has clients
     /// older than 0.6.0.
     #[arg(long, env = "SILVER_RELAY_ALLOW_UNBOUND_AUTH")]

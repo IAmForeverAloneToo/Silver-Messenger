@@ -4,28 +4,37 @@ Notable changes to Silver Messenger. Versions follow [semantic
 versioning](https://semver.org); while the major version is 0, a minor bump
 means behaviour or the wire protocol changed in a way worth reading about.
 
-## Unreleased
+## 0.16.0 - 2026-09-10
 
-Roadmap item 57: the two on-disk changes the first review asked for
-(SM-C-24, SM-C-25), and the two wire changes as optional fields (SM-P-14,
-and a device's own signature on its certificate). The on-disk pair
-changes what a data directory looks like and migrates it on first
-unlock, so it is kept out of 0.15.0 -- that release is the answer to the
-second review and nothing else.
+Two things at once, and 0.15.0 was never cut: the answer to the second
+independent security review, and roadmap item 57, the changes the *first*
+review left for a version allowed to change a format.
 
-**These sections are in commit order, not release order.** 0.15.0 has
-not been tagged, so the tip of `main` carries both: cutting a release
-from it as it stands would ship this section under 0.15.0's name. The
-on-disk pair is a migration and deserves to be read as one rather than
-folded into a release of security fixes.
+The review of the 0.14.0 line reported 2 High, 7 Medium, 18 Low and 2
+Informational findings and found no cryptographic break. Both Highs, all
+seven Mediums, eleven of the eighteen Lows and the one Informational that
+was a real defect are fixed here; three Lows the report withdrew itself,
+and the rest are listed, with what leaving each costs and which are
+declined outright, in
+[docs/design/audit-response-2.md](docs/design/audit-response-2.md). The
+report is published whole at
+[docs/audits/2026-09-second-security-audit.md](docs/audits/2026-09-second-security-audit.md),
+with identifiers belonging to the maintainer's own machine and relay
+redacted from its live-evidence appendix -- the only edit, and the report
+says so at its head.
 
-The cut for 0.15.0 is "Settle how the on-disk pair is built, before
-writing it" -- everything up to and including that commit, which is the
-last before the first line of on-disk code. One thing from 0.15.0's own
-work lands after it and would go in the next release instead: the
-host-name check on a redirect target, which the new fuzz target found.
-Nothing resolves a host name with a NUL or an `@` in it, so that one was
-not reachable in practice; it is a loose end, not a hole.
+Item 57 brings the on-disk pair (SM-C-24, SM-C-25), which **migrates the
+data directory on first unlock**, and the two wire changes as optional
+fields (SM-P-14, and a device's own signature on its certificate), which
+a later release makes required. `docs/design/format-changes.md` settles
+all four and says what each costs.
+
+**Upgrading.** The data directory is migrated the first time this
+version unlocks it: every file gains a generation, and every
+conversation's log moves off a name that says who it is with. A
+directory this version has written is not readable by an older one,
+which is what the vault's version field has always been for. Nothing on
+the wire changes for a peer.
 
 ### Security
 
@@ -78,6 +87,16 @@ not reachable in practice; it is a loose end, not a hole.
   refused. Required a release later, as the design note schedules. The
   account's signed device list keeps the certificate as the account
   minted it, the account's signature covering that list whole.
+- A macOS release built without the notarization secrets is signed ad
+  hoc with the hardened runtime asked for, rather than left with no code
+  signature at all. That is what should make macOS refuse a debugger
+  attach from another program of the same user, and the release job
+  fails if the flag is missing from the signature it just made.
+  **It is not verified.** Nobody has watched it refuse an attach on a
+  real Mac, so the threat model and SECURITY.md go on counting macOS as
+  unprotected and say why; a claim about what a platform enforces is not
+  one to make from a manual page. Gatekeeper is unchanged either way: an
+  unnotarised download is refused whether it is signed or not.
 - A message carries its own id inside the body, where the AEAD covers it
   (SM-P-14, from the first review). The envelope's id is chosen after the
   ciphertext is made and no signature or AEAD reaches it, so a relay
@@ -125,24 +144,6 @@ not reachable in practice; it is a loose end, not a hole.
   from the generations the files themselves carry, and says plainly that
   whatever happened to the directory before that moment is now
   unprovable.
-
-## 0.15.0 - 2026-09-09
-
-A second independent security review of the 0.14.0 line reported 2 High,
-7 Medium, 18 Low and 2 Informational findings and found no cryptographic
-break. Both Highs, all seven Mediums, eleven of the eighteen Lows and the
-one Informational that was a real defect are fixed here; three Lows the
-report withdrew itself, and the rest are listed, with what leaving each
-costs and which are declined outright, in
-[docs/design/audit-response-2.md](docs/design/audit-response-2.md).
-The report is published whole at
-[docs/audits/2026-09-second-security-audit.md](docs/audits/2026-09-second-security-audit.md),
-with identifiers belonging to the maintainer's own machine and relay
-redacted from its live-evidence appendix — the only edit, and the report
-says so at its head.
-
-### Security
-
 - The threat model said a compromised long-term Diffie–Hellman key only
   decrypts, and left impersonation to the identity key. That has been
   wrong since protocol v4: a v4 message carries no signature at the

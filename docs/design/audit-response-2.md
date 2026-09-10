@@ -10,7 +10,7 @@ is done about it, and where. It follows
 note and the code disagree, the code wins and this note is corrected.
 
 There is no Critical and no cryptographic break. The two Highs and every
-Medium are fixed in 0.15.0, as are eleven of the eighteen Lows and the
+Medium are fixed in 0.16.0, as are eleven of the eighteen Lows and the
 one Informational that was a real defect. Of the rest, three Lows the
 report itself withdrew, one is declined, and the others are remainders of
 findings otherwise closed — two scheduled, three declined with the
@@ -21,8 +21,8 @@ up.
 
 | Question | Decision |
 | --- | --- |
-| What ships in 0.15.0 | Both Highs, all seven Mediums, eleven of the eighteen Lows in full, three more in part, and the one Informational that is a real defect (I-1). No patch release was cut ahead of it: neither High is reachable without either a line the user pastes without reading (H-2) or the access class that already reads an unlocked client outright (H-1, M-1), so nothing here is a race against disclosure. |
-| What is scheduled | One remainder, under roadmap item 63: the macOS signing H-1 wants, which needs checking on a real Mac before it is claimed. Section 4 says what leaving it costs. |
+| What ships in 0.16.0 | Both Highs, all seven Mediums, eleven of the eighteen Lows in full, three more in part, and the one Informational that is a real defect (I-1). No patch release was cut ahead of it: neither High is reachable without either a line the user pastes without reading (H-2) or the access class that already reads an unlocked client outright (H-1, M-1), so nothing here is a race against disclosure. |
+| What is scheduled | One remainder, under roadmap item 63: verifying on a real Mac that the ad-hoc hardened runtime H-1 asked for actually restricts an attach. The signing is in; the claim is not made until somebody has watched it hold. Section 4 says what that leaves. |
 | What is declined | L-1 and the M-1 remainder, on one decision about `forbid(unsafe_code)`; the L-11 and L-12 remainders, each on its own argument; and the review's suggested non-zero `lock_after_minutes` default. All five are argued in section 4 rather than left open. |
 | Where a suggested fix was not taken | Section 5. Five cases, each argued. |
 | Disclosure | The report goes in whole, this note beside it, as [SECURITY.md](../../SECURITY.md) says of every review. |
@@ -112,12 +112,22 @@ documentation defect.
   `SILVER_LOG` is set, it is written 0600, and the threat model says
   what it is. Turning it on is a deliberate trade, and the client should
   not quietly make the diagnostic unreadable in exchange.
-* **H-1 remainder — macOS release builds are unsigned** unless
-  notarization secrets are set, so the hardened runtime that would
-  restrict same-user attach is absent. Ad-hoc signing would get
-  `CS_RESTRICT` without notarization.
+* **H-1 remainder — macOS release builds carry no Developer ID
+  signature** unless the notarization secrets are set. *Half done, and
+  the half that is done is unverified.* A build without those secrets is
+  now signed **ad hoc with the hardened runtime asked for**, which is
+  what should make macOS refuse a same-user attach, and the release job
+  fails if the flag is missing from the signature it just made. What
+  nobody has done is watch it refuse one on a real Mac, so the threat
+  model and SECURITY.md go on counting macOS as unprotected and say why.
+  A claim about what a platform enforces is not one to make from a
+  manual page — this program has been caught once already by a document
+  describing a check the code did not do (I-1), and the answer to that
+  was a test, not better prose. Until somebody runs it: Gatekeeper is
+  unchanged either way, since an unnotarised download is refused signed
+  or not.
 * **M-1 remainder — no enumeration sweep of `data-key-*` entries.**
-  *Declined.* The pending list covers every key orphaned from 0.15.0 on;
+  *Declined.* The pending list covers every key orphaned from 0.16.0 on;
   keys orphaned by *earlier* versions stay until removed by hand. Same
   decision as L-1.
 
@@ -139,7 +149,7 @@ worth more than what either finding buys: L-1 narrows a swap exposure
 that full-disk encryption already answers and that pinning the key alone
 would not close anyway — the decrypted messages beside it stay pageable —
 and the M-1 remainder is a key left behind by a version older than
-0.15.0, removable by hand, on a machine whose key store the attacker
+0.16.0, removable by hand, on a machine whose key store the attacker
 would have to hold already. A dependency is not a way around the same
 trade: it moves the unsafe out of view without removing it from the
 process, and the reviewer's point was about what runs, not about which

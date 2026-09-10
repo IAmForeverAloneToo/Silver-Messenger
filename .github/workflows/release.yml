@@ -146,7 +146,31 @@ jobs:
             if [ -n "${!name}" ]; then given=$((given + 1)); fi
           done
           if [ "$given" -eq 0 ]; then
-            echo "::notice::the APPLE_* secrets are not set; the macOS executables are published unsigned and not notarised (README, \"Signing releases\")"
+            # No Apple credentials, so no Developer ID signature and no
+            # notarisation. Sign ad hoc anyway, with the hardened runtime
+            # asked for: it costs nothing, it is what asks macOS to refuse
+            # a same-user debugger attach, and the alternative is an
+            # executable with no code signature at all. Gatekeeper is no
+            # worse off -- it already refuses an unnotarised download
+            # whether or not it is signed.
+            #
+            # UNVERIFIED. Nobody has yet watched this refuse an attach on
+            # a real Mac; `docs/THREAT_MODEL.md` and SECURITY.md say macOS
+            # is unprotected and keep saying so until somebody has. That
+            # the flag is set is checked here; that it does what the
+            # manual page says it does is not.
+            dir="target/${{ matrix.target }}/release"
+            for bin in silver silver-relay; do
+              codesign --sign - --options runtime --force "$dir/$bin"
+              codesign --verify --strict --verbose=2 "$dir/$bin"
+              # The signature must actually carry the runtime flag; an
+              # ad-hoc signature without it would be decoration.
+              codesign --display --verbose=2 "$dir/$bin" 2>&1 | grep -q 'flags=.*runtime' || {
+                echo "::error::$bin was signed without the hardened runtime flag"
+                exit 1
+              }
+            done
+            echo "::notice::the APPLE_* secrets are not set; the macOS executables are signed ad hoc with the hardened runtime and are neither Developer ID signed nor notarised (README, \"Signing releases\")"
             exit 0
           fi
           if [ "$given" -ne 5 ]; then

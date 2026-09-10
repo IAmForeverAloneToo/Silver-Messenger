@@ -67,7 +67,7 @@ const MAX_REDIRECTS: usize = 5;
 /// that publishes no key, which makes an update refuse rather than
 /// accept whatever the release host serves.
 ///
-/// That last sentence was written before the code did it: until 0.15.0 an
+/// That last sentence was written before the code did it: until 0.16.0 an
 /// empty key skipped the signature and installed the binary anyway,
 /// saying so in a line printed after the swap. The other two checks are
 /// no substitute, both being answers from the host serving the bytes.

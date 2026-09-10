@@ -152,7 +152,7 @@ V6 and the threat model.
 | 6.3.1 CSPRNG | Met | `OsRng` (`getrandom`) for every key, nonce, id and epoch. |
 | 6.3.2 Identifiers from a CSPRNG | Met | Envelope ids, blob ids, prekey ids, sequence epochs. |
 | 6.4.1 Secrets management | Met | OS key store or passphrase; relay invite token from flag or environment. |
-| 6.4.2 Keys not exposed to application code | Partly | Keys are in process memory; core dumps are disabled, on Linux the process is not dumpable or traceable by other processes of the user, and from 0.15.0 on Windows its access list refuses being opened for reading (macOS has neither); `SILVER_PASSPHRASE` is scrubbed from the environment before any thread exists. A program running as the user still reads an unlocked client's memory, which the threat model states rather than defends. |
+| 6.4.2 Keys not exposed to application code | Partly | Keys are in process memory; core dumps are disabled, on Linux the process is not dumpable or traceable by other processes of the user, and from 0.16.0 on Windows its access list refuses being opened for reading (macOS has neither); `SILVER_PASSPHRASE` is scrubbed from the environment before any thread exists. A program running as the user still reads an unlocked client's memory, which the threat model states rather than defends. |
 
 ## V7 Error handling and logging
 
