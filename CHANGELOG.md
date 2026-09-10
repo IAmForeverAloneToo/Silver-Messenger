@@ -4,6 +4,69 @@ Notable changes to Silver Messenger. Versions follow [semantic
 versioning](https://semver.org); while the major version is 0, a minor bump
 means behaviour or the wire protocol changed in a way worth reading about.
 
+## 0.17.0 - 2026-09-10
+
+The second of the two releases roadmap item 57 schedules for its wire
+changes: the two fields 0.16.0 added as optional are required. Cut the
+same day as 0.16.0, by decision; section 6 of
+[docs/design/format-changes.md](docs/design/format-changes.md) records
+what "required" means at each site and what cutting it without a gap
+costs.
+
+**Upgrading.** A client older than 0.16.0 cannot message this one, and
+this one cannot read what such a client sends -- a message already
+queued on the relay before this one updated included. A device linked
+by a client older than 0.16.0 is refused by a relay on this release when
+it publishes its bundle, and is unreachable until it updates; once it
+does, it signs its stored certificate on first start and is back with
+nothing more to do. `silver update` takes anyone on 0.12.0 or later
+straight here. Nothing in the data directory changes, and the relay's
+database and backup format are as they were.
+
+### Security
+
+- A message body without its id is refused (SM-P-14, the second half).
+  Since 0.16.0 every client puts the message's id inside the body, where
+  the AEAD covers it, so a body arriving without one can only be from a
+  client older than that -- and reading it under the envelope's id, the
+  relay's to choose, was the finding. The fallback goes with the field
+  made required, in the type as well as on the wire: a body cannot be
+  built without an id, and the decoder refuses one that arrives without.
+  The plain body's version does not move; a field stopped being
+  optional, and a v2 body would make every reader dispatch on a version
+  to learn nothing.
+- A device's certificate must carry the device's own signature wherever
+  the device presents it as its own: the `device_of` in its bundle,
+  which the relay checks on publish and every client on lookup, and the
+  `device` in each body it sends, which the recipient checks. The
+  account's own copies -- its signed list, a provisioning message, a
+  `sync` -- cannot carry it and are not asked to, and the MLS leaf,
+  signed by the device key itself, never needed it; one check that
+  required it everywhere would have refused the account's own list. A
+  device linked before 0.16.0 holds only the account's copy; on first
+  start under this release it signs it and writes it back, so a device
+  that skipped 0.16.0 is not stranded.
+
+### Fixed
+
+- A read receipt for one message is two padding blocks on the wire, not
+  one, and has been since 0.16.0 put the message's id inside every body:
+  the id and its framing carry a one-message receipt over the 160-byte
+  block. The test that guarded "a receipt, a short and a medium message
+  are the same size" built its bodies with zeroed times and epochs and
+  went on passing; it now uses the values a message really carries, and
+  the protocol document says what is true -- a receipt and a medium
+  message are the same size, and only a text of a dozen characters or so
+  is a block smaller. Nothing was mis-sent; the claim was stale for one
+  release.
+
+### Changed
+
+- The conformance vectors carry an id on every plain body, the laptop's
+  bundle in the transparency vectors carries the laptop's own signature,
+  and the envelope vector's v1 body has an id, so its ciphertext moved.
+  No leaf moved: the counter-signature is outside the leaf encoding.
+
 ## 0.16.0 - 2026-09-10
 
 Two things at once, and 0.15.0 was never cut: the answer to the second
