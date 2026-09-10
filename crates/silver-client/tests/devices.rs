@@ -721,6 +721,29 @@ async fn a_device_links_by_its_link_and_takes_the_snapshot() {
         vec![certificate.clone()]
     );
     assert!(!laptop_store.is_unused().unwrap());
+    // Linking ends with the account syncing its list to every device, so
+    // that list — carrying the account's copy of this very certificate,
+    // without the half only the laptop can sign — lands on the laptop a
+    // moment later. Waited for rather than left to chance: the laptop
+    // must take the account's word about *which devices there are*
+    // without taking its own signature back off its own certificate.
+    wait_for(&mut laptop_ev, "alice's device list", |e| {
+        matches!(e, ClientEvent::Sync { device, sync }
+            if *device == alice.user_id() && matches!(**sync, Sync::Devices { .. }))
+    })
+    .await;
+    assert_eq!(
+        laptop_store.load_linked().unwrap(),
+        Some(Linked {
+            account: alice.user_id(),
+            certificate: countersigned.clone(),
+        }),
+        "a sync must not take the device's own signature off its certificate"
+    );
+    assert_eq!(
+        laptop_store.load_devices().unwrap().devices,
+        vec![certificate.clone()]
+    );
     assert_eq!(
         alice_store.load_devices().unwrap().devices,
         vec![certificate.clone()]

@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use silver_protocol::device::MAX_DEVICES;
 use silver_protocol::device::Sync;
-use silver_protocol::{Content, DeviceCertificate, DeviceRevocation, UserId};
+use silver_protocol::{Content, DeviceCertificate, DeviceRevocation, Identity, UserId};
 
 use crate::store::Store;
 
@@ -227,14 +227,33 @@ impl DeviceState {
 
     /// Take the list as the primary synced it. Every certificate must be
     /// the account's and verify, as must every revocation. On a linked
-    /// device the list's certificate for this key, when it differs (the
-    /// primary renamed the device), becomes this device's own. Returns
-    /// the devices newly revoked by it, whose sessions the caller drops.
+    /// device the list's certificate for this key, when the account
+    /// changed what it says (the primary renamed the device), becomes
+    /// this device's own — counter-signed afresh with `me`, since the
+    /// rename moved the bytes the old counter-signature covered.
+    ///
+    /// A copy that differs in nothing but the counter-signature is the
+    /// same statement and is left alone. The account never has that half
+    /// (it cannot sign for the device), so its list always lacks it;
+    /// taking the list's copy on that difference would strip the
+    /// device's own signature from every body it sends on the first
+    /// sync after linking.
+    ///
+    /// Returns the devices newly revoked by the list, whose sessions the
+    /// caller drops.
     pub fn set_list(
         &mut self,
         devices: Vec<DeviceCertificate>,
         revoked: Vec<DeviceRevocation>,
+        me: &Identity,
     ) -> anyhow::Result<Vec<UserId>> {
+        // `me` is what signs this device's certificate, so it has to be
+        // this device's key. Checked here, before anything is taken from
+        // the list, so a caller that passed the wrong identity is told
+        // that instead of the primary being blamed for a bad list.
+        if me.user_id() != self.me {
+            anyhow::bail!("the device state was given another key's identity");
+        }
         let list = checked_list(&self.account(), devices, revoked)?;
         let new: Vec<UserId> = list
             .revoked
@@ -244,9 +263,9 @@ impl DeviceState {
             .collect();
         if let Some(linked) = &mut self.linked
             && let Some(mine) = list.devices.iter().find(|d| d.device == self.me)
-            && *mine != linked.certificate
+            && !same_account_statement(mine, &linked.certificate)
         {
-            linked.certificate = mine.clone();
+            linked.certificate = me.countersign_device(mine)?;
             if let Some(store) = &self.store {
                 store.save_linked(Some(linked))?;
             }
@@ -327,6 +346,33 @@ fn checked_list(
     devices.sort_by_key(|d| d.device);
     devices.dedup_by_key(|d| d.device);
     Ok(DevicesFile { devices, revoked })
+}
+
+/// Whether two certificates for the same key say the same thing about it,
+/// counting only what the account signed. The counter-signature covers
+/// exactly the bytes the account's signature does, so a certificate that
+/// carries one makes the same statement as the same certificate without
+/// it, by a second signer.
+///
+/// Destructured rather than compared field by field so a field added to
+/// [`DeviceCertificate`] has to be placed on one side of that line here,
+/// instead of being quietly left out of the comparison.
+fn same_account_statement(theirs: &DeviceCertificate, ours: &DeviceCertificate) -> bool {
+    let DeviceCertificate {
+        account,
+        device,
+        created_at_ms,
+        name,
+        signature,
+        // The device's own half, which the account cannot produce and
+        // its list therefore never carries.
+        device_signature: _,
+    } = theirs;
+    *account == ours.account
+        && *device == ours.device
+        && *created_at_ms == ours.created_at_ms
+        && *name == ours.name
+        && *signature == ours.signature
 }
 
 fn check_linked(linked: &Linked, me: &UserId) -> anyhow::Result<()> {
@@ -467,15 +513,20 @@ mod tests {
         let alice = Identity::generate();
         let laptop = Identity::generate();
         let phone = Identity::generate();
+        // As a device holds it after linking: the account's certificate
+        // with the device's own signature added. The account's list holds
+        // the same certificate without that half, which the account has
+        // no way to produce.
         let certificate = certified(&alice, &laptop, "laptop");
+        let mine = laptop.countersign_device(&certificate).unwrap();
         let linked = Linked {
             account: alice.user_id(),
-            certificate: certificate.clone(),
+            certificate: mine.clone(),
         };
         let mut state = DeviceState::ephemeral(laptop.user_id(), Some(linked.clone())).unwrap();
         assert!(state.is_linked());
         assert_eq!(state.account(), alice.user_id());
-        assert_eq!(state.certificate(), Some(&certificate));
+        assert_eq!(state.certificate(), Some(&mine));
         assert_eq!(state.siblings(), vec![alice.user_id()]);
         assert!(state.is_ours(&alice.user_id()) && state.is_ours(&laptop.user_id()));
         assert!(state.link(certified(&alice, &phone, "phone")).is_err());
@@ -489,9 +540,19 @@ mod tests {
             .set_list(
                 vec![certified(&alice, &phone, "phone"), certificate.clone()],
                 vec![],
+                &laptop,
             )
             .unwrap();
         assert!(newly.is_empty());
+        // The account's copy says what this device's copy says; the only
+        // difference is the device's own signature, which the account
+        // cannot have. The device keeps its counter-signed copy, or the
+        // first sync after linking would strip it.
+        assert_eq!(
+            state.certificate(),
+            Some(&mine),
+            "a sync must not take the device's own signature off its certificate"
+        );
         let mut siblings = state.siblings();
         siblings.sort();
         let mut expected = vec![alice.user_id(), phone.user_id()];
@@ -501,30 +562,60 @@ mod tests {
             .set_list(
                 vec![certificate.clone()],
                 vec![alice.revoke_device(&phone.user_id(), 2)],
+                &laptop,
             )
             .unwrap();
         assert_eq!(newly, vec![phone.user_id()]);
         assert!(state.is_revoked(&phone.user_id()));
         assert_eq!(state.siblings(), vec![alice.user_id()]);
         // A new certificate for this key in the list (the primary renamed
-        // the device) becomes this device's own.
+        // the device) becomes this device's own — signed again, because
+        // the rename moved the bytes the old signature covered.
         let renamed = alice
             .certify_device(&laptop.user_id(), "desk laptop", 1)
             .unwrap();
-        state.set_list(vec![renamed.clone()], vec![]).unwrap();
-        assert_eq!(state.certificate(), Some(&renamed));
+        state
+            .set_list(vec![renamed.clone()], vec![], &laptop)
+            .unwrap();
+        let now = state.certificate().expect("still linked");
+        assert!(now.is_countersigned(), "the device signs the new name too");
+        now.verify().expect("both signatures verify");
+        assert_eq!(
+            now,
+            &DeviceCertificate {
+                device_signature: now.device_signature,
+                ..renamed.clone()
+            }
+        );
         assert_eq!(state.name_of(&laptop.user_id()), Some("desk laptop"));
         // Another account's list or statements are refused whole.
         let other = Identity::generate();
         assert!(
             state
-                .set_list(vec![certified(&other, &phone, "x")], vec![])
+                .set_list(vec![certified(&other, &phone, "x")], vec![], &laptop)
                 .is_err()
         );
         assert!(
             state
-                .set_list(vec![], vec![other.revoke_device(&phone.user_id(), 3)])
+                .set_list(
+                    vec![],
+                    vec![other.revoke_device(&phone.user_id(), 3)],
+                    &laptop
+                )
                 .is_err()
+        );
+        // And the identity handed in must be this device's key, since it
+        // is what signs this device's certificate. Refused even though
+        // this list is one the device would otherwise take without
+        // signing anything, so the mistake is caught where it is made
+        // rather than at the first rename.
+        let wrong = state
+            .set_list(vec![renamed.clone()], vec![], &other)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            wrong.contains("another key's identity"),
+            "the caller's mistake, not the primary's: {wrong}"
         );
         // The certificate must be this key's and the account's.
         assert!(DeviceState::ephemeral(phone.user_id(), Some(linked)).is_err());

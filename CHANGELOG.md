@@ -86,7 +86,13 @@ the wire changes for a peer.
   write it yet keep working; one carrying a *wrong* device signature is
   refused. Required a release later, as the design note schedules. The
   account's signed device list keeps the certificate as the account
-  minted it, the account's signature covering that list whole.
+  minted it, the account's signature covering that list whole; a device
+  that takes a synced list therefore compares it against its own
+  certificate on what the *account* said, and keeps its own signature
+  where only that differs. Otherwise the list the account syncs right
+  after linking -- which cannot carry the half only the device can
+  sign -- would take the device's word for its own key straight back
+  off again.
 - A macOS release built without the notarization secrets is signed ad
   hoc with the hardened runtime asked for, rather than left with no code
   signature at all. That is what should make macOS refuse a debugger

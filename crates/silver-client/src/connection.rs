@@ -3219,7 +3219,7 @@ async fn plain_received(
             {
                 let mut state = lock(state);
                 if state.is_linked() && from == state.account() {
-                    match state.set_list(devices.clone(), revoked.clone()) {
+                    match state.set_list(devices.clone(), revoked.clone(), &setup.identity) {
                         Ok(newly) => {
                             for device in newly {
                                 if let Some(sessions) = &setup.sessions
