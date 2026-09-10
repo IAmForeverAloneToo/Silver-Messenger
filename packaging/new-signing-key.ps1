@@ -122,7 +122,7 @@ if ($ByHand) {
     $key
     copy both of its lines, and paste them into
 
-        https://github.com/IAmForeverAloneToo/Silver-Messanger/settings/secrets/actions
+        https://github.com/IAmForeverAloneToo/Silver-Messenger/settings/secrets/actions
 
         New repository secret
           Name    MINISIGN_SECRET_KEY

@@ -150,7 +150,7 @@ else
 --- 2. The private half is at $key. Back it up as you would a password
 manager's export, then put it into this repository's secrets:
 
-    https://github.com/IAmForeverAloneToo/Silver-Messanger/settings/secrets/actions
+    https://github.com/IAmForeverAloneToo/Silver-Messenger/settings/secrets/actions
 
     New repository secret
       Name    MINISIGN_SECRET_KEY
