@@ -79,6 +79,20 @@ prove the device agreed. The device signs the certificate too, so an
 account cannot enroll a key its holder never offered. SM-R-01's own path
 is fixed; this closes the shape of it.
 
+The second half only the device can produce, which decides where each
+form lives. The account's signed device list keeps the certificate as
+the account minted it — the account cannot counter-sign, and its
+signature covers the list whole — while the counter-signed form is what
+the device presents for itself. So the two copies of the same
+certificate legitimately differ, and a device taking a synced list has
+to compare them on what the *account* said rather than whole: linking
+ends with the account syncing its list, so a whole comparison would
+have the device adopt the account's copy and strip its own signature
+seconds after adding it. Only a change the account made (a rename,
+which is a fresh certificate with a later `created_at_ms`) moves the
+bytes the counter-signature covers, and there the device signs the new
+certificate before adopting it rather than going without.
+
 Both add a field. The transition is the usual one and is why they go
 together: the field is optional for one minor release, during which a
 client sends it and accepts its absence; then required, at which point a

@@ -1834,24 +1834,7 @@ its own:
 
 with `signature = sign("silver-messenger/v5/device", account (32) ||
 device (32) || created_at_ms (8 BE) || name length (1) || name)`, raw
-key bytes,
-
-`device_signature` is the *device's* signature over the same bytes,
-under `"silver-messenger/v5/device-countersignature"`. The account's
-signature proves the account meant to enroll a device; it does not prove
-the device agreed, because an account can certify any public key it can
-name. A device adds this when it accepts the provisioning message (14.3)
-and presents the counter-signed certificate from then on, so an account
-cannot enroll a key its holder never offered. A domain of its own, so
-neither key's signature over these bytes can be lifted into the other's
-place. The field is absent from certificates minted before it existed
-and from clients that do not write it, and such a certificate verifies
-on the account's signature alone; one that carries a *wrong* device
-signature is refused. It becomes required a release after every client
-in use is writing it. The account's signed device list (14.1 below)
-keeps the certificate as the account minted it, since the account's
-signature covers that list whole; the counter-signed form is what the
-device itself presents. and `name` the owner's name for the device: at most 32 bytes
+key bytes, and `name` the owner's name for the device: at most 32 bytes
 of UTF-8 without control characters, left out of the JSON when empty. A
 name is refused when it is chosen if it carries any of the invisible
 characters of 4.7 (zero-width spaces, the bidi embeddings and overrides,
@@ -1863,14 +1846,52 @@ Clients show the name to the owner's own devices only, but it is part
 of the certificate, which the bundle's list and every message from the
 device carry, so the relay and anyone who fetches the bundle can read
 it. A certificate whose `device` is the account's own key is malformed.
-It verifies against the account's identity key alone, so a contact that
-has the account pinned checks a device without the relay. As bytes (for
-the MLS leaf, 14.7) a certificate is the signed bytes followed by the
-signature:
+It verifies against the keys it names and nothing else — the account's
+identity key, and the device's when `device_signature` is there — so a
+contact that has the account pinned checks a device without the relay.
+
+`device_signature` is the *device's* signature over the same bytes the
+account signed, under
+`"silver-messenger/v5/device-countersignature"`. The account's
+signature proves the account meant to enroll a device; it does not
+prove the device agreed, because an account can certify any public key
+it can name. A device adds this when it accepts the provisioning
+message (14.3) and presents the counter-signed certificate from then
+on, so an account cannot enroll a key its holder never offered. A
+domain of its own, so neither key's signature over these bytes can be
+lifted into the other's place. The field is absent from certificates
+minted before it existed and from clients that do not write it, and
+such a certificate verifies on the account's signature alone; one that
+carries a *wrong* device signature is refused. It becomes required a
+release after every client in use is writing it.
+
+The account's signed device list below keeps the certificate as the
+account minted it, without this half — the account cannot produce it,
+and its signature covers the list whole. The counter-signed form is
+what the device itself presents, in its bundle's `device_of` and in
+every body it sends. So a device that takes a synced list compares it
+against its own certificate on what the *account* said — the fields
+above and the account's signature — and leaves its own signature in
+place when only that differs: the account's copy always lacks it, and
+adopting the copy on that difference would take the device's word for
+its own key back off again on the first sync after linking. When the
+account did say something new (a rename, which is a fresh certificate
+with a later `created_at_ms`), the bytes the old counter-signature
+covered have moved, so the device signs the new certificate before
+adopting it.
+
+As bytes (for the MLS leaf, 14.7) a certificate is the signed bytes
+followed by the account's signature:
 
 ```text
 account (32) || device (32) || created_at_ms (8 BE) || name length (1) || name || signature (64)
 ```
+
+The counter-signature is outside that encoding, and a leaf needs none:
+the leaf's own MLS signature is made with the device key, and a reader
+refuses a leaf whose certificate does not name that same key (13.1), so
+the leaf already proves what the counter-signature proves elsewhere —
+that the device key's holder took part.
 
 A certificate is never revoked in place: a device goes by a revocation
 (14.2) and by leaving the list.
