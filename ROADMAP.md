@@ -728,8 +728,8 @@ those who want to pay for it (46).
         name-only one once and bind it on its next write, since every
         directory since 0.16.0 holds both files in that shape. Found when
         the migration that stamps every file stamped these two and their
-        readers refused them (the fix after 0.18.0); the threat model
-        names the gap.
+        readers refused them (fixed in 0.18.1); the threat model names
+        the gap.
 
 ## Continuous
 

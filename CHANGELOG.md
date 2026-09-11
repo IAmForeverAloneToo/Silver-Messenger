@@ -8,7 +8,7 @@ A release's entry opens with a paragraph on what it is, then an
 then `Security`, `Added`, `Changed` and `Fixed` as the release needs
 them; older entries keep the shape they were written in.
 
-## Unreleased
+## 0.18.1 - 2026-09-11
 
 Two fixes to the data directory at the seams where a client older than
 0.16.0 meets a newer one, both found on 0.18.0 the day it shipped.
