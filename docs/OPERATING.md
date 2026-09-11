@@ -35,7 +35,7 @@ keep it updated, and know what to do when something goes wrong.
    administer, and no other service on the host if you can help it.
 4. **Install.** The relay binary from the release page, checked against
    the signed `SHA256SUMS` and put beside `deploy/silver-relay.service`
-   (README, "Running a relay"), or the README's installer
+   (README, "Deploying a relay"), or the README's installer
    (`deploy/install.sh` from the repository, or the "Deploy relay" workflow)
    with `SILVER_DOMAIN` and `SILVER_EMAIL`, or `deploy/compose.yml`.
    Without `SILVER_DOMAIN` the installer configures a loopback listener

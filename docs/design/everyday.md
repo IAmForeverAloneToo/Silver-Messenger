@@ -66,14 +66,14 @@ Non-goals, for this item:
   counts as read when its chat is in front of the user and the window has
   focus (`mark_selected_read`); that moment is where the recipient's timer
   starts.
-* Devices (section 14) send a copy of everything a device sends to its
-  siblings (`sync sent`), so an edit, a deletion for everyone, a reaction
-  or a timer made on one device reaches the others by the same path as a
-  text; `sync read` tells siblings what was shown.
-* Groups (section 13) carry any `Content` as an application message and
-  ignore kinds that are not a text or a file; every leaf declares MLS
-  capabilities, which is what a sender can check before using a kind not
-  every member's client may read.
+* Devices (protocol section 14) send a copy of everything a device
+  sends to its siblings (`sync sent`), so an edit, a deletion for
+  everyone, a reaction or a timer made on one device reaches the others
+  by the same path as a text; `sync read` tells siblings what was shown.
+* Groups (protocol section 13) carry any `Content` as an application
+  message and ignore kinds that are not a text or a file; every leaf
+  declares MLS capabilities, which is what a sender can check before
+  using a kind not every member's client may read.
 * The vault encrypts files under a per-installation key with the file
   name bound (`FileCipher::encrypt(name, bytes)`); `downloads/` is the one
   place under the data directory it does not cover.
@@ -277,9 +277,9 @@ report an unreadable message, which is why the check comes first.
   milliseconds.
 * `contacts.json` gains `expire_after_s`; `groups.json` gains
   `expire_after_s` per group; `config.json` gains `encrypted_downloads`.
-* The device snapshot (section 14.6) carries each line's current state:
-  the latest text, `edited`, the reactions, the timer of each
-  conversation, and no deleted or expired lines.
+* The device snapshot (protocol section 14.6) carries each line's
+  current state: the latest text, `edited`, the reactions, the timer of
+  each conversation, and no deleted or expired lines.
 
 ### 6.2 Engine
 

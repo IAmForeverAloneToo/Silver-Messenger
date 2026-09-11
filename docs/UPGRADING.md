@@ -2,7 +2,7 @@
 
 How to move a relay from one version to the next, roll it back, and move
 it to another host, without losing a mailbox. The client updates itself
-(`silver --update`); this is about the server side. The changes behind
+(`silver update`); this is about the server side. The changes behind
 each version are in [CHANGELOG.md](../CHANGELOG.md).
 
 ## Before every upgrade

@@ -689,18 +689,17 @@ those who want to pay for it (46).
         of releases, each right when written and since bent by accretion
         — one fact in several homes, version history where a description
         belongs, paragraphs in table cells, claims that stopped being
-        true. Design note
-        [docs/design/documents.md](docs/design/documents.md): six kinds
-        of document and the shape each is held to, what moves where, a
-        verdict per document, and the order of the work. No code changes;
-        section numbers and item numbers never move.
-        - [ ] 65.1 The facts: every wrong or stale statement the note
-          names, fixed where it stands; the link checker under
-          `tests/docs/` and its CI step.
-        - [ ] 65.2 The map: `docs/RELEASES.md` from the README's three
-          release sections; "Installing" in the operator's guide from the
-          README's deployment section; the README rebuilt around what is
-          left; every cross-reference following.
+        true. The shape each kind of document is held to is written
+        down in `CONTRIBUTING.md` ("What the documents hold to"). No
+        code changes; section numbers and item numbers never move.
+        - [ ] 65.1 The facts: every wrong or stale statement found, fixed
+          where it stands; the link checker under `tests/docs/` and its
+          CI step.
+        - [ ] 65.2 The map: a release guide of its own under `docs/`,
+          from the README's three release sections; "Installing" in the
+          operator's guide from the README's deployment section; the
+          README rebuilt around what is left; every cross-reference
+          following.
         - [ ] 65.3 The promises: the threat model reshaped into lists per
           actor and re-read claim by claim against 0.18.0; the assessment
           re-read row by row against the code.

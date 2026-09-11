@@ -9,7 +9,7 @@ and the code later disagree, the code wins and this note is corrected.
 | Question | Decision |
 | --- | --- |
 | What the feature is | `silver update`: one command that finds the newest release, downloads the client for this platform, checks it, and puts it in place of the running one. `silver update --check` says what is available and changes nothing. `silver update --rollback` puts back the binary the last update replaced. Nothing else in the client downloads anything, ever. |
-| Whether it is automatic | No, by default. A check on a timer tells the release host this computer's address, that it runs Silver Messenger, and when it is used — a usage pattern, which is the kind of thing the rest of the client works to withhold. `update-check` is a setting, off unless the user turns it on; on, the client asks once at start and at most once a day, through the same proxy the relay connection uses, and prints one line if something newer exists. It never downloads on its own even then. |
+| Whether it is automatic | No, by default. A check on a timer tells the release host this computer's address, that it runs Silver Messenger, and when it is used — a usage pattern, which is the kind of thing the rest of the client works to withhold. `update_check` is a setting, off unless the user turns it on; on, the client asks once at start and at most once a day, through the same proxy the relay connection uses, and prints one line if something newer exists. It never downloads on its own even then. |
 | What an update proves | That the bytes match the SHA-256 the release API gave for that asset, that they match the `SHA256SUMS` entry published with the release, that the project's signature over `SHA256SUMS` checks out against the key compiled into this client, and that the downloaded binary reports the version that was expected. It does not prove the maintainer approved the release from a machine an attacker does not hold: see section 8. |
 | Where the checksum comes from | The release API (`api.github.com`), which returns a `sha256:` digest for every asset; the bytes come from the asset store, a different origin. A tampered artifact must therefore be matched by a tampered API answer. `SHA256SUMS` is checked too, so the automated path and the by-hand path in README's "Verifying a release" agree on the same number. |
 | Signing | The project's own minisign key over `SHA256SUMS`, in the release workflow, from `MINISIGN_SECRET_KEY`. The workflow checks its own signature against the repository's `minisign.pub` before publishing, so a secret that is not the published key fails the release rather than shipping something nobody can check. Signing from a secret is weaker than signing on a machine the maintainer holds and stronger than not signing: the secret store and the release assets are separate systems. Moving the key offline later changes that one step and nothing here, because both are checked against the same `minisign.pub`. |
@@ -142,11 +142,11 @@ adds a way for a half-finished update to coincide with a write.
 The status line shows nothing about updates. A permanent nag in a
 messenger's chrome is how people learn to ignore chrome.
 
-With `update-check` on, one line appears in the System pane at start when
+With `update_check` on, one line appears in the System pane at start when
 a newer release exists, at most once a day, remembered in the config as a
 date so a client started ten times a day asks once. Off by default,
-turned on with `/set update-check on`, and documented in README beside
-the proxy settings as a thing that talks to the network.
+turned on by setting `update_check` in `config.json`, and documented in
+the README under "Updating" as a thing that talks to the network.
 
 ## 7. Bounds
 

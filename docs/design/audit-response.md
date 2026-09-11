@@ -161,7 +161,7 @@ this note said 0.10.1 would carry them and was wrong.
    SM-C-12; SM-G-01; SM-G-02; SM-C-06 with SM-C-03. Then the
    documentation rows, the changelog's `Security` section, the report
    and this note, the release, the deployed relay.
-2. 0.11.0: section 13.2 as verified, grouped by crate.
+2. 0.11.0: the report's section 13.2 as verified, grouped by crate.
 3. Phase 11 roadmap entries for the 1.0 items.
 
 ## 5. What changes for users and operators

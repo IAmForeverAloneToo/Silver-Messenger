@@ -47,10 +47,9 @@ note beside it.
 
 Everything this repository ships: `silver` (the terminal client),
 `silver-relay`, the `silver-protocol` and `silver-client` crates, the
-release and deploy workflows, and the relay installer. The reference relay
-at `test-silver.duckdns.org` is a test instance; treat it as in scope for
-protocol and relay bugs, but do not run load or denial-of-service tests
-against it.
+release and deploy workflows, and the relay installer. The relay the
+maintainer runs is a test instance: in scope for protocol and relay
+bugs, but do not run load or denial-of-service tests against it.
 
 Reports that matter most, roughly in order:
 
@@ -113,11 +112,13 @@ peers.
 
 ## Verifying what you run
 
-Release binaries are reproducible and carry GitHub's build provenance;
-`SHA256SUMS` is not signed by the maintainer today, and the README
-section *Verifying a release* says so and explains how to check a
-download against the published hashes and the attestation, and how to
-rebuild the tagged commit and compare. Dependencies are checked
+Release binaries are reproducible and carry GitHub's build provenance,
+and from 0.12.0 `SHA256SUMS` is signed with the project's minisign key,
+whose public half is `minisign.pub` at the repository root. The README
+section *Verifying a release* says how to check a download against the
+signature, the hashes and the attestation, and how to rebuild the tagged
+commit and compare; the threat model's *Supply chain* section says what
+a key held in the release workflow is worth. Dependencies are checked
 against the RustSec advisory database on every push (`cargo audit`,
 `cargo deny`).
 

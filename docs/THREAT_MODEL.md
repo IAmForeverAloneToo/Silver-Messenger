@@ -764,13 +764,12 @@ is the intended replacement once one API serves both paths.
 Can put a tampered binary on a mirror, or a poisoned crate in the
 dependency tree, or a bad step in the build. What stops each is under
 *Supply chain* below; the short version is that a release can be
-rebuilt bit for bit from its tag, carries GitHub's provenance (a
-maintainer's signature is designed for and not published yet), and
-embeds the exact dependency tree, so a tampered download or build is
-detectable by anyone who checks. What is
-not detectable this way is a compromised toolchain or runner (the
-provenance would then be honestly issued for a dishonest build); an
-independent rebuild is the answer to that.
+rebuilt bit for bit from its tag, carries GitHub's provenance and the
+project's signature over `SHA256SUMS`, and embeds the exact dependency
+tree, so a tampered download or build is detectable by anyone who
+checks. What is not detectable this way is a compromised toolchain or
+runner (the provenance would then be honestly issued for a dishonest
+build); an independent rebuild is the answer to that.
 
 ## Cryptographic design in brief
 
@@ -903,27 +902,30 @@ protection above. What is done about that, from 0.6.0:
   tagged commit gives the same bytes; CI rebuilds the Linux binaries twice
   on every push and fails if they differ. The README says how to repeat
   the build and compare.
-- **Provenance, and a signature that is not there yet.** Every release
-  file carries a SLSA build provenance attestation issued by GitHub for
-  the workflow run that built it (`gh attestation verify`): it says
-  *which workflow built what from which commit*, and GitHub's
-  transparency log holds the record. That is what a download can be
-  checked against today, and it defeats a hostile mirror or a swapped
-  file. It does not defeat GitHub, or whoever holds the maintainer's
-  account: an attestation issued for a workflow run they started is
-  honestly issued.
+- **Provenance, and a signature.** Every release file carries a SLSA
+  build provenance attestation issued by GitHub for the workflow run
+  that built it (`gh attestation verify`): it says *which workflow built
+  what from which commit*, and GitHub's transparency log holds the
+  record. It defeats a hostile mirror or a swapped file. It does not
+  defeat GitHub, or whoever holds the maintainer's account: an
+  attestation issued for a workflow run they started is honestly
+  issued.
 
-  A maintainer's signature over `SHA256SUMS` would be the independent
-  root, and there is none: the repository publishes no `minisign.pub`, so
-  every release so far is unsigned by the maintainer and the run says so.
-  When one is set up it is set up off this platform — generated and kept
-  on a machine the maintainer holds, `SHA256SUMS` signed there after each
-  release and the signature attached by hand. The release workflow does
-  not sign and holds no signing key, on purpose: a key it could use would
-  live where the build lives, so a compromised account or a workflow run
-  with access to secrets could sign with it, and it would say exactly
-  what the attestation says. Until the key exists, the attestation is the
-  whole of it, and this section is to be read that way.
+  From 0.12.0 `SHA256SUMS` is also signed with the project's minisign
+  key, whose public half is `minisign.pub` at the repository root and
+  compiled into the client, which `silver update` checks against. The
+  secret half is a repository secret and the release workflow signs
+  with it, verifying its own signature against the published key
+  before anything is published. What that is worth is stated exactly:
+  the key lives where the build lives, so whoever can run a workflow
+  with secrets, or holds the maintainer's account, can sign, and the
+  signature says what the attestation says — from a separate store, so
+  tampering with the published files alone does not survive it. The
+  independent root would be the same key kept on a machine the
+  maintainer holds and used by hand after each release; moving it there
+  changes one workflow step and nothing a verifier does, since both are
+  checked against the same `minisign.pub`. It is recorded as the option
+  it is, not scheduled (`docs/design/updates.md` section 8).
 - **What is inside.** Binaries are built with `cargo auditable`, so the
   exact dependency versions are embedded and `cargo audit bin` can check
   a binary against the advisory database years later; a CycloneDX SBOM
@@ -1047,9 +1049,15 @@ change that.
   binary (one documented exception), clippy with warnings denied,
   `cargo audit`, `cargo deny`, the reproducible-build job.
 - The control-by-control walk in [SECURITY_ASSESSMENT.md](SECURITY_ASSESSMENT.md).
-- Not yet: a review by anyone who did not write the code. It is planned
-  before 1.0 (roadmap item 35), and [SECURITY.md](../SECURITY.md) says how
-  to get in touch about it.
+- Two reviews by people who did not write the code, published whole
+  with the answer to every finding:
+  [audits/2026-09-security-audit.md](audits/2026-09-security-audit.md)
+  of the 0.10.0 line, answered in
+  [design/audit-response.md](design/audit-response.md), and
+  [audits/2026-09-second-security-audit.md](audits/2026-09-second-security-audit.md)
+  of the 0.14.0 line, answered in
+  [design/audit-response-2.md](design/audit-response-2.md).
+  [SECURITY.md](../SECURITY.md) says how to get in touch about a third.
 
 ## Gaps and where they close
 
@@ -1064,7 +1072,7 @@ change that.
 | Received files stored unencrypted in `downloads/` | Closed as an option (0.10.0, roadmap item 50): `/files encrypt on`, where the directory is protected, keeps received files as ciphertext under the data key, `/open` decrypting a private copy that goes at exit. Off by default, so other programs can open the files. |
 | History kept until the user removes it | Closed (0.10.0, roadmap item 50): a per-conversation timer removes messages on each device's own clock, from sending for the sender and from reading for the reader; `/delete me` removes any message from one's own devices; both rewrite the history file rather than mark it. |
 | Delete for everyone and disappearing messages: what they promise | By design (0.10.0): enforced by the other side's software, never by cryptography. An unmodified client on 0.10.0 or later removes the message when the deletion reaches it or the timer runs out, and the client says exactly that; a screenshot, a modified client, an export or a backup taken before, a file already saved and a person's memory are beyond it. The relay holds only ciphertext and does nothing for either; it cannot tell a deletion from a short message. |
-| A panic in the terminal client can leave the terminal in raw mode | Small; next client pass. |
+| A panic in the terminal client can leave the terminal in raw mode | Closed (0.10.0, roadmap item 52): one panic hook puts the terminal back before the message prints, in both modes, and a pseudo-terminal test drives a real panic under each terminal type. |
 | Groups: what the relay learns, and what a member can do | Groups exist from 0.9.0 (roadmap item 47) and this document says what they protect. What remains, by design: the relay sees a group's size and membership by inference from delivery bursts and sees each group's epoch move; group messages are not deniable; a rogue member can wedge a group (every honest client stops rather than accept a rule-breaking commit) and an admin has to make it anew; a leaver stays in the tree until an admin's client commits the leave, and a declined invitation leaves a dead leaf until an admin removes it; a member absent past its mailbox's quota rejoins and loses the messages between. Cover traffic does not cover groups. |
 | Multiple devices: what a second device adds to the attack surface | Done (0.9.0, roadmap item 48), and this document says what devices protect: the identity key stays on the primary, a linked device is certified and revocable, contacts verify the identity and never a device, the relay cannot add or keep a device unseen (`PROTOCOL.md` section 14). What remains, by design: the relay learns how many devices a person has and which ids, and infers it again from delivery bursts; a linked device holds every conversation from the day it was linked plus the snapshot it was given, so its theft exposes what the person read anywhere; a revoked device is told so but erases itself only on its owner's word; the primary's loss is still the identity's, restored from the backup; a succession moves no devices. |
 

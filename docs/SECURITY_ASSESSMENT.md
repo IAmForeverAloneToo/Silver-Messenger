@@ -15,13 +15,13 @@ apply and say so. Every other control gets a verdict:
 
 This is a self-assessment by the author, checked against the code, the
 tests and the CI configuration. It is not itself an audit — but it is no
-longer unaudited work: an independent adversarial review of the 0.10.0
-line reported 76 findings, published whole as
-[audits/2026-09-security-audit.md](audits/2026-09-security-audit.md) with
-the answer to each in
-[design/audit-response.md](design/audit-response.md), and every row below
-that the review contradicted has been corrected against the code that
-ships. Controls marked Level 3 only are left out. Where a control is met
+longer unaudited work: two independent adversarial reviews, of the
+0.10.0 line (76 findings) and the 0.14.0 line (29), are published whole
+under [audits/](audits/) with the answer to each finding in
+[design/audit-response.md](design/audit-response.md) and
+[design/audit-response-2.md](design/audit-response-2.md), and every row
+below that either review contradicted has been corrected against the
+code that ships. Controls marked Level 3 only are left out. Where a control is met
 by a design decision rather than code, the threat model
 ([THREAT_MODEL.md](THREAT_MODEL.md)) is the reference.
 
@@ -51,7 +51,7 @@ all. The gaps that matter are listed at the end with what closes them.
 | 1.5.4 Output encoding near the interpreter | Met | Text is sanitised for the terminal at the rendering layer, with a test that drives the real backend and asserts no escape reaches it. |
 | 1.6.1 Key management policy | Met | PROTOCOL.md sections 1, 2, 5 and 8: what each key is, who signs it, how long it lives, when it rotates; section 10 for retiring or replacing a key, section 11 for the log every served key is checked against. |
 | 1.6.2 Key consumers protected from key exposure | Partly | Secrets are `Zeroize`d on drop and kept out of `Debug` output; the running process holds them in memory (threat model: device thief with memory). |
-| 1.6.3 Key replacement | Met | Prekeys rotate on a schedule; an identity key is revoked with a pre-signed certificate (`/revoke`) or replaced with a cross-signed succession (`/rotate`), served by the relay and verified by contacts (PROTOCOL.md section 10). |
+| 1.6.3 Key replacement | Met | Prekeys rotate on a schedule; an identity key is revoked with a pre-signed certificate (`/revoke`) or replaced with a cross-signed succession (`/rotate`), served by the relay and verified by contacts (PROTOCOL.md section 10); the long-term Diffie–Hellman key is replaced under the same identity with `/rekey` (0.18.0), the old one kept 30 days for what was sealed to it (`docs/design/dh-rotation.md`). |
 | 1.6.4 Client-side secrets | Met | The data key is wrapped by the OS key store or a passphrase; nothing is embedded in the binary. |
 | 1.7.1 Common logging format | Met | `tracing` in both binaries. |
 | 1.7.2 Logs transmitted securely | N/A | Logs stay on the host (journal, or `silver.log` with 0600). |
@@ -123,7 +123,7 @@ V6 and the threat model.
 | Control | Verdict | Evidence |
 | --- | --- | --- |
 | 5.1.1 Parameter pollution | N/A | No query strings. |
-| 5.1.3, 5.1.4 Input validated and structured data typed | Met | Every frame and body is a typed serde structure with caps: 128 KiB frames, 32 KiB bodies, 4000-character messages, 200 one-time prekeys (50 ML-KEM), 16 MiB files, chunk counts checked against sizes, futures of at most two minutes on timestamps. |
+| 5.1.3, 5.1.4 Input validated and structured data typed | Met | Every frame and body is a typed serde structure with caps: 128 KiB frames, 32 KiB bodies, a stranger's held messages cut at 4000 characters, 200 one-time prekeys (50 ML-KEM), 16 MiB files, chunk counts checked against sizes, futures of at most two minutes on timestamps. |
 | 5.2.1 Untrusted HTML | N/A | |
 | 5.2.2 Unstructured data sanitised | Met | Aliases are cut to 40 visible characters and stripped of controls and bidi overrides; file names are NFC-normalised, stripped of format characters, cut to 120 characters keeping the extension, made safe for Windows device names. Tests in `silver-client` pin each rule; the fuzzer found two edge cases that are now tests. |
 | 5.2.4, 5.2.5 Dynamic code, templates | N/A | |
@@ -162,7 +162,7 @@ V6 and the threat model.
 | 7.1.2 No unnecessary sensitive data in logs | Met | The relay names clients by a per-run salted pseudonym unless `--log-ids` is set; the client's own log does not record its user id at the info level; aliases and message text are never logged. |
 | 7.1.3 Security-relevant events logged | Met | Refused registrations, connections, uploads and logins are counted, reported hourly and served as metrics; rate-limit hits are logged; an address that fails to log in twenty times within an hour is named in a warning (item 37). |
 | 7.1.4 Log entries have context | Met | Structured `tracing` fields. |
-| 7.3.1 Log injection | Partly | The relay logs the kind and position of a parse error rather than the offending input, and names identities by a per-run pseudonym unless the operator asked otherwise. The client's `silver.log`, which is written only when `SILVER_LOG` is set, records at `debug` what it is debugging: envelope ids, contact ids, the relay URL and the relay's own error strings. It is 0600, it is outside the data key (it is opened before the directory is unlocked), it is not rotated, and from 0.11.0 `/devices leave` erases it with the rest. A client that wants none of it does not set `SILVER_LOG`. |
+| 7.3.1 Log injection | Partly | The relay logs the kind and position of a parse error rather than the offending input, and names identities by a per-run pseudonym unless the operator asked otherwise. The client's `silver.log`, which is written only when `SILVER_LOG` is set, records at `debug` what it is debugging: envelope ids, contact ids, the relay URL and the relay's own error strings. It is 0600, outside the data key (it is opened before the directory is unlocked), bounded at 8 MiB with one rolled file kept (0.16.0), and erased with the rest when the device is wiped. A client that wants none of it does not set `SILVER_LOG`. |
 | 7.3.3 Logs protected from modification | Met | The relay logs to the journal; `silver.log` is created 0600 in a 0700 directory. Neither is signed or append-only: a root user on the host edits either. |
 | 7.4.1 Generic error messages to users | Met | The relay answers with an error code and a fixed short message; internal errors say "storage error" and log the detail on the relay. |
 | 7.4.2 Exception handling | Met | Rust `Result` throughout; the relay's per-connection task cannot take the process down. |
@@ -202,10 +202,10 @@ V6 and the threat model.
 | Control | Verdict | Evidence |
 | --- | --- | --- |
 | 10.1.1 Code analysis | Partly | clippy, `cargo audit`, `cargo deny`, fuzzing, the OpenSSF Scorecard; no dedicated malicious-code analysis. |
-| 10.2.1 No unauthorised phone-home | Met | The client contacts its relay and, only on `silver update` (or its older name `--check-release`), GitHub's releases API; nothing else, ever. From 0.12.0 the `update_check` setting will make that request once a day at start, and it is off unless turned on, for the reason the threat model gives: a check on a timer reveals an address, a program and the times it is used. Verified in tests that the client makes no other connections. |
+| 10.2.1 No unauthorised phone-home | Met | The client contacts its relay and, only on `silver update` (or its older name `--check-release`), GitHub's releases API; nothing else, ever. The `update_check` setting (0.12.0) makes that request once a day at start, and it is off unless turned on, for the reason the threat model gives: a check on a timer reveals an address, a program and the times it is used. Verified in tests that the client makes no other connections. |
 | 10.2.2 No data collection | Met | None. |
 | 10.2.3 No backdoors, undocumented modes | Met | Every flag is documented (`--help`, README); `--log-ids` and `--submit-authenticated` are the only "less private" modes and say so. |
-| 10.3.1 Auto-update with signature checks | Met (by absence) | There is no auto-update; releases are signed and reproducible for manual verification. |
+| 10.3.1 Auto-update with signature checks | Met | Nothing updates by itself. `silver update` (0.12.0), run by the user, checks the download against the release API's digest, against `SHA256SUMS`, against the project's signature over it with the key compiled in from `minisign.pub`, and against the binary's own `--version` before the swap; a build without the key refuses to update (`docs/design/updates.md`). |
 | 10.3.2 Integrity of third-party code | Met | `Cargo.lock`, `cargo deny` sources allowlist (crates.io only), `cargo auditable` embeds the tree, SBOM per binary. |
 | 10.3.3 Subdomain takeover | N/A | |
 
@@ -263,15 +263,14 @@ routes (`/` with the source notice, `/healthz`).
 | 14.3.1 Debug modes off in production | Met | Release builds; `--log-ids` and `SILVER_LOG=debug` are explicit opt-ins. |
 | 14.3.3 No stack traces to users | Met | Error codes and short messages; panics abort a relay connection task, not the process. |
 | 14.4.x HTTP security headers | Partly | The relay's HTTP surface is two plain-text GET routes and the WebSocket upgrade, now served over its own TLS; there is no browser client and no cookie, so the usual headers would protect nothing, and none are sent. |
-| 14.5.x HTTP request header validation | Partly | The WebSocket upgrade does not check `Origin`; there is no browser client, so the check would protect nothing today, and cookies are not involved. Noted for item 36. |
+| 14.5.x HTTP request header validation | Partly | The WebSocket upgrade does not check `Origin`; there is no browser client, so the check would protect nothing today, and cookies are not involved. |
 
 ## Gaps, in order of weight
 
 | Gap | Control | Closed by |
 | --- | --- | --- |
-| No independent review of the cryptography and the relay | 1.1.1 | Roadmap item 35: before 1.0. |
 | Plain `ws://` allowed when configured | 9.1.1 | By design for local relays; the no-downgrade rule covers the case that matters. |
 | Certificate revocation not checked | 9.2.4 | Not planned; pins and short-lived Let's Encrypt certificates are the mitigation. |
-| Received files stored unencrypted | 6.1.1 | By design, documented; a per-file "keep encrypted" option could follow if asked for. |
-| No client-side history expiry | 8.3.8 | Could follow as a setting if asked for. |
-| No `Origin` check on the WebSocket upgrade, no HTTP headers | 14.4, 14.5 | Item 36, when the relay serves more than three routes. |
+| Received files stored unencrypted by default | 6.1.1 | By design, documented; `/files encrypt on` (0.10.0) keeps them encrypted where the directory is protected. |
+| History kept until asked to go | 8.3.8 | By design: a per-conversation timer (`/timer`, 0.10.0) removes it on request; nothing expires unasked. |
+| No `Origin` check on the WebSocket upgrade, no HTTP headers | 14.4, 14.5 | Not planned while the relay serves three routes and no browser. |

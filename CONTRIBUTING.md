@@ -79,8 +79,10 @@ tracker.
 
 ## What the code holds to
 
-* `#![deny(unsafe_code)]` in every crate; the few places that need
-  `unsafe` are in dependencies that are fuzzed and audited.
+* `#![forbid(unsafe_code)]` in every crate but the terminal binary,
+  which is `#![deny(unsafe_code)]` with one documented exception; the
+  few places that need `unsafe` are in dependencies that are fuzzed and
+  audited.
 * Everything that comes in from the network, a file or a link is
   bounded before it is used (`crates/silver-client/tests/garbage.rs` and
   the fuzz targets feed the parsers bytes nobody meant), and nothing a
@@ -93,6 +95,44 @@ tracker.
   before 1.0), one relay is one network (no federation), and groups run
   on MLS; a change that assumes otherwise needs the roadmap changed
   first.
+
+## What the documents hold to
+
+The documents are as much the product as the code, and each is held to
+a shape:
+
+* **Each is one kind of thing**, and its first paragraph says which. A
+  *front door* (the README) is for deciding and starting: short
+  sections, a table where there is a choice, a command block where
+  there is a step. A *reference* (`PROTOCOL.md`, the command table,
+  `TERMINALS.md`) is for looking one thing up: tables and code blocks,
+  one item per row, prose only to state a rule. A *guide*
+  (`OPERATING.md`, `UPGRADING.md`, the FAQ, this file) is for doing one
+  task in order: numbered steps, one task per section. A *promise*
+  (`THREAT_MODEL.md`, `SECURITY.md`, the assessment) is for checking:
+  claims as lists, short, each with what backs it, and the version it
+  was checked against. An *argument* (a design note) says why: the
+  decisions, the reasons, the alternatives not taken, dated, with
+  corrections made after the code landed kept in a section of their
+  own. A *record* (`CHANGELOG.md`, `ROADMAP.md`, the audit reports) is
+  appended to and never rewritten for style.
+* **One home per fact.** The README describes, the operator's guide
+  operates, the protocol specifies, the threat model promises, the
+  design notes argue, the changelog records. A fact wanted in two
+  places is stated in one and linked from the other.
+* **History goes to the changelog.** A document describes the program
+  as it is; a version appears only where a reader must act on it, as in
+  a compatibility rule or an upgrade note.
+* **A table cell is a line**: a value, a phrase, at most two short
+  sentences. Anything longer is a list, or prose under a run-in
+  heading. A paragraph makes one point and fits in a dozen lines.
+* **Section numbers do not move.** `PROTOCOL.md` sections and roadmap
+  items are cited by the code, the tests and the audit reports.
+* **A cross-reference names its target**: a relative link, a file by
+  its path, "protocol section 13.5", "roadmap item 52".
+  `tests/docs/check_links.py` resolves every one, and CI runs it.
+* British spelling; the em dash, never `--`; commands, flags and file
+  names in code spans; *the client* and *the relay*.
 
 ## Licence
 

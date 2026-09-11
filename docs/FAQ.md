@@ -65,7 +65,8 @@ standard (MLS) with the same kind of hybrid. What is not protected: the
 computer you run it on (a program that can read your files can read your
 messages), and the fact that you talk to the relay at all. The threat
 model is the honest list, including the gaps that remain, and the code
-has not yet had an independent review; the roadmap says when it will.
+has had two independent reviews, published whole with the answer to
+every finding; `SECURITY.md` says where.
 
 ## My encryption key may have been read. What do I do?
 
@@ -85,6 +86,7 @@ If it is your *identity* key that may have been read — the one your
 safety number is made of — that is `/revoke` or `/rotate`, which the
 next answer is about.
 
+## What happens if I lose my laptop?
 
 If your data directory was under a passphrase (`silver
 --set-passphrase`) or the computer's key store, the thief has encrypted

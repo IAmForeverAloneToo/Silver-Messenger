@@ -44,6 +44,15 @@ jobs:
       - run: cargo fmt --manifest-path fuzz/Cargo.toml -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
+  docs:
+    # Every cross-reference in the documents resolves: a relative link,
+    # a file named by its path, a protocol section, a roadmap item.
+    name: document links
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: python3 tests/docs/check_links.py
+
   audit:
     name: advisories + licenses
     runs-on: ubuntu-latest

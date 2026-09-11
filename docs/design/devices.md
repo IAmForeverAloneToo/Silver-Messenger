@@ -71,10 +71,10 @@ Non-goals, for this item:
 * Sessions are kept per peer id, several per peer, with the initiator
   rule (section 8); a device id is a peer id, so per-device sessions
   need no new store.
-* Groups verify every leaf against its credential (section 13.1) with a
-  private-use leaf extension for the sealing key; a second extension for
-  the certificate follows the same pattern, and the membership rules
-  already name the committer's identity, not its leaf.
+* Groups verify every leaf against its credential (protocol section
+  13.1) with a private-use leaf extension for the sealing key; a second
+  extension for the certificate follows the same pattern, and the
+  membership rules already name the committer's identity, not its leaf.
 * The invite and group links (`silver://add/`, `silver://group/`) and
   their QR codes give the linking link its shape.
 
@@ -123,8 +123,8 @@ over the devices in ascending device id order. The list holds the linked
 devices only (the primary is the bundle's owner) and at most 8 of them.
 It is signed as a whole so a relay cannot serve a list with one device
 left out: the signature covers the set. The bundle's transparency leaf
-(section 11.2) grows by the list, so a change of devices is a logged
-bundle change like a prekey rotation:
+(protocol section 11.2) grows by the list, so a change of devices is a
+logged bundle change like a prekey rotation:
 
 ```text
 || devices? : 0x00, or 0x01 || count (2 BE) || (device (32) || created_at_ms (8 BE))* || devices_signature (64)
@@ -177,9 +177,9 @@ identity off by calling it a device of its own. A device already revoked
 is answered again without a second entry, so a client that lost the
 reply may repeat itself.
 
-An identity revocation (section 10.1) covers every device: a contact
-retires the contact, devices included, and the relay refuses the devices
-too, since their certificates name a dead account.
+An identity revocation (protocol section 10.1) covers every device: a
+contact retires the contact, devices included, and the relay refuses
+the devices too, since their certificates name a dead account.
 
 ### 4.5 Succession
 
@@ -672,7 +672,8 @@ about 200 bytes of JSON in a body (one padding step, sometimes). A
 provisioning message is a few kilobytes plus the contact list; a history
 snapshot is a file. A leaf with the certificate extension is 136 bytes
 larger; a 256-member group with two devices each is a 512-leaf tree,
-which is within what section 13.10 measured for 256 members times two.
+which is within what protocol section 13.10 measured for 256 members
+times two.
 
 ## 12. Tests
 
