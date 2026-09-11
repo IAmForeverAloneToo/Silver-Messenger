@@ -19,13 +19,28 @@ up.
 
 ## 1. Decisions
 
-| Question | Decision |
-| --- | --- |
-| What ships in 0.16.0 | Both Highs, all seven Mediums, eleven of the eighteen Lows in full, three more in part, and the one Informational that is a real defect (I-1). No patch release was cut ahead of it: neither High is reachable without either a line the user pastes without reading (H-2) or the access class that already reads an unlocked client outright (H-1, M-1), so nothing here is a race against disclosure. |
-| What is scheduled | One remainder, under roadmap item 63: verifying on a real Mac that the ad-hoc hardened runtime H-1 asked for actually restricts an attach. The signing is in; the claim is not made until somebody has watched it hold. Section 4 says what that leaves. |
-| What is declined | L-1 and the M-1 remainder, on one decision about `forbid(unsafe_code)`; the L-11 and L-12 remainders, each on its own argument; and the review's suggested non-zero `lock_after_minutes` default. All five are argued in section 4 rather than left open. |
-| Where a suggested fix was not taken | Section 5. Five cases, each argued. |
-| Disclosure | The report goes in whole, this note beside it, as [SECURITY.md](../../SECURITY.md) says of every review. |
+**What ships in 0.16.0.** Both Highs, all seven Mediums, eleven of the
+eighteen Lows in full, three more in part, and the one Informational
+that is a real defect (I-1). No patch release was cut ahead of it:
+neither High is reachable without either a line the user pastes without
+reading (H-2) or the access class that already reads an unlocked client
+outright (H-1, M-1), so nothing here is a race against disclosure.
+
+**What is scheduled.** One remainder, under roadmap item 63: verifying
+on a real Mac that the ad-hoc hardened runtime H-1 asked for actually
+restricts an attach. The signing is in; the claim is not made until
+somebody has watched it hold. Section 4 says what that leaves.
+
+**What is declined.** L-1 and the M-1 remainder, on one decision about
+`forbid(unsafe_code)`; the L-11 and L-12 remainders, each on its own
+argument; and the review's suggested non-zero `lock_after_minutes`
+default. All five are argued in section 4 rather than left open.
+
+**Where a suggested fix was not taken.** Section 5. Five cases, each
+argued.
+
+**Disclosure.** The report goes in whole, this note beside it, as
+[SECURITY.md](../../SECURITY.md) says of every review.
 
 ## 2. What the review got right about the code, in one paragraph
 

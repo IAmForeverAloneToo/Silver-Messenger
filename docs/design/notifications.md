@@ -7,19 +7,104 @@ note is corrected.
 
 ## 1. Decisions
 
-| Question | Decision |
-| --- | --- |
-| What a notification says | `Silver Messenger` as the title and `New message` as the text, and nothing else, ever: not who wrote, not their alias or id, not a group's name, not a device's, not a count, and never a word of content. Every event that rings raises those same words. Which events ring is decided in `docs/design/requests.md`: from 0.14.0 a message received and nothing else — a message in a chat or a group, a stranger's first message, a message reaching this device through a linked one — where 0.13.0 also rang for a group invitation and for being added to a group. This is enforced by construction, not by care: the call that raises a notification takes no text, so there is no parameter through which a name could reach one. The unread count stays where it is today, in the terminal's window title, which is not a notification and does not leave the terminal. |
-| Where it is raised | Two paths, chosen from the environment at start. *Terminal-raised*: the escape sequences the client has always written (OSC 777, OSC 9, OSC 99), for the terminals that turn them into a toast and for the one case nothing else can serve, a client running over SSH, where the desktop is on the other end of the connection. *OS-raised*: a request to the operating system's own notification service, for the terminals that ignore the sequences — which are most of them: Windows Terminal, the Windows console, Terminal.app, GNOME Terminal and every VTE terminal, Konsole, Alacritty. Today only the first path exists, so on those terminals `all` produced a bell and nothing more, which is the bug this note answers. |
-| Choosing between them | By terminal, from the environment (section 3). A terminal known to raise the sequences gets those alone; one known not to gets the OS; one the client does not recognise gets both, because a second toast on a rare terminal is a smaller failure than none on a common one. Over SSH, the terminal path alone, whatever else the environment says: a toast on the relay host or a jump box is a toast nobody sees. `/notify terminal` and `/notify desktop` force one path for a setup the detection gets wrong. |
-| Linux | The `org.freedesktop.Notifications` service on the session bus, called through `zbus`, which the client already links for the Secret Service key store; no new crate joins the tree. Summary `New message`, empty body, no icon, normal urgency, the service's default timeout, and a `replaces_id` so a second notification replaces the first rather than stacking. No session bus, as on a server or in a container: the call fails once, is remembered as unavailable for ten minutes, and the bell and title carry on. |
-| macOS | A command-line program without an application bundle cannot use the notification framework: `UNUserNotificationCenter` needs a bundle identifier and aborts without one. The route every terminal tool takes is `osascript -e 'display notification "New message" with title "Silver Messenger"'`, which every Mac has. The script is a constant, so there is nothing to escape; it is spawned detached, with no shell, its standard streams closed. The notification appears under Script Editor's name, which is cosmetic. `mac-notification-sys`, the crate that reaches the older API directly, needs Objective-C, a bundle-identifier workaround and `unsafe`; the constant script needs none of that. |
-| Windows | A toast needs an AppUserModelID, which a bare executable does not have and which is registered by a Start Menu shortcut the client does not install. The established workaround is to post the toast under PowerShell's own AppUserModelID, which `tauri-winrt-notification` does; the toast then shows as from Windows PowerShell, which is cosmetic. This is the one new dependency of the feature, and it is gated to the Windows target and accepted only if `cargo deny` stays clean (its `windows` crates must be the versions already in the tree, or the duplicates are refused) and the Windows executable grows by an amount recorded here after the first release that carries it. The alternative, spawning `powershell.exe` with a script, needs no crate but takes a third of a second, is refused by the execution policies and application-control rules that managed machines run, and puts a script on the command line of a process; it is the worse trade. |
-| Blocking and failure | Never on the interface's thread. An OS notification is asked for from a blocking task; whether it succeeds is not waited for; a failure is logged once at debug level and that path is not tried again for ten minutes, so a machine without a notification service does not spawn a process, or open a bus connection, for every message. The bell, the terminal sequences and the window title do not depend on it. |
-| Bursts | The existing rule holds: announcements within a second of the last are folded into it, so a burst rings once and raises one notification. Where the platform can replace a notification (D-Bus `replaces_id`, a Windows toast tag), the client does, so the notification area never fills with identical lines. |
-| tmux | tmux swallows the sequences unless they are wrapped in its passthrough (`DCS tmux ; ESC <sequence> ST`) and `allow-passthrough` is on. The client wraps them when `TMUX` is set, and, since tmux hides the outer terminal's identity, treats a local tmux session as an unrecognised terminal: both paths. |
-| Modes | `/notify` keeps `off`, `bell` and `all`, and gains `terminal` and `desktop`. `all`, the default, is the automatic choice above. The setting is stored as it is today. |
-| Reader mode and disappearing messages | Unchanged. Reader mode keeps the bell and leaves the title alone, as it does now. A disappearing message raises nothing and counts as nothing unread, as `docs/design/everyday.md` decided; the OS path sits behind the same gate as the bell, so the rule covers it without new code. |
+**What a notification says.** `Silver Messenger` as the title and `New
+message` as the text, and nothing else, ever: not who wrote, not their
+alias or id, not a group's name, not a device's, not a count, and never
+a word of content. Every event that rings raises those same words. Which
+events ring is decided in `docs/design/requests.md`: a message received
+and nothing else (a message in a chat or a group, a stranger's first
+message, a message reaching this device through a linked one). This is
+enforced by construction, not by care: the
+call that raises a notification takes no text, so there is no parameter
+through which a name could reach one. The unread count stays where it is
+today, in the terminal's window title, which is not a notification and
+does not leave the terminal.
+
+**Where it is raised.** Two paths, chosen from the environment at start.
+*Terminal-raised*: the escape sequences the client has always written
+(OSC 777, OSC 9, OSC 99), for the terminals that turn them into a toast
+and for the one case nothing else can serve, a client running over SSH,
+where the desktop is on the other end of the connection. *OS-raised*: a
+request to the operating system's own notification service, for the
+terminals that ignore the sequences — which are most of them: Windows
+Terminal, the Windows console, Terminal.app, GNOME Terminal and every
+VTE terminal, Konsole, Alacritty. Today only the first path exists, so
+on those terminals `all` produced a bell and nothing more, which is the
+bug this note answers.
+
+**Choosing between them.** By terminal, from the environment (section
+3). A terminal known to raise the sequences gets those alone; one known
+not to gets the OS; one the client does not recognise gets both, because
+a second toast on a rare terminal is a smaller failure than none on a
+common one. Over SSH, the terminal path alone, whatever else the
+environment says: a toast on the relay host or a jump box is a toast
+nobody sees. `/notify terminal` and `/notify desktop` force one path for
+a setup the detection gets wrong.
+
+**Linux.** The `org.freedesktop.Notifications` service on the session
+bus, called through `zbus`, which the client already links for the
+Secret Service key store; no new crate joins the tree. Summary `New
+message`, empty body, no icon, normal urgency, the service's default
+timeout, and a `replaces_id` so a second notification replaces the first
+rather than stacking. No session bus, as on a server or in a container:
+the call fails once, is remembered as unavailable for ten minutes, and
+the bell and title carry on.
+
+**macOS.** A command-line program without an application bundle cannot
+use the notification framework: `UNUserNotificationCenter` needs a
+bundle identifier and aborts without one. The route every terminal tool
+takes is `osascript -e 'display notification "New message" with title
+"Silver Messenger"'`, which every Mac has. The script is a constant, so
+there is nothing to escape; it is spawned detached, with no shell, its
+standard streams closed. The notification appears under Script Editor's
+name, which is cosmetic. `mac-notification-sys`, the crate that reaches
+the older API directly, needs Objective-C, a bundle-identifier
+workaround and `unsafe`; the constant script needs none of that.
+
+**Windows.** A toast needs an AppUserModelID, which a bare executable
+does not have and which is registered by a Start Menu shortcut the
+client does not install. The established workaround is to post the toast
+under PowerShell's own AppUserModelID, which `tauri-winrt-notification`
+does; the toast then shows as from Windows PowerShell, which is
+cosmetic. This is the one new dependency of the feature, and it is gated
+to the Windows target and accepted only if `cargo deny` stays clean (its
+`windows` crates must be the versions already in the tree, or the
+duplicates are refused) and the Windows executable grows by an amount
+recorded here after the first release that carries it. The alternative,
+spawning `powershell.exe` with a script, needs no crate but takes a
+third of a second, is refused by the execution policies and
+application-control rules that managed machines run, and puts a script
+on the command line of a process; it is the worse trade.
+
+**Blocking and failure.** Never on the interface's thread. An OS
+notification is asked for from a blocking task; whether it succeeds is
+not waited for; a failure is logged once at debug level and that path is
+not tried again for ten minutes, so a machine without a notification
+service does not spawn a process, or open a bus connection, for every
+message. The bell, the terminal sequences and the window title do not
+depend on it.
+
+**Bursts.** The existing rule holds: announcements within a second of
+the last are folded into it, so a burst rings once and raises one
+notification. Where the platform can replace a notification (D-Bus
+`replaces_id`, a Windows toast tag), the client does, so the
+notification area never fills with identical lines.
+
+**tmux.** tmux swallows the sequences unless they are wrapped in its
+passthrough (`DCS tmux ; ESC <sequence> ST`) and `allow-passthrough` is
+on. The client wraps them when `TMUX` is set, and, since tmux hides the
+outer terminal's identity, treats a local tmux session as an
+unrecognised terminal: both paths.
+
+**Modes.** `/notify` keeps `off`, `bell` and `all`, and gains `terminal`
+and `desktop`. `all`, the default, is the automatic choice above. The
+setting is stored as it is today.
+
+**Reader mode and disappearing messages.** Unchanged. Reader mode keeps
+the bell and leaves the title alone, as it does now. A disappearing
+message raises nothing and counts as nothing unread, as
+`docs/design/everyday.md` decided; the OS path sits behind the same gate
+as the bell, so the rule covers it without new code.
 
 ## 2. Goals and non-goals
 
@@ -130,5 +215,12 @@ Measured on the release. `cargo deny` stayed clean: the crate's one
 dependency of weight, `windows`, is the version already in the tree, so
 nothing was duplicated. `silver-v0.13.0-x86_64-pc-windows-msvc.exe` is
 13,222,912 bytes against 13,180,928 for `silver-v0.12.5`, 41,984 bytes
-more for the whole item -- the crate, the route, the tmux wrapping and
-the rest together -- so the crate stays.
+more for the whole item (the crate, the route, the tmux wrapping and
+the rest together), so the crate stays.
+
+## 7. Corrections
+
+* This note first listed a group invitation and being added to a group
+  among the events that ring (0.13.0). [requests.md](requests.md)
+  narrowed the rule to a message received and nothing else (0.14.0),
+  and the first decision above reads as the rule now stands.

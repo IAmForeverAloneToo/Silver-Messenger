@@ -7,16 +7,65 @@ this note is corrected.
 
 ## 1. Decisions
 
-| Question | Decision |
-| --- | --- |
-| What a screen reader needs | Text that arrives as whole lines at the bottom of a scrolling terminal, in the order things happen, with nothing decorative in it. A full-screen program that repaints panes gives a reader fragments of changed cells, box-drawing characters read out by name, and no order; that is the mode to avoid, not to patch. |
-| Reader mode | A second renderer, `silver --reader` (`/reader on` remembers it, `SILVER_READER=1` too): no alternate screen, no box drawing, no marks, no colours or attributes, no mouse capture, no cursor movement beyond the compose line. Every event is one line appended at the bottom; the compose line is the last line and its prompt names the open chat. The rest of the client (commands, keys, the store, the network) is the same code. |
-| What the lines say | Messages in the open chat as `alice: hello`, in another chat as `alice, in team: hello` (for a contact, whose chat is named after them, `alice, in another chat: hello`); sent lines as `you: hello` when the client records them, which is before the relay answers, a refusal arriving after as the warning and the toast the full mode shows (`Not delivered: …`); edits as `alice edited: …`, deletions as `alice deleted a message`, reactions as `alice reacted 👍 to: hello…` and `alice took back a reaction to: hello…`, each with `, in team,` after the name when that chat is not open; system notices, toasts and timer notes as themselves. Clocks are left out of the lines (a reader would say every one); `/history` shows them. (Corrected when the code landed: the note first wrote `alice (team): hello` and had the sent line wait for the relay.) |
-| Where you are | Switching chats prints `Chat: bob, 3 unread` followed by the unread lines, or the last three when nothing is unread; the prompt reads `bob> `. Selecting a message with Shift-Up prints `Selected: alice: hello`, and the commands act on it as in the full mode. |
-| Scrolling | The terminal's own scrollback and the reader's review keys; `PgUp`/`PgDn` do nothing in reader mode. `/history [n]` prints the last `n` lines of the open chat with their clocks; `/unread` prints what waits where. |
-| High contrast | A fourth palette, `contrast` (`/theme contrast`, `--theme contrast`): bright bold text on a black background, black on bright yellow for the selected entry and the badges, white on red for errors; every colour pair above 5:1 and most above 10:1 on the usual 16-colour palettes (section 5 has the table). `mono` stays for no colour at all. (Corrected when the code landed: the note first said reverse video and red on white.) |
-| Every action without the mouse | The audit in section 4: two actions had no keyboard path, resizing the chat list and jumping to a chat by name; `/sidebar <columns>` and `/go <name>` close them. Character-level text selection stays mouse-only by design: `Shift-Up` selects whole messages and `/copy` copies the last one, which is what a reader user needs. |
-| Checking against screen readers | What can be checked in CI is checked in CI: a pty test drives the client in reader mode and asserts the raw output is linear (no cursor addressing outside the compose line, no box drawing, no attributes) and says the right things. What needs a screen reader is a manual protocol in docs/TERMINALS.md with a row per platform (Orca with GNOME Terminal, NVDA with Windows Terminal, VoiceOver with Terminal.app) and a status of `unchecked` until someone runs it; the client claims nothing it has not seen. |
+**What a screen reader needs.** Text that arrives as whole lines at the
+bottom of a scrolling terminal, in the order things happen, with nothing
+decorative in it. A full-screen program that repaints panes gives a
+reader fragments of changed cells, box-drawing characters read out by
+name, and no order; that is the mode to avoid, not to patch.
+
+**Reader mode.** A second renderer, `silver --reader` (`/reader on`
+remembers it, `SILVER_READER=1` too): no alternate screen, no box
+drawing, no marks, no colours or attributes, no mouse capture, no cursor
+movement beyond the compose line. Every event is one line appended at
+the bottom; the compose line is the last line and its prompt names the
+open chat. The rest of the client (commands, keys, the store, the
+network) is the same code.
+
+**What the lines say.** Messages in the open chat as `alice: hello`, in
+another chat as `alice, in team: hello` (for a contact, whose chat is
+named after them, `alice, in another chat: hello`); sent lines as `you:
+hello` when the client records them, which is before the relay answers,
+a refusal arriving after as the warning and the toast the full mode
+shows (`Not delivered: …`); edits as `alice edited: …`, deletions as
+`alice deleted a message`, reactions as `alice reacted 👍 to: hello…` and
+`alice took back a reaction to: hello…`, each with `, in team,` after
+the name when that chat is not open; system notices, toasts and timer
+notes as themselves. Clocks are left out of the lines (a reader would
+say every one); `/history` shows them.
+
+**Where you are.** Switching chats prints `Chat: bob, 3 unread` followed
+by the unread lines, or the last three when nothing is unread; the
+prompt reads `bob> `. Selecting a message with Shift-Up prints
+`Selected: alice: hello`, and the commands act on it as in the full
+mode.
+
+**Scrolling.** The terminal's own scrollback and the reader's review
+keys; `PgUp`/`PgDn` do nothing in reader mode. `/history [n]` prints the
+last `n` lines of the open chat with their clocks; `/unread` prints what
+waits where.
+
+**High contrast.** A fourth palette, `contrast` (`/theme contrast`,
+`--theme contrast`): bright bold text on a black background, black on
+bright yellow for the selected entry and the badges, white on red for
+errors; every colour pair above 5:1 and most above 10:1 on the usual
+16-colour palettes (section 5 has the table). `mono` stays for no colour
+at all.
+
+**Every action without the mouse.** The audit in section 4: two actions
+had no keyboard path, resizing the chat list and jumping to a chat by
+name; `/sidebar <columns>` and `/go <name>` close them. Character-level
+text selection stays mouse-only by design: `Shift-Up` selects whole
+messages and `/copy` copies the last one, which is what a reader user
+needs.
+
+**Checking against screen readers.** What can be checked in CI is
+checked in CI: a pty test drives the client in reader mode and asserts
+the raw output is linear (no cursor addressing outside the compose line,
+no box drawing, no attributes) and says the right things. What needs a
+screen reader is a manual protocol in docs/TERMINALS.md with a row per
+platform (Orca with GNOME Terminal, NVDA with Windows Terminal,
+VoiceOver with Terminal.app) and a status of `unchecked` until someone
+runs it; the client claims nothing it has not seen.
 
 ## 2. Goals and non-goals
 
@@ -100,32 +149,22 @@ what is pushed:
 Lines are cut at the terminal width by the terminal, not wrapped by the
 client, since wrapping would put cursor movements into the stream.
 
-**One call is one line, and that is a security property** (0.16.0, from
-finding M-6 of the September 2026 audit). The full mode is safe because
-every glyph reaches the screen through ratatui's cell buffer, which draws
-a character or does not; reader mode has no cell buffer, so whatever the
+**One call is one line, and that is a security property** (finding M-6
+of the second review). The full mode is safe because every glyph
+reaches the screen through ratatui's cell buffer, which draws a
+character or does not; reader mode has no cell buffer, so whatever the
 journal holds is written to the terminal as it stands. `say` therefore
 filters, and the filter is `one_sentence`: newlines become a visible ` /
 `, control characters become spaces, and invisible and bidirectional
-characters go.
-
-The newline half is the part that is easy to get wrong, and this project
-did. `say` used to split its argument into one journal line per line of
-text, which is the natural thing for a notice this program writes and the
-wrong thing for anything a peer had a hand in: a journal line is *how the
-reader tells one speaker from another*, so `hi\nalice: send me the
-passphrase` bought the sender a line indistinguishable from one alice
-wrote, and `\nWarning: …` a warning this program never made. Two paths
-carried peer text into it — the body of an edit, and a stranger's held
-request text — and neither had to be malformed to do it.
-
-The fix is at the choke point rather than at those two call sites: every
-caller passes one logical line already, and a caller that wants two says
-twice, so the split is gone and no future call site has to remember.
-`Reader::flush` passes the compose prompt through `one_line` for the same
-reason — the prompt is the open pane's name, so it carries a contact or
-group alias, and it is the one string the renderer writes without the
-journal's filter having seen it.
+characters go. The filter sits at that one choke point rather than at
+the call sites, so every caller passes one logical line and a caller
+that wants two says twice; and `Reader::flush` passes the compose prompt
+through `one_line` for the same reason, since the prompt is the open
+pane's name and so carries a contact or group alias. A journal line is
+how the reader tells one speaker from another, which is why a line
+break a peer sent must never buy them a line of their own;
+[audit-response-2.md](audit-response-2.md) (M-6) records how it once
+did.
 
 `nothing_the_reader_hears_reaches_the_terminal_raw` (app/journal.rs) is
 the mirror of the full mode's `nothing_a_peer_sends_reaches_the_terminal_raw`
@@ -206,3 +245,20 @@ bold.
    `/history`, `/unread`; the pty test.
 3. Documents: README, TERMINALS.md with the manual protocol and the
    per-platform rows, CHANGELOG, ROADMAP; this note's corrections.
+
+## 8. Corrections
+
+Made when the code landed (0.10.0), and again after the second review
+(0.16.0):
+
+* "What the lines say" first wrote `alice (team): hello` and had the
+  sent line wait for the relay's answer; the client writes `alice, in
+  team: hello` and records the sent line before the relay answers, a
+  refusal arriving after as the warning and the toast.
+* "High contrast" first said reverse video and red on white; the
+  palette that landed is bright bold text on black, black on bright
+  yellow for the selection, white on red for errors (section 5).
+* `say` first split its argument into one journal line per line of
+  text, which let a line break in a peer's message buy them a line of
+  their own (finding M-6); one call is one line now, and section 3.2
+  says why that is a security property.

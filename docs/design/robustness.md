@@ -6,15 +6,55 @@ and the code later disagree, the code wins and this note is corrected.
 
 ## 1. Decisions
 
-| Question | Decision |
-| --- | --- |
-| The terminal after a panic | One hook, installed once at start, undoes exactly what the client set up and then hands the panic to the default hook, so the message prints on the normal screen with the keyboard and mouse back to the shell. A static records what was set up: the full mode's raw mode, alternate screen, mouse capture, bracketed paste, focus events and pushed title, or reader mode's raw mode, bracketed paste and focus events. The client enters and leaves the terminal itself rather than through ratatui's `init` and `restore`, whose hook puts back raw mode and the alternate screen and leaves mouse reporting, paste and focus modes and the title behind. |
-| Provoking a panic in a test | A trigger compiled into debug builds only (`SILVER_DEBUG_PANIC_AFTER_MS`, read under `cfg(debug_assertions)`): the client panics on the first tick after that many milliseconds. Release builds have no such thing. |
-| Atomic writes | Every whole-file store file is already written beside and renamed over; the rename is preceded by a sync of the file from now on, so a crash cannot leave the new name pointing at an empty file. Histories are append-only lines; a line cut short by a crash is kept unreadable and skipped on load, as now. |
-| The kill test | A test in `silver-client` runs itself as a child that writes the store as fast as it can (the config, the contacts, history lines and their updates, with a passphrase and without), kills it at a random moment (SIGKILL; TerminateProcess on Windows), then opens the store: every file loads, the config is one the child wrote, the contacts are a list the child wrote, the history is a prefix of what the child wrote with at most one line lost. Twenty rounds. |
-| Memory | In memory a conversation holds its newest 2,000 lines; the file holds all of them. The System pane holds its newest 500 lines. Updates waiting for a message that has not arrived are capped at 1,000 besides their day. The seen-id set is capped at 20,000 already. |
-| What the cap hides | Nothing that a command reads: `/search` reads the files through the store (contacts and groups both) rather than the lines on screen, and `--export-history` reads the files. The chat's title says `older lines in the file` once the window is full. |
-| The soak test | `tests/tui/soak.py --minutes N`: a relay and two clients exchanging messages both ways five times a second, a reaction, an edit and a deletion mixed in, each process's resident memory sampled every thirty seconds. It passes when every process is alive at the end, the last messages arrived, and each client's memory at the end is within a tenth of what it was at the half and under 256 MiB. CI runs three minutes on every push; the workflow can be dispatched with any length up to six hours; the day-long run is made by hand and its result recorded in section 7. |
+**The terminal after a panic.** One hook, installed once at start,
+undoes exactly what the client set up and then hands the panic to the
+default hook, so the message prints on the normal screen with the
+keyboard and mouse back to the shell. A static records what was set up:
+the full mode's raw mode, alternate screen, mouse capture, bracketed
+paste, focus events and pushed title, or reader mode's raw mode,
+bracketed paste and focus events. The client enters and leaves the
+terminal itself rather than through ratatui's `init` and `restore`,
+whose hook puts back raw mode and the alternate screen and leaves mouse
+reporting, paste and focus modes and the title behind.
+
+**Provoking a panic in a test.** A trigger compiled into debug builds
+only (`SILVER_DEBUG_PANIC_AFTER_MS`, read under
+`cfg(debug_assertions)`): the client panics on the first tick after that
+many milliseconds. Release builds have no such thing.
+
+**Atomic writes.** Every whole-file store file is already written beside
+and renamed over; the rename is preceded by a sync of the file from now
+on, so a crash cannot leave the new name pointing at an empty file.
+Histories are append-only lines; a line cut short by a crash is kept
+unreadable and skipped on load, as now.
+
+**The kill test.** A test in `silver-client` runs itself as a child that
+writes the store as fast as it can (the config, the contacts, history
+lines and their updates, with a passphrase and without), kills it at a
+random moment (SIGKILL; TerminateProcess on Windows), then opens the
+store: every file loads, the config is one the child wrote, the contacts
+are a list the child wrote, the history is a prefix of what the child
+wrote with at most one line lost. Twenty rounds.
+
+**Memory.** In memory a conversation holds its newest 2,000 lines; the
+file holds all of them. The System pane holds its newest 500 lines.
+Updates waiting for a message that has not arrived are capped at 1,000
+besides their day. The seen-id set is capped at 20,000 already.
+
+**What the cap hides.** Nothing that a command reads: `/search` reads
+the files through the store (contacts and groups both) rather than the
+lines on screen, and `--export-history` reads the files. The chat's
+title says `older lines in the file` once the window is full.
+
+**The soak test.** `tests/tui/soak.py --minutes N`: a relay and two
+clients exchanging messages both ways five times a second, a reaction,
+an edit and a deletion mixed in, each process's resident memory sampled
+every thirty seconds. It passes when every process is alive at the end,
+the last messages arrived, and each client's memory at the end is within
+a tenth of what it was at the half and under 256 MiB. CI runs three
+minutes on every push; the workflow can be dispatched with any length up
+to six hours; the day-long run is made by hand and its result recorded
+in section 7.
 
 ## 2. Goals and non-goals
 
@@ -70,8 +110,7 @@ earlier.
 The kill test found a second thing to fix: a line cut short by a crash
 has no newline, and the next append used to glue its line onto it, so
 the load skipped both. An append now looks at the file's last byte and
-starts a fresh line when it must; the cut line alone is lost. (Corrected
-when the code landed: the note said only the cut line was ever lost.)
+starts a fresh line when it must; the cut line alone is lost.
 
 The kill test (`crates/silver-client/tests/kill.rs`) runs its own test
 binary as the child, told by an environment variable to be the writer:
@@ -96,7 +135,6 @@ the child's first round (the unlock alone takes longer than the random
 wait), and the reads and reactions are checked for the rounds that child
 reported, since a kill between a round's entry and its read leaves the
 entry without one for good, as a crash between two writes does in life.
-(Corrected when the code landed.)
 
 ## 5. Memory
 
@@ -181,3 +219,17 @@ and its figures belong here when it has.
 4. The soak script and the CI job; a run of an hour here, the day-long
    run recorded when made.
 5. README, CHANGELOG, ROADMAP; this note's corrections.
+
+## 10. Corrections
+
+Made when the code landed (0.10.0):
+
+* Section 4 said only the cut line was ever lost. The kill test found
+  the next append gluing its line onto a cut one, so both were skipped
+  on load; an append now starts a fresh line when the file's last byte
+  is not a newline.
+* The kill test as first written killed the child a random 5 to 60 ms
+  after starting it. It waits for the child's first round, since the
+  unlock alone takes longer than that, and checks reads and reactions
+  only for the rounds the child reported, since a kill between an
+  entry and its read leaves the entry without one for good.

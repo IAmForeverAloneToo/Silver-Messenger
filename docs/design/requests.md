@@ -15,17 +15,77 @@ let them *point* at one.
 
 ## 1. Decisions
 
-| Question | Decision |
-| --- | --- |
-| What a request is | A chat you have not answered yet. Each stranger who wrote gets an entry of their own in the sidebar, under a `requests` divider, drawn dim and marked as not a contact; the entry shows their id and nothing a stranger chose. Selecting it shows every message they sent, not three. The Requests pane -- one list of everyone waiting -- goes; `/requests` prints that list into the System pane instead. |
-| Group invitations | The same. An invitation is an entry under the divider, labelled `invitation`, showing the group's name, who invited you, how many are in it and when it came. Only strangers' invitations wait (a contact's is taken at once, as today), so the inviter is always shown by id. The name is the stranger's word for the group: sanitised as today, and never the entry's identity on its own -- the label and the inviter's id are. |
-| The commands on an entry | `/accept`, `/decline` and `/block` take no argument there and act on the entry you are looking at. Typing text and pressing Enter on a request accepts it and sends the text, because answering someone is accepting them. On an invitation, Enter with text says to `/accept` first. With an argument the same commands work from anywhere: a number, an id prefix, or an alias where one exists. |
-| Decline | *Not now*, where block is *never*. The request and its held messages are dropped and the sender is told nothing, exactly as with block. If they write again the request reappears, quietly: no bell, no notification, no toast, because you already said not now and a stranger must not be able to ring you by repeating themselves. The quiet flag is remembered on disk for the id and cleared when you accept or block them. It is this device's alone: a block is synced to your other devices because it is a fact about a person; a decline is a mood, and syncing it would need a wire change for little. An invitation is declined as today, and a declined inviter's later invitations are quiet in the same way. |
-| What rings | The bell and the desktop notification are raised for a message received, and for nothing else: a message in a chat, a message in a group, a stranger's first message (that is what a request is), a message reaching this device through a linked one. Not for an invitation, for being added to a group, for joining by link, for a device linking, for a key change, or for an update. Those go to the System pane and the sidebar badge, and the window title's count still includes what waits. This narrows the first decision of `docs/design/notifications.md`, which listed invitations and group adds among the events that ring; that table is corrected to point here. |
-| Naming a person | One resolver, used by every command that names one: an alias (case-insensitive), the full id, or a prefix of the id that matches exactly one person; and with nothing given, the selected chat. `/block`, `/unblock` (against the blocked list), `/accept` and `/decline` (against what waits), `/go`, `/group add`, `/group remove`, `/group admin`, `/copy id` and `/whois` all use it. An ambiguous prefix says which people it matched and does nothing. |
-| Getting an id out | `/copy id` copies yours, as today; `/copy id <who>` copies theirs. `/whois [who]` prints their id, alias, verification state and how messages with them are protected into the System pane, as ordinary selectable text. A click on the title of a contact's chat or of a request copies that id to the clipboard, with a toast saying so. |
-| Completion | Tab after a command that names a person or a chat cycles through contact aliases and group names, the way it cycles through paths after `/send`. The command table says which arguments those are, so the help, the status line and the completion agree. |
-| Numbers | They stay, for reader mode and for whoever prefers them, and they hold still. A request or invitation gets its number when the client first sees it, in one sequence for both kinds, and keeps it until it is handled; a number is not reused within a run. `/accept 3` takes entry 3 whichever kind it is; `/accept g3` takes it only if it is an invitation, so an old habit cannot accept a person by mistake. The number is in the entry's title, in the arrival line, and in `/requests`. |
+**What a request is.** A chat you have not answered yet. Each stranger
+who wrote gets an entry of their own in the sidebar, under a `requests`
+divider, drawn dim and marked as not a contact; the entry shows their id
+and nothing a stranger chose. Selecting it shows every message they
+sent, not three. The Requests pane -- one list of everyone waiting --
+goes; `/requests` prints that list into the System pane instead.
+
+**Group invitations.** The same. An invitation is an entry under the
+divider, labelled `invitation`, showing the group's name, who invited
+you, how many are in it and when it came. Only strangers' invitations
+wait (a contact's is taken at once, as today), so the inviter is always
+shown by id. The name is the stranger's word for the group: sanitised as
+today, and never the entry's identity on its own -- the label and the
+inviter's id are.
+
+**The commands on an entry.** `/accept`, `/decline` and `/block` take no
+argument there and act on the entry you are looking at. Typing text and
+pressing Enter on a request accepts it and sends the text, because
+answering someone is accepting them. On an invitation, Enter with text
+says to `/accept` first. With an argument the same commands work from
+anywhere: a number, an id prefix, or an alias where one exists.
+
+**Decline.** *Not now*, where block is *never*. The request and its held
+messages are dropped and the sender is told nothing, exactly as with
+block. If they write again the request reappears, quietly: no bell, no
+notification, no toast, because you already said not now and a stranger
+must not be able to ring you by repeating themselves. The quiet flag is
+remembered on disk for the id and cleared when you accept or block them.
+It is this device's alone: a block is synced to your other devices
+because it is a fact about a person; a decline is a mood, and syncing it
+would need a wire change for little. An invitation is declined as today,
+and a declined inviter's later invitations are quiet in the same way.
+
+**What rings.** The bell and the desktop notification are raised for a
+message received, and for nothing else: a message in a chat, a message
+in a group, a stranger's first message (that is what a request is), a
+message reaching this device through a linked one. Not for an
+invitation, for being added to a group, for joining by link, for a
+device linking, for a key change, or for an update. Those go to the
+System pane and the sidebar badge, and the window title's count still
+includes what waits. This narrows the first decision of
+`docs/design/notifications.md`, which listed invitations and group adds
+among the events that ring; that table is corrected to point here.
+
+**Naming a person.** One resolver, used by every command that names one:
+an alias (case-insensitive), the full id, or a prefix of the id that
+matches exactly one person; and with nothing given, the selected chat.
+`/block`, `/unblock` (against the blocked list), `/accept` and
+`/decline` (against what waits), `/go`, `/group add`, `/group remove`,
+`/group admin`, `/copy id` and `/whois` all use it. An ambiguous prefix
+says which people it matched and does nothing.
+
+**Getting an id out.** `/copy id` copies yours, as today; `/copy id
+<who>` copies theirs. `/whois [who]` prints their id, alias,
+verification state and how messages with them are protected into the
+System pane, as ordinary selectable text. A click on the title of a
+contact's chat or of a request copies that id to the clipboard, with a
+toast saying so.
+
+**Completion.** Tab after a command that names a person or a chat cycles
+through contact aliases and group names, the way it cycles through paths
+after `/send`. The command table says which arguments those are, so the
+help, the status line and the completion agree.
+
+**Numbers.** They stay, for reader mode and for whoever prefers them,
+and they hold still. A request or invitation gets its number when the
+client first sees it, in one sequence for both kinds, and keeps it until
+it is handled; a number is not reused within a run. `/accept 3` takes
+entry 3 whichever kind it is; `/accept g3` takes it only if it is an
+invitation, so an old habit cannot accept a person by mistake. The
+number is in the entry's title, in the arrival line, and in `/requests`.
 
 ## 2. Goals and non-goals
 

@@ -8,19 +8,63 @@ disagree, the code and PROTOCOL.md win and this note is corrected.
 
 ## 1. Decisions
 
-| Question | Decision |
-| --- | --- |
-| Where it all lives | Inside the encrypted body, as content kinds (section 4 of the protocol) in one-to-one sessions and as application messages in groups. The relay sees a padded body like any other and learns nothing new; nothing here needs the relay. |
-| Disappearing messages | A timer per conversation, set by either side of a one-to-one conversation and by an admin in a group, told to the other side as a message. It runs from the moment of sending for the sender and from the moment of reading for the recipient; an unread message waits. Each device deletes on its own clock; nothing is asked of the other side beyond running this software. |
-| Delete for everyone | The author, within 24 hours of sending, asks every recipient's client to remove the message. A conforming client removes the text and the file reference, keeps a placeholder saying a message was deleted, and keeps any file it already saved. What it cannot recall is stated in the threat model, not softened. |
-| Delete for me | Local: the message goes from this device's history and screen, and from the device's siblings, which are told by sync. The other side keeps its copy. |
-| Edits | A new message of its own kind that names the message it replaces, from the author, within 24 hours of the original. Shown in place with an "edited" mark; the original stays in the history file and the export shows both. |
-| Replies | An optional `reply_to` on a text or a file, naming the message answered. The quote is rendered from the reader's own history; a client that does not know the field shows the text alone, which is why replies need no capability. |
-| Reactions | One short string (an emoji, or a few characters) per person per message, sent as a message naming its target; a later one replaces it and an empty one removes it. |
-| Older clients | Three new in-body capabilities gate the new kinds one-to-one: `edits` (edit, delete for everyone), `reactions`, `timers`. To a contact whose client lacks one, the client does not send the kind; it says what the contact will not see, and where the local side can act alone (the timer) it does so and says the deletion is one-sided. In groups the gate is a leaf capability every 0.10.0 leaf declares. |
-| Encrypted downloads | An option, `/files encrypt on`, only where the data directory is protected: received files are saved under the data key like every other file, and `/open` decrypts a private temporary copy for the program that opens it. Off by default, so files stay ordinary files for other programs, as today. |
-| History export | `silver --export-history <dir>`: one file per conversation, plain text by default or JSON lines with `--format json`, written after unlocking the store. Deleted messages are left out; edits are shown as the latest text with the earlier versions in the JSON. |
-| Message references | By the id a message goes by: the envelope id of the message to the contact's primary one-to-one (protocol section 14.4), the application message id in a group. |
+**Where it all lives.** Inside the encrypted body, as content kinds
+(section 4 of the protocol) in one-to-one sessions and as application
+messages in groups. The relay sees a padded body like any other and
+learns nothing new; nothing here needs the relay.
+
+**Disappearing messages.** A timer per conversation, set by either side
+of a one-to-one conversation and by an admin in a group, told to the
+other side as a message. It runs from the moment of sending for the
+sender and from the moment of reading for the recipient; an unread
+message waits. Each device deletes on its own clock; nothing is asked of
+the other side beyond running this software.
+
+**Delete for everyone.** The author, within 24 hours of sending, asks
+every recipient's client to remove the message. A conforming client
+removes the text and the file reference, keeps a placeholder saying a
+message was deleted, and keeps any file it already saved. What it cannot
+recall is stated in the threat model, not softened.
+
+**Delete for me.** Local: the message goes from this device's history
+and screen, and from the device's siblings, which are told by sync. The
+other side keeps its copy.
+
+**Edits.** A new message of its own kind that names the message it
+replaces, from the author, within 24 hours of the original. Shown in
+place with an "edited" mark; the original stays in the history file and
+the export shows both.
+
+**Replies.** An optional `reply_to` on a text or a file, naming the
+message answered. The quote is rendered from the reader's own history; a
+client that does not know the field shows the text alone, which is why
+replies need no capability.
+
+**Reactions.** One short string (an emoji, or a few characters) per
+person per message, sent as a message naming its target; a later one
+replaces it and an empty one removes it.
+
+**Older clients.** Three new in-body capabilities gate the new kinds
+one-to-one: `edits` (edit, delete for everyone), `reactions`, `timers`.
+To a contact whose client lacks one, the client does not send the kind;
+it says what the contact will not see, and where the local side can act
+alone (the timer) it does so and says the deletion is one-sided. In
+groups the gate is a leaf capability every 0.10.0 leaf declares.
+
+**Encrypted downloads.** An option, `/files encrypt on`, only where the
+data directory is protected: received files are saved under the data key
+like every other file, and `/open` decrypts a private temporary copy for
+the program that opens it. Off by default, so files stay ordinary files
+for other programs, as today.
+
+**History export.** `silver --export-history <dir>`: one file per
+conversation, plain text by default or JSON lines with `--format json`,
+written after unlocking the store. Deleted messages are left out; edits
+are shown as the latest text with the earlier versions in the JSON.
+
+**Message references.** By the id a message goes by: the envelope id of
+the message to the contact's primary one-to-one (protocol section 14.4),
+the application message id in a group.
 
 ## 2. Goals and non-goals
 
@@ -435,7 +479,7 @@ Each step is one commit on `main` with its tests:
 Compatibility through the steps: nothing sends a new kind until step 3,
 and until then a 0.10.0 tree is a 0.9.0 client with more code.
 
-## 11. Where the code differs from this note
+## 11. Corrections
 
 Written after the six steps landed; PROTOCOL.md sections 4.7, 13.1,
 13.3 and 14.5 are the normative text.
