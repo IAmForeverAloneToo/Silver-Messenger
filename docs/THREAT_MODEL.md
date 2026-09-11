@@ -677,7 +677,9 @@ sessions as its owner with every one of their contacts, without the
 identity key. Until 0.16.0 this section listed only what the key
 decrypts and left impersonation to the identity key's section, which was
 wrong for v4. Both keys do live in the same file, so this is usually the
-device-thief case above — but not always: the review of September 2026
+device-thief case above — but not always: the second review
+([docs/audits/2026-09-second-security-audit.md](audits/2026-09-second-security-audit.md),
+answered in [docs/design/audit-response-2.md](design/audit-response-2.md))
 read the Diffie–Hellman key out of a running client's memory, where it
 is in use on every envelope, and that is not the same event as reading
 the signing seed. Binding the identity key freshly into the handshake
@@ -687,8 +689,8 @@ section 3 records the decision not to — so the answer is to make the key
 same identity, the next message to each contact starts afresh under it
 (the old session still reads what arrives on it meanwhile), and a
 contact's client takes a peer-started session on a key that is not the
-pinned one
-only once the relay confirms it is the key the identity now publishes
+pinned one only once the relay confirms it is the key the identity now
+publishes
 ([docs/design/dh-rotation.md](design/dh-rotation.md)). After a rekey the
 old secret still opens what was sealed to it — it always could — but
 starts no session as its owner with anybody whose client makes that
