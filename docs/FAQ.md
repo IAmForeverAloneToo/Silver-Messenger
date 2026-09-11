@@ -158,43 +158,34 @@ at rest) or link the new computer as a device and remove the old one.
 ## What does it put in my computer's key store?
 
 One entry, filed under the service `silver-messenger` and named
-`data-key-` followed by thirty-two hex characters. It holds the key that
-unwraps your data directory when you have not set a passphrase. On
-Windows the Credential Manager shows it as
-`data-key-….silver-messenger`; on macOS the Keychain shows the service
-with that name as the account; on Linux a Secret Service tool such as
-`seahorse` shows `data-key-…@silver-messenger`.
-`silver --set-passphrase`, `silver --remove-passphrase` and `--wipe` all
+`data-key-` followed by thirty-two hex characters: the key that unwraps
+your data directory when you have not set a passphrase. On Windows the
+Credential Manager shows it as `data-key-….silver-messenger`; on macOS
+the Keychain shows the service with that name as the account; on Linux
+a Secret Service tool such as `seahorse` shows
+`data-key-…@silver-messenger`. `silver --set-passphrase`, `silver
+--remove-passphrase` and erasing a device (`/devices leave confirm`)
 look after it: the entry follows the vault, or goes with it.
 
-You may still find more than one. From 0.16.0 the client writes down any
-key a half-finished change could orphan and clears it at the next start,
-so a crash mid-change settles itself. A crash under an *earlier* version
-left no such note, and that entry stays until you remove it. The client
-will not sweep them up for you: enumerating a key store needs system
-calls `keyring` offers on no platform, and reaching for them would cost
-`silver-client` the `#![forbid(unsafe_code)]` it holds over every secret
-in this program — not a trade worth making for a key that unwraps a
-vault you no longer have.
-
-To clear them by hand, without having to work out which one is live:
-`silver --set-passphrase` moves your directory to a passphrase and
-deletes the entry it was using, so everything left under
-`silver-messenger` is stray. Delete those in the tool for your platform
-(`secret-tool clear service silver-messenger` does it in one on Linux),
-then `silver --remove-passphrase` if you want to go back to the key
-store, which makes a fresh entry. A leftover entry is a dead key rather
-than a way in: it opens a directory that is gone, and nothing else.
+You may find more than one if a version before 0.16.0 crashed in the
+middle of a change. A leftover entry is a dead key, not a way in: it
+opens a directory that is gone. To clear them without working out which
+is live: `silver --set-passphrase` moves your directory to a passphrase
+and deletes the entry in use, so everything left under
+`silver-messenger` is stray and can be deleted in your platform's tool
+(`secret-tool clear service silver-messenger` on Linux); then `silver
+--remove-passphrase` if you want the key store back. Why the client does
+not sweep them up itself is in `docs/design/audit-response-2.md` (M-1).
 
 ## How do I update, and what breaks?
 
-`silver update` does it, from 0.12.0 onwards -- earlier clients have no
+`silver update` does it, from 0.12.0 onwards — earlier clients have no
 such command, so the step from 0.11.0 or older to 0.12.0 is made once by
 hand, from the releases page or a package manager. After that: it fetches
 the client for your platform, checks
 it against the checksum the releases page reports, against `SHA256SUMS`,
 against the project's signature, and by running it to see that it reports
-the version expected -- and only then puts it in place. If anything
+the version expected — and only then puts it in place. If anything
 disagrees, your working client is left alone. The one it replaced is kept
 beside it, so `silver update --rollback` undoes it. If you installed
 through a package manager, `silver update` says so and prints that

@@ -14,11 +14,11 @@ a word of content. Every event that rings raises those same words. Which
 events ring is decided in `docs/design/requests.md`: a message received
 and nothing else (a message in a chat or a group, a stranger's first
 message, a message reaching this device through a linked one). This is
-enforced by construction, not by care: the
-call that raises a notification takes no text, so there is no parameter
-through which a name could reach one. The unread count stays where it is
-today, in the terminal's window title, which is not a notification and
-does not leave the terminal.
+enforced by construction, not by care: the call that raises a
+notification takes no text, so there is no parameter through which a
+name could reach one. The unread count stays where it is today, in the
+terminal's window title, which is not a notification and does not leave
+the terminal.
 
 **Where it is raised.** Two paths, chosen from the environment at start.
 *Terminal-raised*: the escape sequences the client has always written
@@ -199,7 +199,7 @@ checked on, as the other columns there are. On Windows it was checked
 the day 0.13.0 shipped: a contact request sent to the maintainer over
 the public relay raised a toast reading `Silver Messenger` and `New
 message` under the Windows PowerShell header, and the maintainer accepted
-it as it is -- the header says where the notification is from, which is
+it as it is — the header says where the notification is from, which is
 all it has to do.
 
 ## 6. What ships, and in what order

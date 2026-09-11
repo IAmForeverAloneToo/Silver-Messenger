@@ -19,7 +19,7 @@ let them *point* at one.
 who wrote gets an entry of their own in the sidebar, under a `requests`
 divider, drawn dim and marked as not a contact; the entry shows their id
 and nothing a stranger chose. Selecting it shows every message they
-sent, not three. The Requests pane -- one list of everyone waiting --
+sent, not three. The Requests pane — one list of everyone waiting —
 goes; `/requests` prints that list into the System pane instead.
 
 **Group invitations.** The same. An invitation is an entry under the
@@ -27,7 +27,7 @@ divider, labelled `invitation`, showing the group's name, who invited
 you, how many are in it and when it came. Only strangers' invitations
 wait (a contact's is taken at once, as today), so the inviter is always
 shown by id. The name is the stranger's word for the group: sanitised as
-today, and never the entry's identity on its own -- the label and the
+today, and never the entry's identity on its own — the label and the
 inviter's id are.
 
 **The commands on an entry.** `/accept`, `/decline` and `/block` take no
@@ -96,7 +96,7 @@ are accepted; the terminal rings for messages and for nothing else.
 
 Non-goals: names chosen by strangers, which are never shown as a name;
 syncing declines between devices; any change to what the relay sees or
-holds -- the relay and the protocol are untouched, and a client on 0.13.0
+holds — the relay and the protocol are untouched, and a client on 0.13.0
 talks to one on 0.14.0 as before.
 
 ## 3. The sidebar, and what a request looks like
@@ -117,7 +117,7 @@ When an entry is handled the selection goes to the chat it became, on
 accept, and to System on decline or block; when the list changes for any
 other reason the selection stays on the same pane if it still exists.
 
-A request entry reads `? 29cHxz2f…` -- the mark says stranger -- with the
+A request entry reads `? 29cHxz2f…` -- the mark says stranger — with the
 number of messages held as its badge. Its title is
 
     request 3 · not a contact · 29cHxz2fipYEUQacUJH817ZNwXQ7cqoQwY8ZTuWe3Nsa · 4 messages
@@ -162,8 +162,8 @@ as `Invitation 4 to <name> from 8PeGavsi…, 7 members; /accept or
 The resolver lives in the client's app, not in the groups code where it
 grew, and is the one place that turns a word into a person: an alias,
 compared without case; a full id; or a prefix of an id that exactly one
-contact -- or, for the commands that act on what waits, exactly one
-requester -- starts with. Given nothing, it is the selected chat, when
+contact — or, for the commands that act on what waits, exactly one
+requester — starts with. Given nothing, it is the selected chat, when
 that is a contact or a request. Given a prefix that several people share
 it names them and does nothing: `nima and nimrod both start with "ni"`.
 A number is tried first where the command takes one.
@@ -171,7 +171,7 @@ A number is tried first where the command takes one.
 The command table gains `/requests`, `/whois [who]`, and the argument
 words `[n|who]` for `/accept`, `/decline` and `/block`, `<who>` for
 `/unblock`, `[id [who]|link]` for `/copy`. Each entry says what kind its
-argument is -- nothing, a path, a person, a chat -- and Tab completes
+argument is — nothing, a path, a person, a chat — and Tab completes
 accordingly; `/group add`, `/group remove`, `/group admin add|remove` and
 `/copy id` complete a person at their second word. Completion of a chat
 offers aliases, group names and the words `system` and `requests`.
@@ -214,7 +214,7 @@ nothing given with and without a selected chat; numbers held across a
 handled entry and not reused; the quiet flag set by decline, cleared by
 accept and block, and honoured on arrival; the pane list in order and
 the selection following an accepted entry to its chat; the completion
-candidates for each argument kind; and the ringing rule as a table --
+candidates for each argument kind; and the ringing rule as a table —
 each event against whether it announces, the way the notification note
 tested each row of its environment table.
 

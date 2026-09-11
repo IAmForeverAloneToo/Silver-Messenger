@@ -54,7 +54,7 @@ from the source and not from the network. Verification is Ed25519 over
 BLAKE2b through `minisign-verify`, which has no dependencies of its own
 and is small enough to read in one sitting. A client built from a
 checkout with no `minisign.pub` refuses to update at all rather than
-accept whatever the release host serves -- in the code from 0.16.0,
+accept whatever the release host serves — in the code from 0.16.0,
 though this note and the constant's own comment had said so since
 0.12.0: before that it skipped the signature, installed the binary, and
 printed a line afterwards saying no signature had been checked. The
