@@ -2,10 +2,11 @@
 
 A walk through the [OWASP Application Security Verification Standard
 4.0.3](https://owasp.org/www-project-application-security-verification-standard/),
-Level 2, applied to the code on `main` at the end of Phase 10 and the
-security review that followed it (the 0.12.3 line). ASVS is written for web applications; Silver Messenger is a terminal
-client and a relay that speak WebSocket, so a number of controls do not
-apply and say so. Every other control gets a verdict:
+Level 2, applied to the code on `main` as of 0.18.0 and re-read after
+each of the two independent reviews. ASVS is written for web
+applications; Silver Messenger is a terminal client and a relay that
+speak WebSocket, so a number of controls do not apply and say so. Every
+other control gets a verdict:
 
 - **Met**: the control is implemented and something (a test, a CI job, a
   review of the code) backs the claim.
@@ -50,7 +51,7 @@ all. The gaps that matter are listed at the end with what closes them.
 | 1.5.3 Input validation in a trusted layer | Met | Relay validates frames before acting; the client validates bodies after decrypting, in `silver-client`, not the UI. |
 | 1.5.4 Output encoding near the interpreter | Met | Text is sanitised for the terminal at the rendering layer, with a test that drives the real backend and asserts no escape reaches it. |
 | 1.6.1 Key management policy | Met | PROTOCOL.md sections 1, 2, 5 and 8: what each key is, who signs it, how long it lives, when it rotates; section 10 for retiring or replacing a key, section 11 for the log every served key is checked against. |
-| 1.6.2 Key consumers protected from key exposure | Partly | Secrets are `Zeroize`d on drop and kept out of `Debug` output; the running process holds them in memory (threat model: device thief with memory). |
+| 1.6.2 Key consumers protected from key exposure | Partly | Secrets are `Zeroize`d on drop and kept out of `Debug` output; the running process holds them in memory, which a program of the same user can read on an unlocked client (threat model, *Program running as you*). |
 | 1.6.3 Key replacement | Met | Prekeys rotate on a schedule; an identity key is revoked with a pre-signed certificate (`/revoke`) or replaced with a cross-signed succession (`/rotate`), served by the relay and verified by contacts (PROTOCOL.md section 10); the long-term Diffie–Hellman key is replaced under the same identity with `/rekey` (0.18.0), the old one kept 30 days for what was sealed to it (`docs/design/dh-rotation.md`). |
 | 1.6.4 Client-side secrets | Met | The data key is wrapped by the OS key store or a passphrase; nothing is embedded in the binary. |
 | 1.7.1 Common logging format | Met | `tracing` in both binaries. |
@@ -86,7 +87,7 @@ optional invite token for registration.
 | 2.5.x Credential recovery | N/A | There is nothing to recover; a lost identity is a new identity (documented). |
 | 2.9.1 Verification keys stored securely | Met | The relay keeps public keys only; the client's private keys are in `identity.json` under the data key. |
 | 2.9.2 Challenge nonce ≥64 bits, single use | Met | 32 random bytes per connection, used once. |
-| 2.9.3 Approved algorithms | Met | Ed25519; domain-separated, host-bound. The older host-less login is accepted from older clients until the operator sets `--require-bound-auth` (documented downgrade window). |
+| 2.9.3 Approved algorithms | Met | Ed25519; domain-separated, host-bound. The older host-less login is refused unless the operator allows it with `--allow-unbound-auth`, a documented downgrade window for clients older than 0.6.0. |
 | 2.10.1–2.10.4 Service authentication secrets | Met | The only shared secret is the invite token, given by flag or environment, compared in constant time, never logged. |
 
 ## V3 Session management
@@ -114,7 +115,7 @@ V6 and the threat model.
 | 4.1.3 Least privilege | Met | A connection can read one mailbox and publish one bundle; anonymous connections can only submit and move blobs. |
 | 4.1.5 Fail securely | Met | Every error path refuses; the relay's frame handler returns an error code and does nothing else. |
 | 4.2.1 Insecure direct object reference | Met | Mailboxes are addressed by authenticated identity, never by a parameter; blobs by a random id that only the recipient's message reveals (a guess of it yields ciphertext). |
-| 4.2.2 CSRF | N/A | No cookies, no browser. The terminal analogue — a command the user did not intend, arriving on their input line by way of the clipboard — is answered by the paste guard and the confirmation step (`docs/design/consequential-commands.md`, and "A line you did not write" in the threat model): `/send`, `/revoke`, `/rotate` and `/devices leave` refuse a line that arrived faster than anyone types, and `/devices link`, `/relay` and `/group join` say what they would do and wait for a short second line, which is where the guard sits, since their arguments are pasted by design. |
+| 4.2.2 CSRF | N/A | No cookies, no browser. The terminal analogue — a command the user did not intend, arriving on their input line by way of the clipboard — is answered by the paste guard and the confirmation step (`docs/design/consequential-commands.md`, and "A line you did not write" in the threat model): `/send`, `/revoke`, `/rotate`, `/rekey` and `/devices leave` refuse a line that arrived faster than anyone types, and `/devices link`, `/relay` and `/group join` say what they would do and wait for a short second line, which is where the guard sits, since their arguments are pasted by design. |
 | 4.3.1 Administrative interfaces | Met | Administration is over a local Unix socket only (`--admin-socket`, mode 0600 in a 0700 runtime directory), never over the network, and needs no credential beyond the file permissions: root or the relay's user. What it offers is bounded to what the store already holds: counters, identities under their log pseudonyms with mailbox sizes and prekey deposits, eviction, bans on addresses and identities, the invite token, and a backup of the store (what the database holds, checked against its checksum, written readable by its owner only). No route reads a message, a key or an address list. The metrics listener is separate and read-only. |
 | 4.3.2 Directory browsing | N/A | The relay serves three fixed routes (`/`, `/healthz`, `/ws`). |
 
@@ -141,7 +142,7 @@ V6 and the threat model.
 
 | Control | Verdict | Evidence |
 | --- | --- | --- |
-| 6.1.1 Private data encrypted at rest | Met | The data directory is encrypted under a data key wrapped by the OS key store (Credential Manager, Keychain, Secret Service) or, with a passphrase, by Argon2id (64 MiB, 3 passes) and XChaCha20-Poly1305. `downloads/` is the documented exception (plain files for other programs). Where there is no key store and no passphrase, files are plain and the client says so. |
+| 6.1.1 Private data encrypted at rest | Met | The data directory is encrypted under a data key wrapped by the OS key store (Credential Manager, Keychain, Secret Service) or, with a passphrase, by Argon2id (64 MiB, 3 passes) and XChaCha20-Poly1305. `downloads/` is the documented exception (plain files for other programs) unless `/files encrypt on` keeps received files under the data key too. Where there is no key store and no passphrase, files are plain and the client says so. |
 | 6.2.1 Cryptographic modules fail securely | Met | Every failure is a `Result`; a failed decryption leaves session state untouched (trial decrypt on a clone). |
 | 6.2.2 Approved algorithms | Met | Ed25519, X25519, ML-KEM-768 (FIPS 203), XChaCha20-Poly1305, HKDF-SHA256, HMAC-SHA256, SHA-256, Argon2id; all from RustCrypto or dalek crates. Their composition (the handshake and the ratchet) is modelled in Verifpal (`formal/`) with every query's outcome checked in CI, and every operation has known-answer vectors (`docs/vectors/`) replayed by the test suite. |
 | 6.2.3 No insecure modes or padding | Met | AEAD only; message padding is JSON whitespace under the AEAD, not a cryptographic padding scheme. |
@@ -182,7 +183,7 @@ V6 and the threat model.
 | 8.3.4 Sensitive data identified and protected | Met | Asset table; encryption at rest; sealed sender. |
 | 8.3.6 Sensitive data in memory wiped | Met | `Zeroize`/`ZeroizeOnDrop` on keys, session state, passphrases and plaintext buffers. |
 | 8.3.7 Encrypted at rest | Met | As 6.1.1. |
-| 8.3.8 Retention policy | Partly | Relay: 30-day mailbox TTL, caps on messages, bytes, blobs and identities. Client: history is kept until the user removes the contact or the directory; no automatic expiry. |
+| 8.3.8 Retention policy | Partly | Relay: 30-day mailbox TTL, caps on messages, bytes, blobs and identities. Client: history is kept until a per-conversation timer (`/timer`) removes it, the user deletes it, or the contact or the directory goes; nothing expires unasked. |
 
 ## V9 Communication
 
