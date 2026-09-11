@@ -114,11 +114,12 @@ peers.
 
 Release binaries are reproducible and carry GitHub's build provenance,
 and from 0.12.0 `SHA256SUMS` is signed with the project's minisign key,
-whose public half is `minisign.pub` at the repository root. The README
-section *Verifying a release* says how to check a download against the
-signature, the hashes and the attestation, and how to rebuild the tagged
-commit and compare; the threat model's *Supply chain* section says what
-a key held in the release workflow is worth. Dependencies are checked
+whose public half is `minisign.pub` at the repository root.
+[docs/RELEASES.md](docs/RELEASES.md) says how to check a download
+against the signature, the hashes and the attestation, how to rebuild
+the tagged commit and compare, and how a release is signed; the threat
+model's *Supply chain* section says what a key held in the release
+workflow is worth. Dependencies are checked
 against the RustSec advisory database on every push (`cargo audit`,
 `cargo deny`).
 

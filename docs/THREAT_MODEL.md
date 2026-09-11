@@ -900,8 +900,8 @@ protection above. What is done about that, from 0.6.0:
 - **Builds you can check.** Release binaries are built from locked
   dependencies with build paths and timestamps removed, so rebuilding the
   tagged commit gives the same bytes; CI rebuilds the Linux binaries twice
-  on every push and fails if they differ. The README says how to repeat
-  the build and compare.
+  on every push and fails if they differ. [RELEASES.md](RELEASES.md)
+  says how to repeat the build and compare.
 - **Provenance, and a signature.** Every release file carries a SLSA
   build provenance attestation issued by GitHub for the workflow run
   that built it (`gh attestation verify`): it says *which workflow built
@@ -981,7 +981,7 @@ protection above. What is done about that, from 0.6.0:
   repository's secrets, says the platform's own checker can name the
   signer; it adds no bytes the attestation does not cover, and a signed
   download compares with a rebuild once the signature is stripped
-  (README, "Verifying a release"). Without the secrets the workflow
+  ([RELEASES.md](RELEASES.md)). Without the secrets the workflow
   says so and the platform goes out unsigned, as before.
 
 Not addressed: a compromised Rust toolchain or GitHub-hosted runner (the

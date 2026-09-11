@@ -86,47 +86,18 @@ installs the relay's systemd unit without enabling it;
 
 ### Verifying a release
 
-A release page carries the client and the relay for each platform, the
-two Debian packages, and `SHA256SUMS` with the project's signature over
-it; every file has a build provenance attestation from GitHub. The
-workflow run that built the release keeps an archive per target among
-its artifacts, with a CycloneDX SBOM per binary and a `BUILD-INFO.txt`
-naming the compiler and the flags the binaries were built with. To check
-a download:
+`SHA256SUMS` on the release page carries the project's signature, and
+every file carries a build provenance attestation from GitHub. With
+`minisign.pub` from the repository root:
 
 ```sh
-minisign -Vm SHA256SUMS -p minisign.pub           # the list is the project's; the key is at the repository root
+minisign -Vm SHA256SUMS -p minisign.pub           # the list is the project's
 sha256sum -c SHA256SUMS --ignore-missing          # the file is what was published
-gh attestation verify silver-v* --owner IAmForeverAloneToo   # ...by the release workflow, from the tagged commit
-cargo audit bin silver                            # the dependencies inside the binary, against the advisory database
+gh attestation verify silver-v* --owner IAmForeverAloneToo   # built by the release workflow, from the tagged commit
 ```
 
-The signature is what says the list came from this project, from a key
-held outside GitHub (see "Signing releases" below). The attestation is
-what says the file was built by the release workflow from the tagged
-commit, and GitHub's transparency log holds that record. The two are
-separate roots of trust. Releases before 0.12.0 carry no signature.
-
-The binaries are reproducible: build the tagged commit yourself and the
-bytes match (CI does this twice on every push for Linux and fails when
-they differ). The compiler is part of that, so it is pinned in
-`rust-toolchain.toml` at the tag and named in the `BUILD-INFO.txt` the
-run's archives carry; rustup picks it up from the file on its own. From a
-fresh clone at the tag, on Linux:
-
-```sh
-SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" \
-RUSTFLAGS="--remap-path-prefix=$PWD=/src --remap-path-prefix=$HOME/.cargo=/cargo" \
-cargo auditable build --release --locked --workspace --target x86_64-unknown-linux-musl
-sha256sum target/x86_64-unknown-linux-musl/release/silver-relay   # compare with SHA256SUMS
-```
-
-A signed Windows or macOS executable (the release notes say whether a
-release is signed) differs from a rebuild by its signature alone: strip
-it and compare (`osslsigncode remove-signature -in silver.exe -out
-plain.exe` on any platform, `codesign --remove-signature silver` on a
-Mac). The Linux binaries, the Debian packages and the container image
-carry no embedded signature and reproduce byte for byte.
+What each proves, how to rebuild a release and compare, and how a
+release is made and signed are in [docs/RELEASES.md](docs/RELEASES.md).
 
 ### Updating
 
@@ -869,77 +840,9 @@ GitHub Action is pinned to a commit hash, every container image by
 digest, and the compiler to an exact version; the OpenSSF Scorecard runs
 weekly.
 
-Pushing a `v*` tag (or running the release workflow with a tag) builds
-the two programs for all platforms with `cargo auditable`, writes a
-CycloneDX SBOM per binary and a `BUILD-INFO.txt` per target into an
-archive the run keeps as an artifact, publishes the binaries, the Debian
-packages and `SHA256SUMS` with its signature on the release page, and
-attests the provenance of every file there. The notes point a relay's
-operator at `deploy/install.sh` in the repository, to read before running.
-
-A release page leads with which file to take: for most people that is the
-bare `silver-v<version>-<target>`, which is the whole client in one file —
-make it executable and run it. The `silver-messenger-v<version>-<target>`
-archives, kept as artifacts of the workflow run rather than on the page,
-hold the same client with the relay, the SBOMs, the build record, the
-changelog and the licence beside it (`tar xzf <archive> --wildcards
-'*/sbom/*'` gets the SBOMs).
-
-**Signing releases.** `SHA256SUMS` is signed with the project's minisign
-key, whose public half is `minisign.pub` at the repository root. Check a
-download against it with
-
-```sh
-minisign -Vm SHA256SUMS -p minisign.pub
-```
-
-which asks GitHub nothing: the signature and the provenance attestation
-are two separate things to check, and the `SHA256SUMS` you just verified
-covers every file in the release.
-
-Releases before 0.12.0 carry no signature; the attestation is what those
-are checked against.
-
-The signing itself happens in the release workflow, from the
-`MINISIGN_SECRET_KEY` secret, and the workflow verifies its own signature
-against `minisign.pub` before publishing, so a secret that is not the
-published key fails the release rather than shipping something nobody can
-check. **Actions → Signing key check** runs those two commands on their
-own, without building anything, for after the secret is set or the key
-rotated.
-
-Signing from a secret is weaker than signing on a machine the maintainer
-holds — whoever can run a workflow with secrets can sign — and stronger
-than not signing, since the secret store and the release assets are
-separate systems, so tampering with the published files alone does not
-survive it. Moving the key offline later changes one workflow step and
-nothing else: clients and `minisign -V` check against `minisign.pub`
-either way. `packaging/new-signing-key.sh --by-hand` (or
-`new-signing-key.ps1 -ByHand` on Windows) makes such a key, and the
-release is then signed with
-
-```sh
-minisign -Sm SHA256SUMS -t "Silver Messenger v0.0.0"
-```
-
-with `SHA256SUMS.minisig` attached to the release by hand.
-
-The executables themselves are signed *in* the workflow, when the
-platform secrets exist — a code-signing certificate says the platform's
-own checker can name the signer, which is a different claim from the one
-above and only useful where the platform makes it: on Windows with
-Authenticode from `AUTHENTICODE_PFX` (the PKCS#12
-file, base64) and `AUTHENTICODE_PASSWORD`; on macOS with a Developer ID
-Application certificate from `APPLE_CERTIFICATE_P12` (base64) and
-`APPLE_CERTIFICATE_PASSWORD`, then notarised under `APPLE_ID`,
-`APPLE_TEAM_ID` and `APPLE_APP_PASSWORD` (an app-specific password). With
-none of a platform's secrets the workflow says so and publishes that
-platform unsigned; with some but not all it fails, since a half-set
-secret is a mistake. A bare executable takes a signature but no stapled
-notarisation ticket, so Gatekeeper asks Apple about it the first time.
-
-Security problems go through [SECURITY.md](SECURITY.md), not the issue
-tracker.
+How a release is made, what it carries and how it is signed are in
+[docs/RELEASES.md](docs/RELEASES.md). Security problems go through
+[SECURITY.md](SECURITY.md), not the issue tracker.
 
 The terminal client is tested for real in `tests/tui/`: each test starts a
 relay and one or two clients in pseudo-terminals, types, clicks, drags
