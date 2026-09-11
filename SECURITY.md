@@ -137,10 +137,25 @@ and what was found when each finding was checked against the code, what
 was done about it and where a suggested fix was not taken is in
 [docs/design/audit-response.md](docs/design/audit-response.md), finding by
 finding. 0.10.1 carried the Critical, the Highs and the Mediums that
-shared their code; 0.11.0 carried the rest — 72 of the 76 are fixed and
-released. The four that are left each change a wire or an on-disk format
-and are named in the roadmap under item 57. The changelog's `Security`
-entries say what each finding was in the release that fixed it.
+shared their code; 0.11.0 carried the rest, and the four that changed a
+wire or an on-disk format went out in 0.16.0 and 0.17.0 — all 76 are
+closed. The changelog's `Security` entries say what each finding was in
+the release that fixed it.
+
+A second adversarial review, of the 0.14.0 line, reported 29 findings
+after three review rounds: two High, seven Medium, 18 Low and two
+Informational, no Critical and no cryptographic break. It is published
+whole as
+[docs/audits/2026-09-second-security-audit.md](docs/audits/2026-09-second-security-audit.md),
+with one class of edit the report itself names — identifiers of the
+maintainer's own machine and infrastructure redacted from an appendix
+and one finding — and its response, finding by finding, is
+[docs/design/audit-response-2.md](docs/design/audit-response-2.md).
+Both Highs, every Medium and most of the Lows went out in 0.16.0; what
+is declined is declined with the argument written down, in that note's
+section 4, and the one thing still open — watching the macOS hardened
+runtime refuse an attach on a real Mac — is named there and in the
+roadmap rather than assumed.
 
 A further review is welcome. If you are in a position to do one, the
 maintainer would like to hear from you.

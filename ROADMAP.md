@@ -621,10 +621,10 @@ those who want to pay for it (46).
           `--allow-unbound-auth` for a relay that still has clients older
           than 0.6.0; the two parsers the updater runs before any
           signature is checked are fuzzed.
-        - [ ] Link the report and the response from `SECURITY.md` and the
-          threat model, as the first review's are. Both files have been
-          in the tree since 2026-09-09; what is missing is the pointer a
-          reader starts from, held for the maintainer's read.
+        - [x] The report and the response linked from `SECURITY.md` and
+          the threat model, as the first review's are. Both had been in
+          the tree since 2026-09-09; the pointer a reader starts from
+          came after 0.18.0.
 63. [ ] **The second review's remainder** (M). The findings the September
         2026 review left open, none of them a way for anyone to read a
         message or forge one, each listed with what leaving it costs in
