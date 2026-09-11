@@ -644,7 +644,9 @@ HiddenServicePort 80 127.0.0.1:7777
 and restart Tor; `/var/lib/tor/silver-relay/hostname` holds the address.
 Clients use `silver --relay ws://<that address>.onion/ws --proxy
 socks5://127.0.0.1:9050`. The onion address is the relay's identity: give
-it to people the way you would an invite link.
+it to people the way you would an invite link. This recipe was run live
+with 0.18.0: a relay that knew only its onion name, reached through Tor
+by two clients, a message each way.
 
 ## How the crypto works
 
