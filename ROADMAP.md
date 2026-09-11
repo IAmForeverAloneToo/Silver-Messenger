@@ -297,9 +297,11 @@ container story. Operations come before reach.
         item, since a relay that hides its own address is the natural
         partner of a client that already connects through Tor.
         (RFC 8555.)
-        - [ ] A live run of a relay behind an onion service. The recipe
-          is documented and the client's SOCKS5 path is tested; nobody
-          has yet stood one up and talked through it.
+        - [x] A live run of a relay behind an onion service: done on
+          2026-09-11 with 0.18.0, as the README's recipe says — Tor's
+          hidden service in front of an ephemeral relay told its onion
+          name with `--host`, two clients through SOCKS5, a message each
+          way with its read receipt, torn down afterwards.
 37. [x] **Metrics and structured logs** (S). A Prometheus endpoint on a
         separate listener that is never public, with the counters the
         relay already keeps plus failed logins per address; JSON log
