@@ -121,7 +121,8 @@ own statements found again by the tool:
   sessions (two, unless a model says otherwise) and reports a query as
   passing when its search found none. A passing query is evidence, not
   a proof. Tamarin or ProVerif would give unbounded proofs and are the
-  next step if the outside review (roadmap item 35) asks for them.
+  next step if a reviewer asks for them; neither review so far (roadmap
+  items 55 and 62) did.
 - **Sealed-sender anonymity and deniability** (protocol sections 3
   and 9) are not modelled: Verifpal has no observational-equivalence
   query that states them. They are argued in the protocol document.

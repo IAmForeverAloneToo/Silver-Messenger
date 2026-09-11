@@ -11,10 +11,11 @@ it. What the relay, the network and a stolen laptop can and cannot learn is
 spelled out in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md); how the code
 measures up against the OWASP ASVS controls is in
 [docs/SECURITY_ASSESSMENT.md](docs/SECURITY_ASSESSMENT.md); how to report
-a vulnerability is in [SECURITY.md](SECURITY.md). An independent
-adversarial review of the 0.10.0 line is published whole in
-[docs/audits/](docs/audits/), with the answer to each of its 76 findings
-in [docs/design/audit-response.md](docs/design/audit-response.md). The
+a vulnerability is in [SECURITY.md](SECURITY.md). Two independent
+adversarial reviews are published whole in [docs/audits/](docs/audits/),
+with the answer to every finding in
+[docs/design/audit-response.md](docs/design/audit-response.md) and
+[docs/design/audit-response-2.md](docs/design/audit-response-2.md). The
 questions people ask first, with short answers, are in
 [docs/FAQ.md](docs/FAQ.md); how to build, test and propose a change is
 in [CONTRIBUTING.md](CONTRIBUTING.md).
@@ -34,18 +35,18 @@ The repository is a Cargo workspace with four crates:
 
 ### From the release binaries
 
-Download the archive for your system from the
-[releases page](https://github.com/IAmForeverAloneToo/Silver-Messenger/releases):
+The [releases page](https://github.com/IAmForeverAloneToo/Silver-Messenger/releases)
+carries the client and the relay as one file each per platform. Take
+the client for your system:
 
-| System  | Archive                                                                 |
+| System  | File                                                                    |
 | ------- | ----------------------------------------------------------------------- |
-| Windows | `silver-messenger-<version>-x86_64-pc-windows-msvc.zip`                 |
-| macOS   | `…-aarch64-apple-darwin.tar.gz` (Apple Silicon), `…-x86_64-apple-darwin.tar.gz` (Intel) |
-| Linux   | `…-x86_64-unknown-linux-musl.tar.gz` (static; runs on any distribution) |
+| Windows | `silver-v<version>-x86_64-pc-windows-msvc.exe`                          |
+| macOS   | `silver-v<version>-aarch64-apple-darwin` (Apple Silicon), `…-x86_64-apple-darwin` (Intel) |
+| Linux   | `silver-v<version>-x86_64-unknown-linux-musl` or `…-aarch64-unknown-linux-musl` (static; runs on any distribution) |
 
-Unpack it. Inside are the client `silver` (`silver.exe` on Windows), the
-relay `silver-relay`, and the docs. Open a terminal in that folder and
-point the client at a relay once:
+Rename it `silver` (`silver.exe` on Windows), make it executable on
+macOS and Linux (`chmod +x silver`), and point it at a relay once:
 
 ```
 .\silver.exe --relay wss://relay.example.org/ws     # Windows, in PowerShell or Windows Terminal
@@ -73,7 +74,7 @@ checksum, so what arrives is what the release page carries.
 ```sh
 brew tap iamforeveralonetoo/silver https://github.com/IAmForeverAloneToo/Silver-Messenger
 brew install silver-messenger                          # macOS and Linux (Homebrew)
-sudo apt install ./silver-messenger_0.13.0_amd64.deb   # Debian and Ubuntu, amd64 or arm64
+sudo apt install ./silver-messenger_<version>_amd64.deb   # Debian and Ubuntu, amd64 or arm64
 ```
 
 On Windows, on Arch, and anywhere else, take the one file for your
@@ -475,7 +476,7 @@ shorter path now that the relay is one file on it, and the better
 checked one, since the binary is covered by a list the project signs:
 
 ```sh
-v=0.13.0; t=x86_64-unknown-linux-musl
+v=<version>; t=x86_64-unknown-linux-musl          # the version on the releases page, and your target
 base=https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/download/v$v
 curl -fsSLO "$base/silver-relay-v$v-$t" -O "$base/SHA256SUMS" -O "$base/SHA256SUMS.minisig"
 minisign -Vm SHA256SUMS -p minisign.pub          # the list is the project's
@@ -844,8 +845,9 @@ it does not, is in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
   never sent what it would not read, and the client says so. Received
   files can be kept encrypted, and the history exported.
 
-What it does **not** do yet: a screen-reader mode, or a client for a
-phone. The ordered plan is in [ROADMAP.md](ROADMAP.md).
+What it does **not** do: a client for a phone, or a window to click in;
+the client is a terminal program on purpose, and neither comes before
+1.0. The ordered plan is in [ROADMAP.md](ROADMAP.md).
 
 ## Development
 

@@ -1,11 +1,12 @@
 # Design note: the changes that need a new format
 
-Roadmap item 57. Four findings from the first review (section 13.3) and
-one from its relay half were left out of 0.10.1 and 0.11.0 for the same
-reason: each changes a wire or an on-disk format, and neither release was
-allowed to. This note settles what each becomes, which release carries
-it, and what old peers and old directories do meanwhile — before any of
-it is written, as the roadmap item asks.
+Roadmap item 57. Four findings from the first review (the report's
+section 13.3) and one from its relay half were left out of 0.10.1 and
+0.11.0 for the same reason: each changes a wire or an on-disk format,
+and neither release was allowed to. This note settles what each
+becomes, which release carries it, and what old peers and old
+directories do meanwhile — before any of it is written, as the roadmap
+item asks.
 
 Nothing here is reachable by a stranger. Every one is either defence in
 depth against an attacker who already holds something (a key, write
