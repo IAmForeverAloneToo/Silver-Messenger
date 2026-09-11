@@ -111,33 +111,39 @@ routine step.
 
 ## Version notes
 
+A version not listed here changed nothing for the relay: the same
+schema, the same backup format, the same wire. Each note says what the
+relay's upgrade changes, then what an operator may be asked about
+clients.
+
 ### 0.18.0
 
-* **Nothing for the relay.** The schema stays at 3 and the backup format
-  at 2, and nothing on the wire changes: a rekey (`/rekey`) republishes
-  a client's bundle with a new key under the same identity, which the
-  relay logs and serves as it logs and serves any bundle change. A 0.17.0
-  relay serves 0.18.0 clients and the other way round. What an operator
-  may be asked about: a user still on 0.17.0 who is told a contact's key
-  "is not the one pinned" after that contact ran `/rekey` -- the older
-  client cannot ask which key is published now, and the answer is to
-  update, or `/remove` and re-add the contact.
+* **Relay: nothing.** The schema stays at 3 and the backup format at 2,
+  and nothing on the wire changes: a rekey (`/rekey`) republishes a
+  client's bundle with a new key under the same identity, which the
+  relay logs and serves as it logs and serves any bundle change. A
+  0.17.0 relay serves 0.18.0 clients and the other way round.
+* **Clients.** A user still on 0.17.0 who is told a contact's key "is
+  not the one pinned" after that contact ran `/rekey`: the older client
+  cannot ask which key is published now, and the answer is to update,
+  or `/remove` and re-add the contact.
 
 ### 0.17.0
 
-* **The one older client a relay stops taking.** The schema stays at 3
+* **Relay: one older client it stops taking.** The schema stays at 3
   and the backup format at 2, and nothing about the database changes. A
   linked device from a client older than 0.16.0 publishes its
   certificate without its own signature, which this relay refuses as a
-  `bad_signature`, so such a device is unreachable until it updates --
-  and once it does, it signs its stored certificate on first start and
+  `bad_signature`, so such a device is unreachable until it updates;
+  once it does, it signs its stored certificate on first start and
   publishes again with nothing more to do. Every other client is
-  accepted as before: a primary or an unlinked identity on 0.14.0
-  registers and is served, since what changed for it is inside the
-  encrypted body, which the relay never opens. It is that client's
-  *peers* on 0.17.0 that drop its messages, a message queued before they
-  updated included. Upgrade the relay first, as ever, and tell your
-  users that a client older than 0.16.0 has to update to be read.
+  accepted as before. Upgrade the relay first, as ever.
+* **Clients.** A primary or an unlinked identity on 0.14.0 registers
+  and is served, since what changed for it is inside the encrypted
+  body, which the relay never opens; it is that client's *peers* on
+  0.17.0 that drop its messages, a message queued before they updated
+  included. Tell your users that a client older than 0.16.0 has to
+  update to be read.
 
 ### 0.10.1
 

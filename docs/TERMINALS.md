@@ -25,15 +25,16 @@ optional sequences.
 
 ## Known terminals
 
-"Checked" means the pty test suite (`tests/tui/`) runs against that
-terminal type in CI, or the client was used on it by hand. "Expected"
-means the terminal documents the feature and nothing in the client is
-specific to it.
+The status column: *checked in CI* means the pseudo-terminal suite
+(`tests/tui/`) runs against that terminal type on every push; *checked
+by hand* names the release it was used on; *expected* means the
+terminal documents the feature and nothing in the client is specific to
+it.
 
 | Terminal | Marks | Mouse | Selection with the mouse captured | Copy | Paste | Notification | Status |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Windows Terminal | Yes | Yes | `Shift`+drag; or use the client's own selection | OS clipboard | OS clipboard on `Ctrl-V`; `Ctrl-Shift-V` too | A Windows toast (0.13.0); it ignores the sequences | Checked by hand on 0.4.0; the marks, selection and paste fixes of 0.5.0 and the 0.13.0 toast are expected |
-| Windows console (conhost) | No: ASCII marks by default | Wheel and clicks | None natively once the mouse is captured; the client's own selection and `Ctrl-C` copy instead, or `--no-mouse` for QuickEdit | OS clipboard | OS clipboard on `Ctrl-V`, `Shift-Insert`, right click | A Windows toast (0.13.0) | Checked by hand on 0.4.0 (the reason for Phase 5); 0.5.0 and the 0.13.0 toast expected |
+| Windows Terminal | Yes | Yes | `Shift`+drag; or use the client's own selection | OS clipboard | OS clipboard on `Ctrl-V`; `Ctrl-Shift-V` too | A Windows toast (0.13.0); it ignores the sequences | Checked by hand on 0.4.0, and the toast on 0.13.0 |
+| Windows console (conhost) | No: ASCII marks by default | Wheel and clicks | None natively once the mouse is captured; the client's own selection and `Ctrl-C` copy instead, or `--no-mouse` for QuickEdit | OS clipboard | OS clipboard on `Ctrl-V`, `Shift-Insert`, right click | A Windows toast (0.13.0) | Checked by hand on 0.4.0; the toast expected |
 | macOS Terminal.app | Yes | Yes | `Fn`+drag or `Option`+drag | OS clipboard | `Cmd-V` (bracketed paste); `Ctrl-V` reaches the client | Notification Center, through `osascript` (0.13.0) | Expected |
 | iTerm2 | Yes | Yes | `Option`+drag | OS clipboard; OSC 52 | `Cmd-V`; `Ctrl-V` reaches the client | OSC 9 toast, raised by iTerm2 itself | Expected |
 | GNOME Terminal and other VTE terminals | Yes | Yes | `Shift`+drag | OS clipboard | `Ctrl-Shift-V`, `Shift-Insert`; `Ctrl-V` reaches the client | The session bus (0.13.0; VTE has no notification sequence) | Expected |
@@ -42,9 +43,9 @@ specific to it.
 | WezTerm | Yes | Yes | `Shift`+drag | OS clipboard; OSC 52 | `Ctrl-Shift-V` | OSC 777 or 9, raised by WezTerm itself | Expected |
 | Alacritty | Yes | Yes | `Shift`+drag | OS clipboard; OSC 52 | `Ctrl-Shift-V` | The session bus (0.13.0) | Expected |
 | foot | Yes | Yes | `Shift`+drag | OS clipboard; OSC 52 | `Ctrl-Shift-V` | OSC 777, raised by foot itself | Expected |
-| xterm | Yes | Yes | `Shift`+drag | OSC 52 (when `allowWindowOps` permits) | `Shift-Insert` | The session bus (0.13.0); xterm is not one the client recognises, so the sequences are written too and ignored | Checked: the test suite runs as `xterm-256color` |
-| tmux | Yes | Yes (with `mouse on`, tmux forwards the wheel and clicks) | tmux's own copy mode | OSC 52 through tmux when `set-clipboard on` | tmux paste (`prefix ]`) or the outer terminal's | The sequences wrapped in tmux's passthrough (0.13.0; needs `allow-passthrough on`) for the outer terminal, and the session bus | Checked: `test_tmux.py` runs the client inside tmux; the wrapping is checked in `test_notify.py` |
-| Linux virtual console | No: ASCII marks by default | No | gpm, if running | OSC 52 is ignored | The console has no clipboard | Bell | Checked: the test suite runs as `TERM=linux` |
+| xterm | Yes | Yes | `Shift`+drag | OSC 52 (when `allowWindowOps` permits) | `Shift-Insert` | The session bus (0.13.0); xterm is not one the client recognises, so the sequences are written too and ignored | Checked in CI (`xterm-256color`) |
+| tmux | Yes | Yes (with `mouse on`, tmux forwards the wheel and clicks) | tmux's own copy mode | OSC 52 through tmux when `set-clipboard on` | tmux paste (`prefix ]`) or the outer terminal's | The sequences wrapped in tmux's passthrough (0.13.0; needs `allow-passthrough on`) for the outer terminal, and the session bus | Checked in CI (`test_tmux.py`; the notification wrapping in `test_notify.py`) |
+| Linux virtual console | No: ASCII marks by default | No | gpm, if running | OSC 52 is ignored | The console has no clipboard | Bell | Checked in CI (`TERM=linux`) |
 | SSH from any of the above | As the local terminal | As the local terminal | As the local terminal | OSC 52 reaches the local terminal's clipboard where supported | The local terminal's paste | The local terminal's, where it raises one: only the terminal path is taken, since the desktop is on the other end | Expected |
 
 ## Running the checks

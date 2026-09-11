@@ -53,9 +53,9 @@ one file for their platform from the release page.
 repository is tapped by URL (`brew tap iamforeveralonetoo/silver
 https://github.com/IAmForeverAloneToo/Silver-Messenger`). The formula
 points at the release binaries for macOS (Apple Silicon and Intel) and
-Linux (x86_64 and aarch64) with their checksums -- the client as its
+Linux (x86_64 and aarch64) with their checksums — the client as its
 download, the relay as a resource beside it, since a release carries the
-two programs as two files -- and tests `silver --version`. A separate
+two programs as two files — and tests `silver --version`. A separate
 `homebrew-silver` repository would be the usual shape; one repository is
 enough for a tap, keeps the formula next to the code it installs, and
 needs no second set of permissions.

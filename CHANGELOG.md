@@ -3,6 +3,10 @@
 Notable changes to Silver Messenger. Versions follow [semantic
 versioning](https://semver.org); while the major version is 0, a minor bump
 means behaviour or the wire protocol changed in a way worth reading about.
+A release's entry opens with a paragraph on what it is, then an
+**Upgrading** paragraph on what changes on disk or between versions,
+then `Security`, `Added`, `Changed` and `Fixed` as the release needs
+them; older entries keep the shape they were written in.
 
 ## 0.18.0 - 2026-09-11
 

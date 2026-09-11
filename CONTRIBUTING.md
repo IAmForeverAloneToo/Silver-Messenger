@@ -185,6 +185,23 @@ a shape:
 * British spelling; the em dash, never `--`; commands, flags and file
   names in code spans; *the client* and *the relay*.
 
+## Releasing
+
+The maintainer's checklist, so that nothing a release changes is left
+undocumented:
+
+1. The changelog section, with its **Upgrading** paragraph, and the
+   version notes in `docs/UPGRADING.md` where the relay or a client's
+   files change.
+2. `docs/THREAT_MODEL.md` and `docs/SECURITY_ASSESSMENT.md` re-read
+   where the release changed what they claim, and their baseline moved
+   to the new version; `docs/PROTOCOL.md` where the wire changed.
+3. The version bump, CI green on the commit, the tag through the
+   release workflow, the assets checked as
+   [docs/RELEASES.md](docs/RELEASES.md) says, the packaging commit.
+4. The maintainer's relay upgraded per `docs/UPGRADING.md`, and a live
+   check between clients of the new and the previous release.
+
 ## Licence
 
 AGPL-3.0-only. By contributing you agree that your contribution is
