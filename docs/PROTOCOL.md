@@ -6,14 +6,19 @@ without reading the source; where the source and this document disagree,
 the source is the bug. Byte encodings, domain strings and constants are
 given exactly.
 
-Three protocol versions coexist. **v1** is the sealed-envelope format of
-the first release; **v2** adds prekeys and forward-secret sessions *inside*
-the same envelope, so relays and v1 clients cannot tell the two apart from
-the outside; **v3** makes the session handshake a hybrid of X3DH and
-ML-KEM-768 (PQXDH-style), which changes only the bundle's prekeys, the
-`init` header and the session-key derivation. A client speaks v3 to a peer
-whose bundle carries ML-KEM keys, v2 to one with X25519 prekeys only, and
-v1 to one that has published no prekeys.
+Five protocol versions coexist, all inside the same envelope, so a relay
+cannot tell them apart from the outside. **v1** is the sealed-envelope
+format of the first release: a signed plain body. **v2** adds prekeys
+and forward-secret sessions inside it. **v3** makes the session
+handshake a hybrid of X3DH and ML-KEM-768 (PQXDH-style), which changes
+only the bundle's prekeys, the `init` header and the session-key
+derivation, so the body stays `v: 2`. **v4** adds an ML-KEM step to
+every ratchet step and drops the sealed-layer signature, which makes
+the session deniable. **v5** is the group body: one MLS message,
+unsigned at the sealed layer as well. A client speaks v4 to a peer whose
+bundle carries ML-KEM keys and advertises `pq_ratchet`, and v2 (with the
+v3 handshake where the bundle has ML-KEM keys) to any other peer with
+prekeys; section 8 says when the plain v1 body is still sent.
 
 Notation: `||` is concatenation, `BE` is big-endian, `b64` is standard
 padded base64, `b58` is Bitcoin-alphabet base58. All JSON is UTF-8 text; a
@@ -224,21 +229,21 @@ device (section 14), and `id` the id the message goes by, required since
 
 `id` is the message's own name, sealed inside the body where the AEAD
 covers it. The envelope's `id` is not: it is chosen after the ciphertext
-is made and no signature or AEAD reaches it, so a relay may put any value
-there — and a recipient that read the id from the envelope would file the
-message under the relay's name, leaving the sender's later edits,
-deletions, reactions and receipts, which all name the sender's id,
-matching nothing. A sender therefore mints the id first and puts it in
-both places; a recipient takes the body's. The two are equal for a
-message, and *differ by design* for a copy to one of the sender's own
-devices (section 14), where the body names the message being copied and
-the envelope keeps a fresh id of its own, which is what the relay
-de-duplicates on. Clients before 0.16.0 wrote `id` only on those copies,
-and 0.16.0 read a body without one under the envelope's id for that one
-release, so that every client was sending it before anything required
-it. Since 0.17.0 a body without `id` is refused: the only id left to
-read would be the envelope's, and that one is the relay's to choose,
-which is the whole point. `content.type` is one of `text`, `receipt` (4.4), `file` (4.5),
+is made and no signature or AEAD reaches it, so a relay may put any
+value there, and a recipient that filed the message under the envelope's
+id would leave the sender's later edits, deletions, reactions and
+receipts, which all name the sender's id, matching nothing. A sender
+mints the id first and puts it in both places; a recipient takes the
+body's, and refuses a body without one.
+
+The two ids are equal for a message and *differ by design* for a copy to
+one of the sender's own devices (section 14): the body names the message
+being copied and the envelope keeps a fresh id of its own, which is what
+the relay de-duplicates on. Since 0.17.0 `id` is required; 0.16.0 sent
+it and accepted its absence, and clients before 0.16.0 wrote it only on
+device copies, so a message from one of those is refused.
+
+`content.type` is one of `text`, `receipt` (4.4), `file` (4.5),
 `revocation` and `succession` (section 10), `sync`, `provision` and
 `device_revocation` (section 14); unknown types are rejected by this
 implementation, which is why a sender uses a kind beyond `text` only
@@ -296,18 +301,17 @@ published in every bundle, and says nothing about who was talked to. It
 prevents a third party from substituting its own `identity_dh` (and so its
 own DH1) to impersonate the sender while claiming their id.
 
-What it does not prevent, and what the *client* must therefore check: the
-signature proves that whoever built the handshake holds the sender's
-identity key, not that `identity_dh` is the key that identity published.
-Somebody who has a copy of the identity key can sign a fresh
-`identity_dh` of their own, publish nothing, and start a session that
-verifies. A receiving client compares `init.identity_dh` with the
-`dh_public` of the bundle it has pinned for that id and, when they
-differ, drops the session and says so rather than replying into it (0.11.0
-on); a client with nothing pinned for the id has nothing to compare and
-starts the session, as trust on first use always does. Binding the
-handshake to the *published* key rather than to a signature is a protocol
-change held for 1.0.
+What it does not prevent, and what the *client* must therefore check:
+the signature proves that whoever built the handshake holds the
+sender's identity key, not that `identity_dh` is the key that identity
+publishes now. Somebody with a copy of the identity key can sign a
+fresh `identity_dh` of their own, publish nothing, and start a session
+that verifies; somebody with the secret half of a key the identity has
+since replaced holds a signature over it that stays valid. Section 5.4
+gives the rule a responder applies: a key equal to the pinned one is
+taken at once, a key that contradicts the pin is checked against the key
+the relay publishes before the message is delivered, and a client with
+nothing pinned starts the session, as trust on first use always does.
 
 ### 4.3 Capabilities
 
@@ -831,40 +835,50 @@ its absence as "not kept here" rather than "none left".
 
 ### 7.4 Limits and abuse controls
 
-Per authenticated connection: 60 `send`, 30 `lookup`, 600 blob chunks
-(`blob_put` or chunks answered to `blob_get`), 6 `publish` and 4000 `ack`
-per minute (token buckets of that burst size). Per anonymous connection:
-30 `send` and 600 chunks per minute. A connection has ten seconds to
-finish its HTTP request before the WebSocket upgrade, as it has ten
-seconds to log in after it. Per recipient: 1000 queued envelopes or
-32 MiB, whichever first; 4 GiB of queued envelopes over every mailbox
-together, answered `storage_full`; unacknowledged envelopes expire after
-30 days. An envelope to an identity the relay holds no bundle for is
-refused `not_found`: everyone a client seals to has published one, and
-without the rule a stranger could fill the disk with mail for keys
-nobody holds. Blobs: at most 16 MiB of
-plaintext each (the relay allows 16 MiB plus the 256 chunk tags of
-ciphertext), 1 GiB in total, and each expires 30 days after its first
-chunk arrived, on the same schedule as messages. Per client address (the
-socket's peer, or what a trusted TLS front says in `X-Forwarded-For`): 16
-open connections, 20 new identities an hour and 256 MiB of `blob_put`
-data an hour; 4096 connections and 100 000 identities in total; a
-connection that sends nothing for two minutes is closed (clients `ping`
-every 30 seconds). Groups (section 13): one `key_packages` deposit per
-connection per minute, 30 packages plus a last-resort one per identity,
-4096 bytes each; `key_package` counts against the connection's `lookup`
-budget and against the target's hand-out budget of 30 an hour, which it
-shares with one-time prekeys; `group_create` and `group_commit` count as
-`send`, and `group_create` also against the address's 20 registrations
-an hour; 100 000 sequencer entries in total, each dropped after 180 days
-without a commit. Devices (section 14): at most 8 linked devices per
-account; a device registers as an identity, against the address's 20
-registrations an hour and the cap on identities; a `revoke_device`
-costs the address one of those registrations, as `revoke` and `succeed`
-do; a lookup of an account with devices takes one prekey of each kind
-from each device's deposit, under the device's own hand-out budget.
-Relay operators can change all of these and can require an invite token
-for first registrations.
+The defaults; an operator can change all of them and can require an
+invite token for first registrations.
+
+* **Per authenticated connection**: 60 `send`, 30 `lookup`, 600 blob
+  chunks (`blob_put` or chunks answered to `blob_get`), 6 `publish` and
+  4000 `ack` per minute, as token buckets of that burst size.
+* **Per anonymous connection**: 30 `send` and 600 chunks per minute.
+* **Per connection**: ten seconds to finish the HTTP request before the
+  WebSocket upgrade, and ten seconds to log in after it; a connection
+  that sends nothing for two minutes is closed (clients `ping` every 30
+  seconds).
+* **Per recipient**: 1000 queued envelopes or 32 MiB, whichever first;
+  unacknowledged envelopes expire after 30 days. An envelope to an
+  identity the relay holds no bundle for is refused `not_found`:
+  everyone a client seals to has published one, and without the rule a
+  stranger could fill the disk with mail for keys nobody holds.
+* **Per identity**: 12 entries in the transparency log an hour (section
+  11); republishing an unchanged bundle enters nothing.
+* **Over every mailbox together**: 4 GiB of queued envelopes, answered
+  `storage_full` beyond it.
+* **Blobs**: at most 16 MiB of plaintext each (the relay allows 16 MiB
+  plus the 256 chunk tags of ciphertext), 1 GiB in total, and each
+  expires 30 days after its first chunk arrived, on the same schedule as
+  messages.
+* **Per client address** (the socket's peer, or what a trusted TLS front
+  says in `X-Forwarded-For`): 16 open connections, 20 new identities an
+  hour and 256 MiB of `blob_put` data an hour.
+* **In total**: 4096 connections and 100 000 identities.
+* **Groups** (section 13): one `key_packages` deposit per connection per
+  minute, 30 packages plus a last-resort one per identity, 4096 bytes
+  each; `key_package` counts against the connection's `lookup` budget
+  and against the target's hand-out budget of 30 an hour, which it
+  shares with one-time prekeys; `group_create` and `group_commit` count
+  as `send`, and `group_create` also against the address's 20
+  registrations an hour; 100 000 sequencer entries in total, each
+  retired after 180 days without a commit and dropped 180 days after
+  that (13.5).
+* **Devices** (section 14): at most 8 linked devices per account; a
+  device registers as an identity, against the address's 20
+  registrations an hour and the cap on identities; a `revoke_device`
+  costs the address one of those registrations, as `revoke` and
+  `succeed` do; a lookup of an account with devices takes one prekey of
+  each kind from each device's deposit, under the device's own hand-out
+  budget.
 
 The client bounds what it reads as well: a WebSocket message from the
 relay is at most ten frames' worth (a lookup answer carries a bundle for
@@ -910,16 +924,15 @@ without the key from the same message.
   relay, or talking to an older peer, sends the older kind). An existing
   session keeps its version for its lifetime.
 * **Retiring v1.** The plain v1 body has no forward secrecy and is signed
-  (not deniable); it survives only to reach clients from before prekeys.
-  It is scheduled to go: 0.8.0 and 0.9.0 still send it to a peer with no
-  prekeys and log that it is neither forward secret nor deniable, and
-  0.10.1 refuses to send it (a peer without prekeys is then unreachable
-  until it updates). Receiving a v1 body stays supported longer, for
-  stored history. Since prekeys are optional, a bundle stripped of them
-  verifies as well as one with them, so a relay can bring the refusal
-  about: a client that already holds a bundle with prekeys for that
-  contact keeps it rather than the served one, says so, and sends under
-  the keys it knows.
+  (not deniable). A client with a session store does not send it to a
+  peer with no prekeys, who is unreachable until they update; it is
+  still sent where a peer's prekeys are too old to start a session
+  (*Starting a session*, below) and by a client built without a session
+  store. Receiving a v1 body stays supported, for stored history. Since
+  prekeys are optional, a bundle stripped of them verifies as well as
+  one with them, so a relay could bring the refusal about: a client that
+  already holds a bundle with prekeys for that contact keeps it rather
+  than the served one, says so, and sends under the keys it knows.
 * **Starting a session.** A fresh lookup precedes the first message of a
   session, so the handshake uses a current signed prekey and a one-time key
   that has not been handed out before. A pinned bundle is used only when
@@ -1218,7 +1231,10 @@ in 14.8.
 The relay appends, in the same database transaction as the write it
 records: a bundle on `publish` when its leaf differs from the identity's
 last logged bundle leaf (a reconnect that republishes the same bundle adds
-nothing); every revocation and succession it accepts. Nothing is ever
+nothing); every revocation and succession it accepts. An identity may
+add at most 12 entries an hour (7.4): a publish that would add a
+thirteenth is refused `rate_limited`, since a log that is never pruned
+can bound its growth only by refusing to append. Nothing is ever
 removed from the log, not even when the identity is removed. A relay that
 starts logging with state already in its database enters one entry per
 bundle and statement it holds first, so from then on nothing it serves is
@@ -1675,33 +1691,38 @@ ratchet's (section 8), not a larger one.
 
 ### 13.7 Membership: Welcome, invite links, admins
 
-**Add.** An admin fetches one key package of the person to add
-(13.4), verifies it, builds a commit with the Add, takes the sequencer
-step, merges, fans the commit out and seals the Welcome to the new
-member. The added member's client verifies the Welcome before joining:
-the sender's leaf (13.1) and that the sender is a member and an admin
-of the group's `silver_group` extension, the ciphersuite, that the
-Welcome's group id equals the body's `group`, that the extension decodes,
-and every member's leaf in the tree. It then joins at once in MLS terms
-(the key package's secret is spent by the Welcome, and a joined group
-stays in sync while the user decides) and holds the group as *invited*:
+**Add.** An admin fetches one key package of the person to add (13.4),
+verifies it, builds a commit with the Add, takes the sequencer step,
+merges, fans the commit out and seals the Welcome to the new member.
+
+The added member's client verifies the Welcome before joining: the
+sender's leaf (13.1) and that the sender is a member and an admin of the
+group's `silver_group` extension, the ciphersuite, that the Welcome's
+group id equals the body's `group`, that the extension decodes, and
+every member's leaf in the tree. It then joins at once in MLS terms (the
+key package's secret is spent by the Welcome, and a joined group stays
+in sync while the user decides) and holds the group as *invited*:
 nothing of it is shown or sent until the user says yes, and saying no
 drops the state, leaving the admin's group with a dead leaf until an
-admin notices and removes it. A client says yes on the user's behalf
-when the sender is a contact and not blocked, or when the user asked
-that admin for that group by link; a Welcome from a stranger waits for
-the user; one from a blocked sender is declined without a word. A
-Welcome for a group the client is in already is refused; one for a
-group it left, was removed from or that broke replaces what was left of
-the old membership — but only once it has parsed as a Welcome, so a body
-that is not one costs an out-of-sync member nothing. At most 20
-invitations wait for an answer at once; beyond that another is refused
-until one is answered, since a Welcome needs no permission from the
-person it invites and each one is a tree on disk. A client that is an
-admin only because the Welcome that brought it in said so — the
-extension is written by whoever built the Welcome, so that is the
-inviter's word, not the group's — does an admin's automatic work (a join,
-a rejoin) only when the user asks for it.
+admin notices and removes it.
+
+Who says yes: the client, on the user's behalf, when the sender is a
+contact and not blocked, or when the user asked that admin for that
+group by link; the user, when the sender is a stranger; nobody, when the
+sender is blocked, whose Welcome is declined without a word.
+
+What is refused: a Welcome for a group the client is in already, and
+the twenty-first invitation waiting for an answer, until one is
+answered, since a Welcome needs no permission from the person it invites
+and each one is a tree on disk. A Welcome for a group the client left,
+was removed from or that broke replaces what was left of the old
+membership, but only once it has parsed as a Welcome, so a body that is
+not one costs an out-of-sync member nothing.
+
+A client that is an admin only because the Welcome that brought it in
+said so does an admin's automatic work (a join, a rejoin) only when the
+user asks for it: the extension is written by whoever built the Welcome,
+so that is the inviter's word, not the group's.
 
 **Invite links.** `/group invite` prints
 
@@ -1903,41 +1924,38 @@ identity key, and the device's when `device_signature` is there — so a
 contact that has the account pinned checks a device without the relay.
 
 `device_signature` is the *device's* signature over the same bytes the
-account signed, under
-`"silver-messenger/v5/device-countersignature"`. The account's
-signature proves the account meant to enroll a device; it does not
-prove the device agreed, because an account can certify any public key
-it can name. A device adds this when it accepts the provisioning
-message (14.3) and presents the counter-signed certificate from then
-on, so an account cannot enroll a key its holder never offered. A
-domain of its own, so neither key's signature over these bytes can be
-lifted into the other's place. One that carries a *wrong* device
-signature is refused wherever it appears. Since 0.17.0 the field is
-**required wherever a device presents a certificate as its own**: the
-`device_of` in its bundle, which the relay checks when the bundle is
-published and every client when it looks the device up, and the
-`device` in each body it sends, which the recipient checks; a
-certificate without it is refused there, which is what a device from a
-client older than 0.16.0 presents. It is not required — it cannot be —
-on the account's own copies of the certificate, which the next
-paragraph describes, nor in the MLS leaf, whose encoding never carried
-it (below). 0.16.0 accepted its absence everywhere, so that every client
-was sending it before anything required it.
+account signed, under `"silver-messenger/v5/device-countersignature"`,
+a domain of its own so that neither key's signature over these bytes
+can be lifted into the other's place. The account's signature proves
+the account meant to enroll a device; it does not prove the device
+agreed, because an account can certify any public key it can name. A
+device adds its signature when it accepts the provisioning message
+(14.6) and presents the counter-signed certificate from then on, so an
+account cannot enroll a key its holder never offered. A certificate
+that carries a *wrong* device signature is refused wherever it appears.
 
-The account's signed device list below keeps the certificate as the
-account minted it, without this half — the account cannot produce it,
-and its signature covers the list whole. The counter-signed form is
-what the device itself presents, in its bundle's `device_of` and in
-every body it sends. So a device that takes a synced list compares it
-against its own certificate on what the *account* said — the fields
-above and the account's signature — and leaves its own signature in
-place when only that differs: the account's copy always lacks it, and
-adopting the copy on that difference would take the device's word for
-its own key back off again on the first sync after linking. When the
-account did say something new (a rename, which is a fresh certificate
-with a later `created_at_ms`), the bytes the old counter-signature
-covered have moved, so the device signs the new certificate before
-adopting it.
+Where it is required: wherever a device presents a certificate as its
+own, which is the `device_of` in its bundle (checked by the relay when
+the bundle is published and by every client that looks the device up)
+and the `device` in each body it sends (checked by the recipient). A
+certificate without it is refused there. It is not required, and cannot
+be, on the account's own copies of the certificate (the signed device
+list below, the provisioning message, a `sync` of the list), nor in the
+MLS leaf, whose encoding never carried it. Since 0.17.0; 0.16.0 sent it
+and accepted its absence, and a device from a client older than 0.16.0
+presents a certificate without it and is refused until it updates.
+
+The account's signed device list keeps the certificate as the account
+minted it, without this half: the account cannot produce it, and its
+signature covers the list whole. So a device that takes a synced list
+compares it against its own certificate on what the *account* said, the
+fields above and the account's signature, and leaves its own signature
+in place when only that differs; adopting the copy on that difference
+would take the device's word for its own key back off again on the
+first sync after linking. When the account did say something new (a
+rename, which is a fresh certificate with a later `created_at_ms`), the
+bytes the old counter-signature covered have moved, so the device signs
+the new certificate before adopting it.
 
 As bytes (for the MLS leaf, 14.7) a certificate is the signed bytes
 followed by the account's signature:
@@ -2292,37 +2310,39 @@ section 3, so what actually fits is some 18 to 24 KB. JSON:
 ```
 
 the account, its certificate for the device, the device list as it is
-published from now on (the new device on it) and the newest sixteen of
-the revocations it has issued — the rest reach the device with the next
-list the primary publishes, and sending them all would eventually leave
-an account unable to link a device at all — and the reference of the
-**snapshot** as a `file` content (4.5),
-absent when there is nothing to send. The session already hides the
-message from the relay; the layer under the link's secret keeps it from
-anyone who saw the device id and sent something under a secret of their
-own, which the device cannot open and ignores as it ignores any message
-it cannot open. The device checks that the message opens under its
-link's key, names the sender as `account`, certifies its own key for
-that account, and lists that account's devices and revocations alone;
-it keeps the certificate and the list, publishes its bundle again with
-`device_of`, and is linked — but not before the account it is about to
-join has been put to the person at the new device. The link carries a
-key and a device id, not an account, so whoever sees the QR code within
-its ten minutes may answer it with an account of their own: their
-certificate is signed by *their* key and every check above passes, so
-the device would join the wrong account and every message typed on it
-would go there, while the real primary is told the device belongs to an
+published from now on (the new device on it), the newest sixteen of the
+revocations it has issued (the rest reach the device with the next list
+the primary publishes; sending them all would eventually leave an
+account unable to link a device at all), and the reference of the
+**snapshot** as a `file` content (4.5), absent when there is nothing to
+send. The session already hides the message from the relay; the layer
+under the link's secret keeps it from anyone who saw the device id and
+sent something under a secret of their own, which the device cannot
+open and ignores as it ignores any message it cannot open.
+
+The device checks that the message opens under its link's key, names
+the sender as `account`, certifies its own key for that account, and
+lists that account's devices and revocations alone. Then, before
+anything else, it shows the account it is about to join and asks the
+person at the keyboard whether it is theirs: the link carries a key and
+a device id, not an account, so whoever sees the QR code within its ten
+minutes may answer it with an account of their own, and their
+certificate, signed by *their* key, passes every check above; the
+device would join the wrong account, every message typed on it would go
+there, and the real primary would be told the device belongs to an
 account already. Nobody but the person holding both machines can tell
-the two apart, so the device shows the account offered and asks (`silver
---link --account <id>` answers in advance, for a run nobody is sitting
-at; without a terminal to ask, the answer is no). A turned-down answer
-leaves the link standing until it expires, so the right primary can
-still take it. The primary, once the relay has confirmed
-its own publish with the device on the list, tells its other devices the
-list (`sync devices`) and adds the device to every group it is in
-(14.7). A link the primary never answers expires and the device says so;
-a provisioning message for a link that has expired or was used is
-ignored.
+the two apart. `silver --link --account <id>` answers in advance, for a
+run nobody is sitting at; without a terminal to ask, the answer is no;
+a turned-down answer leaves the link standing until it expires, so the
+right primary can still take it.
+
+With a yes, the device keeps the certificate and the list, publishes its
+bundle again with `device_of`, and is linked. The primary, once the
+relay has confirmed its own publish with the device on the list, tells
+its other devices the list (`sync devices`) and adds the device to every
+group it is in (14.7). A link the primary never answers expires and the
+device says so; a provisioning message for a link that has expired or
+was used is ignored.
 
 The snapshot is one JSON document sent as a padded file (4.5) through
 the blob store (7.5), under a key of its own that the `file` content
