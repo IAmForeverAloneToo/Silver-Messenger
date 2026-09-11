@@ -116,7 +116,7 @@ schema, the same backup format, the same wire. Each note says what the
 relay's upgrade changes, then what an operator may be asked about
 clients.
 
-### Unreleased
+### 0.18.1
 
 * **Relay: nothing.** The schema stays at 3 and the backup format at 2,
   and nothing on the wire changes.

@@ -449,14 +449,14 @@ what section 4 required of it.
   re-encryption walks, and two of those, the relay's key log as replayed
   and the outbox, are read by code of their own that knew only the
   name-only shape, so a directory from 0.14.0 or earlier stopped opening
-  after its first unlock by 0.16.0 (found on 0.18.0, fixed in the
-  release after it). Both readers take either shape now; neither file is
-  in the generation record, which roadmap item 66 is for.
+  after its first unlock by 0.16.0 (found on 0.18.0, fixed in 0.18.1).
+  Both readers take either shape now; neither file is in the generation
+  record, which roadmap item 66 is for.
 * The note said a directory this release has written "is refused by an
   older client". It is, at `identity.json`; but before failing the older
   client seals every generation-bearing file a second time under its
   name alone, taking each for a file a cut-short protection left plain,
   and the newer client then found no generation on the outer layer and
-  refused every file as an older copy. Since the release after 0.18.0
-  the newer client reads through both layers: the file underneath is the
-  one it wrote, and making the outer layer took the key.
+  refused every file as an older copy. Since 0.18.1 the newer client
+  reads through both layers: the file underneath is the one it wrote,
+  and making the outer layer took the key.
