@@ -302,7 +302,7 @@ capitals with `SILVER_RELAY_` in front: `--max-connections` is
 | `--blob-mib-per-address-per-hour` | 256 | Uploads from one address; 0 stops uploads | Abuse, or a shared address |
 | `--max-groups` | 100000 | Groups with a live epoch sequencer entry (one counter and one hash each; an entry idle for 180 days is retired and its headstone dropped 180 days after that, neither counting against the cap); 0 for no cap | A small relay, with room: a group costs the relay almost nothing, so this is a guard against a loop making entries, not a sizing knob |
 | `--trusted-proxy` | loopback | Whose `X-Forwarded-For` names the client | A TLS front on another host |
-| `--require-bound-auth` | off | Refuse the login of clients before 0.6.0 | Once everyone has updated |
+| `--allow-unbound-auth` | off | Accept the older login, which signs the challenge without the relay's name and is worth the same at any relay | Only while clients older than 0.6.0 remain; the relay says at start what allowing it costs |
 | `--host` | the ACME domains and the names in `--tls-cert` | The names clients reach this relay by, which a bound login must name | A TLS front, an onion address, or an address clients use literally: without the name, a login collected by another relay under that name is taken here (protocol section 7.1). The relay says at start which names it takes, or that it knows none |
 
 A limit that says no is counted (`silver_relay_refused_total` by reason in

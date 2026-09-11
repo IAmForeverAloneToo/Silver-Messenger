@@ -694,7 +694,7 @@ first.
 
 | `type` | Fields | Notes |
 | --- | --- | --- |
-| `auth` | `user_id`, `signature`, `host`? | With `host` (the relay's host name as the client connected to it, lower case, without surrounding whitespace, without a trailing dot, and without port or IPv6 brackets): `signature = sign("silver-messenger/v2/relay-auth", host \|\| nonce)`, the bound login. Without: `sign("silver-messenger/v1/relay-auth", nonce)`, which a hostile relay could collect and present to another; accepted only while `--require-bound-auth` is off. |
+| `auth` | `user_id`, `signature`, `host`? | With `host` (the relay's host name as the client connected to it, lower case, without surrounding whitespace, without a trailing dot, and without port or IPv6 brackets): `signature = sign("silver-messenger/v2/relay-auth", host \|\| nonce)`, the bound login. Without: `sign("silver-messenger/v1/relay-auth", nonce)`, which a hostile relay could collect and present to another; accepted only on a relay started with `--allow-unbound-auth`. |
 | `publish` | `bundle`, `invite`? | The client's own bundle (section 2). `invite` is a token for relays that only register invited identities. |
 | `lookup` | `user_id` | |
 | `send` | `envelope` | |
@@ -774,9 +774,10 @@ refused here.
 A client answers the older login only when it is told to
 (`--allow-unbound-login`). A signature over the nonce alone is worth the
 same at every relay, so answering one hands whoever asked a login for
-any relay that will take it; only a relay from before 0.6.0 asks. Relays
-still accept it from clients that offer it, unless the operator turns it
-off (`--require-bound-auth`); a later version will refuse it by default.
+any relay that will take it; only a relay from before 0.6.0 asks. A
+relay refuses it unless its operator allows it (`--allow-unbound-auth`,
+for a relay that still has clients older than 0.6.0), and says at start
+what allowing it costs.
 
 On `publish` with prekeys the relay stores the signed prekey with the
 bundle and the one-time keys separately. It keeps, per user, the ids it
