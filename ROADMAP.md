@@ -298,7 +298,7 @@ container story. Operations come before reach.
         partner of a client that already connects through Tor.
         (RFC 8555.)
         - [x] A live run of a relay behind an onion service: done on
-          2026-09-11 with 0.18.0, as the README's recipe says — Tor's
+          2026-09-11 with 0.18.0, as the operator's guide's recipe says — Tor's
           hidden service in front of an ephemeral relay told its onion
           name with `--host`, two clients through SOCKS5, a message each
           way with its read receipt, torn down afterwards.
