@@ -177,9 +177,9 @@ A message from someone who is not a contact yet is a **request**: an entry
 of its own at the bottom of the chat list, marked `?` and named by the
 stranger's id, holding everything they sent. Open it and read; then
 `/accept` makes them a contact and moves the messages into a chat (typing
-a reply does the same), `/decline` says *not now* -- the messages go, the
+a reply does the same), `/decline` says *not now* — the messages go, the
 sender is told nothing, and if they write again the request comes back
-without ringing -- and `/block` drops everything from that id from then
+without ringing — and `/block` drops everything from that id from then
 on. Each of the three also takes the number the request was announced
 with, or enough of the id, from anywhere; `/requests` lists what waits.
 `/alias <name>` gives a contact a friendly name.
@@ -354,7 +354,7 @@ silver --export-history <D> write every conversation to D (outside the data dire
 silver --submit-authenticated  send on the authenticated connection instead of the relay's anonymous one (env SILVER_SUBMIT_AUTHENTICATED)
 silver --require-anonymous send nothing at all to a relay that will not take anonymous submissions, rather than falling back to the authenticated connection (env SILVER_REQUIRE_ANONYMOUS)
 silver --allow-unbound-login   log in to a relay older than 0.6.0, whose login signs the challenge without the relay's name (env SILVER_ALLOW_UNBOUND_LOGIN)
-SILVER_LOG=debug silver    write logs to <data-dir>/silver.log (0600, not encrypted and not rotated; at debug it records envelope ids, contact ids and the relay's errors, so turn it on to debug and off after)
+SILVER_LOG=debug silver    write logs to <data-dir>/silver.log (0600, not encrypted, rolled at 8 MiB with one earlier file kept; at debug it records envelope ids, contact ids and the relay's errors, so turn it on to debug and off after)
 ```
 
 Default data directory: `~/.local/share/silver-messenger` on Linux,
@@ -416,201 +416,71 @@ log, monitoring, administration, backups, what to do after a compromise
 of the host, and shutting down. Moving between versions is
 [docs/UPGRADING.md](docs/UPGRADING.md).
 
-## How the crypto works
+## What protects a message
 
-The exact wire format and every constant are in
-[docs/PROTOCOL.md](docs/PROTOCOL.md); what it protects against, and what
-it does not, is in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+The wire format and every constant are in
+[docs/PROTOCOL.md](docs/PROTOCOL.md); what each of these protects
+against, and what it does not, is in
+[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 
-* **Identity**: an Ed25519 signing key (its public half is your user id,
-  shown as base58) plus a long-term X25519 key for Diffie–Hellman.
-* **Key bundle**: your X25519 public key, signed with your identity key,
-  plus your prekeys: a signed medium-term key rotated weekly and a batch of
-  one-time keys. The relay stores and serves bundles, hands out one
-  one-time key per lookup, and tells you when to deposit more. Clients
-  verify the signatures and pin the long-term key on first use.
-* **Envelope** (what the relay sees): `{ id, to, ephemeral_public, nonce, ciphertext }`.
-  For each message the sender makes a fresh X25519 ephemeral key, derives a
-  key with HKDF-SHA256 from `DH(ephemeral, recipient)`, and encrypts
-  `sender_id || signature || body` with XChaCha20-Poly1305. The recipient id
-  and ephemeral key are bound as associated data, and the signature covers the
-  recipient, ephemeral key, nonce and body, so an envelope cannot be
-  re-addressed, altered, or forged. The sender is inside the ciphertext, so
-  the relay never sees it.
-* **Forward-secret sessions**: when the recipient has published prekeys, the
-  body inside the envelope is not the message but a Double Ratchet message.
-  The first one carries an X3DH handshake against the recipient's identity
-  key, signed prekey and a one-time prekey; from then on every message is
-  encrypted under a key derived for it alone and discarded afterwards, and
-  each change of direction in the conversation performs a fresh
-  Diffie–Hellman step. A stolen device or key cannot decrypt messages that
-  were already read, and a compromised chain heals at the next step. From
-  0.6.0 the handshake is a hybrid (PQXDH-style): the recipient also
-  publishes ML-KEM-768 keys (FIPS 203), the sender encapsulates a secret
-  to one of them, and the session key depends on the Diffie–Hellman values
-  *and* that secret, so a recording of today's traffic stays closed to a
-  future quantum computer. From 0.8.0 the ratchet after the handshake is
-  post-quantum too (protocol v4): every step does an ML-KEM step beside the
-  Diffie–Hellman one, so a compromise heals against a quantum adversary
-  within a round trip, and the message carries no signature at that layer,
-  which makes it deniable (nothing lets the recipient prove to a third
-  party who wrote it). The chat title says `forward secret` once a session
-  exists, `forward secret, post-quantum` when ML-KEM is in play; `/session`
-  explains the state, including whether the ratchet is post-quantum and
-  whether the messages are deniable. A recipient without prekeys (a client
-  older than 0.3.0, or anyone behind an older relay) cannot be written to
-  at all: the plain v1 body that used to reach them has no forward secrecy
-  and stays readable by whoever holds their long-term key, so it is
-  refused and they have to update; one without
-  ML-KEM keys gets the classical handshake; and one whose relay predates
-  0.8.0 gets the v2 ratchet, so everyone keeps talking during the upgrade.
-* **Anonymous submission**: a relay from 0.3.0 on accepts messages on
-  connections that never authenticate, and the client uses one such
-  connection (with TLS session resumption off) for everything it sends. The
-  relay therefore cannot pair an envelope with the identity that submitted
-  it; it still sees the address and the timing. `--submit-authenticated`
-  turns this off for networks that allow one connection only.
-* **Capabilities, receipts and files**: every encrypted body lists what the
-  sending client understands beyond text (`receipts`, `files`), so a client
-  never sends a peer something it cannot read and old clients keep working.
-  A delivery receipt goes back when a message has been decrypted and
-  stored, a read receipt when it has been shown (`/receipts off` keeps
-  those to yourself); both are ordinary encrypted messages, batched so a
-  full mailbox costs one, and never sent to strangers. A file is encrypted
-  on the sender's machine under a fresh per-file key (XChaCha20-Poly1305 in
-  64 KiB chunks, each bound to the file id and its position), the
-  ciphertext is parked on the relay in chunks over the anonymous connection,
-  and the key, name, size and SHA-256 travel to the recipient inside a
-  normal message. The recipient fetches the chunks, decrypts, checks the
-  hash, and saves the file. The relay holds bytes it cannot read, for a
-  recipient it cannot name, and deletes them with the message expiry.
-  Files from people you have not accepted are listed with their request
-  but never fetched.
-* **Abuse controls**: strangers who know your id can write to you, but their
-  messages wait as a request in the chat list until you accept, decline or
-  block them, and a stranger rings the terminal once at most. The
-  relay limits each connection to 60 messages, 30 key lookups and 600 file
-  chunks per minute, caps every mailbox and its total file storage, and can
-  be told to register only identities that present an invite token.
-* **Encryption at rest**: with a passphrase set, every file in the data
-  directory (identity keys, prekeys, sessions, contacts, history, outbox,
-  config) is encrypted
-  with XChaCha20-Poly1305 under a random data key, which is itself wrapped
-  by the passphrase stretched with Argon2id (64 MiB, 3 passes). Each file is
-  bound to its own name and history is encrypted line by line. A new
-  identity offers to set a passphrase on first start; `--set-passphrase`
-  and `--remove-passphrase` change it later.
-* **Backups**: `--export-backup` writes the identity keys, the revocation
-  certificate and the contact list to one file encrypted under a passphrase
-  of its own (Argon2id and XChaCha20-Poly1305). `--import-backup` restores
-  it onto a fresh installation: same id, same contacts, and a new
-  message-numbering epoch so contacts see a reinstall rather than replays.
-  History is not included.
-* **Safety numbers**: `/verify` shows twelve groups of five digits derived
-  from both identity keys, identical on both sides. Two people who read them
-  to each other confirm that nobody sits between them; `/verify ok` records
-  that. A contact's encryption key can only change with a signature from
-  their identity key; when it does, the client warns loudly and clears the
-  verified mark, because it means either a deliberate rotation or a stolen
-  identity key.
-* **Retire or replace an identity**: `/revoke` declares your identity dead
-  with a certificate pre-signed on first run and kept in the data directory
-  and the backup, so a key that is lost can still be retired; contacts that
-  see it stop trusting the key, and the relay refuses to publish it ever
-  again. `/rotate` moves to a fresh identity with a handover signed by both
-  the old and the new key, so contacts re-pin to the new key on their own.
-  `/rekey` is the smaller remedy: it replaces your encryption key and
-  keeps your identity, so the safety number stays and nothing needs a
-  restart; contacts see a key-change notice and their verified mark for
-  you clears, your next message to each of them starts afresh under the
-  new key, and the old key goes on opening what was already sealed to it
-  for 30 days.
-  A revoked contact is marked and cannot be messaged; a rotated one is
-  re-pinned and its conversation carried across, with a nudge to compare
-  safety numbers again. Needs a relay on 0.8.0; older relays still pass on
-  the copy pushed inside a message.
-* **Key transparency**: the relay keeps a hash-chained, append-only log of
-  every key it serves and every revocation or handover, and the client
-  replays it. A key the relay shows that is not the latest one in its log
-  (an old prekey, or one it never logged) is refused, as is a hidden
-  revocation, and every message carries the log head inside its encrypted
-  body so two contacts compare what the relay told each of them: a relay
-  keeping two versions of its log is reported as a fork by the next
-  message between them. `/log` shows where the log stands. Since your id
-  *is* your key, the relay never could substitute an identity; the log
-  catches what signatures cannot, staleness and different stories to
-  different people. Needs a relay on 0.8.0.
-* **Sequence numbers**: every message carries, inside the encrypted body, a
-  per-conversation counter plus a random per-installation epoch. The
-  recipient drops replays, points out gaps, and notices when a contact has
-  started over from a fresh installation. Messages from older clients that
-  do not number messages are accepted unchecked.
-* **Relay auth**: on connect the relay sends a random nonce; the client signs
-  it with its identity key. Only the owner of an id can read its mailbox.
-* **Delivery**: the relay keeps an envelope in an embedded database until the
-  recipient acknowledges it, so nothing is lost if a client drops
-  mid-download or the relay restarts. Unacknowledged envelopes expire after
-  30 days by default, mailboxes are capped per recipient, and resends of the
-  same envelope id are ignored. Clients de-duplicate by envelope id too.
-* **Outbox**: a message written while offline is sealed immediately, kept in
-  `outbox.json` in the data directory, and handed to the relay on the next
-  connection; it shows a pending mark (`⋯`) until the relay accepts it, and a
-  failure mark (`✗`) if the relay refuses it for good.
-
-* **Checked against a model and vectors**: the handshake and the ratchet
-  are modelled in Verifpal ([`formal/`](formal/)), with the outcome of
-  every query, including the ones a model is meant to break, recorded and
-  checked in CI; every operation has known-answer vectors
-  ([`docs/vectors/`](docs/vectors/)) that the test suite replays and a
-  second implementation can check itself against; property tests cover
-  what must hold for every input.
-
-* **Cover traffic, opt-in**: `/cover on` sends meaningless messages at
-  random moments to contacts who have it on too, while you are both
-  around, so the relay cannot tell when you really talk. It shows that
-  you are in contact and does not hide bursts, long messages or files;
-  it costs bandwidth, so it is off by default, and the threat model says
-  exactly what it hides and what it does not.
-
-* **Groups on MLS**: a group is an MLS group (RFC 9420, through OpenMLS)
-  on the `MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519` suite, so its
-  key agreement is post-quantum like the one-to-one handshake. Each
-  member's leaf is signed by their identity key and carries their sealing
-  key, so a group message is one MLS ciphertext sealed separately to every
-  member into the ordinary envelope: the relay sees envelopes to people
-  and no group, keeps no membership list, and orders membership changes
-  with one counter per group it can move only for a token members of the
-  current epoch derive. Admins add and remove members and every member's
-  client checks every change against the group's rules, refusing and
-  marking the group broken rather than let an intruder in; anyone may
-  leave; invite links carry a secret an admin can rotate. Members refresh
-  their keys weekly so a compromise heals. Group messages are signed
-  inside MLS and so, unlike one-to-one messages, are not deniable; the
-  threat model says what the relay can still infer.
-* **Devices** (0.9.0 on): a linked device is a key pair of its own,
-  certified by your identity key, which never leaves the computer it was
-  made on. Your bundle lists your devices, signed as a whole, so a
-  contact seals every message once per device of yours (and once per
-  device of their own, so their other devices have it too), each under
-  its own forward-secret session, all under one id; the relay sees a few
-  more envelopes and no shared key. What one of your devices does the
-  others are told inside ordinary messages that only your own devices
-  can send. Linking sends the new device its certificate and a snapshot
-  of your contacts and recent history through the relay, sealed under a
-  one-time secret it printed; removing one is a signed statement the
-  relay serves, logs and enforces and contacts act on. In groups each
-  device is a leaf of its own.
-
-* **Everyday features** (0.10.0): replies quoted from the reader's own
-  copy, reactions, edits within a day, delete for everyone within a day
-  (a placeholder stays; the threat model says exactly what the other
-  side's software does and does not do about it) and delete for me, and
-  a per-conversation timer after which messages disappear on every
-  device, from sending for the sender and from reading for the reader.
-  All of it travels inside the encrypted body as content the relay
-  cannot tell from a short message; a contact on an older client is
-  never sent what it would not read, and the client says so. Received
-  files can be kept encrypted, and the history exported.
+* **Your id is your key.** An Ed25519 identity key, whose public half
+  is the user id, and an X25519 key for Diffie–Hellman. Comparing ids
+  is comparing keys, and `/verify` shows a safety number two people can
+  read to each other.
+* **The relay sees an envelope, not a letter.** Every message is sealed
+  to the recipient's key; the sender's id is inside the ciphertext, the
+  envelope names only the recipient, and it is submitted on a
+  connection that never logs in. Bodies are padded to 160-byte steps,
+  so a receipt and a short message look alike.
+* **Forward secrecy, post-quantum.** A session starts with a PQXDH
+  handshake (X3DH plus ML-KEM-768) against the recipient's published
+  prekeys and continues as a Double Ratchet that does an ML-KEM step
+  beside every Diffie–Hellman step: a key stolen tomorrow opens nothing
+  read today, a compromise heals within a round trip, and a recording
+  kept for a quantum computer stays closed. Session messages between
+  current clients carry no signature, so nobody can prove to a third
+  party who wrote one. `/session` says what a conversation has.
+* **Keys you can check.** The relay keeps a hash-chained log of every
+  key it serves; clients replay it, refuse a stale or unlogged key, and
+  compare log heads inside their messages, so a relay telling two
+  people two stories is caught by the next message between them. A
+  contact's key change is announced loudly and clears the verified
+  mark.
+* **Keys you can retire.** `/rekey` replaces your encryption key under
+  the same identity; `/rotate` hands over to a new identity with a
+  cross-signed succession contacts re-pin to on their own; `/revoke`
+  declares an identity dead with a certificate pre-signed on first run
+  and kept in the backup, so a lost key can still be retired.
+* **Groups on MLS.** A group is an MLS group (RFC 9420) on a hybrid
+  post-quantum suite; each message is one MLS ciphertext sealed to
+  every member, so the relay sees envelopes to people and no group, and
+  keeps no membership list. Admins add and remove, every member checks
+  every change, and group messages are signed inside MLS, so they are
+  not deniable.
+* **Devices.** A linked device has keys of its own, certified by your
+  identity key, which never leaves the computer it was made on. Every
+  message is sealed once per device, and a device is revoked by a
+  signed statement the relay serves and contacts act on.
+* **Files, receipts, edits.** A file travels as encrypted chunks under
+  a per-file key carried inside the message; receipts, replies, edits,
+  deletions, reactions and timers are content inside the encrypted body
+  and look to the relay like short messages.
+* **At rest.** Everything in the data directory is encrypted under a
+  data key wrapped by the operating system's key store or a passphrase
+  (Argon2id); each file is bound to its name and a generation, so an
+  older copy put back into a live directory is refused. `/lock` and the
+  idle lock take the keys out of memory.
+* **Backups.** `--export-backup` writes the identity, the revocation
+  certificate and the contacts under a passphrase of their own;
+  `--import-backup` restores them onto a fresh installation.
+* **Cover traffic**, opt-in and mutual (`/cover on`), sends meaningless
+  messages between two contacts at random moments while both are
+  around, so the relay cannot tell when they really talk.
+* **Checked against a model and vectors.** The handshake and the
+  ratchet are modelled in Verifpal ([`formal/`](formal/)), and every
+  operation has known-answer vectors ([`docs/vectors/`](docs/vectors/))
+  that the test suite replays and a second implementation can check
+  itself against.
 
 What it does **not** do: a client for a phone, or a window to click in;
 the client is a terminal program on purpose, and neither comes before
@@ -619,52 +489,16 @@ the client is a terminal program on purpose, and neither comes before
 ## Development
 
 ```sh
-cargo test --workspace            # unit tests + in-process relay end-to-end tests
+cargo test --workspace            # unit tests and in-process relay end-to-end tests
 cargo clippy --workspace --all-targets
 cargo fmt --all
-cargo deny check                  # advisories, licenses, duplicate crates (deny.toml)
-cargo audit
+cargo deny check                  # advisories, licences, duplicate crates (deny.toml)
 ```
 
-CI runs the same checks on every push, plus the test suite on Linux, macOS
-and Windows, the terminal tests below under two terminal types, a minute
-of fuzzing per parser against a corpus that carries over between runs
-(half an hour a parser once a week), the relay's ACME client against
-Pebble (Let's Encrypt's test server), and a reproducibility check that
-builds the Linux binaries twice from scratch and compares them. Every
-GitHub Action is pinned to a commit hash, every container image by
-digest, and the compiler to an exact version; the OpenSSF Scorecard runs
-weekly.
-
-How a release is made, what it carries and how it is signed are in
-[docs/RELEASES.md](docs/RELEASES.md). Security problems go through
-[SECURITY.md](SECURITY.md), not the issue tracker.
-
-The terminal client is tested for real in `tests/tui/`: each test starts a
-relay and one or two clients in pseudo-terminals, types, clicks, drags
-and reads the screen back through a terminal emulator (`pip install pyte`
-first; `tests/tui/run.sh` runs them all, `TERMS="xterm-256color linux"`
-for both terminal types, and `test_tmux.py` drives a client inside tmux).
-Which terminals are known to work, and how, is in
-[docs/TERMINALS.md](docs/TERMINALS.md). `tests/tui/soak.py --minutes N`
-runs a relay and two clients exchanging messages for that long and
-watches each process's memory: CI runs three minutes of it on every push,
-the workflow can be dispatched for up to six hours, and
-`--minutes 1440` is the day-long run.
-
-The end-to-end tests in `crates/silver-client/tests/e2e.rs` start a relay
-on a random port, connect two clients, and check both directions, offline
-queueing, reconnection after the relay goes away, forward-secret sessions
-(including handshakes that wait in the mailbox, restarts, a peer that lost
-its session state, and a peer without prekeys, whom nothing is sent to),
-anonymous submission,
-capabilities and receipts, file transfer (chunking, progress, a missing
-blob, a tampered hash, a relay without file storage), groups, and
-devices (`tests/devices.rs`: a device linked by its link, a message
-reaching every device under one id, a revoked device cut off).
-`tests/kill.rs` runs a writer child that saves the store as fast as it
-can, kills it at random moments, and checks that the store opens with
-nothing but the line being written lost.
+[CONTRIBUTING.md](CONTRIBUTING.md) says how to build, what CI runs,
+where the tests are and how to propose a change; how a release is made
+and signed is in [docs/RELEASES.md](docs/RELEASES.md). Security
+problems go through [SECURITY.md](SECURITY.md), not the issue tracker.
 
 ## License
 

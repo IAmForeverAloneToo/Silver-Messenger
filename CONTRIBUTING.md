@@ -1,13 +1,21 @@
 # Contributing
 
-Silver Messenger is a terminal messenger with a relay of its own; the
-README says what it does, and the documents under `docs/` say how and
-why: `PROTOCOL.md` (the wire), `THREAT_MODEL.md` (what it protects
-against and what it does not), `OPERATING.md` (running a relay),
-`TERMINALS.md` (what the client asks of a terminal), `UPGRADING.md`
-(what changes between versions), and `docs/design/` (a note per larger
-item, written before its code). Read the one your change touches first;
-the documents are as much the product as the code.
+Silver Messenger is a terminal messenger with a relay of its own. The
+documents are as much the product as the code; read the one your
+change touches first:
+
+* [README.md](README.md): what it does and how to use it.
+* [docs/PROTOCOL.md](docs/PROTOCOL.md): the wire.
+* [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md): what it protects
+  against and what it does not.
+* [docs/OPERATING.md](docs/OPERATING.md): running a relay;
+  [docs/UPGRADING.md](docs/UPGRADING.md): what changes between versions
+  for one.
+* [docs/RELEASES.md](docs/RELEASES.md): how a release is made, checked
+  and signed.
+* [docs/TERMINALS.md](docs/TERMINALS.md): what the client asks of a
+  terminal.
+* `docs/design/`: a note per larger item, written before its code.
 
 ## Building
 
@@ -40,14 +48,57 @@ pip install pyte && TERMS="xterm-256color linux" tests/tui/run.sh   # the client
 cd fuzz && RUSTUP_TOOLCHAIN=nightly cargo fuzz build  # the fuzz targets still build
 ```
 
-`tests/tui/soak.py --minutes 3` runs a relay and two clients for three
-minutes and watches their memory; CI runs it too. The relay's ACME client
-is tested against Pebble (`crates/silver-relay/tests/acme.rs`, with
-`SILVER_PEBBLE` pointing at the binary), the formal models with
-Verifpal (`formal/check.sh`), and the packaging with the tools of each
-platform (`.github/workflows/ci.yml`, the `packaging` and `homebrew`
-jobs). A test that fails only sometimes is a bug in the test or in the
-code, not a thing to retry; the pseudo-terminal tests wait for what the
+What CI runs on every push, beyond those:
+
+* The test suite on Linux, macOS and Windows, and the terminal tests
+  under two terminal types plus a client driven inside tmux.
+* `tests/tui/soak.py --minutes 3`: a relay and two clients exchanging
+  messages for three minutes with their memory watched. The workflow
+  can be dispatched for up to six hours; `--minutes 1440` is the
+  day-long run.
+* A minute of fuzzing per parser against a corpus that carries over
+  between runs, and half an hour a parser once a week.
+* The relay's ACME client against Pebble, Let's Encrypt's test server
+  (`crates/silver-relay/tests/acme.rs`, with `SILVER_PEBBLE` pointing
+  at the binary).
+* The formal models with Verifpal (`formal/check.sh`).
+* The packaging with the tools of each platform (the `packaging` and
+  `homebrew` jobs).
+* A reproducibility check that builds the Linux binaries twice from
+  scratch and compares them, and the OpenSSF Scorecard weekly. Every
+  GitHub Action is pinned to a commit hash, every container image by
+  digest, and the compiler to an exact version.
+* `tests/docs/check_links.py`: every cross-reference in the documents
+  resolves.
+
+Where the tests are:
+
+* Unit tests beside the code in every crate, the known-answer vectors
+  of `docs/vectors/` and the property tests among them.
+* `crates/silver-client/tests/`: end-to-end tests through an in-process
+  relay. `e2e.rs` starts a relay on a random port, connects two clients
+  and checks both directions, offline queueing, reconnection after the
+  relay goes away, forward-secret sessions (handshakes that wait in the
+  mailbox, restarts, a peer that lost its session state, a peer without
+  prekeys, whom nothing is sent to), anonymous submission, capabilities
+  and receipts, and file transfer (chunking, progress, a missing blob,
+  a tampered hash, a relay without file storage). `groups.rs`,
+  `devices.rs` (a device linked by its link, a message reaching every
+  device under one id, a revoked device cut off), `rekey.rs`,
+  `update.rs` and the rest each cover their subject. `kill.rs` runs a
+  writer child that saves the store as fast as it can, kills it at
+  random moments, and checks that the store opens with nothing but the
+  line being written lost.
+* `tests/tui/`: the terminal client at a pseudo-terminal. Each test
+  starts a relay and one or two clients, types, clicks, drags and reads
+  the screen back through a terminal emulator (`pip install pyte`
+  first; `tests/tui/run.sh` runs them all, `TERMS="xterm-256color
+  linux"` for both terminal types, and `test_tmux.py` drives a client
+  inside tmux). Which terminals are known to work, and how, is in
+  `docs/TERMINALS.md`.
+
+A test that fails only sometimes is a bug in the test or in the code,
+not a thing to retry; the pseudo-terminal tests wait for what the
 screen must show rather than sleeping.
 
 ## Proposing a change
