@@ -512,8 +512,8 @@ those who want to pay for it (46).
           authentication means (section 3). What the finding calls for
           instead is the key being replaceable, and a responder accepting
           only the key an identity currently publishes: `/rekey`, designed
-          in [docs/design/dh-rotation.md](docs/design/dh-rotation.md), on
-          `main` and unreleased.
+          in [docs/design/dh-rotation.md](docs/design/dh-rotation.md).
+          0.18.0.
         - 0.17.0 was cut the same day as 0.16.0, by decision; its
           changelog says in as many words that a client older than 0.16.0
           cannot be read.

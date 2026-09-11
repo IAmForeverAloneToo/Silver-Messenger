@@ -111,6 +111,18 @@ routine step.
 
 ## Version notes
 
+### 0.18.0
+
+* **Nothing for the relay.** The schema stays at 3 and the backup format
+  at 2, and nothing on the wire changes: a rekey (`/rekey`) republishes
+  a client's bundle with a new key under the same identity, which the
+  relay logs and serves as it logs and serves any bundle change. A 0.17.0
+  relay serves 0.18.0 clients and the other way round. What an operator
+  may be asked about: a user still on 0.17.0 who is told a contact's key
+  "is not the one pinned" after that contact ran `/rekey` -- the older
+  client cannot ask which key is published now, and the answer is to
+  update, or `/remove` and re-add the contact.
+
 ### 0.17.0
 
 * **The one older client a relay stops taking.** The schema stays at 3
