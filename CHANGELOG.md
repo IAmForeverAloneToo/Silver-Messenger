@@ -8,6 +8,43 @@ A release's entry opens with a paragraph on what it is, then an
 then `Security`, `Added`, `Changed` and `Fixed` as the release needs
 them; older entries keep the shape they were written in.
 
+## Unreleased
+
+Two fixes to the data directory at the seams where a client older than
+0.16.0 meets a newer one, both found on 0.18.0 the day it shipped.
+Nothing on the wire changes; the relay is as it was.
+
+**Upgrading.** Nothing on disk changes shape. A directory written by
+0.14.0 or earlier that 0.16.0, 0.17.0 or 0.18.0 refused to open ("loading
+the relay's key log: file is not encrypted") opens under this version as
+it is; so does one a client older than 0.16.0 was run on after a newer
+one had opened it (the older client stops at "parsing identity.json" and
+leaves every file sealed a second time, and the newer one then refused
+each as "not the version this directory last wrote"). A client older
+than 0.16.0 still cannot read a directory a newer one has opened, and
+should not be run on one.
+
+### Fixed
+
+- The first unlock by 0.16.0 or later of a directory written by an older
+  client stamps a generation onto every file, the relay's key log as
+  replayed (`transparency.json`) and the outbox included, and those two
+  are read by code of their own that knew the name-only shape alone, so
+  every start after the migration failed at "loading the relay's key
+  log: file is not encrypted". Both read either shape now. Neither file
+  is in the generation record (both are written bound to their names, as
+  before 0.16.0); roadmap item 66 is to bring them in, and the threat
+  model says so.
+- A client older than 0.16.0 run on a directory a newer one has opened
+  takes the generation-bearing files for plain ones, seals each a second
+  time under its name alone, and stops at `identity.json`; the newer
+  client then found no generation on the outer layer and refused every
+  file as an older copy, and the directory was lost. It reads through
+  both layers now: the file underneath is the one it wrote, tag and
+  generation intact, and an older copy put back inside such a wrapping
+  is still refused. Making the outer layer takes the key, so nothing is
+  given up.
+
 ## 0.18.0 - 2026-09-11
 
 `/rekey`: the encryption key replaced under the same identity, which is

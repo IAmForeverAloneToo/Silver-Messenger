@@ -3469,6 +3469,113 @@ mod tests {
         );
     }
 
+    /// Two files are written by code of their own, bound to their names
+    /// alone: the relay's key log as replayed and the outbox. The adoption
+    /// stamps a generation onto them with the rest, and their readers have
+    /// to take that shape, or a directory from before generations stops
+    /// opening after its first unlock (0.18.0 on a directory 0.14.0
+    /// wrote).
+    #[test]
+    fn the_replayed_log_and_the_outbox_survive_adoption() {
+        let (store, dir) = bound_store();
+        let cipher = store.cipher.clone().unwrap();
+        let log_path = store.transparency_path();
+        let outbox_path = store.outbox_path();
+        crate::transparency::LogStore::load(Some(log_path.clone()), Some(cipher.clone()))
+            .unwrap()
+            .confirm(7);
+        // What the outbox writes when nothing is queued.
+        fs::write(&outbox_path, cipher.encrypt(OUTBOX_FILE, b"[]")).unwrap();
+
+        // Back to the shape an older version wrote, as above.
+        for name in recrypted_files() {
+            let path = dir.path().join(name);
+            if !path.exists() {
+                continue;
+            }
+            let opened = cipher.open_file(name, &fs::read(&path).unwrap()).unwrap();
+            fs::write(&path, cipher.encrypt(name, &opened.plain)).unwrap();
+        }
+        let mut vault = store.read_vault().unwrap().unwrap();
+        vault.state_generation = None;
+        store.write_vault(&vault).unwrap();
+        fs::remove_file(dir.path().join(STATE_FILE)).unwrap();
+        let _ = fs::remove_file(dir.path().join(STATE_PREVIOUS_FILE));
+
+        let mut again = Store::open(dir.path()).unwrap();
+        again.unlock_with_keystore().unwrap();
+        for path in [&log_path, &outbox_path] {
+            assert!(
+                fs::read(path)
+                    .unwrap()
+                    .starts_with(crate::vault::GENERATION_MAGIC),
+                "adoption should have stamped {}",
+                path.display()
+            );
+        }
+        let cipher = again.cipher();
+        let log = crate::transparency::LogStore::load(Some(log_path), cipher.clone()).unwrap();
+        assert_eq!(log.verified_at_ms(), 7);
+        let outbox = crate::outbox::Outbox::load(Some(outbox_path), cipher).unwrap();
+        assert!(outbox.ids().is_empty());
+    }
+
+    /// A client from before generations existed, run on a directory a
+    /// newer one has opened, takes every generation-bearing file for a
+    /// plain one and seals it again under its name alone before failing
+    /// at `identity.json` (0.14.0 after 0.18.0). The directory must open
+    /// as it is afterwards, and the generations must still count.
+    #[test]
+    fn a_directory_an_older_client_sealed_again_opens_and_still_refuses_an_older_copy() {
+        let (store, dir) = bound_store();
+        let identity = store.load_or_create_identity().unwrap().0;
+        let peer = Identity::generate();
+        store
+            .save_contacts(&[Contact::new(peer.user_id())])
+            .unwrap();
+        let contacts_path = dir.path().join(CONTACTS_FILE);
+        let older = fs::read(&contacts_path).unwrap();
+        store.save_contacts(&[]).unwrap();
+
+        // What 0.14.0's unlock does: its `is_encrypted` knows the
+        // name-only shape alone, so every file looks plain and is
+        // "sealed", ciphertext and all.
+        let cipher = store.cipher.clone().unwrap();
+        for name in recrypted_files() {
+            let path = dir.path().join(name);
+            if path.exists() {
+                let raw = fs::read(&path).unwrap();
+                fs::write(&path, cipher.encrypt(name, &raw)).unwrap();
+            }
+        }
+
+        let mut again = Store::open(dir.path()).unwrap();
+        again.unlock_with_keystore().unwrap();
+        assert_eq!(
+            again.load_or_create_identity().unwrap().0.user_id(),
+            identity.user_id()
+        );
+        assert!(
+            again.load_contacts().unwrap().is_empty(),
+            "the latest contacts should be read through the second seal"
+        );
+        // A write puts the file back in its own shape.
+        again.save_contacts(&[]).unwrap();
+        assert!(
+            fs::read(&contacts_path)
+                .unwrap()
+                .starts_with(crate::vault::GENERATION_MAGIC)
+        );
+
+        // An older copy inside such a wrapping is an older copy still.
+        fs::write(&contacts_path, cipher.encrypt(CONTACTS_FILE, &older)).unwrap();
+        let err = again.load_contacts().unwrap_err().to_string();
+        assert!(
+            err.contains("not the version this directory last wrote"),
+            "an older copy under a second seal was accepted: {err}"
+        );
+    }
+
     /// Changing what protects the directory rewrites every file under a
     /// new key. The generations have to come with them, or the new key
     /// would open files with nothing left to say which version of each is

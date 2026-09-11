@@ -116,6 +116,19 @@ schema, the same backup format, the same wire. Each note says what the
 relay's upgrade changes, then what an operator may be asked about
 clients.
 
+### Unreleased
+
+* **Relay: nothing.** The schema stays at 3 and the backup format at 2,
+  and nothing on the wire changes.
+* **Clients.** Two directories that would not open, open as they are: one
+  last written by 0.14.0 or earlier that 0.16.0 to 0.18.0 refused with
+  "loading the relay's key log: file is not encrypted", and one a client
+  older than 0.16.0 was run on after a newer one had opened it, which the
+  newer one then refused with "not the version this directory last
+  wrote". A client older than 0.16.0 still cannot read such a directory
+  and should not be run on it: it stops at `identity.json`, and before
+  this version left the directory unreadable for the newer client too.
+
 ### 0.18.0
 
 * **Relay: nothing.** The schema stays at 3 and the backup format at 2,
