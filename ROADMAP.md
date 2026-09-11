@@ -716,6 +716,20 @@ those who want to pay for it (46).
           given the tense pass first planned.
         - [x] 65.7 The close: the checker over everything, the line counts
           before and after in the closing commit's message.
+66. [ ] **The two files outside the generation record** (S). The relay's
+        key log as replayed (`transparency.json`) and the outbox are
+        written by code of their own, bound to their names alone, so item
+        57's rollback protection does not cover them: an older copy of the
+        log put back sets the replay behind, its checkpoints and its
+        record of a fork it had seen included, and an older outbox
+        re-queues envelopes the relay already holds and drops as
+        duplicates. Route both through the store's bound writes, with the
+        rule for a file the record has never heard of loosened to take a
+        name-only one once and bind it on its next write, since every
+        directory since 0.16.0 holds both files in that shape. Found when
+        the migration that stamps every file stamped these two and their
+        readers refused them (the fix after 0.18.0); the threat model
+        names the gap.
 
 ## Continuous
 

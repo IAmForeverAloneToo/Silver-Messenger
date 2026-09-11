@@ -513,7 +513,10 @@ fn read(path: &Path, cipher: Option<&FileCipher>) -> anyhow::Result<LogState> {
     let plain = if FileCipher::is_encrypted(&bytes) {
         let cipher =
             cipher.context("the transparency log is encrypted but no passphrase was given")?;
-        cipher.decrypt(LOG_NAME, &bytes)?.to_vec()
+        // Either shape: `write` binds this file to its name alone, but the
+        // store's migration to generations stamps one onto every file it
+        // walks, this one included.
+        cipher.open_file(LOG_NAME, &bytes)?.plain.to_vec()
     } else {
         bytes
     };
@@ -522,6 +525,8 @@ fn read(path: &Path, cipher: Option<&FileCipher>) -> anyhow::Result<LogState> {
 
 fn write(path: &Path, cipher: Option<&FileCipher>, state: &LogState) -> anyhow::Result<()> {
     let plain = serde_json::to_vec(state)?;
+    // Bound to its name alone, outside the store's generation record, so
+    // an older copy of this file put back is not caught (roadmap item 66).
     let out = match cipher {
         Some(c) => c.encrypt(LOG_NAME, &plain),
         None => plain,
@@ -843,5 +848,24 @@ mod tests {
             again.latest(&alice.user_id()),
             ours.latest(&alice.user_id())
         );
+    }
+
+    /// The store's migration to generations stamps one onto this file
+    /// too, and a log written under its name alone has to load back once
+    /// it has been.
+    #[test]
+    fn a_log_the_store_stamped_with_a_generation_still_loads() {
+        use crate::vault::Kdf;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(LOG_NAME);
+        let (_, cipher) = FileCipher::create("pw", Kdf::fast()).unwrap();
+        let cipher = Arc::new(cipher);
+        LogStore::load(Some(path.clone()), Some(cipher.clone()))
+            .unwrap()
+            .confirm(7);
+        let plain = cipher.decrypt(LOG_NAME, &fs::read(&path).unwrap()).unwrap();
+        fs::write(&path, cipher.encrypt_at(LOG_NAME, 1, &plain)).unwrap();
+        let again = LogStore::load(Some(path), Some(cipher)).unwrap();
+        assert_eq!(again.verified_at_ms(), 7);
     }
 }

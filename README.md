@@ -467,9 +467,10 @@ against, and what it does not, is in
   and look to the relay like short messages.
 * **At rest.** Everything in the data directory is encrypted under a
   data key wrapped by the operating system's key store or a passphrase
-  (Argon2id); each file is bound to its name and a generation, so an
-  older copy put back into a live directory is refused. `/lock` and the
-  idle lock take the keys out of memory.
+  (Argon2id); each file is bound to its name and, all but two (roadmap
+  item 66), a generation, so an older copy put back into a live
+  directory is refused. `/lock` and the idle lock take the keys out of
+  memory.
 * **Backups.** `--export-backup` writes the identity, the revocation
   certificate and the contacts under a passphrase of their own;
   `--import-backup` restores them onto a fresh installation.

@@ -392,6 +392,17 @@ impl FileCipher {
     /// Decrypt a whole file of either shape, saying which generation it
     /// claims. The claim is checked by the tag, so it is the file's own
     /// and not something an editor could put there.
+    ///
+    /// A file may also be a generation-bearing one sealed a second time
+    /// under its name alone. That is what a client from before
+    /// generations existed (0.14.0 and earlier) leaves behind: it takes
+    /// the shape it does not know for a plain file, "finishes" what it
+    /// thinks is a cut-short protection by sealing it, and then fails to
+    /// read the result. The file underneath is the one this client wrote,
+    /// tag and generation intact, so it is read through both layers. The
+    /// outer layer neither proves nor hides anything: making it took the
+    /// key, and an older copy put back inside such a wrapping is still at
+    /// the wrong generation.
     pub fn open_file(&self, name: &str, bytes: &[u8]) -> anyhow::Result<OpenedFile> {
         if let Some(rest) = bytes.strip_prefix(GENERATION_MAGIC) {
             let (at, body) = rest
@@ -407,9 +418,21 @@ impl FileCipher {
                 plain,
             });
         }
+        let plain = self.decrypt(name, bytes)?;
+        if plain.starts_with(GENERATION_MAGIC) {
+            // Only if it opens as one: a plaintext that merely begins with
+            // the magic fails the inner tag and is its own content.
+            if let Ok(inner) = self.open_file(name, &plain) {
+                tracing::info!(
+                    "{name} had been sealed a second time by an older client; read through both \
+                     layers"
+                );
+                return Ok(inner);
+            }
+        }
         Ok(OpenedFile {
             generation: None,
-            plain: self.decrypt(name, bytes)?,
+            plain,
         })
     }
 
@@ -680,6 +703,29 @@ mod tests {
             b"[2]"
         );
         assert!(settled.decrypt("contacts.json", &before).is_err());
+    }
+
+    /// A client from before generations existed takes a generation-bearing
+    /// file for a plain one and seals it again under its name alone. The
+    /// file is read through both layers, at the generation underneath; a
+    /// plaintext that merely begins with the inner magic is its own
+    /// content.
+    #[test]
+    fn a_file_sealed_a_second_time_by_an_older_client_opens_at_its_own_generation() {
+        let (_, cipher) = FileCipher::create("hunter2", Kdf::fast()).unwrap();
+        let inner = cipher.encrypt_at("contacts.json", 7, b"[1]");
+        let wrapped = cipher.encrypt("contacts.json", &inner);
+        let opened = cipher.open_file("contacts.json", &wrapped).unwrap();
+        assert_eq!(opened.generation, Some(7));
+        assert_eq!(opened.plain.as_slice(), b"[1]");
+
+        // The outer layer is bound to the name like any other.
+        assert!(cipher.open_file("sessions.json", &wrapped).is_err());
+
+        let looks_like_one = cipher.encrypt("notes.json", b"SMV2 is not a shape here");
+        let opened = cipher.open_file("notes.json", &looks_like_one).unwrap();
+        assert_eq!(opened.generation, None);
+        assert_eq!(opened.plain.as_slice(), b"SMV2 is not a shape here");
     }
 
     #[test]
