@@ -333,7 +333,7 @@ Then:
 
 1. Take the host off the network. Do not try to clean it.
 2. Build a new host from a fresh image and install the relay from a
-   release you verified (README, "Verifying a release").
+   release you verified ([RELEASES.md](RELEASES.md)).
 3. Restore the last backup you trust into it. If you suspect the
    database was altered, a backup from before the compromise loses the
    messages queued since, which is the safer loss; a database from the

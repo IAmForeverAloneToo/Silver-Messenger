@@ -695,8 +695,8 @@ those who want to pay for it (46).
         - [ ] 65.1 The facts: every wrong or stale statement found, fixed
           where it stands; the link checker under `tests/docs/` and its
           CI step.
-        - [ ] 65.2 The map: a release guide of its own under `docs/`,
-          from the README's three release sections; "Installing" in the
+        - [ ] 65.2 The map: `docs/RELEASES.md` from the README's three
+          release sections; "Installing" in the
           operator's guide from the README's deployment section; the
           README rebuilt around what is left; every cross-reference
           following.

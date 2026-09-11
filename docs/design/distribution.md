@@ -61,9 +61,9 @@ In `release.yml`'s build job, after the build and before the SBOM:
   --type execute`, then delete the keychain.
 
 Each step runs only when its secrets are all present; with none, one
-notice names them and the README section on signing; with some but not
-all, the step fails, since a half-configured secret is a mistake rather
-than a choice.
+notice names them and the signing section of `docs/RELEASES.md`; with
+some but not all, the step fails, since a half-configured secret is a
+mistake rather than a choice.
 
 **What the minisign step is worth** (SM-S-01). The `SHA256SUMS`
 signature is designed to be made by the workflow from

@@ -9,8 +9,7 @@ name: Release binaries
 #     branch and the archives are published on a GitHub release.
 #   * Tag push `v*`: the same archives are published on a GitHub release.
 #
-# What a release carries, and how to check it (see README, "Verifying a
-# release"):
+# What a release carries, and how to check it (see docs/RELEASES.md):
 #   * binaries built with `cargo auditable`, so `cargo audit bin <file>`
 #     lists the exact dependencies inside them;
 #   * a CycloneDX SBOM per binary and target, inside each archive;
@@ -18,7 +17,7 @@ name: Release binaries
 #     it when MINISIGN_SECRET_KEY is set and minisign.pub is in the
 #     repository (packaging/new-signing-key.sh sets both up). The client
 #     checks an update against that signature; a person checks a download
-#     against it (README, "Signing releases");
+#     against it (docs/RELEASES.md, "Signing");
 #   * a BUILD-INFO.txt per target, inside the archive the run keeps as an
 #     artifact, naming the compiler, the commit and the flags, so a build
 #     can be repeated years later;
@@ -95,7 +94,7 @@ jobs:
         shell: bash
         run: |
           # The same flags as the "reproducible build" job in ci.yml and as
-          # the README's rebuild instructions: no build paths or times end
+          # the rebuild instructions in docs/RELEASES.md: no build paths or times end
           # up in the binary, so anyone can rebuild the commit and compare.
           export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
           export RUSTFLAGS="--remap-path-prefix=${{ github.workspace }}=/src --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
@@ -106,7 +105,7 @@ jobs:
       # a notice says so and the release goes out unsigned; with some, the
       # step fails, since a half-configured secret is a mistake. A signature
       # is the one thing a signed download differs from a rebuild by; the
-      # README says how to strip it and compare.
+      # docs/RELEASES.md says how to strip it and compare.
       - name: Sign the Windows executables
         if: contains(matrix.target, 'windows')
         shell: bash
@@ -115,7 +114,7 @@ jobs:
           AUTHENTICODE_PASSWORD: ${{ secrets.AUTHENTICODE_PASSWORD }}
         run: |
           if [ -z "$AUTHENTICODE_PFX" ] && [ -z "$AUTHENTICODE_PASSWORD" ]; then
-            echo "::notice::AUTHENTICODE_PFX and AUTHENTICODE_PASSWORD are not set; the Windows executables are published unsigned (README, \"Signing releases\")"
+            echo "::notice::AUTHENTICODE_PFX and AUTHENTICODE_PASSWORD are not set; the Windows executables are published unsigned (docs/RELEASES.md, \"Signing\")"
             exit 0
           fi
           if [ -z "$AUTHENTICODE_PFX" ] || [ -z "$AUTHENTICODE_PASSWORD" ]; then
@@ -170,7 +169,7 @@ jobs:
                 exit 1
               }
             done
-            echo "::notice::the APPLE_* secrets are not set; the macOS executables are signed ad hoc with the hardened runtime and are neither Developer ID signed nor notarised (README, \"Signing releases\")"
+            echo "::notice::the APPLE_* secrets are not set; the macOS executables are signed ad hoc with the hardened runtime and are neither Developer ID signed nor notarised (docs/RELEASES.md, \"Signing\")"
             exit 0
           fi
           if [ "$given" -ne 5 ]; then
