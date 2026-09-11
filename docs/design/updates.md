@@ -6,20 +6,97 @@ and the code later disagree, the code wins and this note is corrected.
 
 ## 1. Decisions
 
-| Question | Decision |
-| --- | --- |
-| What the feature is | `silver update`: one command that finds the newest release, downloads the client for this platform, checks it, and puts it in place of the running one. `silver update --check` says what is available and changes nothing. `silver update --rollback` puts back the binary the last update replaced. Nothing else in the client downloads anything, ever. |
-| Whether it is automatic | No, by default. A check on a timer tells the release host this computer's address, that it runs Silver Messenger, and when it is used — a usage pattern, which is the kind of thing the rest of the client works to withhold. `update_check` is a setting, off unless the user turns it on; on, the client asks once at start and at most once a day, through the same proxy the relay connection uses, and prints one line if something newer exists. It never downloads on its own even then. |
-| What an update proves | That the bytes match the SHA-256 the release API gave for that asset, that they match the `SHA256SUMS` entry published with the release, that the project's signature over `SHA256SUMS` checks out against the key compiled into this client, and that the downloaded binary reports the version that was expected. It does not prove the maintainer approved the release from a machine an attacker does not hold: see section 8. |
-| Where the checksum comes from | The release API (`api.github.com`), which returns a `sha256:` digest for every asset; the bytes come from the asset store, a different origin. A tampered artifact must therefore be matched by a tampered API answer. `SHA256SUMS` is checked too, so the automated path and the by-hand path in `docs/RELEASES.md` agree on the same number. |
-| Signing | The project's own minisign key over `SHA256SUMS`, in the release workflow, from `MINISIGN_SECRET_KEY`. The workflow checks its own signature against the repository's `minisign.pub` before publishing, so a secret that is not the published key fails the release rather than shipping something nobody can check. Signing from a secret is weaker than signing on a machine the maintainer holds and stronger than not signing: the secret store and the release assets are separate systems. Moving the key offline later changes that one step and nothing here, because both are checked against the same `minisign.pub`. |
-| What the client verifies of the signature | All of it, in the client. `minisign.pub` is read at build time by `build.rs` and compiled in, so the key that decides whether a binary may replace the running one comes from the source and not from the network. Verification is Ed25519 over BLAKE2b through `minisign-verify`, which has no dependencies of its own and is small enough to read in one sitting. A client built from a checkout with no `minisign.pub` refuses to update at all rather than accept whatever the release host serves -- in the code from 0.16.0, though this note and the constant's own comment had said so since 0.12.0: before that it skipped the signature, installed the binary, and printed a line afterwards saying no signature had been checked. The other two checks are no substitute, both being answers from the host serving the bytes. The refusal now happens before anything is fetched. |
-| A package-managed install | Refused, with that manager's own command printed instead. A binary a package manager put there belongs to it: replacing it breaks that manager's verification and is undone by its next upgrade. The project publishes a Debian package and a Homebrew formula; the other managers are still detected, because a binary somebody else packaged is even less this client's to replace. Detection is by where the binary sits and what sits beside it (section 4). |
-| Replacing the running binary | Write beside it, sync, then rename over it. On Unix the running process keeps its inode and is unaffected; on Windows the running image cannot be deleted but can be renamed, so the old one is moved aside and removed at the next start. Both leave the previous binary in place for `--rollback`. |
-| Going backwards | Refused unless asked for by version and confirmed. A silent downgrade is how a stale release is re-served to someone who already has the fix, and an older client can meet a newer on-disk format. `--to <version>` names one explicitly. |
-| Restarting | Never on its own. `silver update` runs without the TUI, so nothing is open when the file changes. Inside the TUI, `/update` checks and prints what to do; it does not download, because a client with an unlocked data directory and live sessions is the wrong place to be swapping the file under itself. |
-| What is downloaded | The client alone, not the release archive. The archive carries the relay, two SBOMs, the changelog and the licence — 11.2 MiB where the client is about half that compressed. The release workflow gains a per-target `silver` asset (and `silver-relay`, for the relay's own updates) listed in `SHA256SUMS` beside the archives, which stay as they are. |
-| Delta updates | No. A binary patcher is a parser for attacker-supplied input that writes an executable, which is a great deal of new surface to audit for a few megabytes; the per-binary asset above gets most of the saving for none of the risk. |
+**What the feature is.** `silver update`: one command that finds the
+newest release, downloads the client for this platform, checks it, and
+puts it in place of the running one. `silver update --check` says what
+is available and changes nothing. `silver update --rollback` puts back
+the binary the last update replaced. Nothing else in the client
+downloads anything, ever.
+
+**Whether it is automatic.** No, by default. A check on a timer tells
+the release host this computer's address, that it runs Silver Messenger,
+and when it is used — a usage pattern, which is the kind of thing the
+rest of the client works to withhold. `update_check` is a setting, off
+unless the user turns it on; on, the client asks once at start and at
+most once a day, through the same proxy the relay connection uses, and
+prints one line if something newer exists. It never downloads on its own
+even then.
+
+**What an update proves.** That the bytes match the SHA-256 the release
+API gave for that asset, that they match the `SHA256SUMS` entry
+published with the release, that the project's signature over
+`SHA256SUMS` checks out against the key compiled into this client, and
+that the downloaded binary reports the version that was expected. It
+does not prove the maintainer approved the release from a machine an
+attacker does not hold: see section 8.
+
+**Where the checksum comes from.** The release API (`api.github.com`),
+which returns a `sha256:` digest for every asset; the bytes come from
+the asset store, a different origin. A tampered artifact must therefore
+be matched by a tampered API answer. `SHA256SUMS` is checked too, so the
+automated path and the by-hand path in `docs/RELEASES.md` agree on the
+same number.
+
+**Signing.** The project's own minisign key over `SHA256SUMS`, in the
+release workflow, from `MINISIGN_SECRET_KEY`. The workflow checks its
+own signature against the repository's `minisign.pub` before publishing,
+so a secret that is not the published key fails the release rather than
+shipping something nobody can check. Signing from a secret is weaker
+than signing on a machine the maintainer holds and stronger than not
+signing: the secret store and the release assets are separate systems.
+Moving the key offline later changes that one step and nothing here,
+because both are checked against the same `minisign.pub`.
+
+**What the client verifies of the signature.** All of it, in the client.
+`minisign.pub` is read at build time by `build.rs` and compiled in, so
+the key that decides whether a binary may replace the running one comes
+from the source and not from the network. Verification is Ed25519 over
+BLAKE2b through `minisign-verify`, which has no dependencies of its own
+and is small enough to read in one sitting. A client built from a
+checkout with no `minisign.pub` refuses to update at all rather than
+accept whatever the release host serves -- in the code from 0.16.0,
+though this note and the constant's own comment had said so since
+0.12.0: before that it skipped the signature, installed the binary, and
+printed a line afterwards saying no signature had been checked. The
+other two checks are no substitute, both being answers from the host
+serving the bytes. The refusal now happens before anything is fetched.
+
+**A package-managed install.** Refused, with that manager's own command
+printed instead. A binary a package manager put there belongs to it:
+replacing it breaks that manager's verification and is undone by its
+next upgrade. The project publishes a Debian package and a Homebrew
+formula; the other managers are still detected, because a binary
+somebody else packaged is even less this client's to replace. Detection
+is by where the binary sits and what sits beside it (section 4).
+
+**Replacing the running binary.** Write beside it, sync, then rename
+over it. On Unix the running process keeps its inode and is unaffected;
+on Windows the running image cannot be deleted but can be renamed, so
+the old one is moved aside and removed at the next start. Both leave the
+previous binary in place for `--rollback`.
+
+**Going backwards.** Refused unless asked for by version and confirmed.
+A silent downgrade is how a stale release is re-served to someone who
+already has the fix, and an older client can meet a newer on-disk
+format. `--to <version>` names one explicitly.
+
+**Restarting.** Never on its own. `silver update` runs without the TUI,
+so nothing is open when the file changes. Inside the TUI, `/update`
+checks and prints what to do; it does not download, because a client
+with an unlocked data directory and live sessions is the wrong place to
+be swapping the file under itself.
+
+**What is downloaded.** The client alone, not the release archive. The
+archive carries the relay, two SBOMs, the changelog and the licence —
+11.2 MiB where the client is about half that compressed. The release
+workflow gains a per-target `silver` asset (and `silver-relay`, for the
+relay's own updates) listed in `SHA256SUMS` beside the archives, which
+stay as they are.
+
+**Delta updates.** No. A binary patcher is a parser for
+attacker-supplied input that writes an executable, which is a great deal
+of new surface to audit for a few megabytes; the per-binary asset above
+gets most of the saving for none of the risk.
 
 ## 2. Goals and non-goals
 
@@ -232,11 +309,18 @@ release host, as `tests/update.rs` already does for the check:
   all: its swap renames the target away and renames the replacement in,
   and between those two the name is genuinely absent. That window cannot
   be closed — see `install.rs`, which makes it as small and as
-  recoverable as it can be instead. Until 0.16.0 this section claimed the
-  kill test existed and it did not; the September 2026 review found that
-  (I-1), and the claim now describes tests that are there.
+  recoverable as it can be instead.
 
 In `tests/tui`: `/update` prints the three lines and downloads nothing.
 
 On Windows, in CI: the rename-aside path, and the deletion of a leftover
 `silver.exe.old` at the next start.
+
+## 11. Corrections
+
+* Until 0.16.0 section 10 claimed the swap was tested under a kill and
+  it was not; the second review found that (I-1), and the two tests it
+  describes now exist.
+* The daily check's setting is `update_check` in `config.json`; the
+  note first called it `update-check` and named a `/set` command that
+  was never built.

@@ -151,7 +151,7 @@ def check(rel, protocol_sections, items, problems):
                     problems.append(f"{where}: {named[-1]} names no document")
                     continue
                 known = sections_of(target)
-            elif re.search(r"protocol", context, re.I):
+            elif re.search(r"protocol", before[-40:], re.I) or re.match(r"\s*of (?:the )?protocol", after, re.I):
                 known = protocol_sections
             elif own_sections:
                 known = own_sections

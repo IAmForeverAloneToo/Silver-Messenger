@@ -8,20 +8,51 @@ disagree, the code and PROTOCOL.md win and this note is corrected.
 
 ## 1. Decisions
 
-| Question | Decision |
-| --- | --- |
-| Protocol | MLS, RFC 9420, through OpenMLS 0.9. |
-| One-to-one conversations | Stay on the Double Ratchet (roadmap item 41). A group is anything created with `/group new`, whatever its size. |
-| Ciphersuite | `MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519` from draft-ietf-mls-pq-ciphersuites: X-Wing (ML-KEM-768 + X25519) HPKE, AES-128-GCM, SHA-256, Ed25519 signatures. The code point is the draft's provisional one (0x004F in OpenMLS); it moves with the RFC, by re-initialising groups. No other suite is offered. |
-| Credentials | `BasicCredential` whose identity is the 32-byte user id; the leaf signature key is the identity key itself. Item 48 puts per-device keys in the same slot. |
-| Delivery | Client fan-out: one sealed envelope per member through the member's existing mailbox, the relay learns no membership list. Commit ordering by a small relay-side epoch sequencer that holds one counter and one hash per group and cannot read anything. |
-| Membership | Admins add and remove; anyone may ask to leave; the creator is the first admin and admins appoint admins. The rules are checked by every member on every commit; a commit that breaks them is refused and the group is declared broken rather than let an intruder in. |
-| Invites | Links (and QR codes) carrying the group id, one admin's id and an invite secret; a join request goes to that admin, who adds the joiner. Rotating the secret voids old links. |
-| Oversize messages | An MLS message that does not fit the envelope travels as an encrypted blob whose key is in the envelope, with the file machinery of section 7.5. |
-| Sealed sender | Kept: group envelopes are sealed to each member with no sealed-layer signature, the way v4 bodies are; the sender is authenticated inside MLS by its leaf signature. |
-| Deniability | Not for groups: MLS signs every message with the sender's leaf key. Documented, and the reason one-to-one stays on the ratchet. |
-| Receipts, cover traffic, typing | Not in groups. |
-| Relay schema | Version 3: two new tables, key packages and group sequencer entries. |
+**Protocol.** MLS, RFC 9420, through OpenMLS 0.9.
+
+**One-to-one conversations.** Stay on the Double Ratchet (roadmap item
+41). A group is anything created with `/group new`, whatever its size.
+
+**Ciphersuite.** `MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519` from
+draft-ietf-mls-pq-ciphersuites: X-Wing (ML-KEM-768 + X25519) HPKE,
+AES-128-GCM, SHA-256, Ed25519 signatures. The code point is the draft's
+provisional one (0x004F in OpenMLS); it moves with the RFC, by
+re-initialising groups. No other suite is offered.
+
+**Credentials.** `BasicCredential` whose identity is the 32-byte user
+id; the leaf signature key is the identity key itself. Item 48 puts
+per-device keys in the same slot.
+
+**Delivery.** Client fan-out: one sealed envelope per member through the
+member's existing mailbox, the relay learns no membership list. Commit
+ordering by a small relay-side epoch sequencer that holds one counter
+and one hash per group and cannot read anything.
+
+**Membership.** Admins add and remove; anyone may ask to leave; the
+creator is the first admin and admins appoint admins. The rules are
+checked by every member on every commit; a commit that breaks them is
+refused and the group is declared broken rather than let an intruder in.
+
+**Invites.** Links (and QR codes) carrying the group id, one admin's id
+and an invite secret; a join request goes to that admin, who adds the
+joiner. Rotating the secret voids old links.
+
+**Oversize messages.** An MLS message that does not fit the envelope
+travels as an encrypted blob whose key is in the envelope, with the file
+machinery of section 7.5.
+
+**Sealed sender.** Kept: group envelopes are sealed to each member with
+no sealed-layer signature, the way v4 bodies are; the sender is
+authenticated inside MLS by its leaf signature.
+
+**Deniability.** Not for groups: MLS signs every message with the
+sender's leaf key. Documented, and the reason one-to-one stays on the
+ratchet.
+
+**Receipts, cover traffic, typing.** Not in groups.
+
+**Relay schema.** Version 3: two new tables, key packages and group
+sequencer entries.
 
 ## 2. Goals and non-goals
 
@@ -383,9 +414,7 @@ takes the sequencer step, merges, fans the commit out to the existing
 members and seals the Welcome to the new one. If the sequencer says
 `stale`, it discards the pending commit, processes what arrived, and
 reports that the group moved on; the user's next try builds on the new
-epoch. (The note first said the client retries once by itself; the
-shipped client leaves the retry to the user, which keeps every commit a
-thing the user asked for.)
+epoch.
 
 The invitee's client verifies the Welcome (the sender's credential and
 that it is an admin's, every member's leaf against its identity, the
@@ -480,9 +509,7 @@ member can therefore wedge a group but cannot get an intruder's keys
 accepted. Recovery is a new group made by an admin (`/group new` and the
 honest members added again; the broken one is forgotten with `/group
 forget`). Confidentiality over availability, and the threat model says a
-malicious member is outside what MLS protects against anyway. (A
-`/group recreate` shorthand was planned and not built: it is two
-commands, and doing it by hand makes the admin choose the members.)
+malicious member is outside what MLS protects against anyway.
 
 ### 7.7 Contacts, names, verification
 
@@ -552,9 +579,7 @@ invitation's entry, or by number from anywhere, since 0.14.0), `/alias`
 for a group's local name; the file commands
 work in a group pane; `/copy`, `/search`, selection and everything in
 the message pane work unchanged. The help overlay and the status line
-learn the group commands from the table as they do today. (`/mute` and
-`/group recreate` from the first draft were not built; the record keeps
-a `muted` flag for when muting is asked for.)
+learn the group commands from the table as they do today.
 
 ## 9. Relay
 
@@ -755,7 +780,26 @@ A throwaway program against OpenMLS 0.9.0 with the
   fetcher the credential, the signature key and the leaf extensions to
   check against the identity, which is what 6.1 needs.
 
-Settled by the implementation: the storage is OpenMLS's memory storage
-written whole (section 8.1), not a redb provider; the write cost is
-acceptable at this scale and the provider is the optimisation to make if
-it stops being so.
+## 16. Corrections
+
+Made when the code landed (0.9.0) and by later releases:
+
+* Section 7.2 first had the client retry a lost sequencer race once by
+  itself; the shipped client leaves the retry to the user, which keeps
+  every commit a thing the user asked for.
+* A `/group recreate` shorthand (section 7.6) was planned and not
+  built: it is two commands, and doing it by hand makes the admin
+  choose the members. `/mute` (section 8.3) was not built either; the
+  record keeps a `muted` flag for when muting is asked for.
+* The storage (section 8.1) is OpenMLS's memory storage written whole,
+  not a redb provider; the write cost is acceptable at this scale and
+  the provider is the optimisation to make if it stops being so.
+* An idle sequencer entry is retired rather than dropped, and only a
+  member of the group at the epoch it died at can raise it (0.11.0,
+  section 5.2; protocol section 13.5 has the rule).
+* A member whose sealing key changes refreshes its leaf rather than
+  being re-added as a new identity (0.18.0, section 4.2;
+  [dh-rotation.md](dh-rotation.md) section 6).
+* Invitations from strangers wait as entries of the chat list rather
+  than in a Requests pane (0.14.0, section 7.2;
+  [requests.md](requests.md)).

@@ -1,22 +1,94 @@
 # Design note: distribution
 
 Roadmap item 53. Written before the code, as the record of the decisions;
-what ships is described in README.md when the code lands. Where this note
-and the code later disagree, the code wins and this note is corrected.
+what ships is described in README.md and `docs/RELEASES.md` when the
+code lands. Where this note and the code later disagree, the code wins
+and this note is corrected.
 
 ## 1. Decisions
 
-| Question | Decision |
-| --- | --- |
-| What every channel installs | The binaries the release workflow already builds, verifies and attests, by checksum. No channel builds its own. A package is a wrapper around bytes that `SHA256SUMS` and the provenance attestation already cover, so what `brew` or `apt` installs is what a person taking the file from the release page by hand would get. |
-| Windows | Authenticode over both executables, in the build job, with `signtool` and a certificate from the repository's secrets (`AUTHENTICODE_PFX`, base64 of the PKCS#12, and `AUTHENTICODE_PASSWORD`), timestamped. Without the secrets the step says so and the release is published unsigned; nothing else changes. The certificate is the maintainer's to obtain (a code-signing certificate from a CA, or a free one for open-source projects from SignPath). |
-| macOS | `codesign` with a Developer ID Application identity from the secrets (`APPLE_CERTIFICATE_P12`, `APPLE_CERTIFICATE_PASSWORD`), hardened runtime and a timestamp, then `notarytool submit --wait` under `APPLE_ID`, `APPLE_TEAM_ID` and `APPLE_APP_PASSWORD`. A bare executable takes a signature but not a stapled ticket (stapling is for bundles, disk images and installer packages), so Gatekeeper checks the ticket online the first time; that is how every command-line tool distributed outside the App Store behaves. Without the secrets the step says so and README keeps the `xattr -d com.apple.quarantine` instruction. The Apple Developer Program membership is the maintainer's to take out. |
-| Reproducibility and signatures | A signature is bytes added to the executable, so a signed release differs from a rebuild by exactly the signature. The archives stay the reproducible artefact: CI compares unsigned builds as before, and README says how to compare a signed download (strip the signature with `osslsigncode remove-signature` or `codesign --remove-signature`, then compare). The Linux archives, the Debian packages and the container image carry no embedded signature and reproduce byte for byte. |
-| Removed | The AUR package and the winget manifests were both written, linted and regenerated at every release, and neither was ever installable: each needed a push to somebody else's index that was never made (section 6). Removed in 0.12.2. An Arch or Windows user takes the one file for their platform from the release page. |
-| Homebrew | A tap in this repository: `HomebrewFormula/silver-messenger.rb`, which Homebrew finds when the repository is tapped by URL (`brew tap iamforeveralonetoo/silver https://github.com/IAmForeverAloneToo/Silver-Messenger`). The formula points at the release binaries for macOS (Apple Silicon and Intel) and Linux (x86_64 and aarch64) with their checksums -- the client as its download, the relay as a resource beside it, since a release carries the two programs as two files -- and tests `silver --version`. A separate `homebrew-silver` repository would be the usual shape; one repository is enough for a tap, keeps the formula next to the code it installs, and needs no second set of permissions. |
-| Debian and Ubuntu | A `.deb` per architecture (`amd64`, `arm64`) built in the release workflow from the Linux binaries with `dpkg-deb`, attached to the release beside them, in `SHA256SUMS` and attested like everything else. It installs `/usr/bin/silver`, `/usr/bin/silver-relay`, the relay's unit in `/lib/systemd/system/` with its path rewritten (installed, not enabled), the documents and the copyright file; its `postinst` creates the relay's system user and runs `systemctl daemon-reload` where systemd is present; `prerm` stops and disables the unit. The package depends on nothing: the binaries are static. No repository is run; the file is installed with `apt install ./silver-messenger_<version>_<arch>.deb`, which resolves nothing and checks nothing beyond the file, so the checksum and the attestation are the person's check, as for the archives. |
-| Keeping the packaging current | The checksums change with every release, so `packaging/update.sh <version>` reads the release's `SHA256SUMS`, checks its signature, and rewrites the formula; the result is committed after the release, by hand, as the packaging commit for that version. Nothing in the workflows commits to the repository. |
-| Checking the packaging in CI | The Debian build script runs on every push against a static debug build (the musl target, stripped, so lintian sees the shape the release has), the package is linted with errors fatal and installed in a Debian container where both binaries run; the formula is checked with `brew audit --strict` and `brew style` on the macOS runner, with this checkout tapped as a person would tap it, then installed from the release it names and tested. The signing and notarising steps cannot be checked without the secrets and are marked unchecked until the first signed release. (Corrected when the code landed: the formula is checked against the release rather than against the run's artefacts.) |
+**What every channel installs.** The binaries the release workflow
+already builds, verifies and attests, by checksum. No channel builds its
+own. A package is a wrapper around bytes that `SHA256SUMS` and the
+provenance attestation already cover, so what `brew` or `apt` installs
+is what a person taking the file from the release page by hand would
+get.
+
+**Windows.** Authenticode over both executables, in the build job, with
+`signtool` and a certificate from the repository's secrets
+(`AUTHENTICODE_PFX`, base64 of the PKCS#12, and
+`AUTHENTICODE_PASSWORD`), timestamped. Without the secrets the step says
+so and the release is published unsigned; nothing else changes. The
+certificate is the maintainer's to obtain (a code-signing certificate
+from a CA, or a free one for open-source projects from SignPath).
+
+**macOS.** `codesign` with a Developer ID Application identity from the
+secrets (`APPLE_CERTIFICATE_P12`, `APPLE_CERTIFICATE_PASSWORD`),
+hardened runtime and a timestamp, then `notarytool submit --wait` under
+`APPLE_ID`, `APPLE_TEAM_ID` and `APPLE_APP_PASSWORD`. A bare executable
+takes a signature but not a stapled ticket (stapling is for bundles,
+disk images and installer packages), so Gatekeeper checks the ticket
+online the first time; that is how every command-line tool distributed
+outside the App Store behaves. Without the secrets the step says so and
+README keeps the `xattr -d com.apple.quarantine` instruction. The Apple
+Developer Program membership is the maintainer's to take out.
+
+**Reproducibility and signatures.** A signature is bytes added to the
+executable, so a signed release differs from a rebuild by exactly the
+signature. The archives stay the reproducible artefact: CI compares
+unsigned builds as before, and README says how to compare a signed
+download (strip the signature with `osslsigncode remove-signature` or
+`codesign --remove-signature`, then compare). The Linux archives, the
+Debian packages and the container image carry no embedded signature and
+reproduce byte for byte.
+
+**Removed.** The AUR package and the winget manifests were both written,
+linted and regenerated at every release, and neither was ever
+installable: each needed a push to somebody else's index that was never
+made (section 6). Removed in 0.12.2. An Arch or Windows user takes the
+one file for their platform from the release page.
+
+**Homebrew.** A tap in this repository:
+`HomebrewFormula/silver-messenger.rb`, which Homebrew finds when the
+repository is tapped by URL (`brew tap iamforeveralonetoo/silver
+https://github.com/IAmForeverAloneToo/Silver-Messenger`). The formula
+points at the release binaries for macOS (Apple Silicon and Intel) and
+Linux (x86_64 and aarch64) with their checksums -- the client as its
+download, the relay as a resource beside it, since a release carries the
+two programs as two files -- and tests `silver --version`. A separate
+`homebrew-silver` repository would be the usual shape; one repository is
+enough for a tap, keeps the formula next to the code it installs, and
+needs no second set of permissions.
+
+**Debian and Ubuntu.** A `.deb` per architecture (`amd64`, `arm64`)
+built in the release workflow from the Linux binaries with `dpkg-deb`,
+attached to the release beside them, in `SHA256SUMS` and attested like
+everything else. It installs `/usr/bin/silver`, `/usr/bin/silver-relay`,
+the relay's unit in `/lib/systemd/system/` with its path rewritten
+(installed, not enabled), the documents and the copyright file; its
+`postinst` creates the relay's system user and runs `systemctl
+daemon-reload` where systemd is present; `prerm` stops and disables the
+unit. The package depends on nothing: the binaries are static. No
+repository is run; the file is installed with `apt install
+./silver-messenger_<version>_<arch>.deb`, which resolves nothing and
+checks nothing beyond the file, so the checksum and the attestation are
+the person's check, as for the archives.
+
+**Keeping the packaging current.** The checksums change with every
+release, so `packaging/update.sh <version>` reads the release's
+`SHA256SUMS`, checks its signature, and rewrites the formula; the result
+is committed after the release, by hand, as the packaging commit for
+that version. Nothing in the workflows commits to the repository.
+
+**Checking the packaging in CI.** The Debian build script runs on every
+push against a static debug build (the musl target, stripped, so lintian
+sees the shape the release has), the package is linted with errors fatal
+and installed in a Debian container where both binaries run; the formula
+is checked with `brew audit --strict` and `brew style` on the macOS
+runner, with this checkout tapped as a person would tap it, then
+installed from the release it names and tested. The signing and
+notarising steps cannot be checked without the secrets and are marked
+unchecked until the first signed release.
 
 ## 2. Goals and non-goals
 
@@ -139,24 +211,23 @@ warning; the `--help` of each is the reference for now.
 
 ## 6. Status
 
-As of 0.18.0:
+As of the latest release:
 
 | Channel | State |
 | --- | --- |
-| Debian package | `silver-messenger_0.18.0_amd64.deb` and `_arm64.deb` are on the release page, built by the release workflow from the Linux archives. The amd64 package was downloaded here for 0.10.0, matched `SHA256SUMS`, installed with `dpkg` on this machine (both binaries reported the release), and purged cleanly; `lintian` reports no errors. Not yet installed on a Debian machine with systemd running. |
-| Homebrew tap | Live for 0.18.0: the formula in this repository names the 0.18.0 binaries -- the client as its download, the relay as a resource -- and CI taps the repository on macOS, audits the formula, installs it from the release and runs its test on every push. Not yet tried by hand on a Mac. |
-| Release page | Fourteen files from 0.12.2: the client and the relay for each of the five targets, the two Debian packages, and `SHA256SUMS` with its signature. The notes lead with which file to take. Checked against the published 0.18.0: fourteen assets, every one of them in the notes' table, `SHA256SUMS` verified against `minisign.pub` before the formula was written from it, and all five build jobs finished in the one run. The notes' checking section has said since 0.14.0 where the `BUILD-INFO.txt` and the SBOMs are -- inside each target's archive among the workflow run's artifacts -- which it had named without saying since the page was trimmed in 0.12.2. The 0.14.0 build also showed what a release run costs when GitHub's artifact storage refuses one upload: the macOS Intel job failed at `FinalizeArtifact` with a 403 from an intermediary, after its binaries had been built, and re-running the failed job alone finished the release from the four artifacts the other jobs had already stored. |
-| AUR and winget | Removed in 0.12.2. Both were written, linted in CI and regenerated at every release, and neither was ever installable: the AUR needs a push to `aur.archlinux.org` from the maintainer's account, and winget needs a pull request to `microsoft/winget-pkgs` per release. Neither had been done, so both were upkeep producing nothing. An Arch or Windows user takes the one file for their platform from the release page, which is the whole client. If either is ever wanted, the release page carries what a manifest would point at, and writing one again is an afternoon. |
-| Authenticode | No certificate in the secrets; the 0.12.1 run printed the notice and the Windows executables went out unsigned. |
-| Notarisation | No Apple membership in the secrets; the 0.12.1 run printed the notice and the macOS executables went out unsigned. |
-| minisign | Set up as of 0.12.0, and every release since is signed: `minisign.pub` is at the repository root, `MINISIGN_SECRET_KEY` is in the repository's secrets, and the "Signing key check" workflow has confirmed the secret signs and that the published key verifies what it signed. Releases up to 0.11.0 carry `SHA256SUMS` unsigned. `packaging/update.sh` checks the signature before it reads a checksum, so the packages cannot be built from a list nobody signed. Section 3 says what this way is worth against the offline one. |
-| Installer | `deploy/install.sh` is in the repository and read before it is run; from 0.12.2 it is not a release asset, because a release page carries the program and nothing else. What replaced it as the checkable path is better: the relay is one file on the page, covered by a `SHA256SUMS` the project signs, so an operator verifies a signature and a checksum rather than reading a script (`docs/OPERATING.md`, "Installing"). |
+| Debian package | On the release page for amd64 and arm64, built by the release workflow from the Linux binaries and installed by CI in a Debian container; not yet installed on a Debian machine with systemd running |
+| Homebrew tap | Live: the formula names the latest release's binaries, and CI taps, audits, installs and tests it on macOS on every push; not yet tried by hand on a Mac |
+| Release page | Fourteen files (`docs/RELEASES.md`): the client and the relay per target, the two packages, `SHA256SUMS` and its signature; the archives with the SBOMs and the build record are artifacts of the workflow run |
+| AUR and winget | Removed in 0.12.2: each needed a push to somebody else's index that never happened. An Arch or Windows user takes the one file for their platform |
+| Authenticode | No certificate in the secrets; the Windows executables go out unsigned, with a notice in the run |
+| Notarisation | No Apple membership in the secrets; the macOS executables go out signed ad hoc with the hardened runtime, neither Developer ID signed nor notarised, with a notice in the run |
+| minisign | Every release since 0.12.0 is signed from the repository secret and checked against `minisign.pub` before publishing; `packaging/update.sh` checks the signature before reading a checksum |
+| Installer | `deploy/install.sh` is in the repository, read before it is run, and not a release asset since 0.12.2; the release binary under the signed `SHA256SUMS` is the better-checked path (`docs/OPERATING.md`, "Installing") |
 
-From 0.12.2 the packaging archive rides on the release workflow run
-rather than the release page: it holds the formula `packaging/update.sh`
-wrote from that release's checksums, which is what the packaging commit
-after a release copies in. It is a maintainer's working file, and a
-reader of the release page has no use for it.
+The packaging archive rides on the release workflow run rather than the
+release page: it holds the formula `packaging/update.sh` wrote from that
+release's checksums, which the packaging commit after a release copies
+in. It is a maintainer's working file.
 
 ## 7. Implementation order
 
@@ -168,3 +239,12 @@ reader of the release page has no use for it.
 4. README (installing per platform; verifying a signed download),
    OPERATING.md (the relay from the package), CHANGELOG, ROADMAP; this
    note's corrections and section 6.
+
+## 8. Corrections
+
+* "Checking the packaging in CI" first had the Homebrew formula checked
+  against the run's own artefacts; it is checked against the release it
+  names, since that is what a person gets.
+* A PKGBUILD, its `.SRCINFO` and winget manifests were written in step
+  2 and removed again in 0.12.2, for the reason the "Removed" decision
+  gives.

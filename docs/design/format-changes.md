@@ -63,17 +63,6 @@ id. A copy in the plain body already exists for device copies. It becomes
 mandatory: the sender mints the id first, puts it in the body and on the
 envelope, and a recipient takes it from the body.
 
-**Corrected while writing it.** This paragraph used to end "and is
-compared against the envelope id, and a mismatch is refused", following
-the report. That is wrong for this program, and would have broken
-something that works: a copy of a message to one of the sender's *own*
-devices carries the original message's id in its body and a fresh id on
-its envelope, deliberately, because the envelope id is what the relay
-de-duplicates on. Those two are meant to differ. The comparison is also
-not needed — once the body's copy is the one that counts, what the
-envelope says has no effect, which is a stronger position than checking
-that it agrees.
-
 **The device counter-signature.** A device certificate is signed by the
 account, which proves the account meant to enroll *a* device; it does not
 prove the device agreed. The device signs the certificate too, so an
@@ -438,3 +427,21 @@ state the gap was meant to protect. What the gap would have bought is a
 window in which a 0.16.0 client and a 0.14.0 one still talked; with no
 window, they do not. The changelog says so in as many words, which is
 what section 4 required of it.
+
+## 7. Corrections
+
+* Section 2's SM-P-14 paragraph first ended "and is compared against
+  the envelope id, and a mismatch is refused", following the report.
+  That would have broken device copies: a copy of a message to one of
+  the sender's own devices carries the original message's id in its
+  body and a fresh id on its envelope, deliberately, because the
+  envelope id is what the relay de-duplicates on. The two are meant to
+  differ, and once the body's id is the one that counts, what the
+  envelope says has no effect, which is stronger than checking that
+  they agree.
+* Section 1 said the generation counters are "kept in the vault";
+  section 5.2 says where they actually live and why `vault.json`, which
+  is not encrypted, holds only the generation of `state`.
+* Section 4 put a release between the optional and the required wire
+  fields; section 6.5 records the decision to cut 0.16.0 and 0.17.0 the
+  same day.

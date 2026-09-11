@@ -13,15 +13,67 @@ code wins and this note is corrected.
 
 ## 1. Decisions
 
-| Question | Decision |
-| --- | --- |
-| How the findings were checked | Every finding was traced in the source at `05e1168` before anything was changed: the cited lines, the callers, the tests that enshrine the behaviour, and the vendored crates where a claim rested on one (rustls and webpki for the pin, hyper and axum-server for the missing timer, OpenMLS for the commit builder and the sender ratchet, bs58 for the decoder, which was also timed). The verdicts are in section 3: 70 findings confirmed as written, 6 confirmed in part with the difference stated, none refuted. Three findings turned out worse than reported and one new problem was found on the way; both are recorded. |
-| What ships first | The Critical and the ten Highs, with the Mediums that share their code paths, as the patch release 0.10.1: the report's section 13.1 as verified. A patch release changes no wire format: every fix in it is a stricter reader, a stricter relay, or a client that refuses what the specification already said it refuses. A 0.10.1 client works with a 0.10.0 relay and the other way round, with the exceptions section 5 lists. |
-| What ships next | The remaining Mediums and the Lows as 0.11.0, the report's section 13.2 as verified, each with its own tests; where one looks like it needs a wire change it goes in as an optional field or a rule that honest 0.10.x peers never trip. In the event the sequencer fix needed neither (SM-R-08): the values a client already sends to re-create a lost entry are exactly the ones a headstone asks for. |
-| What waited for a format change | Four of the report's section 13.3: message ids inside the authenticated body (SM-P-14), rollback protection for the key-bearing files (SM-C-24), the identity-key binding of the v4 handshake (SM-P-04), HMAC-named history files (SM-C-25). Each is a protocol or on-disk format change, and each got its design note first ([format-changes.md](format-changes.md)); three shipped, SM-C-24 and SM-C-25 in 0.16.0 and SM-P-14 in 0.16.0 and 0.17.0, and SM-P-04 turned out to be a decision rather than a change and stays open, with the two properties it trades set side by side in that note. Roadmap item 57. The rest of that section's items are done: the device counter-signature's root cause (SM-R-01) went out in 0.10.1, the length-prefixed ratchet AAD (SM-P-06), the per-epoch sequence window (SM-C-15), data-key rotation (SM-C-23) and continuous fuzzing (SM-S-08) in 0.11.0. |
-| Where a fix the report suggests is not taken | The note says so and why (section 3). Three matter: refusing at `publish` a device list that names an id with a plain bundle would refuse every 0.9.0 and 0.10.0 primary, whose linking flow publishes the list before the device claims the account; a first-frame size cap on the relay would refuse legitimate anonymous first frames; a transcript signature in the v4 handshake is not deniable, contrary to the report's aside. |
-| How the relay is protected meanwhile | The test relay runs the fixed relay from the day the relay fixes land on `main`, upgraded by hand over the maintainer's own connection to it, before the release is cut. Other operators upgrade with the release; the changelog's `Security` section says why. |
-| Disclosure | The findings are the maintainer's to publish. The report goes into the repository whole with the patch release, this note beside it, and the changelog's `Security` section says what each finding was and what was done about it. No separate security advisories: section 6 says why, and carries the affected-version table an advisory would have held. |
+**How the findings were checked.** Every finding was traced in the
+source at `05e1168` before anything was changed: the cited lines, the
+callers, the tests that enshrine the behaviour, and the vendored crates
+where a claim rested on one (rustls and webpki for the pin, hyper and
+axum-server for the missing timer, OpenMLS for the commit builder and
+the sender ratchet, bs58 for the decoder, which was also timed). The
+verdicts are in section 3: 70 findings confirmed as written, 6 confirmed
+in part with the difference stated, none refuted. Three findings turned
+out worse than reported and one new problem was found on the way; both
+are recorded.
+
+**What ships first.** The Critical and the ten Highs, with the Mediums
+that share their code paths, as the patch release 0.10.1: the report's
+section 13.1 as verified. A patch release changes no wire format: every
+fix in it is a stricter reader, a stricter relay, or a client that
+refuses what the specification already said it refuses. A 0.10.1 client
+works with a 0.10.0 relay and the other way round, with the exceptions
+section 5 lists.
+
+**What ships next.** The remaining Mediums and the Lows as 0.11.0, the
+report's section 13.2 as verified, each with its own tests; where one
+looks like it needs a wire change it goes in as an optional field or a
+rule that honest 0.10.x peers never trip. In the event the sequencer fix
+needed neither (SM-R-08): the values a client already sends to re-create
+a lost entry are exactly the ones a headstone asks for.
+
+**What waited for a format change.** Four of the report's section 13.3:
+message ids inside the authenticated body (SM-P-14), rollback protection
+for the key-bearing files (SM-C-24), the identity-key binding of the v4
+handshake (SM-P-04), HMAC-named history files (SM-C-25). Each is a
+protocol or on-disk format change, and each got its design note first
+([format-changes.md](format-changes.md)); three shipped, SM-C-24 and
+SM-C-25 in 0.16.0 and SM-P-14 in 0.16.0 and 0.17.0, and SM-P-04 turned
+out to be a decision rather than a change, made in 0.18.0: v4 stays
+deniable and the Diffie–Hellman key becomes replaceable under the same
+identity (`/rekey`, [dh-rotation.md](dh-rotation.md)). Roadmap item 57. The
+rest of that section's items are done: the device counter-signature's
+root cause (SM-R-01) went out in 0.10.1, the length-prefixed ratchet AAD
+(SM-P-06), the per-epoch sequence window (SM-C-15), data-key rotation
+(SM-C-23) and continuous fuzzing (SM-S-08) in 0.11.0.
+
+**Where a fix the report suggests is not taken.** The note says so and
+why (section 3). Three matter: refusing at `publish` a device list that
+names an id with a plain bundle would refuse every 0.9.0 and 0.10.0
+primary, whose linking flow publishes the list before the device claims
+the account; a first-frame size cap on the relay would refuse legitimate
+anonymous first frames; a transcript signature in the v4 handshake is
+not deniable, contrary to the report's aside.
+
+**How the relay is protected meanwhile.** The test relay runs the fixed
+relay from the day the relay fixes land on `main`, upgraded by hand over
+the maintainer's own connection to it, before the release is cut. Other
+operators upgrade with the release; the changelog's `Security` section
+says why.
+
+**Disclosure.** The findings are the maintainer's to publish. The report
+goes into the repository whole with the patch release, this note beside
+it, and the changelog's `Security` section says what each finding was
+and what was done about it. No separate security advisories: section 6
+says why, and carries the affected-version table an advisory would have
+held.
 
 ## 2. What the audit got right about the code, in one paragraph
 
@@ -52,7 +104,7 @@ closes it), **kept** (a design choice the note defends).
 | SM-P-01 | High | P: the relay-served path is narrower than stated (a lookup of contact A drops a statement naming another account; it passes only on a lookup of the device itself), and the effect is not a permanent severance but a repeatable loss: every session with the device dropped, so its messages in flight fail, and one of its one-time prekeys burned per repeat. | `DeviceRevocation::verify_for(account)`; the client applies a pushed statement only when it knows the device under that account, and a served one only when the account matches; §14.2 reworded. | 0.10.1 |
 | SM-P-02 | High | W: the client is exposed too, through a hostile relay's `lookup_result` and `deliver`, with tungstenite's 64 MiB default in place of the relay's 128 KiB. | Length cap of 44 characters before decoding in `UserId` and `GroupId`, 22 for link secrets; a client-side frame cap (SM-C-17). The report's first-frame cap is not taken: an anonymous connection's first frame is legitimately a `send` or a `blob_put`. | 0.10.1 |
 | SM-P-03 | Medium | C. Hiding `devices` has little effect (fan-out reads the signed list); the v3 downgrade and the missing `groups` are the impact. | `KeyBundle::verify` refuses a capability name outside `[a-z0-9_]`, which makes the join injective without a wire change; §2 states the rule. The length-prefixed form waits for a domain bump at 1.0 (every 0.10.x peer would fail to verify bundles otherwise). | 0.11.0 |
-| SM-P-04 | Medium | C. v4 only, towards `pq_ratchet` peers. | Documentation now: the X25519 key is an impersonation key from v4 on, said in the threat model's assets table and its compromised-key section, and in §4.2.1. A protocol fix is a design note for 1.0; the report's transcript signature would not be deniable. | doc, 1.0 |
+| SM-P-04 | Medium | C. v4 only, towards `pq_ratchet` peers. | Documented first: the X25519 key is an impersonation key from v4 on, said in the threat model's assets table and its compromised-key section, and in §4.2.1. Then decided the other way from the report, whose transcript signature would not be deniable: v4 stays deniable, the key is replaceable under the same identity (`/rekey`), and a responder takes a peer-started session on a key that is not the pinned one only once the relay confirms it is the published one ([dh-rotation.md](dh-rotation.md)). | doc, 0.18.0 |
 | SM-P-05 | Medium | W: the same ordering bug (merge, then frame, then seal) fires on any sealing failure, and one is attacker-chosen: a member whose leaf carries a low-order X25519 seal key, which every reader accepts and which makes `seal_bytes_to` fail for everyone. | Sender threshold set to what encodes for every kind (24 360 bytes), the reader's limit unchanged; envelopes framed and sealed before the commit is merged and before the sequencer is asked; low-order seal keys refused at leaf verification. | 0.11.0 |
 | SM-P-06 | Low | C, and the "unable to encapsulate" consequence is not reachable (the trial state is discarded). | Lengths of `kem` and `kem_ct` checked before the AAD is built. | 0.11.0 |
 | SM-P-07 | Low | C. | A re-certification carries a later `created_at_ms`, so the list signature and the leaf change with a rename; §14.1 says what the signature covers. | 0.11.0 |
@@ -195,7 +247,7 @@ this note said 0.10.1 would carry them and was wrong.
 | --- | --- | --- |
 | 0.10.1 | The Critical finding, the ten Highs, and the Mediums sharing their code: SM-R-01, SM-P-01, SM-R-02, SM-C-04, SM-P-02, SM-C-17, SM-C-01, SM-C-02, SM-C-08, SM-R-03 to SM-R-06, SM-C-06, SM-C-03, SM-C-12, SM-G-01, SM-G-02 | Released 6 September 2026, with this note and the report |
 | 0.11.0 | The rest of the Mediums, the Lows, the Informational findings, and the documentation rows of the report's section 12 — 54 of the 76 | Released 7 September 2026 |
-| 0.16.0 and 0.17.0 | Three of the four the report's section 13.3 leaves, each with a design note first ([format-changes.md](format-changes.md)): SM-C-24 and SM-C-25 on disk in 0.16.0; SM-P-14 as an optional field in 0.16.0 and required in 0.17.0, with the device counter-signature the report suggested beside it. The fourth, SM-P-04, is a decision rather than a change — binding the identity key into the v4 handshake costs the deniability v4 exists for — and stays open with the two properties set side by side in that note's section 3. Roadmap item 57 | Released 10 September 2026 |
+| 0.16.0 and 0.17.0 | Three of the four the report's section 13.3 leaves, each with a design note first ([format-changes.md](format-changes.md)): SM-C-24 and SM-C-25 on disk in 0.16.0; SM-P-14 as an optional field in 0.16.0 and required in 0.17.0, with the device counter-signature the report suggested beside it. The fourth, SM-P-04, is a decision rather than a change, since binding the identity key into the v4 handshake costs the deniability v4 exists for; decided in 0.18.0, v4 staying deniable and the key becoming replaceable (`/rekey`, [dh-rotation.md](dh-rotation.md)). Roadmap item 57 | Released 10 September 2026; SM-P-04 settled in 0.18.0 |
 
 No separate security advisories were filed for these. The project has
 one user, its own maintainer, and the report, this note and the

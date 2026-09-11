@@ -1,9 +1,11 @@
-# Replacing the Diffie–Hellman key under the same identity
+# Design note: replacing the Diffie–Hellman key under the same identity
 
-*Design note, September 2026. Written before the code, as
-`docs/design/format-changes.md` section 3 promised: that section put the
-two properties side by side and left the choice. This note records the
-choice and what follows from it.*
+Roadmap item 57, finding SM-P-04. Written before the code, as the record
+of the decisions, and as [format-changes.md](format-changes.md) section
+3 promised: that section put the two properties side by side and left
+the choice, and this note records the choice and what follows from it.
+Where this note and the code later disagree, the code wins and this
+note is corrected.
 
 ## 1. The decision
 

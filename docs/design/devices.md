@@ -8,18 +8,54 @@ disagree, the code and PROTOCOL.md win and this note is corrected.
 
 ## 1. Decisions
 
-| Question | Decision |
-| --- | --- |
-| What a device is | A key pair of its own (Ed25519 and X25519, like an identity's), certified by the identity key. The identity key stays where it was made, on the **primary**; every other device is a **linked device** holding only its own keys and a certificate. |
-| What people see | The user id stays the identity key. Contacts add, verify and message a person; devices are the person's business. The safety number does not change. |
-| Addressing | A device is an identity to the relay: it logs in with its own key, has its own mailbox and its own bundle with its own prekeys. Nothing in the relay's routing changes. The account's bundle lists the devices, signed by the identity key. |
-| Sessions | One Double Ratchet session per (device, device) pair, as Sesame does. A message to a contact is sealed once per device of theirs and once per other device of one's own, so every device of both people has it. |
-| Groups | A device is a leaf. The credential identity is the user id; the leaf signature key is the device key, carried with its certificate in a leaf extension, so members verify a leaf from the tree alone. An identity's devices add and remove that identity's other leaves without being admins. |
-| Linking | The new device prints a link with its device id and a one-time secret; the primary takes the link and answers, through the relay, with the certificate and what the device needs to start, under a key derived from the secret. The identity key never leaves the primary. |
-| Unlinking and compromise | The primary publishes a new device list without the device and a signed device revocation the relay serves and logs; contacts drop their sessions with it; the identity's other devices remove its leaves. The identity survives a linked device's loss. Losing the primary is losing the identity key: the backup restores it. |
-| History | Optional, at link time only: the primary offers a snapshot of history through the blob store, under a key inside the provisioning message. Nothing syncs history afterwards; what happens from then on reaches every device as it happens. |
-| Compatibility | A client from 0.8.0 keeps talking to a person with linked devices: it seals to the account's bundle, which is still the primary's, and the primary forwards to the other devices. Linked devices need a relay on 0.9.0, which keeps the device list in the bundle. |
-| Relay schema | Version 3, the one groups brought (both are new in 0.9.0): device revocations, served and logged like identity revocations. |
+**What a device is.** A key pair of its own (Ed25519 and X25519, like an
+identity's), certified by the identity key. The identity key stays where
+it was made, on the **primary**; every other device is a **linked
+device** holding only its own keys and a certificate.
+
+**What people see.** The user id stays the identity key. Contacts add,
+verify and message a person; devices are the person's business. The
+safety number does not change.
+
+**Addressing.** A device is an identity to the relay: it logs in with
+its own key, has its own mailbox and its own bundle with its own
+prekeys. Nothing in the relay's routing changes. The account's bundle
+lists the devices, signed by the identity key.
+
+**Sessions.** One Double Ratchet session per (device, device) pair, as
+Sesame does. A message to a contact is sealed once per device of theirs
+and once per other device of one's own, so every device of both people
+has it.
+
+**Groups.** A device is a leaf. The credential identity is the user id;
+the leaf signature key is the device key, carried with its certificate
+in a leaf extension, so members verify a leaf from the tree alone. An
+identity's devices add and remove that identity's other leaves without
+being admins.
+
+**Linking.** The new device prints a link with its device id and a
+one-time secret; the primary takes the link and answers, through the
+relay, with the certificate and what the device needs to start, under a
+key derived from the secret. The identity key never leaves the primary.
+
+**Unlinking and compromise.** The primary publishes a new device list
+without the device and a signed device revocation the relay serves and
+logs; contacts drop their sessions with it; the identity's other devices
+remove its leaves. The identity survives a linked device's loss. Losing
+the primary is losing the identity key: the backup restores it.
+
+**History.** Optional, at link time only: the primary offers a snapshot
+of history through the blob store, under a key inside the provisioning
+message. Nothing syncs history afterwards; what happens from then on
+reaches every device as it happens.
+
+**Compatibility.** A client from 0.8.0 keeps talking to a person with
+linked devices: it seals to the account's bundle, which is still the
+primary's, and the primary forwards to the other devices. Linked devices
+need a relay on 0.9.0, which keeps the device list in the bundle.
+
+**Relay schema.** Version 3, the one groups brought (both are new in
+0.9.0): device revocations, served and logged like identity revocations.
 
 ## 2. Goals and non-goals
 
@@ -433,6 +469,7 @@ which says what the device would be given and stops, then `/devices link
 confirm` — see `docs/design/consequential-commands.md` for why the grant
 is named before it is made and why the paste guard sits on the second
 line rather than the first.
+
 The primary makes the certificate with `created_at_ms` now and the
 name from the link or the owner's answer, looks the device up, starts a
 session with it, and sends a **provisioning** message: the certificate,
@@ -441,7 +478,7 @@ device on it) and the revocations issued, and the reference of a
 **snapshot** (7.4), a file on the relay's blob store with the contacts
 (aliases, verified marks, pinned bundles, file settings, the revoked
 mark), the blocked ids, the groups (ids, names, aliases) the account is
-in, and the recent history; the whole body is encrypted once more under
+in, and the recent history. The whole body is encrypted once more under
 `HKDF-SHA256(secret, "silver-messenger/v5/link")` before it goes into
 the session, so that only the device that printed the link reads it,
 whoever else was handed the device id. The contacts go in the snapshot
@@ -453,24 +490,27 @@ every group it can (6.3), and syncs the new list to its other devices.
 
 The new device decrypts the provisioning message with the secret,
 verifies the certificate against the account id it names and the
-account against the sender, shows the account and asks whoever is at
-the keyboard whether it is theirs, keeps the certificate and the list,
-republishes its bundle with `device_of`, and is linked; then it fetches
-the snapshot and takes the contacts, the blocked ids, the groups and
-the history. If the primary sends something under the wrong secret (a
-stranger who saw the device id) the device sees a message it cannot
-open from an unknown peer and ignores it, as it ignores any such thing.
-The asking matters because the link carries a key and a device id but
-not an account: whoever sees the QR code within its ten minutes can
-answer it with an account of their own, signed by their own key, and
-every check above passes — the device would join their account, every
-message typed on it would go there, and the real primary would be told
-the device belongs to an account already. Only the person holding both
-machines can tell the two apart, so they are asked; `--account <id>`
-answers in advance for a run nobody is sitting at, and with no terminal
-to ask the answer is no. A turned-down answer leaves the link standing
-until it expires, so the right primary can still take it.
-If the primary never answers, the link expires and the device says so;
+account against the sender, and shows the account and asks whoever is
+at the keyboard whether it is theirs. The asking matters because the
+link carries a key and a device id but not an account: whoever sees the
+QR code within its ten minutes can answer it with an account of their
+own, signed by their own key, and every check above passes; the device
+would join their account, every message typed on it would go there, and
+the real primary would be told the device belongs to an account
+already. Only the person holding both machines can tell the two apart,
+so they are asked. `--account <id>` answers in advance for a run nobody
+is sitting at, and with no terminal to ask the answer is no; a
+turned-down answer leaves the link standing until it expires, so the
+right primary can still take it.
+
+With a yes, the device keeps the certificate and the list, republishes
+its bundle with `device_of`, and is linked; then it fetches the snapshot
+and takes the contacts, the blocked ids, the groups and the history.
+
+What can go wrong: something sent under the wrong secret (a stranger
+who saw the device id) is a message the device cannot open from an
+unknown peer, and it ignores it as it ignores any such thing. If the
+primary never answers, the link expires and the device says so;
 `silver --link` again makes a new one. A snapshot that cannot be fetched
 leaves the device linked with an empty contact list, and says so: the
 primary's later `sync contact` messages fill in what changes from then
