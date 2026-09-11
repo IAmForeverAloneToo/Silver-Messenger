@@ -684,7 +684,7 @@ those who want to pay for it (46).
           handshakes been bound with identity signatures, the hardware key
           would sign every session start and the item would cost more for
           less.
-65. [ ] **The documents** (L). Every document in the repository read
+65. [x] **The documents** (L). Every document in the repository read
         against what it is for: thirty of them, written over eight days
         of releases, each right when written and since bent by accretion
         — one fact in several homes, version history where a description
@@ -692,26 +692,30 @@ those who want to pay for it (46).
         true. The shape each kind of document is held to is written
         down in `CONTRIBUTING.md` ("What the documents hold to"). No
         code changes; section numbers and item numbers never move.
-        - [ ] 65.1 The facts: every wrong or stale statement found, fixed
+        Landed on `main` after 0.18.0, one commit per box; the next
+        release carries it.
+        - [x] 65.1 The facts: every wrong or stale statement found, fixed
           where it stands; the link checker under `tests/docs/` and its
           CI step.
-        - [ ] 65.2 The map: `docs/RELEASES.md` from the README's three
+        - [x] 65.2 The map: `docs/RELEASES.md` from the README's three
           release sections; "Installing" in the
           operator's guide from the README's deployment section; the
           README rebuilt around what is left; every cross-reference
           following.
-        - [ ] 65.3 The promises: the threat model reshaped into lists per
+        - [x] 65.3 The promises: the threat model reshaped into lists per
           actor and re-read claim by claim against 0.18.0; the assessment
           re-read row by row against the code.
-        - [ ] 65.4 The specification: `PROTOCOL.md` within its sections,
+        - [x] 65.4 The specification: `PROTOCOL.md` within its sections,
           the vectors harness run after each.
-        - [ ] 65.5 The arguments: the design notes brought to one
+        - [x] 65.5 The arguments: the design notes brought to one
           template, with their corrections gathered.
-        - [ ] 65.6 The rest: the contributor guide, the FAQ, the terminals
-          matrix, the two reference READMEs, the upgrade guide's version
-          notes, this file's tense pass, the changelog's intro.
-        - [ ] 65.7 The close: the checker over everything, the line counts
-          before and after into the note.
+        - [x] 65.6 The rest: the contributor guide, the FAQ, the terminals
+          matrix, the upgrade guide's version notes, the changelog's
+          intro. The two reference READMEs were read and left as they
+          are, and this file was left as the record it is rather than
+          given the tense pass first planned.
+        - [x] 65.7 The close: the checker over everything, the line counts
+          before and after in the closing commit's message.
 
 ## Continuous
 
