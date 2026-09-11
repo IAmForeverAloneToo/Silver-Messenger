@@ -1,11 +1,11 @@
 # Operating a relay
 
-What running a Silver Messenger relay involves after the install: what
-the machine needs, what the limits do, what the log and the metrics say,
-how to administer it day to day, how to keep backups, and what to do when
-the host is compromised. Installing is in the README ("Deploying a
-relay"), moving between versions in [UPGRADING.md](UPGRADING.md), what the
-relay can and cannot see in [THREAT_MODEL.md](THREAT_MODEL.md).
+What running a Silver Messenger relay involves: installing it, what the
+machine needs, what the limits do, what the log and the metrics say,
+how to administer it day to day, how to keep backups, and what to do
+when the host is compromised. Moving between versions is in
+[UPGRADING.md](UPGRADING.md), what the relay can and cannot see in
+[THREAT_MODEL.md](THREAT_MODEL.md).
 
 ## What you are running
 
@@ -24,6 +24,188 @@ So the operator's duties are the ordinary ones of a server that holds
 private metadata: keep it up, keep its key and its database to itself,
 keep it updated, and know what to do when something goes wrong.
 
+## Installing
+
+The relay is one static binary that needs one open TCP port. Under
+systemd it runs as the unprivileged `silver` user with the hardened
+unit `deploy/silver-relay.service`, reads its settings from
+`/etc/silver-relay/relay.env`, keeps its database in
+`/var/lib/silver-relay`, and logs to the journal (`journalctl -u
+silver-relay`). Open the port in your provider's firewall as well: 443
+with the built-in TLS, 7777 behind a TLS front of your own. Four ways
+to put the binary there:
+
+1. **The Debian package.** `apt install ./silver-messenger_<version>_<arch>.deb`
+   (amd64 or arm64, from the release page) puts `silver` and
+   `silver-relay` in `/usr/bin`, installs the unit without enabling it
+   and makes the `silver` user. Then write `/etc/silver-relay/relay.env`
+   (owner root, group `silver`, mode 640) with
+   `SILVER_RELAY_LISTEN=0.0.0.0:443`, `SILVER_RELAY_ACME_DOMAIN`,
+   `SILVER_RELAY_ACME_EMAIL` and
+   `SILVER_RELAY_ADMIN_SOCKET=/run/silver-relay/admin.sock`, and
+   `systemctl enable --now silver-relay`. The backup timer and the
+   firewall are the installer's; with the package, set them up yourself
+   ("Backups" below, and one port open).
+2. **The release binary.** One file on the release page, covered by
+   the signed `SHA256SUMS` ([RELEASES.md](RELEASES.md)), so you verify
+   a signature and a checksum rather than read a script:
+
+   ```sh
+   v=<version>; t=x86_64-unknown-linux-musl          # the version on the releases page, and your target
+   base=https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/download/v$v
+   curl -fsSLO "$base/silver-relay-v$v-$t" -O "$base/SHA256SUMS" -O "$base/SHA256SUMS.minisig"
+   minisign -Vm SHA256SUMS -p minisign.pub          # the list is the project's
+   grep " silver-relay-v$v-$t\$" SHA256SUMS | sha256sum -c -
+   sudo install -m755 "silver-relay-v$v-$t" /usr/local/bin/silver-relay
+   sudo useradd --system --no-create-home --shell /usr/sbin/nologin silver
+   ```
+
+   with `deploy/silver-relay.service` from the repository as the unit
+   and `relay.env` written as for the package.
+3. **The installer**, on a Debian/Ubuntu or Fedora server as root. It
+   is in the repository and worth reading before running a script that
+   installs software as root, which is why it is not offered as a pipe
+   from a branch into a shell:
+
+   ```sh
+   curl -fsSLO https://github.com/IAmForeverAloneToo/Silver-Messenger/raw/main/deploy/install.sh
+   less install.sh
+   SILVER_DOMAIN=relay.example.org SILVER_EMAIL=you@example.org bash install.sh
+   ```
+
+   It installs build tools and Rust (`rustup-init` from the Rust
+   project's own host, checked against the SHA-256 published next to
+   it), clones the repository into `/opt/silver-messenger`, builds the
+   relay on the server, and sets up the service, the admin socket, the
+   daily backup timer and the firewall. Re-running it updates to the
+   latest `main`. With a `silver-relay` binary and `silver-relay.service`
+   placed next to it, it installs those instead and needs no compiler.
+   Without `SILVER_DOMAIN` the relay listens on `127.0.0.1:7777`, since
+   a public port with no TLS is not something to get by accident;
+   `SILVER_ALLOW_PLAINTEXT=1` opens it to `0.0.0.0:7777` for a TLS front
+   of your own.
+
+   The same script runs from GitHub Actions, and works for a private
+   repository: add the secrets `VPS_HOST` and `VPS_SSH_KEY` (a private
+   key whose public half is in the server's `authorized_keys`;
+   `VPS_USER` optionally, default `root`), put the server's own SSH host
+   key in the repository *variable* `VPS_HOST_KEY` (what `ssh-keyscan
+   <host>` prints, read once from somewhere you trust: the workflow will
+   not fetch it itself, since that would trust whoever answers), set
+   the variable `VPS_DOMAIN` for the built-in TLS, and run the **Deploy
+   relay** workflow. It builds a static binary on the runner and
+   installs it over SSH, so the server needs neither Rust nor access to
+   the repository; the same workflow can show status and logs or
+   restart the relay.
+4. **The container image.** Each release publishes
+   `ghcr.io/iamforeveralonetoo/silver-relay` for amd64 and arm64: the
+   release's own static binary and a CA bundle on an empty base,
+   running as an unprivileged user, with a provenance attestation
+   ([RELEASES.md](RELEASES.md) says how to check it). `deploy/compose.yml`
+   runs it with the built-in TLS on port 443, a read-only filesystem and
+   no capabilities: `SILVER_DOMAIN=relay.example.org docker compose -f
+   deploy/compose.yml up -d`, then `docker compose -f deploy/compose.yml
+   exec relay silver-relay admin status` for administration and the
+   same with `silver-relay backup /var/lib/silver-relay/relay.backup`
+   for a backup on the data volume. `deploy/Dockerfile` builds the same
+   image from source.
+
+A relay for a few people can run with `SILVER_RELAY_EPHEMERAL=1` in
+`relay.env` (`--ephemeral`), keeping mailboxes in memory only: a
+restart loses queued messages, and the disk never holds any.
+
+### TLS
+
+Plain WebSocket on port 7777 is safe for message content, which is
+end-to-end encrypted before it leaves the client, but shows recipient
+ids and timing to the network path, and corporate or campus proxies
+often block non-standard ports outright. Serve `wss://` on 443, one of
+three ways:
+
+* **Built in.** Point a hostname at the server and start the relay with
+  `--listen 0.0.0.0:443 --acme-domain relay.example.org`
+  (`SILVER_RELAY_ACME_DOMAIN` in `relay.env`; the installer does this
+  from `SILVER_DOMAIN`). The relay obtains a Let's Encrypt certificate
+  on its own, proving control of the name over TLS on that same port
+  (TLS-ALPN-01, RFC 8737), so port 80 stays closed and nothing else is
+  installed; renewals happen inside the relay, and the journal says
+  when. Using Let's Encrypt means agreeing to its terms; `--acme-email`
+  (`SILVER_EMAIL` for the installer) gives it an address for expiry
+  warnings, `--acme-directory` points at another certificate authority
+  (Let's Encrypt's staging directory, for a dry run) and `--acme-root`
+  trusts a private one. The account, the key and the certificate live
+  under `acme/` in the data directory, readable by the relay's user
+  only. Clients then use `silver --relay wss://relay.example.org/ws`; a
+  client trusts the operating system's certificate store and Mozilla's
+  roots, so it works behind a TLS-inspecting proxy whose root is
+  installed on the machine, and once it has reached a relay over
+  `wss://` it refuses that host over plain `ws://`, so a mistyped or
+  tampered URL cannot quietly drop the encryption.
+* **A certificate from elsewhere.** `--tls-cert chain.pem --tls-key
+  key.pem` serves it and re-reads the files whenever they change, so
+  certbot's renewals take effect without a restart.
+* **A TLS front.** Caddy, nginx or any reverse proxy can terminate TLS
+  and forward the WebSocket to the relay on localhost. The relay then
+  learns the client's address from `X-Forwarded-For`, trusted only from
+  the addresses in `--trusted-proxy`, and must be told the name clients
+  reach it by with `--host` (`SILVER_RELAY_HOST`), or their bound logins
+  fail. The installer sets Caddy up this way with `SILVER_TLS=caddy`,
+  and keeps a Caddy setup from before 0.7.0 unless `SILVER_TLS=builtin`
+  tells it to switch, which stops Caddy and moves the relay to port 443.
+
+### As an onion service
+
+A relay can be reachable as a Tor onion service instead of, or as well
+as, a public name: no relay address is published, nobody's traffic
+leaves the Tor network, and Tor encrypts the connection end to end, so
+plain `ws://` is the right scheme for it. On the relay host, with the
+relay listening on `127.0.0.1:7777` and told its onion name with
+`--host`, add to `/etc/tor/torrc`:
+
+```
+HiddenServiceDir /var/lib/tor/silver-relay/
+HiddenServicePort 80 127.0.0.1:7777
+```
+
+and restart Tor; `/var/lib/tor/silver-relay/hostname` holds the
+address. Clients use `silver --relay ws://<that address>.onion/ws
+--proxy socks5://127.0.0.1:9050`. The onion address is the relay's
+identity: give it to people the way you would an invite link. This
+recipe was run live with 0.18.0: a relay that knew only its onion name,
+reached through Tor by two clients, a message each way.
+
+### The key clients pin
+
+A client can pin the relay's TLS public key (`silver --pin`) and then
+refuse every other, and the pin outlives renewals that keep the key:
+the built-in ACME client generates its key once and reuses it for every
+renewal (delete `acme/key.pem` to change it), the installer's Caddyfile
+sets `reuse_private_keys`, and certbot does the same with `--reuse-key`.
+Step 7 below says how to compute the pin and publish it. When the key
+does change, pinned clients fail to connect until they are given the
+new pin, which is the point.
+
+### Flags and variables
+
+Every flag has an environment variable for `relay.env`, and
+`silver-relay --help` lists them all. The limits are in their own table
+below; the rest:
+
+| Flag | Variable | What |
+| --- | --- | --- |
+| `--listen <ADDR>` | `SILVER_RELAY_LISTEN` | Where to listen; default `0.0.0.0:7777` |
+| `--data-dir <DIR>` | `SILVER_RELAY_DATA` | The database; `/var/lib/silver-relay` under systemd |
+| `--host <NAME>` | `SILVER_RELAY_HOST` | Names clients reach the relay by, comma separated, which a bound login must carry; the ACME domains and the certificate's names count already |
+| `--acme-domain`, `--acme-email`, `--acme-directory`, `--acme-root` | `SILVER_RELAY_ACME_DOMAIN`, `_EMAIL`, `_DIRECTORY`, `_ROOT` | The built-in TLS, above |
+| `--tls-cert`, `--tls-key` | `SILVER_RELAY_TLS_CERT`, `_KEY` | A certificate from elsewhere, above |
+| `--trusted-proxy <ADDR>` | `SILVER_RELAY_TRUSTED_PROXY` | Whose `X-Forwarded-For` names the client; loopback by default |
+| `--admin-socket <PATH>` | `SILVER_RELAY_ADMIN_SOCKET` | The Unix socket `silver-relay admin` uses ("Day to day") |
+| `--metrics-listen <ADDR>` | `SILVER_RELAY_METRICS_LISTEN` | Prometheus metrics ("Monitoring"); loopback or a private network |
+| `--log-format json` | `SILVER_RELAY_LOG_FORMAT` | One JSON object per line, for a log collector |
+| `--log-ids` | `SILVER_RELAY_LOG_IDS` | Real ids in the log instead of per-run pseudonyms |
+| `--ephemeral` | `SILVER_RELAY_EPHEMERAL` | Everything in memory only |
+| `RUST_LOG=debug` | | Log level; `info` by default |
+
 ## A first deployment, step by step
 
 1. **A host.** Any Linux with systemd; 1 vCPU, 1 GB of memory and 10 GB
@@ -33,25 +215,9 @@ keep it updated, and know what to do when something goes wrong.
    The relay obtains its certificate under that name.
 3. **Ports.** 443 open to the world; nothing else. SSH from where you
    administer, and no other service on the host if you can help it.
-4. **Install.** The relay binary from the release page, checked against
-   the signed `SHA256SUMS` and put beside `deploy/silver-relay.service`
-   (README, "Deploying a relay"), or the README's installer
-   (`deploy/install.sh` from the repository, or the "Deploy relay" workflow)
-   with `SILVER_DOMAIN` and `SILVER_EMAIL`, or `deploy/compose.yml`.
-   Without `SILVER_DOMAIN` the installer configures a loopback listener
-   rather than a public plaintext one; `SILVER_ALLOW_PLAINTEXT=1` is the
-   opt-in for a relay behind a TLS front of your own. The installer sets up the service, the admin
-   socket, the daily backup timer and the firewall. On Debian and Ubuntu
-   the release's package does the first part: `apt install
-   ./silver-messenger_<version>_<arch>.deb` puts the relay in `/usr/bin`,
-   installs its unit without enabling it and makes its user; then write
-   `/etc/silver-relay/relay.env` (owner root, group `silver`, mode 640)
-   with `SILVER_RELAY_LISTEN=0.0.0.0:443`, `SILVER_RELAY_ACME_DOMAIN`,
-   `SILVER_RELAY_ACME_EMAIL` and
-   `SILVER_RELAY_ADMIN_SOCKET=/run/silver-relay/admin.sock`, and
-   `systemctl enable --now silver-relay`. The backup timer and the
-   firewall are the installer's; with the package, set them up yourself
-   ("Backups" below, and port 443 alone open).
+4. **Install.** One of the four ways under "Installing" (the package,
+   the release binary, the installer, the container image), with the
+   built-in TLS under the name from step 2.
 5. **Decide who may register.** A relay for a known group of people
    should require an invite token: `silver-relay admin invite-set` prints
    a random one, which people pass to the client once (`silver --invite`,
