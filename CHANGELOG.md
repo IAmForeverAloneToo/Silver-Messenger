@@ -4,7 +4,21 @@ Notable changes to Silver Messenger. Versions follow [semantic
 versioning](https://semver.org); while the major version is 0, a minor bump
 means behaviour or the wire protocol changed in a way worth reading about.
 
-## Unreleased
+## 0.18.0 - 2026-09-11
+
+`/rekey`: the encryption key replaced under the same identity, which is
+how the second review's SM-P-04 is settled -- v4 stays deniable, and the
+key that would impersonate its owner if read out of memory becomes a key
+its owner can retire. Nothing on the wire changes; the relay is as it was.
+
+**Upgrading.** `identity.json` gains an optional field after a rekey, the
+replaced key with its expiry; a client older than this one reads the
+file and ignores the field, so it simply has no grace. A contact still
+on 0.17.0 who receives a message from somebody who has rekeyed sees it
+as a key that is not the one pinned -- the older client cannot ask the
+relay which key is published now -- and should update, or `/remove` and
+re-add the contact. `silver update` takes anyone on 0.12.0 or later
+straight here. No database or backup format changes.
 
 ### Security
 
