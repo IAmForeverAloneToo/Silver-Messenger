@@ -2,7 +2,12 @@
 
 Ordered from first to last. Each item says why it sits where it does and
 roughly how big it is (S: hours, M: a day or two, L: a week or more).
-Tick items off as they land on `main`.
+Tick items off as they land on `main`. An item with parts lists them as
+boxes of their own, so what is left of it can be read without reading it;
+a decision an item turned on is one line here, and its argument is in the
+design note the item links. A ticked item may keep an unticked line under
+it: a check that needs a machine or a person this project does not have,
+kept visible rather than assumed.
 
 ## Done
 
@@ -132,13 +137,13 @@ more protocol work.
         terminal's quirks in `docs/TERMINALS.md`; make the matrix part of
         CI where the terminal can be driven headless. Last because it
         keeps 18 to 23 from regressing.
-
-Done, with two deviations: clickable OSC 8 links were left out (the
-renderer's cell buffer cannot carry them; paths and links are copied with
-`/copy` and opened with `/open` or a double click instead), and only
-xterm, the Linux console and tmux are driven in CI. Windows Terminal, the
-classic console, Terminal.app and iTerm2 are documented in
-`docs/TERMINALS.md` from hand checks and the terminals' own documentation.
+        - Clickable OSC 8 links were left out: the renderer's cell buffer
+          cannot carry them; paths and links are copied with `/copy` and
+          opened with `/open` or a double click instead.
+        - xterm, the Linux console and tmux are driven in CI. Windows
+          Terminal, the classic console, Terminal.app and iTerm2 are
+          documented in `docs/TERMINALS.md` from hand checks and the
+          terminals' own documentation.
 
 ## Phase 6: secure by default
 
@@ -291,9 +296,10 @@ container story. Operations come before reach.
         as a Tor onion service is documented and tested in the same
         item, since a relay that hides its own address is the natural
         partner of a client that already connects through Tor.
-        (RFC 8555.) Done, with one deviation: the onion recipe is
-        documented and the client's SOCKS5 path is tested, but a live
-        run of a relay behind an onion service has not been done yet.
+        (RFC 8555.)
+        - [ ] A live run of a relay behind an onion service. The recipe
+          is documented and the client's SOCKS5 path is tested; nobody
+          has yet stood one up and talked through it.
 37. [x] **Metrics and structured logs** (S). A Prometheus endpoint on a
         separate listener that is never public, with the counters the
         relay already keeps plus failed logins per address; JSON log
@@ -382,488 +388,300 @@ those who want to pay for it (46).
 
 47. [x] **Groups on MLS** (L). RFC 9420 through OpenMLS, with the relay
         as the delivery service: key packages published and handed out
-        like prekeys, welcome messages and ordered commits through group
-        mailboxes, membership changes as signed proposals by group
+        like prekeys, membership changes as signed proposals by group
         administrators, invites as links, and sealed sender kept so the
-        relay still does not learn who wrote what. The design decides
-        whether one-to-one conversations stay on the Double Ratchet or
-        become two-member groups, and picks the ciphersuite, with a
-        post-quantum hybrid as soon as one is standardised. The design
-        note is docs/design/groups.md. Done in 0.9.0: one-to-one stays
-        on the ratchet; the suite is the hybrid
+        relay still does not learn who wrote what. Design note
+        [docs/design/groups.md](docs/design/groups.md); `docs/PROTOCOL.md`
+        section 13. Settled in 0.9.0: one-to-one conversations stay on the
+        Double Ratchet, so 42's deniability holds; the suite is the hybrid
         `MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519` on its
         provisional code point; delivery is client fan-out through the
-        members' own mailboxes rather than group mailboxes, with a
-        relay-side epoch sequencer ordering commits; PROTOCOL.md
-        section 13.
-48. [x] **Multiple devices** (L). Each device has its own keys under the
-        identity, listed in the bundle and signed by the identity key;
-        linking by a QR code and a short-lived secret; every device is a
-        leaf in the MLS tree of every conversation it belongs to;
-        optional encrypted history sync through the relay. Signal's
-        Sesame is the reference for the device list. The design note
-        is docs/design/devices.md. Done in 0.9.0: the identity key
-        stays on the primary and every other device is certified by
-        it; one Double Ratchet session per pair of devices, a message
-        sealed once per device of both people under one id, and what
-        one's own devices do told between them as `sync` content;
-        linking by a link with a one-time secret, answered through the
-        relay with the certificate and a snapshot of the contacts,
-        groups and recent history, which is the one history sync there
-        is; a device is a leaf of its own in groups, signed by the
-        device key with the certificate in the leaf; revocation by a
-        signed statement the relay serves, logs and enforces; a client
-        from 0.8.0 keeps talking to a person with devices through the
-        primary. PROTOCOL.md section 14.
+        members' own mailboxes, with a relay-side epoch sequencer ordering
+        commits.
+48. [x] **Multiple devices** (L). Each device has its own keys, certified
+        by the identity key, which stays on the primary; linking by a link
+        with a one-time secret, answered through the relay with the
+        certificate and a snapshot of the contacts, groups and recent
+        history; a device is a leaf of its own in every group; revocation
+        by a signed statement the relay serves, logs and enforces.
+        Signal's Sesame is the reference. Design note
+        [docs/design/devices.md](docs/design/devices.md); `docs/PROTOCOL.md`
+        section 14. Shipped in 0.9.0; a client from 0.8.0 keeps talking to
+        a person with devices through the primary.
 49. [ ] **Usernames scoped to a relay** (M). `alice` as a signed claim,
         unique on that relay, resolved by the relay and verified by the
-        client against the signature, with the safety number still the
-        truth. Last, and only if 47 and 48 show that people want
-        discovery beyond invite links. Not done in 0.9.0: nothing yet
-        shows that need; a person is found by an invite link or a QR
-        code, a group by its link, and a device by the link it prints,
-        and each of those carries the relay. The item stays open for
-        the day people who use groups and devices ask for names, and is
-        not a condition of 1.0.
-        Re-examined in 0.16.0 and still gated. Groups (47) and devices
-        (48) have both shipped, which is the condition this item was
-        waiting on, and neither produced the need: a group is joined by
-        its link, a device by the link it prints, a person by an invite
-        or a QR code, and each of those already carries the relay. A name
-        would add a namespace the relay owns and can lie about — the
-        safety number stays the truth either way, but a name is the thing
-        people would trust instead of checking it, which is the failure
-        this program keeps trying not to build. Left open rather than
-        dropped: the condition is real and may yet be met.
-        If it is, the shape to build is not a username. It is an
-        unlisted, changeable, disposable handle for first contact — a
-        discovery token somebody hands to a stranger and can retire
-        afterwards, never shown as identity, never searchable, so it
-        does not compete with the safety number for the trust people
-        put in a name. Signal arrived at that shape after years without
-        usernames, for the reasons this item gives; whoever picks the
-        item up should start there, not at the thing it was right to
-        fear.
+        client, with the safety number still the truth. Gated: only if
+        people who use groups and devices ask for discovery beyond invite
+        links, and not a condition of 1.0.
+        - Re-examined in 0.16.0, with 47 and 48 shipped: neither produced
+          the need. A person is found by an invite or a QR code, a group
+          by its link, a device by the link it prints, and each carries
+          the relay. A name is a namespace the relay owns, and the thing
+          people would trust instead of checking the safety number — the
+          failure this program keeps refusing to build.
+        - If the need comes, the shape is not a username but an unlisted,
+          changeable, disposable handle for first contact: a discovery
+          token handed to a stranger and retired afterwards, never shown
+          as identity, never searchable. Signal arrived there after years
+          without usernames, for the same reasons.
 
 ## Phase 10: a finished terminal client
 
 50. [x] **Everyday privacy features** (M). Disappearing messages with a
-        per-conversation timer enforced by both sides; delete for me and
-        a best-effort delete for everyone that says exactly what it can
-        and cannot promise; edits as new messages that reference the old
-        one; replies and reactions; all as encrypted content types behind
-        capabilities, so older clients see something sensible. Encrypted
-        `downloads/` as an option, and history export. Done in 0.10.0:
-        `/reply`, `/react`, `/edit`, `/delete [me]`, `/timer`, `/files
-        encrypt`, `--export-history`; protocol sections 4.7, 13.3 and
-        14.5; the design note `docs/design/everyday.md`.
+        per-conversation timer enforced by both sides; delete for me, and
+        a best-effort delete for everyone that says what it can and
+        cannot promise; edits, replies and reactions; all as encrypted
+        content types behind capabilities, so older clients see something
+        sensible; encrypted `downloads/` as an option, and history export.
+        Shipped in 0.10.0 as `/reply`, `/react`, `/edit`, `/delete [me]`,
+        `/timer`, `/files encrypt` and `--export-history`; protocol
+        sections 4.7, 13.3 and 14.5; design note
+        [docs/design/everyday.md](docs/design/everyday.md).
 51. [x] **Accessibility in the terminal** (M). A screen-reader mode with
-        linear output and no box drawing, high-contrast palettes, and
-        every action reachable without the mouse checked against a
-        screen reader on each platform. Shipped as `--reader` and
-        `/reader on`, the `contrast` palette, `/go` and `/sidebar`; what
-        the pty suite can check of reader mode it checks, and the
-        check against each platform's screen reader is a manual protocol
-        in docs/TERMINALS.md, unchecked until someone runs it.
+        linear output and no box drawing, a high-contrast palette, and
+        every action reachable without the mouse. Shipped as `--reader`
+        and `/reader on`, the `contrast` palette, `/go` and `/sidebar`,
+        with what the pty suite can check of reader mode checked.
+        - [ ] The check against each platform's screen reader: a manual
+          protocol in `docs/TERMINALS.md`, unrun until someone runs it.
 52. [x] **Client robustness** (S). The terminal restored on a panic,
-        atomic writes for every store file checked under a kill test,
-        memory caps for history and the seen-id set, and a soak test
-        that runs a client for a day against a local relay. Shipped:
+        atomic writes for every store file under a kill test, memory
+        caps for history and the seen-id set, and a soak test. Shipped:
         one panic hook that undoes exactly what the client set up, the
         kill test on every platform CI tests, the windows and caps, and
-        `tests/tui/soak.py` for as long as it is told (three minutes on
-        every push; an hour run by hand with memory flat, recorded in
-        docs/design/robustness.md; the day-long run is still to be made).
-53. [x] **Distribution** (M). Authenticode on Windows and notarisation on
-        macOS, a Homebrew tap and a Debian package, each built from the
-        same reproducible release. Shipped: a Debian package built in the
-        release workflow from the release binaries, a Homebrew tap in
-        this repository that works the moment the formula is committed,
-        and the signing and notarising steps, which run once the
-        maintainer's certificate and Apple membership are in the secrets.
-        A PKGBUILD and winget manifests were written too and removed
-        again in 0.12.2: both needed a push to somebody else's index
-        before anyone could install anything, neither had been pushed,
-        and each cost a regenerated file per release for nothing. Both
-        platforms take the one file for them from the release page.
-        docs/design/distribution.md says where each channel stands.
+        `tests/tui/soak.py` — three minutes on every push, an hour by
+        hand with memory flat (`docs/design/robustness.md`).
+        - [ ] The day-long soak run.
+53. [x] **Distribution** (M). A Debian package and a Homebrew tap built
+        from the same reproducible release; Authenticode on Windows and
+        notarisation on macOS. Shipped: the package, the tap, and the
+        signing and notarising steps. A PKGBUILD and winget manifests were
+        written and removed again in 0.12.2: each needed a push to
+        somebody else's index that never happened and cost a regenerated
+        file per release for nothing.
+        [docs/design/distribution.md](docs/design/distribution.md) says
+        where each channel stands.
+        - [ ] The maintainer's Authenticode certificate and Apple
+          membership in the release secrets, which is what makes the
+          signing steps run.
 54. [x] **Contributor guide and FAQ** (S). How to build, test and propose
-        a change; a FAQ for people who are not developers, written from
-        the questions the first users ask. Shipped as CONTRIBUTING.md and
-        docs/FAQ.md; the FAQ starts from the questions a messenger like
-        this is asked and grows with the ones that come in.
+        a change; a FAQ for people who are not developers. Shipped as
+        `CONTRIBUTING.md` and `docs/FAQ.md`, which grows with the
+        questions that come in.
 
 ## Phase 11: 1.0
 
 55. [x] **Independent review** (L). The review of `silver-protocol` and
-        the relay promised in item 35, by someone who did not write
-        them, its findings fixed and published with the report. Under
-        way: the review of the 0.10.0 line reported 76 findings and is
-        published whole as
+        the relay promised in item 35, by someone who did not write them,
+        its findings fixed and published with the report. The review of
+        the 0.10.0 line reported 76 findings, published whole as
         [docs/audits/2026-09-security-audit.md](docs/audits/2026-09-security-audit.md),
-        with what was found when each was checked against the code and
-        what is done about it in
+        with what each turned out to be and what was done about it in
         [docs/design/audit-response.md](docs/design/audit-response.md).
-        0.10.1 carried the Critical finding, the ten Highs and the
-        Mediums that share their code; 0.11.0 carries the rest of the
-        Mediums, the Lows and the Informational findings; item 57
-        carries what needs a format change. Done: 72 of the 76 are
-        fixed and out, and the four that are left — a message's own id
-        inside the authenticated body, rollback protection for the
-        key-bearing files, the identity key bound into the v4
-        handshake, and history file names under an HMAC — are item 57.
+        - [x] 0.10.1: the Critical, the ten Highs, and the Mediums that
+          share their code.
+        - [x] 0.11.0: the rest of the Mediums, the Lows and the
+          Informational findings — 72 of the 76.
+        - [x] The four that needed a format change: item 57.
 56. [ ] **Stable** (S). Protocol v4 frozen and documented as such, a
         support policy for what a stable release promises and for how
         long, and the first 1.0 release.
-57. [x] **What the review left for a format change** (L). **The on-disk
-        pair is done**, in 0.16.0: SM-C-24, so an older copy of a file
-        put back into a live directory is refused rather than read, and
-        SM-C-25, so a conversation's log is no longer filed under the
-        name of who it is with. Section 5 of the note settles how, and
-        was corrected three times while it was being written — the
-        counter cannot live in plaintext `vault.json` without
-        publishing the file names, the file has to be written
-        before the anchor is raised or the crash case becomes the attack,
-        and the key the names are MACed under cannot be the data key,
-        which rotates, nor live in the record, whose loss would then
-        leave files that decrypt with nothing to say whose they are.
-        **The wire pair is in as optional fields**, which is the first of
-        the two releases the note schedules for them: SM-P-14, a
-        message's id sealed inside the body where the AEAD reaches it
-        (the envelope's is picked after the ciphertext is made and bound
-        by nothing), and a device's own signature on its certificate, so
-        an account cannot enroll a key its holder never offered. 0.16.0
-        accepted both absent, so clients that did not write them kept
-        working for that release. **Required in 0.17.0**, cut the same
-        day as 0.16.0 by decision, with the changelog saying in as many
-        words that a client older than 0.16.0 cannot be read and a device
-        linked by one cannot publish until it updates. Section 6 of the
-        note says what "required" means at each site, which is not the
-        same answer everywhere a certificate appears: the account's own
-        copies cannot carry the device's signature and are not asked to,
-        and a device linked before 0.16.0 signs its stored certificate on
-        first start rather than being stranded. Settled in
-        [docs/design/format-changes.md](docs/design/format-changes.md):
-        the two on-disk changes go together in one release with one
-        migration and need no peer coordination, the two wire changes go
-        in as optional fields for a release before anything requires
-        them, and SM-P-04 is a decision rather than a change — binding
-        the identity key freshly costs v4 the deniability it exists for,
-        so the note put the two properties side by side. **Decided:**
-        v4 stays deniable, and what the finding calls for instead is
-        `/rekey` — the Diffie–Hellman key replaceable without a new
-        identity, and a responder that accepts only the key an
-        identity currently publishes, designed in
-        [docs/design/dh-rotation.md](docs/design/dh-rotation.md).
-        Its minimum, correcting the threat model, is done: that
-        document said the Diffie–Hellman key only decrypts, and has said
-        since 0.16.0 that from v4 it impersonates too. The four
-        findings of the report's section 13.3 that 0.11.0 could not
-        take, each with a design note before code: a message's own id
-        inside the authenticated body (SM-P-14); rollback protection for
-        the key-bearing files (SM-C-24); the identity key bound into the
-        v4 handshake, which today makes the long-term Diffie–Hellman key
-        enough to impersonate (SM-P-04); history file names under an
-        HMAC rather than the contact's id (SM-C-25). With them, the
-        defence in depth that section suggests beyond the fixes already
-        out: a device's own counter-signature on its certificate, so an
-        account cannot enroll a stranger's key even where the relay is
-        the one being lied to (SM-R-01 is fixed; this closes the shape
-        of it). Each changes a wire or an on-disk format, so each waits
-        for the version that may.
-58. [x] **Updating in place** (M). `silver update`: one command that
-        finds the newest release, downloads the client for this
-        platform, checks its SHA-256 against the digest the release API
-        gives and against `SHA256SUMS`, makes the downloaded binary say
-        its own version, and renames it over the running one, keeping
-        the old one for `silver update --rollback`. A binary a package
-        manager owns is refused with that manager's command instead.
-        Nothing automatic: `update-check` is off unless turned on, and
-        even on it only prints a line. The release gains a per-target
-        `silver` and `silver-relay` asset so an update fetches the
-        client alone rather than the archive, and a keyless signature
-        over `SHA256SUMS` made by the release workflow and recorded in a
-        public transparency log — no key for anyone to hold. Design note
-        [docs/design/updates.md](docs/design/updates.md); what it does
-        not defend against is in its section 8 and the threat model.
-        Done: the command, `/update`, the opt-in daily check, the
-        per-target assets, and tests that a tampered digest, a
-        disagreeing `SHA256SUMS`, an unsigned release, a redirect off the
-        host and a package-managed binary are each refused with nothing
-        left behind.
+57. [x] **What the review left for a format change** (L). The four
+        findings of the report's section 13.3 that 0.11.0 could not take
+        without changing a wire or an on-disk format, and the
+        counter-signature that closes the shape of SM-R-01. Design note
+        [docs/design/format-changes.md](docs/design/format-changes.md),
+        which also records the three corrections its section 5 took while
+        it was being implemented.
+        - [x] SM-C-24, rollback protection for the key-bearing files: an
+          older copy of a file put back into a live directory is refused
+          rather than read. 0.16.0.
+        - [x] SM-C-25, history file names under an HMAC rather than the
+          contact's id. 0.16.0, in one migration with SM-C-24.
+        - [x] SM-P-14, the message's id sealed inside the body where the
+          AEAD covers it, since the envelope's is the relay's to choose.
+          Optional in 0.16.0, required in 0.17.0.
+        - [x] The device's own signature on its certificate, so an account
+          cannot enroll a key its holder never offered. Optional in
+          0.16.0, required in 0.17.0; section 6 says what "required" means
+          at each site, and a device linked before 0.16.0 signs its stored
+          certificate on first start rather than being stranded.
+        - [x] SM-P-04, the identity key bound into the v4 handshake.
+          **Decided against:** v4 stays deniable, because a secret that
+          authenticates you impersonating you when stolen is what deniable
+          authentication means (section 3). What the finding calls for
+          instead is the key being replaceable, and a responder accepting
+          only the key an identity currently publishes: `/rekey`, designed
+          in [docs/design/dh-rotation.md](docs/design/dh-rotation.md), on
+          `main` and unreleased.
+        - 0.17.0 was cut the same day as 0.16.0, by decision; its
+          changelog says in as many words that a client older than 0.16.0
+          cannot be read.
+58. [x] **Updating in place** (M). `silver update`: finds the newest
+        release, downloads the client for this platform, checks it
+        against the release API's digest and against `SHA256SUMS` under
+        the release workflow's keyless signature, makes the binary say its
+        own version, and renames it over the running one, keeping the old
+        for `--rollback`. A binary a package manager owns is refused with
+        that manager's command; nothing is automatic, the daily check off
+        unless turned on and then only a printed line. Design note
+        [docs/design/updates.md](docs/design/updates.md), whose section 8
+        says what it does not defend against. Shipped in 0.12.0 with
+        `/update`, per-target release assets, and tests that a tampered
+        digest, a disagreeing `SHA256SUMS`, an unsigned release, a
+        redirect off the host and a package-managed binary are each
+        refused with nothing left behind.
 59. [x] **Desktop notifications that reach the desktop** (M). Item 15
-        raised them through the terminal alone (OSC 777, 9 and 99), which
-        the common terminals ignore, so on Windows Terminal, Terminal.app
-        and every VTE terminal `all` was a bell and nothing more. The
-        client asks the operating system itself where the terminal will
-        not: the session bus on Linux through the `zbus` already linked,
-        `osascript` on macOS, a WinRT toast on Windows; the terminal path
-        stays for the terminals that raise one and for SSH, and the
-        sequences pass through tmux. The notification says `New message`
-        and nothing else, ever — no name, no id, no content — enforced by
-        a raising call that takes no text. Design note
+        raised them through the terminal alone, which the common terminals
+        ignore. The client asks the operating system where the terminal
+        will not — the session bus on Linux, `osascript` on macOS, a WinRT
+        toast on Windows — and the notification says `New message` and
+        nothing else, ever, enforced by a raising call that takes no text.
+        Design note
         [docs/design/notifications.md](docs/design/notifications.md).
-        Done in 0.13.0: the route from the environment with `/notify
-        terminal` and `/notify desktop` to force one, the three
-        platforms, the tmux wrapping, a failed service left alone for ten
-        minutes, and tests that every notification at a pty says the one
-        text and that each row of the environment table picks its path.
-        The desktop paths compile on every CI platform; that a toast
-        appears is checked by hand and recorded in `docs/TERMINALS.md`.
-
-60. [x] **Requests, and naming people** (M). A contact's id could not be
-        copied and the header that shows it could not be selected, so
-        every command that wanted an id was hard to use; the numbers
-        `/accept` and `/block` took lived in one Requests pane and shifted
-        as it changed; a request could not be dealt with from where it
-        was read; and there was no way to turn a stranger down short of
-        blocking them. A request becomes a chat not yet answered: an
-        entry of its own in the sidebar, showing the stranger's id and
-        nothing they chose, where `/accept`, `/decline` and `/block` take
-        no argument and a typed reply accepts. Decline is *not now* where
-        block is *never*: the sender learns nothing either way, and a
-        declined stranger who writes again reappears without ringing.
-        The bell and the desktop notification are raised for a message
-        received and for nothing else. One resolver -- alias, id, unique
-        id prefix, or the selected chat -- under every command that names
-        a person; `/copy id <who>`, `/whois`, a click on the title that
-        copies the id, Tab completion of aliases and group names; numbers
-        that hold still. Design note
-        [docs/design/requests.md](docs/design/requests.md). Done in
-        0.14.0: the chat list is a list of panes with the waiting entries
-        at its end and scrolls to the selection; `/requests`, `/whois`,
-        `/copy id <who>`, `/decline`, the quiet rule for a declined
-        stranger, the ringing rule, and the resolver under every command
-        that names a person, with unit tests for each and a terminal test
-        that walks a request through decline, the quiet return, a typed
-        reply, `/whois`, the completed `/copy id`, the title click,
-        `/block` and `/unblock`.
-
+        Shipped in 0.13.0 with `/notify terminal` and `/notify desktop`,
+        the tmux wrapping, and tests that every notification at a pty says
+        the one text. That a toast appears on each platform is checked by
+        hand and recorded in `docs/TERMINALS.md`.
+60. [x] **Requests, and naming people** (M). A request becomes a chat not
+        yet answered: an entry of its own in the sidebar showing the
+        stranger's id and nothing they chose, where `/accept`, `/decline`
+        and `/block` take no argument and a typed reply accepts; decline
+        is *not now* where block is *never*, and the sender learns nothing
+        either way. One resolver — alias, id, unique id prefix, or the
+        selected chat — under every command that names a person;
+        `/copy id`, `/whois`, a click on the title that copies the id,
+        Tab completion of aliases and group names. Design note
+        [docs/design/requests.md](docs/design/requests.md). Shipped in
+        0.14.0, with a terminal test that walks a request through each of
+        those.
 61. [x] **What the keys are worth on your own computer** (S). An outside
         review dumped the memory of an unlocked 0.14.0 client on Windows
-        11 from an ordinary program of the same user, with no elevation,
-        and read the keys. Reading an unlocked client is the documented
-        limit and no software on that machine can close it, but the
-        review showed the limit was not the same on every platform and
-        that two other things were wrong. `harden_process` had no Windows
-        branch at all, so what took root on Linux took nothing on
-        Windows; the process now carries an access list that refuses
-        being opened for reading, which is cost rather than prevention,
-        since the owner of a process may rewrite it. Erasing a device
-        left its wrapping key in the key store, where a copy of the
-        directory taken beforehand still had something to be opened
-        with, and a key made for a change that then failed was left there
-        too; both are removed now. The threat model gains the actor this
-        describes, says what each platform manages and what it leaves,
-        and names swap and hibernation as a path out of memory that
-        full-disk encryption answers and this program does not.
-
+        11 from an ordinary program of the same user and read the keys.
+        Reading an unlocked client is the documented limit; the review
+        showed the limit was not the same on every platform, and found
+        two other things wrong beside it.
+        - [x] `harden_process` gained the Windows branch it never had: an
+          access list that refuses the process being opened for reading,
+          which is cost rather than prevention, since the owner of a
+          process may rewrite it.
+        - [x] Erasing a device, or a change that then failed, no longer
+          leaves a wrapping key in the key store.
+        - [x] The threat model gained the actor this describes, a
+          per-platform table of what each manages and leaves, and swap
+          and hibernation as a path out of memory that full-disk
+          encryption answers and this program does not.
 62. [x] **What the second audit found** (M). A second outside review, run
         adversarially over the whole tree and reconciled across three
         rounds, found no cryptographic break: every chain built against
         the protocol failed against a check that was already there. What
-        it did find clusters in the places where a command does more than
-        it looks like, where a promise the documentation makes is kept
-        only on one path, and where the relay's bookkeeping disagrees with
-        itself. The findings and this project's answers are published in
-        `docs/audits/` when the work is done, unedited, as the first
-        audit's were — including the three of the reviewer's claims this
-        project argued down and the two the reviewer argued back.
-        The first piece is done: `/devices link` no longer signs a device
-        certificate on one pasted line. It says what the device would be
-        given — that the identity signs for it and it thereafter reads and
-        writes as the account — and waits for a short second line, which
-        is where the paste guard belongs, because a link is pasted by
-        design and a guard whose remedy is "type it out" cannot be met on
-        one. `/relay` and `/group join` ask the same way; `/send` takes
-        the guard alone, its argument being a path a person can type; and
-        a group alias is filtered on the way in and out, as a contact's
-        always was. `docs/design/consequential-commands.md` records which
-        commands ask, which are guarded, which are neither, and why the
-        list is meant to stay short.
-        The second is done too: in reader mode a line break inside a
-        message bought its sender a journal line of their own, which a
-        screen reader hears as another person speaking, or as a warning
-        this program never made. The filter that exists for exactly this
-        was applied at two call sites and missed by two others, so it
-        moved to the one door every line goes through, and took the
-        invisible and bidirectional characters with it. Reader mode now
-        has the mirror of the invariant test the full mode has had since
-        0.10.0.
-        The third closes the key store paths 0.16.0 left half shut. The
-        key is written before the vault that needs it, so dropping an
-        unneeded one on the failure path only worked if the process lived
-        to take that path; a crash in the window left a key for good. The
-        undecided name is written down first now, and the next start
-        settles it -- the same for removing the protection and for erasing
-        the device, which had the same gap on the other side. And the
-        check that decides no longer reads "I cannot tell" as "no": that
-        would have deleted the key opening every file in the directory.
-        The fourth is the updater keeping a promise it had made twice in
-        writing and never in code: a build with no `minisign.pub` skipped
-        the signature and installed whatever the release host served. It
-        refuses now, before fetching. The tests gained a signing key of
-        their own, so the accepting half of the check is exercised too --
-        with the project's key they could only ever show refusals.
-        The fifth is saying when a peer's post-quantum protection goes
-        away. Showing what a new session is was never enough: a classical
-        session with somebody who used to have post-quantum ones reads
-        exactly like one with somebody who never did, so a stripped bundle
-        looked ordinary. The best level reached with each contact is kept
-        with the contact and a fall is reported, with both readings --
-        their older client, or somebody taking the keys out in transit --
-        since the client cannot tell those apart.
-        The sixth is two on the relay. An hourly limit of zero allowed one
-        an hour rather than none, so `--registrations-per-hour 0` left
-        registration open at a trickle -- a limit wrong in the only
-        direction that matters. And the expiry sweep listed its victims in
-        a read transaction and removed them in a later write one, so an
-        acknowledgement landing between the two was charged for twice and
-        the difference came out of the mail still queued. It runs in one
-        write transaction now.
-        The seventh is a batch of the same shape: things bounded in one
-        place and not in the one next to it. A refused frame wrote a log
-        line, so sitting on a rate limit filled the operator's disk; the
-        metrics listener never called the helper that gives the main
-        listener its header-read timeout, so a silent connection held a
-        socket for ever; and `silver.log` grew without limit while being
-        a record of who this device talked to.
-        The eighth is the ratchet body being the one body version that
-        went from JSON to a value unchecked, while v0/v1 and v5 had
-        validated at the boundary for versions. Its rules existed, further
-        in, where only the bodies that got that far met them.
-        The ninth is the Windows swap, where the path is briefly empty
-        because the operating system will not replace a running image any
-        other way. That cannot be closed, so it is made survivable: the
-        recovery copies when it cannot rename, and says what to rename by
-        hand when it can do neither. Rollback shared the window and now
-        shares the recovery.
-        The tenth is two residuals: a system trust store that will not
-        load is now a warning rather than a debug line nobody sees, since
-        falling back to Mozilla's list alone drops this machine's own
-        decisions about what to distrust; and the threat model no longer
-        implies the data directory's Unix modes apply on Windows.
-        The eleventh ends the unbound login's nine-release grace period --
-        it is refused by default now, with `--allow-unbound-auth` for a
-        relay that still has clients older than 0.6.0 -- and fuzzes the
-        two parsers the updater runs before any signature is checked.
-
-        All twelve are done and in 0.16.0. Publishing the review itself
-        and the response note is held back for the maintainer to review
-        first, so this item is ticked for the code and not for the
-        disclosure.
-63. [ ] **The second review's remainder** (M). Eight findings the
-        September 2026 review left open, none of them a way for anyone to
-        read a message or forge one, all of them listed with what leaving
-        each costs in
+        it found clusters where a command does more than it looks like,
+        where a promise is kept on one path only, and where the relay's
+        bookkeeping disagrees with itself. The report is
+        [docs/audits/2026-09-second-security-audit.md](docs/audits/2026-09-second-security-audit.md);
+        the answers, with the claims argued down and the two the reviewer
+        argued back, are
+        [docs/design/audit-response-2.md](docs/design/audit-response-2.md).
+        All twelve fixes are in 0.16.0.
+        - [x] 62.1 `/devices link` no longer signs a certificate on one
+          pasted line: it says what the device would be given and waits
+          for a short second line, the shape `/relay` and `/group join`
+          share, while `/send` takes the paste guard alone
+          ([docs/design/consequential-commands.md](docs/design/consequential-commands.md)).
+        - [x] 62.2 A build with no `minisign.pub` refuses to update, as
+          its own comment had promised twice in writing; the tests gained
+          a signing key of their own, so the accepting half is exercised.
+        - [x] 62.3 Reader mode: a line break inside a message no longer
+          buys its sender a journal line of their own. The filter moved to
+          the one door every line goes through, with the invariant test
+          full mode has had since 0.10.0.
+        - [x] 62.4 A fall in a peer's post-quantum level is reported, with
+          both readings, since the client cannot tell an older client from
+          keys stripped in transit.
+        - [x] 62.5 A group alias is filtered on the way in and out, as a
+          contact's always was (L-18).
+        - [x] 62.6 The key store paths 0.16.0 left half shut: the undecided
+          name is written first and the next start settles it, and
+          "cannot tell" is no longer read as "no".
+        - [x] 62.7 Relay: `--registrations-per-hour 0` means none, not one
+          an hour; the expiry sweep runs in one write transaction, so an
+          acknowledgement landing mid-sweep is not charged twice.
+        - [x] 62.8 Relay: a refused frame no longer writes a log line, the
+          metrics listener has the header-read timeout, and `silver.log`
+          is bounded.
+        - [x] 62.9 The ratchet body is validated at the boundary, as every
+          other body version already was.
+        - [x] 62.10 The Windows swap's empty window is made survivable:
+          copy when rename fails, say what to rename by hand when both do;
+          rollback shares the recovery.
+        - [x] 62.11 A trust store that will not load is a warning rather
+          than a debug line; the threat model no longer implies Unix modes
+          apply on Windows.
+        - [x] 62.12 The unbound login is refused by default, with
+          `--allow-unbound-auth` for a relay that still has clients older
+          than 0.6.0; the two parsers the updater runs before any
+          signature is checked are fuzzed.
+        - [ ] Link the report and the response from `SECURITY.md` and the
+          threat model, as the first review's are. Both files have been
+          in the tree since 2026-09-09; what is missing is the pointer a
+          reader starts from, held for the maintainer's read.
+63. [ ] **The second review's remainder** (M). The findings the September
+        2026 review left open, none of them a way for anyone to read a
+        message or forge one, each listed with what leaving it costs in
         [docs/design/audit-response-2.md](docs/design/audit-response-2.md)
-        section 4. Six are **done** and in 0.16.0: **I-1**, the claim in
-        `docs/design/updates.md` that the swap is tested under a kill
-        when no such test existed — the worst of them, being a false
-        statement about what is tested, and two tests now stand behind
-        it; **L-5**, the mailbox limits that wrapped on multiply and
-        silently meant "always full" at zero; **L-16** and **L-8**,
-        validation at the protocol boundary rather than only where a
-        value is used; **L-6**, the uncapped transparency log; **L-10**,
-        secrets that serialized as plaintext for anything persisting them
-        outside the vault; **L-13**, homoglyph names. **L-1**, locking
-        key buffers out of swap, is declined below, as is the remainder
-        of a finding otherwise closed — an enumeration sweep of
-        `data-key-*` entries for keys orphaned by versions before 0.16.0.
-
-        **L-14** is done too, and wider than the report asked. Its five
-        remaining parsers — the hand-rolled HTTP response head, with the
-        redirect check beside it, `transparency.rs`, `vault.rs`,
-        `linking.rs` and `Pin::parse` — each got a target that asserts
-        the property it exists for rather than only running it: a page
-        the transparency log refuses leaves the head where it was, a
-        vault file opens under its own name and no other, a pin prints
-        what it parsed, a device link prints the device somebody is meant
-        to compare. Writing the first found a defect worth the exercise:
-        `split_https_url` read `evil.test@api.github.com` as a host,
-        which ends with `.github.com` and so passed the redirect check
-        while naming another host to anybody reading it. Refused now.
-
-        **What is left in this item** is one verification. **H-1**: a
-        macOS release built without the notarization secrets is now
-        signed ad hoc with the hardened runtime asked for, and the
-        release job fails if the flag is missing from the signature it
-        made. What nobody has done is watch that refuse a same-user
-        attach on a real Mac, so the threat model and SECURITY.md go on
-        counting macOS as unprotected. That check is the whole of what is
-        left here — and it is left rather than assumed because this
-        program has already been caught once by a document describing a
-        check the code did not do (I-1), and the answer to that was a
-        test, not better prose.
-
-        **Two of those are declined, on one decision.** L-1 needs `mlock`
-        or `VirtualLock`, and the key-store sweep needs `CredEnumerate`
-        and its equivalents, which `keyring` does not expose on any
-        backend. Both are system calls, and `silver-client` — the crate
-        that holds the keys — is `#![forbid(unsafe_code)]`, which the
-        September 2026 review named among the reasons the tree reads as it
-        does. Each would therefore cost either that property in the crate
-        that most wants it, or a dependency whose whole job is to hold the
-        unsafe (`region`, `memsec`, or `secmem-alloc`, the last by the
-        author of the `secmem-proc` this project already links on
-        Windows). **Neither is worth it, and neither will be done.** A Low
-        about swap — which full-disk encryption answers, and which pinning
-        the key alone would not close anyway, since the plaintext beside
-        it stays pageable — and a key left behind by a version older than
-        0.16.0, removable by hand, do not buy back an audited-away
-        invariant across every secret this program handles. If that trade
-        ever changes it will be because something larger wants it, not
-        these two.
-        The review's other remainder, a non-zero `lock_after_minutes`
-        default, is **decided against**: locking after an idle spell is
-        the user's choice, not something to switch on for everybody. It
-        would shorten the window the review demonstrated, and it would
-        also lock people out of a program they left open on purpose. The
-        setting is there, `/lock` is there, and the threat model says
-        what an unlocked client is worth; which of those to use is the
-        person's call.
-
+        section 4. All but one are closed.
+        - [x] I-1: `docs/design/updates.md` claimed a kill test of the
+          swap that did not exist — the worst of them, a false statement
+          about what is tested. Two tests stand behind it now.
+        - [x] L-5: mailbox limits that wrapped on multiply and silently
+          meant "always full" at zero.
+        - [x] L-8 and L-16: validation at the protocol boundary rather
+          than only where a value is used.
+        - [x] L-6: the transparency log capped per identity.
+        - [x] L-10: secrets that serialized as plaintext for anything
+          persisting them outside the vault.
+        - [x] L-13: homoglyph names.
+        - [x] L-14: a fuzz target for each of the five remaining parsers,
+          each asserting the property it exists for. Writing the first
+          found `split_https_url` reading `evil.test@api.github.com` as a
+          host; refused now.
+        - [ ] **H-1.** A macOS release built without the notarization
+          secrets is signed ad hoc with the hardened runtime asked for,
+          and the release job fails if the flag is missing from the
+          signature it made. Left: watch that refuse a same-user attach on
+          a real Mac. Until someone has, the threat model and
+          `SECURITY.md` go on counting macOS as unprotected — left rather
+          than assumed, because I-1 was a document describing a check the
+          code did not do.
+        - Declined, on one decision: L-1 (`mlock`/`VirtualLock` on key
+          buffers) and the M-1 remainder (a key-store sweep), both system
+          calls in the crate that holds the keys and is
+          `#![forbid(unsafe_code)]`; and the L-11 and L-12 remainders,
+          each on its own argument. Section 4 has the arguments.
+        - Decided against: a non-zero `lock_after_minutes` default.
+          Locking after an idle spell is the person's choice; the setting
+          and `/lock` are there.
 64. [ ] **The identity key somewhere the memory is not** (L, undecided).
-        The one place where taking a key out of the process would buy
-        something. Everything else in memory is the conversation itself,
-        and hiding the key that decrypts it from a program that can read
-        the decrypted text achieves nothing; the identity key is
-        different, because it signs, and a copy taken once impersonates
-        the account for as long as the key stands, outliving the lock and
-        the session. Keeping it in a token or a platform enclave would
-        bound a memory dump to the session it was taken in.
-        What stops this being a small change is the algorithm. The
-        identity key is Ed25519, and it signs bundles, prekeys,
-        revocations, successions and MLS credentials; the Secure Enclave
-        holds P-256 only, TPMs commonly the same, and PIV tokens only in
-        recent firmware, so hardware custody means either a second
-        signature algorithm across the protocol or a hybrid, and every
-        peer has to accept it. That is a protocol change with a design
-        note in front of it, not a hardening pass. Worth doing only if
-        the answer to "a key stolen once, for good" is judged to be worth
-        that, and the revocation certificate and `/rotate` are the cheap
-        answer standing in the meantime.
-        The September 2026 review sharpens the question without settling
-        it. It read the *Diffie–Hellman* key out of a running client's
-        memory in six seconds, and the identity key sits in the same
-        file — so "a key stolen once, for good" is demonstrated rather
-        than hypothetical. But what hardware custody would buy is bounded
-        by what the hardware holds: enclaves and most tokens do P-256,
-        the identity key is Ed25519, and every peer would have to accept
-        a second algorithm or a hybrid. That is a protocol change with
-        its own design note, for a benefit that only bites after a
-        compromise the revocation certificate already answers. Still
-        undecided, and still not a condition of 1.0.
-        One dependency the question has, recorded so the order is not
-        got wrong: this only pays off under a deniable v4 with the
-        Diffie–Hellman key rotating on its own (SM-P-04 as decided,
-        `/rekey`). Then the identity key signs rarely — bundles,
-        revocations, certificates — which is the workload an enclave is
-        good for, and a memory read is worth only as much as the time
-        until the owner rekeys from a key the reader cannot reach. Had
-        handshakes been bound with identity signatures, the hardware key
-        would sign every session start, with a P-256 signature every
-        peer must verify, and the item would cost more for less.
+        The one place taking a key out of the process would buy
+        something: the identity key signs, so a copy taken once
+        impersonates the account for as long as the key stands, outliving
+        the lock and the session. A token or a platform enclave would
+        bound a memory dump to the session it was taken in — but enclaves
+        and most tokens hold P-256 and the identity key is Ed25519, so
+        custody means a second signature algorithm or a hybrid across the
+        protocol, every peer accepting it, and a design note in front. The
+        September 2026 review read the Diffie–Hellman key out of memory in
+        six seconds, so "stolen once, for good" is demonstrated rather
+        than hypothetical; the revocation certificate and `/rotate` remain
+        the cheap answer, and this is not a condition of 1.0.
+        - Depends on SM-P-04 as decided (57): under a deniable v4 with the
+          Diffie–Hellman key rotating on its own, the identity key signs
+          rarely — bundles, revocations, certificates — which is what an
+          enclave is good for, and a memory read is worth only the time
+          until the owner rekeys from a key the reader cannot reach. Had
+          handshakes been bound with identity signatures, the hardware key
+          would sign every session start and the item would cost more for
+          less.
 
 ## Continuous
 
