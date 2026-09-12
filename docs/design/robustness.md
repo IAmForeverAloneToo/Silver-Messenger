@@ -180,8 +180,8 @@ run is by hand: `tests/tui/soak.py --minutes 1440`.
 
 ## 7. Results
 
-The longest run so far is an hour, made on the day the code landed, on
-a debug build, with the relay's abuse limits lifted:
+An hour on a debug build, made on the day the code landed, with the
+relay's abuse limits lifted:
 
 | Time | Messages | alice | bob | relay |
 | --- | --- | --- | --- | --- |
@@ -194,9 +194,24 @@ half, and flat over the last twenty minutes; the relay's did not move.
 The rise of the first forty minutes is what fills once and stays full:
 the window of two thousand lines a side, the seen-id set (twenty
 thousand ids, not full yet at the end), and the allocator's own
-plateau. A three-minute run passes in CI on every push. The day-long
-run has not been made yet; `tests/tui/soak.py --minutes 1440` makes it,
-and its figures belong here when it has.
+plateau.
+
+Nearly three hours on the 0.18.0 release build, on the maintainer's
+relay host on 2026-09-11, limits lifted, started as the day-long run
+and stopped at 2 h 58 min by a reboot the host's unattended upgrades
+had scheduled the day before, so the harness reached no verdict:
+
+| Time | Messages | alice | bob | relay |
+| --- | --- | --- | --- | --- |
+| start | 0 | 12 MiB | 12 MiB | 9 MiB |
+| 1 h 29 min | 19,190 | 18 MiB | 18 MiB | 9 MiB |
+| 2 h 58 min | 37,915 | 19 MiB | 19 MiB | 9 MiB |
+
+The release build sits at well under half the debug build's memory,
+and each client rose by one mebibyte between the half and the end. A
+three-minute run passes in CI on every push. The day-long run has not
+completed yet; `tests/tui/soak.py --minutes 1440` makes it, and its
+figures belong here when it has.
 
 ## 8. Tests
 
