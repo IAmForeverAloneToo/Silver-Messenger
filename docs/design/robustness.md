@@ -208,10 +208,28 @@ had scheduled the day before, so the harness reached no verdict:
 | 2 h 58 min | 37,915 | 19 MiB | 19 MiB | 9 MiB |
 
 The release build sits at well under half the debug build's memory,
-and each client rose by one mebibyte between the half and the end. A
-three-minute run passes in CI on every push. The day-long run has not
-completed yet; `tests/tui/soak.py --minutes 1440` makes it, and its
-figures belong here when it has.
+and each client rose by one mebibyte between the half and the end.
+
+The day-long run, on the 0.18.1 release build against the 0.18.1
+relay, on the same host, limits lifted, from 2026-09-12 01:24 UTC to
+the next day, `tests/tui/soak.py --minutes 1440`:
+
+| Time | Messages | alice | bob | relay |
+| --- | --- | --- | --- | --- |
+| start | 0 | 14 MiB | 14 MiB | 9 MiB |
+| 12 h | 147,919 | 22 MiB | 25 MiB | 9 MiB |
+| 24 h | 294,004 | 24 MiB | 24 MiB | 4 MiB |
+
+It passed on every criterion of section 6: all three processes alive
+at the end with the last line each way on the other screen, each
+client's memory at the end within a tenth of its memory at the half,
+and everything far under the ceiling. The clients' 2,883 samples never
+left 14 to 25 MiB but for one: bob's 41 MiB in a single sample at 7 h
+56 min, on the message that carried both an edit and a reaction, gone
+by the next sample. The relay's resident set fell from 9 MiB to 4 MiB
+over the second half, the host (950 MiB of memory) paging idle pages
+of the relay out rather than the relay giving anything up. A
+three-minute run passes in CI on every push.
 
 ## 8. Tests
 

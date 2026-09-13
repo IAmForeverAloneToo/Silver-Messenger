@@ -453,7 +453,9 @@ those who want to pay for it (46).
         kill test on every platform CI tests, the windows and caps, and
         `tests/tui/soak.py` — three minutes on every push, an hour by
         hand with memory flat (`docs/design/robustness.md`).
-        - [ ] The day-long soak run.
+        - [x] The day-long soak run: 2026-09-12 to 13 on the 0.18.1
+          release build, 294,004 messages, memory flat, the figures in
+          `docs/design/robustness.md` section 7.
 53. [x] **Distribution** (M). A Debian package and a Homebrew tap built
         from the same reproducible release; Authenticode on Windows and
         notarisation on macOS. Shipped: the package, the tap, and the
