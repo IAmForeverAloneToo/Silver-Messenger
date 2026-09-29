@@ -8,6 +8,44 @@ A release's entry opens with a paragraph on what it is, then an
 then `Security`, `Added`, `Changed` and `Fixed` as the release needs
 them; older entries keep the shape they were written in.
 
+## Unreleased
+
+**Upgrading.** The data directory is touched once, at the first unlock:
+the relay's key log as replayed and the outbox are brought into the
+record of what the directory writes, which every other file has been in
+since 0.16.0. A client older than 0.18.1 cannot open the directory
+afterwards; 0.18.1 can, and a directory it has been run on is brought
+in again at the next unlock by this version. Nothing on the wire
+changes; the relay is as it was. For a program built on
+`silver-client`: `ConnectOptions` loses `outbox_path` and
+`outbox_cipher` and gains `outbox_store`, the store whose outbox the
+connection drains; `LogStore::load` takes the store; and the store's
+`outbox_path` and `transparency_path` go, since nothing needs them.
+
+### Security
+
+- The relay's key log as replayed (`transparency.json`) and the outbox
+  are bound to a generation like every other file in the data
+  directory, so an older copy of either put back is refused rather than
+  read: the replay can no longer be set back, its checkpoints and its
+  record of a fork included, and envelopes the relay already holds can
+  no longer be re-queued. Roadmap item 66; the argument, and what a
+  directory that already holds the two files in the old shape goes
+  through, in
+  [docs/design/format-changes.md](docs/design/format-changes.md)
+  section 5.7. The threat model's gap closes.
+
+### Fixed
+
+- Writing a file raised its generation under the store's lock but wrote
+  the record of it after letting go, so two writers could land their
+  records out of order and leave a file two generations ahead, which
+  the next unlock reads as tampering. The lock is held through the
+  record's write now. With two writers (the front end, and the sessions
+  in the connection) a file could end up one ahead at most, which the
+  crash rule accepts; the two files above make four writers, and the
+  window became real.
+
 ## 0.18.1 - 2026-09-11
 
 Two fixes to the data directory at the seams where a client older than

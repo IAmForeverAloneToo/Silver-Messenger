@@ -46,6 +46,9 @@ pub(crate) const STATE_FILE: &str = "state";
 /// The version before it, kept so an interrupted write has something to
 /// fall back to.
 pub(crate) const STATE_PREVIOUS_FILE: &str = "state.prev";
+/// The value of [`State::covers`] once the relay's key log as replayed and
+/// the outbox are in the record.
+pub(crate) const COVERS_LOG_AND_OUTBOX: u32 = 1;
 
 /// Where a history file stands, and whose it is.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,6 +95,17 @@ pub(crate) struct State {
     /// generation for the file.
     #[serde(default)]
     pub history: BTreeMap<String, HistoryState>,
+    /// Which files the record covers: 0 the store's own, and
+    /// [`COVERS_LOG_AND_OUTBOX`] those and the relay's key log as replayed
+    /// and the outbox, which were written bound to their names alone
+    /// until roadmap item 66. A file brought in after the record existed
+    /// is brought in once, at the unlock that finds this below its
+    /// number, and not at every unlock. A client that does not know the
+    /// field drops it when it writes the record, and is also a client
+    /// that wrote those two files name-only, so the next unlock brings
+    /// them in again (`docs/design/format-changes.md` section 5.7).
+    #[serde(default)]
+    pub covers: u32,
 }
 
 /// Where a directory stands with respect to rollback binding.
@@ -239,5 +253,16 @@ mod tests {
         };
         state.wrote("config.json", 3);
         assert_eq!(state.acceptable("config.json"), vec![3]);
+    }
+
+    /// A record written by a client that does not know `covers` (0.18.1
+    /// and earlier) reads as covering the store's own files alone, so the
+    /// next unlock brings the other two in again.
+    #[test]
+    fn a_record_without_covers_covers_the_original_files_alone() {
+        let state: State =
+            serde_json::from_str(r#"{"generation":3,"files":{},"history":{}}"#).unwrap();
+        assert_eq!(state.covers, 0);
+        assert!(state.covers < COVERS_LOG_AND_OUTBOX);
     }
 }

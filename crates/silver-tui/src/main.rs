@@ -618,8 +618,7 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
             extra_ca_certs: config.ca_cert.iter().cloned().collect(),
             proxy: proxy.clone(),
             pins: pins.clone(),
-            outbox_path: Some(store.outbox_path()),
-            outbox_cipher: store.cipher(),
+            outbox_store: Some(store.clone()),
             invite_token: config.invite_token.clone(),
             sessions: Some(
                 SessionStore::load(store, identity.user_id())
@@ -631,7 +630,7 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
             allow_unbound_login: args.allow_unbound_login,
             groups: true,
             transparency: Some(
-                silver_client::LogStore::load(Some(store.transparency_path()), store.cipher())
+                silver_client::LogStore::load(store)
                     .context("loading the relay's key log")?
                     .shared(),
             ),

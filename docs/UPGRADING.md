@@ -116,6 +116,21 @@ schema, the same backup format, the same wire. Each note says what the
 relay's upgrade changes, then what an operator may be asked about
 clients.
 
+### Unreleased
+
+* **Relay: nothing.** The schema stays at 3 and the backup format at 2,
+  and nothing on the wire changes.
+* **Clients.** The first unlock by this version brings the relay's key
+  log as replayed and the outbox into the record of what the directory
+  writes, once. A client older than 0.18.1 cannot open the directory
+  afterwards, as 0.14.0 could not open one 0.16.0 had written; 0.18.1
+  can, and a directory it has been run on is brought in again at the
+  next unlock by this version. A user who then sees "not the version
+  this directory last wrote" for `transparency.json` or `outbox.json`
+  ran 0.18.1 on it without its connecting; `silver
+  --reset-rollback-protection` starts the record again from what is on
+  disk.
+
 ### 0.18.1
 
 * **Relay: nothing.** The schema stays at 3 and the backup format at 2,

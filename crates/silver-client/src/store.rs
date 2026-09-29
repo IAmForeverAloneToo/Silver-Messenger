@@ -49,7 +49,7 @@ use silver_protocol::{Identity, IdentitySecrets, KeyBundle, Revocation, Sequence
 
 use crate::devices::{DevicesFile, Linked};
 use crate::files::FileInfo;
-use crate::rollback::{Generations, STATE_FILE, STATE_PREVIOUS_FILE, State};
+use crate::rollback::{COVERS_LOG_AND_OUTBOX, Generations, STATE_FILE, STATE_PREVIOUS_FILE, State};
 use crate::sequence::Seen;
 use crate::sessions::{PrekeyFile, SessionsFile};
 use crate::vault::{FileCipher, Kdf, LINE_PREFIX, VaultError, VaultFile};
@@ -928,7 +928,8 @@ impl Store {
         self.protection() != Protection::None && self.cipher.is_none()
     }
 
-    /// The data key, for components that keep their own files (the outbox).
+    /// The data key, for what is kept outside the store's own files:
+    /// received files written encrypted (`/files encrypt`).
     pub fn cipher(&self) -> Option<Arc<FileCipher>> {
         self.cipher.clone()
     }
@@ -1086,6 +1087,60 @@ impl Store {
                     Generations::Unreadable(e.to_string())
                 }
             };
+        self.bind_uncovered(&cipher)
+    }
+
+    /// Bring in the files the record did not cover when it was made.
+    ///
+    /// The relay's key log as replayed and the outbox were written bound
+    /// to their names alone until roadmap item 66: unrecorded in a
+    /// directory started on 0.16.0 or later, and recorded at generation 1
+    /// by the adoption but since rewritten name-only in one that came up
+    /// from 0.14.0. Each that exists is read through whichever shape it
+    /// is in, written back at the next generation and recorded, and the
+    /// record says so through `covers`, so this happens once per
+    /// directory — and again after a client that does not know `covers`
+    /// has written the record without it, since that is also a client
+    /// that wrote the two files name-only
+    /// (`docs/design/format-changes.md` section 5.7). A crash between
+    /// the files and the record leaves `covers` where it was, and the
+    /// next unlock does this again.
+    fn bind_uncovered(&self, cipher: &FileCipher) -> anyhow::Result<()> {
+        let mut generations = self.generations.lock().unwrap_or_else(|e| e.into_inner());
+        let Generations::Bound(state) = &mut *generations else {
+            return Ok(());
+        };
+        if state.covers >= COVERS_LOG_AND_OUTBOX {
+            return Ok(());
+        }
+        for name in [TRANSPARENCY_FILE, OUTBOX_FILE] {
+            let path = self.root.join(name);
+            if !path.exists() {
+                continue;
+            }
+            let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+            if !FileCipher::is_encrypted(&bytes) {
+                // Left plain by a protection a crash cut short, which
+                // `seal_stragglers` has already had its turn at; the next
+                // write binds it.
+                continue;
+            }
+            let opened = cipher.open_file(name, &bytes).with_context(|| {
+                format!(
+                    "{name} could not be read while it was being brought into the record of what \
+                     this directory writes; if it is damaged, move it aside"
+                )
+            })?;
+            let at = state.generation + 1;
+            write_atomic(&path, &cipher.encrypt_at(name, at, &opened.plain))?;
+            state.wrote(name, at);
+            state.generation = at;
+        }
+        state.covers = COVERS_LOG_AND_OUTBOX;
+        self.persist_generations(state, cipher)?;
+        tracing::info!(
+            "the relay's key log and the outbox are in the record of what this directory writes"
+        );
         Ok(())
     }
 
@@ -1140,6 +1195,10 @@ impl Store {
         const FIRST: u64 = 1;
         let mut state = State {
             generation: FIRST,
+            // Everything the re-encryption walks is stamped here, the
+            // relay's key log and the outbox included, so there is
+            // nothing left for `bind_uncovered` to bring in.
+            covers: COVERS_LOG_AND_OUTBOX,
             ..State::default()
         };
         for name in recrypted_files() {
@@ -1762,7 +1821,9 @@ impl Store {
                     "{name} is not the version this directory last wrote ({}, where it should be \
                      {acceptable:?}): it has been replaced with another copy of itself, which is \
                      what the generation in the vault is there to catch. Nothing has been read \
-                     from it.",
+                     from it. If a client older than this one has been run on this directory \
+                     since, that is the cause, and `silver --reset-rollback-protection` starts \
+                     the record again from what is on disk.",
                     match opened.generation {
                         Some(at) => format!("generation {at}"),
                         None => "no generation at all".to_owned(),
@@ -1789,6 +1850,11 @@ impl Store {
         let Some(cipher) = self.cipher.clone() else {
             return write_atomic(&self.root.join(name), bytes);
         };
+        // Held through the record's write. Several writers share one
+        // record (the front end, and the sessions, the key log and the
+        // outbox in the connection), and two records landing out of
+        // order would leave a file two generations ahead, which the next
+        // unlock reads as tampering.
         let mut generations = self.generations.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(why) = generations.refusal() {
             bail!("{why}");
@@ -1802,9 +1868,7 @@ impl Store {
         write_atomic(&self.root.join(name), &out)?;
         state.wrote(name, at);
         state.generation = at;
-        let state = state.clone();
-        drop(generations);
-        self.persist_generations(&state, &cipher)
+        self.persist_generations(state, &cipher)
     }
 
     /// The generation `vault.json` should be pointing at, for a rewrite
@@ -2316,9 +2380,8 @@ impl Store {
             .unwrap_or(0);
         state.wrote_history(name, &conversation.id(), bytes);
         state.generation += 1;
-        let state = state.clone();
-        drop(generations);
-        self.persist_generations(&state, &cipher)
+        // Held through the record's write, as in `write_file`.
+        self.persist_generations(state, &cipher)
     }
 
     /// Move the conversation log from `old` to `new`, for example when a
@@ -2556,9 +2619,8 @@ impl Store {
         };
         state.removed_history(name);
         state.generation += 1;
-        let state = state.clone();
-        drop(generations);
-        self.persist_generations(&state, &cipher)
+        // Held through the record's write, as in `write_file`.
+        self.persist_generations(state, &cipher)
     }
 
     /// Which conversation a history file's name belongs to, worked out
@@ -2803,16 +2865,6 @@ impl Store {
         }
         out.sort_by_key(|c| c.id());
         Ok(out)
-    }
-
-    /// Where the client keeps not-yet-accepted outgoing envelopes.
-    pub fn outbox_path(&self) -> PathBuf {
-        self.root.join(OUTBOX_FILE)
-    }
-
-    /// Where the relay's transparency log, as replayed, is kept.
-    pub fn transparency_path(&self) -> PathBuf {
-        self.root.join(TRANSPARENCY_FILE)
     }
 
     /// Where received files are saved.
@@ -3479,13 +3531,13 @@ mod tests {
     fn the_replayed_log_and_the_outbox_survive_adoption() {
         let (store, dir) = bound_store();
         let cipher = store.cipher.clone().unwrap();
-        let log_path = store.transparency_path();
-        let outbox_path = store.outbox_path();
-        crate::transparency::LogStore::load(Some(log_path.clone()), Some(cipher.clone()))
+        let log_path = dir.path().join(TRANSPARENCY_FILE);
+        let outbox_path = dir.path().join(OUTBOX_FILE);
+        crate::transparency::LogStore::load(&store)
             .unwrap()
             .confirm(7);
         // What the outbox writes when nothing is queued.
-        fs::write(&outbox_path, cipher.encrypt(OUTBOX_FILE, b"[]")).unwrap();
+        store.write_private_file(OUTBOX_FILE, b"[]").unwrap();
 
         // Back to the shape an older version wrote, as above.
         for name in recrypted_files() {
@@ -3513,11 +3565,133 @@ mod tests {
                 path.display()
             );
         }
-        let cipher = again.cipher();
-        let log = crate::transparency::LogStore::load(Some(log_path), cipher.clone()).unwrap();
+        // Stamped by the adoption with everything else, so nothing is
+        // left for the unlock to bring in.
+        assert_eq!(
+            again.generations().state().unwrap().covers,
+            COVERS_LOG_AND_OUTBOX
+        );
+        let log = crate::transparency::LogStore::load(&again).unwrap();
         assert_eq!(log.verified_at_ms(), 7);
-        let outbox = crate::outbox::Outbox::load(Some(outbox_path), cipher).unwrap();
+        let outbox = crate::outbox::Outbox::load(Some(again.clone())).unwrap();
         assert!(outbox.ids().is_empty());
+    }
+
+    /// Directories in use hold the two files bound to their names alone:
+    /// one started on 0.16.0 or later, where the record never heard of
+    /// them; one that came up from 0.14.0, where the adoption recorded
+    /// them at generation 1 and the writers 0.16.0 to 0.18.1 had then
+    /// rewrote them name-only; and, after a crash between the rewrite and
+    /// the record, one where they are bound and recorded but `covers` is
+    /// still unset. Each comes in at the next unlock, once, and an older
+    /// copy is refused from then on.
+    #[test]
+    fn the_two_files_written_name_only_are_brought_in_at_unlock() {
+        let log_plain = serde_json::to_vec(&crate::transparency::LogState {
+            verified_at_ms: 7,
+            ..Default::default()
+        })
+        .unwrap();
+        for (recorded_at_one, bound_at_one) in [(false, false), (true, false), (true, true)] {
+            let (store, dir) = bound_store();
+            let cipher = store.cipher.clone().unwrap();
+            // The record as those versions left it.
+            let mut state = store.generations().state().unwrap().clone();
+            state.covers = 0;
+            for name in [TRANSPARENCY_FILE, OUTBOX_FILE] {
+                state.files.remove(name);
+                if recorded_at_one {
+                    state.wrote(name, 1);
+                }
+            }
+            store.persist_generations(&state, &cipher).unwrap();
+            for (name, plain) in [
+                (TRANSPARENCY_FILE, log_plain.as_slice()),
+                (OUTBOX_FILE, b"[]".as_slice()),
+            ] {
+                let bytes = if bound_at_one {
+                    cipher.encrypt_at(name, 1, plain)
+                } else {
+                    cipher.encrypt(name, plain)
+                };
+                fs::write(dir.path().join(name), bytes).unwrap();
+            }
+
+            let mut again = Store::open(dir.path()).unwrap();
+            again.unlock_with_keystore().unwrap();
+            let state = again.generations().state().unwrap().clone();
+            assert_eq!(state.covers, COVERS_LOG_AND_OUTBOX);
+            for name in [TRANSPARENCY_FILE, OUTBOX_FILE] {
+                let bytes = fs::read(dir.path().join(name)).unwrap();
+                assert!(
+                    bytes.starts_with(crate::vault::GENERATION_MAGIC),
+                    "{name} should be bound (recorded at one: {recorded_at_one}, bound at one: \
+                     {bound_at_one})"
+                );
+                assert!(state.files.contains_key(name), "{name} should be recorded");
+            }
+            assert_eq!(
+                crate::transparency::LogStore::load(&again)
+                    .unwrap()
+                    .verified_at_ms(),
+                7
+            );
+            assert!(
+                crate::outbox::Outbox::load(Some(again.clone()))
+                    .unwrap()
+                    .ids()
+                    .is_empty()
+            );
+
+            // Once: a second unlock rewrites nothing.
+            let record = fs::read(dir.path().join(STATE_FILE)).unwrap();
+            let log = fs::read(dir.path().join(TRANSPARENCY_FILE)).unwrap();
+            let mut third = Store::open(dir.path()).unwrap();
+            third.unlock_with_keystore().unwrap();
+            assert_eq!(fs::read(dir.path().join(STATE_FILE)).unwrap(), record);
+            assert_eq!(fs::read(dir.path().join(TRANSPARENCY_FILE)).unwrap(), log);
+
+            // And bound means bound: the name-only copy put back is refused.
+            fs::write(
+                dir.path().join(TRANSPARENCY_FILE),
+                cipher.encrypt(TRANSPARENCY_FILE, &log_plain),
+            )
+            .unwrap();
+            let err = format!(
+                "{:#}",
+                crate::transparency::LogStore::load(&third).unwrap_err()
+            );
+            assert!(
+                err.contains("not the version this directory last wrote"),
+                "a name-only copy was read after the file was bound: {err}"
+            );
+        }
+    }
+
+    /// Several writers share one record: two threads writing different
+    /// files through clones of one store leave a directory that opens,
+    /// with every file at a generation the record accepts. Before the
+    /// lock was held through the record's write, two records landing out
+    /// of order could leave a file two generations ahead.
+    #[test]
+    fn writers_on_two_threads_leave_a_directory_that_opens() {
+        let (store, dir) = bound_store();
+        let peer = Identity::generate().user_id();
+        let other = store.clone();
+        let writer = std::thread::spawn(move || {
+            for _ in 0..40 {
+                other.save_blocked(&[peer]).unwrap();
+            }
+        });
+        for _ in 0..40 {
+            store.save_contacts(&[]).unwrap();
+        }
+        writer.join().unwrap();
+
+        let mut again = Store::open(dir.path()).unwrap();
+        again.unlock_with_keystore().unwrap();
+        assert!(again.load_contacts().unwrap().is_empty());
+        assert_eq!(again.load_blocked().unwrap(), vec![peer]);
     }
 
     /// A client from before generations existed, run on a directory a

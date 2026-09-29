@@ -718,7 +718,7 @@ those who want to pay for it (46).
           given the tense pass first planned.
         - [x] 65.7 The close: the checker over everything, the line counts
           before and after in the closing commit's message.
-66. [ ] **The two files outside the generation record** (S). The relay's
+66. [x] **The two files outside the generation record** (S). The relay's
         key log as replayed (`transparency.json`) and the outbox are
         written by code of their own, bound to their names alone, so item
         57's rollback protection does not cover them: an older copy of the
@@ -731,7 +731,14 @@ those who want to pay for it (46).
         directory since 0.16.0 holds both files in that shape. Found when
         the migration that stamps every file stamped these two and their
         readers refused them (fixed in 0.18.1); the threat model names
-        the gap.
+        the gap. Shipped after 0.18.1: both through the store's bound
+        writes, with the rule for an unrecorded file left as it was,
+        since it could not take the second kind of directory in without
+        taking the attack in too; instead a number in the record itself
+        brings the two files in once, at the next unlock. The argument
+        is section 5.7 of
+        [docs/design/format-changes.md](docs/design/format-changes.md),
+        and the threat model's gap closes.
 
 ## Continuous
 
