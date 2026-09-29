@@ -118,8 +118,9 @@ clients.
 
 ### 0.19.0
 
-* **Relay: nothing.** The schema stays at 3 and the backup format at 2,
-  and nothing on the wire changes.
+* **Relay: a dependency only.** rustls 0.23.45, for RUSTSEC-2026-0285,
+  which the changelog describes; the schema stays at 3 and the backup
+  format at 2, and nothing on the wire changes.
 * **Clients.** The first unlock by this version brings the relay's key
   log as replayed and the outbox into the record of what the directory
   writes, once. A client older than 0.18.1 cannot open the directory
