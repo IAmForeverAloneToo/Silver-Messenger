@@ -14,38 +14,38 @@ class SilverMessenger < Formula
   # download and the relay is a resource beside it.
   on_macos do
     on_arm do
-      url "https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/download/v0.18.1/silver-v0.18.1-aarch64-apple-darwin"
-      sha256 "4bf4722e4d521a4b13f4fc395b918f9b21f88841f88651379734ed7e36e70021"
+      url "https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/download/v0.19.0/silver-v0.19.0-aarch64-apple-darwin"
+      sha256 "093da7df1be9fb4d6f19d3979e2cd8e6b8de45e932df021687792c067b2dcf28"
       resource "relay" do
-        url "https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/download/v0.18.1/silver-relay-v0.18.1-aarch64-apple-darwin"
-        sha256 "38a8fe8c317c9dae75b11633974ebe6d4a2ed7eae7a6c7b324ffba9a48c76e61"
+        url "https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/download/v0.19.0/silver-relay-v0.19.0-aarch64-apple-darwin"
+        sha256 "f87941c70d3cac01fc8c0e669a0a904c34475fedc916acf4efab422e1a49adcb"
       end
     end
     on_intel do
-      url "https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/download/v0.18.1/silver-v0.18.1-x86_64-apple-darwin"
-      sha256 "48d388b3843dc5d9505f52fdc7a155d5022d5b5cc2f89d2b7e9e25a1f5a5a65b"
+      url "https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/download/v0.19.0/silver-v0.19.0-x86_64-apple-darwin"
+      sha256 "f4ac53d483ca4130676890c145981ec86a03ec09a191db490b57806bbf9dcc02"
       resource "relay" do
-        url "https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/download/v0.18.1/silver-relay-v0.18.1-x86_64-apple-darwin"
-        sha256 "4cd2597a20847156c2a5d5b29de178832dc0a5942a9e882a7900b902af44e18d"
+        url "https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/download/v0.19.0/silver-relay-v0.19.0-x86_64-apple-darwin"
+        sha256 "0cbfc689774272bdceece3b9c023cc298a257d554491416f493a9ff025931c2c"
       end
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/download/v0.18.1/silver-v0.18.1-aarch64-unknown-linux-musl"
-      sha256 "5b45106564d7e38782a824bd20ad01bc8fe146ae018dedb234f7b0cc4f081dd9"
+      url "https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/download/v0.19.0/silver-v0.19.0-aarch64-unknown-linux-musl"
+      sha256 "240e9b3b0db154f9bde95f1295895dbcf01adbc218540ba19cb3d70fb6678d96"
       resource "relay" do
-        url "https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/download/v0.18.1/silver-relay-v0.18.1-aarch64-unknown-linux-musl"
-        sha256 "62b5fcb59385d9538ec65fe31dabb3cc314ebb84e59d18bd2740a618a394c403"
+        url "https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/download/v0.19.0/silver-relay-v0.19.0-aarch64-unknown-linux-musl"
+        sha256 "cb84e1f59fe8ce4b4ac577eeb17249b2044b32aab83638807fec80f8544afc6d"
       end
     end
     on_intel do
-      url "https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/download/v0.18.1/silver-v0.18.1-x86_64-unknown-linux-musl"
-      sha256 "649ee27686930772b401561a48fcf07189828520606b9eb0c1363c366c355ec3"
+      url "https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/download/v0.19.0/silver-v0.19.0-x86_64-unknown-linux-musl"
+      sha256 "72f7cda5ad263ccda333f6a3ab27795a1bcf47361db0b487a07545fa0567b874"
       resource "relay" do
-        url "https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/download/v0.18.1/silver-relay-v0.18.1-x86_64-unknown-linux-musl"
-        sha256 "03cfda044188601dd5b79f526dac31a1fb5e5c287ebcc303fc7f7a2fef8d0544"
+        url "https://github.com/IAmForeverAloneToo/Silver-Messenger/releases/download/v0.19.0/silver-relay-v0.19.0-x86_64-unknown-linux-musl"
+        sha256 "25228acdadea58b689c89b3779e9d238c1c91b3407d69ef8863fbe4ff0570714"
       end
     end
   end
