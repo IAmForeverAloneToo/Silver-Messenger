@@ -512,12 +512,7 @@ different case from the thief, and a sharper one than it looks:
   `verified` mark: each file is bound to a **generation** as well as its
   name, recorded in an encrypted `state` file whose own generation is the
   one number `vault.json` carries in the clear, so a file at the wrong
-  generation does not decrypt at all. Two files are outside that record
-  and bound to their names alone, the relay's key log as replayed and
-  the outbox (roadmap item 66): an older copy of the first sets the
-  replay back, its checkpoints and its record of any fork it had seen
-  included, and of the second re-queues envelopes the relay already
-  holds and drops as duplicates.
+  generation does not decrypt at all.
 - They can roll back the **whole directory**, every file and the anchor
   together, to a state it really was in, and that cannot be told from the
   passage of time, because every file agrees with every other exactly as
@@ -876,8 +871,7 @@ independent rebuild is the answer to that.
   own, signed by the device key with the certificate in the leaf.
 - **At rest**: a per-installation data key, wrapped by the OS key store or
   by a passphrase through Argon2id; every file under it is
-  XChaCha20-Poly1305, bound to its name and, all but two (roadmap item
-  66), its generation.
+  XChaCha20-Poly1305, bound to its name and its generation.
 
 Deliberately off by default: cover traffic (`/cover on`, roadmap item
 46), which costs bandwidth on both sides and the relay. Deniability is
@@ -1179,13 +1173,15 @@ hardened-runtime signing is in and unverified on a real Mac; until
 somebody has watched it refuse an attach, macOS counts as unprotected
 here and in `SECURITY.md`.
 
-**Two files outside the generation record.** Open (roadmap item 66): the
-relay's key log as replayed and the outbox are written bound to their
-names alone, so somebody who can write the directory can put back an
-older copy of either and have it read. What that buys them: the replay
-set back, with its checkpoints and its record of a fork it had seen, and
-envelopes re-queued that the relay already holds and drops as
-duplicates. Everything else in the directory is bound to a generation.
+**Two files outside the generation record.** Closed (roadmap item 66):
+the relay's key log as replayed and the outbox were written bound to
+their names alone, so somebody who could write the directory could put
+back an older copy of either and have it read, the replay set back with
+its checkpoints and its record of a fork, or envelopes re-queued that
+the relay already holds. Both go through the store's bound writes now,
+and a directory holding them in the old shape brings them in once at
+its next unlock. What remains is the bound every file has: the whole
+directory rolled back together, which no counter inside it can see.
 
 ## Out of scope
 

@@ -1,46 +1,46 @@
 //! Envelopes handed to us that the relay has not yet accepted.
 //!
 //! Sending never fails for lack of a connection: the envelope goes into the
-//! outbox, is written to disk when a path is configured, and is (re)sent on
-//! every connection until the relay answers `Sent` or `Rejected`. The relay
-//! ignores duplicates by envelope id, so resending is safe.
+//! outbox, is written to the data directory when the connection has one,
+//! and is (re)sent on every connection until the relay answers `Sent` or
+//! `Rejected`. The relay ignores duplicates by envelope id, so resending is
+//! safe.
 
 use std::collections::VecDeque;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use anyhow::Context;
 use silver_protocol::Envelope;
 use tracing::warn;
 
-use crate::vault::FileCipher;
+use crate::store::Store;
 
 const OUTBOX_NAME: &str = "outbox.json";
 
 #[derive(Debug, Default)]
 pub(crate) struct Outbox {
     entries: VecDeque<Envelope>,
-    path: Option<PathBuf>,
-    cipher: Option<Arc<FileCipher>>,
+    /// The directory the outbox is kept in, through whose bound writes
+    /// the file is encrypted and bound to a generation like every other
+    /// file there (`docs/design/format-changes.md` section 5.7). `None`
+    /// keeps the outbox in memory only.
+    store: Option<Store>,
 }
 
 impl Outbox {
-    /// Load the outbox from `path` (missing file = empty). Without a path the
-    /// outbox lives in memory only. With a cipher the file is encrypted.
-    pub(crate) fn load(
-        path: Option<PathBuf>,
-        cipher: Option<Arc<FileCipher>>,
-    ) -> anyhow::Result<Self> {
-        let entries = match &path {
-            Some(p) if p.exists() => read(p, cipher.as_deref())?,
-            _ => VecDeque::new(),
+    /// Load the outbox from the store's directory (a missing file is an
+    /// empty outbox). Without a store the outbox lives in memory only.
+    pub(crate) fn load(store: Option<Store>) -> anyhow::Result<Self> {
+        let entries = match &store {
+            Some(store) => match store
+                .read_private_file(OUTBOX_NAME)
+                .context("reading the outbox")?
+            {
+                Some(bytes) => serde_json::from_slice(&bytes).context("parsing outbox.json")?,
+                None => VecDeque::new(),
+            },
+            None => VecDeque::new(),
         };
-        Ok(Self {
-            entries,
-            path,
-            cipher,
-        })
+        Ok(Self { entries, store })
     }
 
     pub(crate) fn push(&mut self, envelope: Envelope) {
@@ -70,45 +70,19 @@ impl Outbox {
     }
 
     fn persist(&self) {
-        let Some(path) = &self.path else {
+        let Some(store) = &self.store else {
             return;
         };
-        if let Err(e) = write(path, self.cipher.as_deref(), &self.entries) {
-            warn!("could not save outbox to {}: {e:#}", path.display());
+        // Synced by the store's write: the outbox holds sealed envelopes
+        // waiting to go, and a power loss must not leave the name pointing
+        // at an empty file.
+        let written = serde_json::to_vec(&self.entries)
+            .map_err(anyhow::Error::from)
+            .and_then(|bytes| store.write_private_file(OUTBOX_NAME, &bytes));
+        if let Err(e) = written {
+            warn!("could not save the outbox: {e:#}");
         }
     }
-}
-
-fn read(path: &Path, cipher: Option<&FileCipher>) -> anyhow::Result<VecDeque<Envelope>> {
-    let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    let plain = if FileCipher::is_encrypted(&bytes) {
-        let cipher = cipher.context("outbox is encrypted but no passphrase was given")?;
-        // Either shape: `write` binds this file to its name alone, but the
-        // store's migration to generations stamps one onto every file it
-        // walks, this one included.
-        cipher.open_file(OUTBOX_NAME, &bytes)?.plain.to_vec()
-    } else {
-        bytes
-    };
-    serde_json::from_slice(&plain).with_context(|| format!("parsing {}", path.display()))
-}
-
-fn write(
-    path: &Path,
-    cipher: Option<&FileCipher>,
-    entries: &VecDeque<Envelope>,
-) -> anyhow::Result<()> {
-    let plain = serde_json::to_vec(entries)?;
-    // Bound to its name alone, outside the store's generation record, so
-    // an older copy of this file put back is not caught (roadmap item 66).
-    let out = match cipher {
-        Some(c) => c.encrypt(OUTBOX_NAME, &plain),
-        None => plain,
-    };
-    // Owner-only and synced: the outbox holds sealed envelopes waiting to
-    // go, and a power loss between the write and the rename must not leave
-    // the name pointing at an empty file.
-    crate::store::write_atomic(path, &out)
 }
 
 #[cfg(test)]
@@ -124,64 +98,56 @@ mod tests {
     #[test]
     fn outbox_round_trips_through_disk() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("outbox.json");
+        let store = Store::open(dir.path()).unwrap();
         let (first, second) = (envelope("one"), envelope("two"));
         {
-            let mut outbox = Outbox::load(Some(path.clone()), None).unwrap();
+            let mut outbox = Outbox::load(Some(store.clone())).unwrap();
             outbox.push(first.clone());
             outbox.push(second.clone());
             outbox.push(first.clone()); // duplicate, ignored
             assert_eq!(outbox.ids(), vec![first.id.clone(), second.id.clone()]);
         }
-        let mut outbox = Outbox::load(Some(path.clone()), None).unwrap();
+        let mut outbox = Outbox::load(Some(store.clone())).unwrap();
         assert_eq!(
             outbox.iter().cloned().collect::<Vec<_>>(),
             vec![first.clone(), second.clone()]
         );
         assert!(outbox.remove(&first.id));
         assert!(!outbox.remove(&first.id));
-        let outbox = Outbox::load(Some(path), None).unwrap();
+        let outbox = Outbox::load(Some(store)).unwrap();
         assert_eq!(outbox.ids(), vec![second.id]);
     }
 
+    /// Through a protected store the file is under the data key and bound
+    /// to a generation like every other, a store that is not unlocked
+    /// reads none of it, and an older copy put back is refused rather
+    /// than re-queued.
     #[test]
-    fn outbox_file_is_encrypted_with_a_cipher() {
-        use crate::vault::Kdf;
+    fn a_protected_store_binds_the_outbox_and_refuses_an_older_copy() {
+        crate::keystore::use_mock_store();
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("outbox.json");
-        let (_, cipher) = FileCipher::create("pw", Kdf::fast()).unwrap();
-        let cipher = Arc::new(cipher);
+        let mut store = Store::open(dir.path()).unwrap();
+        store.load_or_create_identity().unwrap();
+        store.protect_with_keystore().unwrap();
         let env = envelope("secret");
-        {
-            let mut outbox = Outbox::load(Some(path.clone()), Some(cipher.clone())).unwrap();
-            outbox.push(env.clone());
-        }
-        let raw = fs::read(&path).unwrap();
-        assert!(FileCipher::is_encrypted(&raw));
-        assert!(Outbox::load(Some(path.clone()), None).is_err());
-        let outbox = Outbox::load(Some(path), Some(cipher)).unwrap();
-        assert_eq!(outbox.ids(), vec![env.id]);
-    }
+        Outbox::load(Some(store.clone())).unwrap().push(env.clone());
+        let path = dir.path().join(OUTBOX_NAME);
+        let older = std::fs::read(&path).unwrap();
+        assert!(older.starts_with(crate::vault::GENERATION_MAGIC));
+        assert!(
+            Outbox::load(Some(Store::open(dir.path()).unwrap())).is_err(),
+            "a store that is not unlocked should read nothing"
+        );
+        let mut outbox = Outbox::load(Some(store.clone())).unwrap();
+        assert_eq!(outbox.ids(), vec![env.id.clone()]);
 
-    /// The store's migration to generations stamps one onto this file
-    /// too, and an outbox written under its name alone has to load back
-    /// once it has been.
-    #[test]
-    fn an_outbox_the_store_stamped_with_a_generation_still_loads() {
-        use crate::vault::Kdf;
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("outbox.json");
-        let (_, cipher) = FileCipher::create("pw", Kdf::fast()).unwrap();
-        let cipher = Arc::new(cipher);
-        let env = envelope("queued");
-        Outbox::load(Some(path.clone()), Some(cipher.clone()))
-            .unwrap()
-            .push(env.clone());
-        let plain = cipher
-            .decrypt(OUTBOX_NAME, &fs::read(&path).unwrap())
-            .unwrap();
-        fs::write(&path, cipher.encrypt_at(OUTBOX_NAME, 1, &plain)).unwrap();
-        let outbox = Outbox::load(Some(path), Some(cipher)).unwrap();
-        assert_eq!(outbox.ids(), vec![env.id]);
+        // The envelope went; its older self put back would send it again.
+        assert!(outbox.remove(&env.id));
+        std::fs::write(&path, &older).unwrap();
+        let err = format!("{:#}", Outbox::load(Some(store)).unwrap_err());
+        assert!(
+            err.contains("not the version this directory last wrote"),
+            "an older copy of the outbox was read: {err}"
+        );
     }
 }

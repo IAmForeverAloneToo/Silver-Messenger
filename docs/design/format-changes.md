@@ -344,6 +344,87 @@ step 1 was, and it is done again. The vault version field carries the
 change, so an older client refuses the directory rather than reading half
 of it — which is what that field has always been for.
 
+### 5.7 The two files outside the record
+
+Roadmap item 66. Two files were never in the record. The relay's key
+log as this client has replayed it (`transparency.json`) and the outbox
+are written by code of their own, handed a path and the data key rather
+than a store, and bound to their names alone. The migration of 5.6
+stamped them with the rest, and their readers, which knew the name-only
+shape alone, refused what it made (0.18.1's first fix). They read
+either shape now, but an older copy of either put back is still read as
+current: the replay set back, its checkpoints and its record of a fork
+included, or envelopes re-queued that the relay already holds and drops
+as duplicates. Three decisions bring them in.
+
+**Through the store, like everything else.** Both are read and written
+through the store's own bound read and write, holding a store handle as
+the sessions, the devices and the groups already do, so each is written
+at a generation and recorded. The connection options lose `outbox_path`
+and `outbox_cipher` and gain the store whose outbox the connection
+drains; a library client that keeps no directory passes none and keeps
+its outbox in memory, as before.
+
+**Brought in once, at unlock, on the record's own word.** A directory
+in use holds the two files in one of two states: unrecorded and
+name-only (every directory started on 0.16.0 or later), or recorded at
+generation 1 by the migration and since rewritten name-only by the
+writers 0.16.0 to 0.18.1 had (every directory that came up from 0.14.0
+or earlier). The first sketch was to loosen `acceptable` so that a file
+the record has never heard of is taken name-only once. That covers the
+first state and not the second, where the record *has* heard of the
+file and a name-only one is exactly the copy an attacker puts back; and
+"once" means nothing in a rule consulted at every read. So the rule is
+not touched. Instead `state` gains a number, `covers`, saying which
+files the record covers: 0 the store's own, 1 those and the two. At
+unlock, once the record is read and found below 1, each of the two
+files that exists is read through whichever shape it is in, written
+back bound at the next generation and recorded, and `covers` is raised,
+in one write of the record. The migration of 5.6 sets it to 1 as it
+stamps, so a directory coming up from 0.14.0 needs no second pass. What
+this accepts is whatever the two files hold at that moment, once per
+directory, which is what the migration accepted for every file. It
+cannot be made to happen again from outside: `state` is under the data
+key and anchored, so lowering `covers` takes the key or a rollback of
+the whole directory, which 5.1 already concedes. A crash between the
+rewrite and the record leaves `covers` at 0, and the next unlock does
+it again, reading through the shape it finds.
+
+**One record, more writers.** `write_file` wrote the file and raised
+the generation under the lock, then let the lock go before writing the
+record. With one writer in the front end and one in the connection that
+left at most one file a generation ahead, which the crash rule accepts.
+The connection now writes three files, and two records landing out of
+order can leave a file two ahead, which the next unlock reads as
+tampering. The three places that raise the generation (the whole-file
+write, the history append's note and the history removal's) all let
+the lock go the same way; each holds it through the record's write
+now. The cost is a few small writes under a lock nothing waits long
+for.
+
+What a rollback of the client leaves. 0.18.1 opens a directory this
+version has written, since it reads either shape, and its writers put
+the two files back into the name-only shape; on its next write of the
+record it drops `covers`, a field it does not know, which is the signal
+wanted: the next unlock by this version brings the two files in again.
+A 0.18.1 run that never wrote the record (it did not connect) leaves
+`covers` at 1 and the files name-only, and this version then refuses
+them as it would an older copy; the refusal says that an older client
+run on the directory is one cause, and names
+`--reset-rollback-protection` as the way out. 0.18.0 and earlier cannot
+open the directory at all, as 0.14.0 could not open one 0.16.0 had
+written, and the upgrade guide says so.
+
+Checked in CI: a log and an outbox written through a bound store come
+back, are in the generation shape, and are refused when an older copy
+is put back; a directory holding them unrecorded and name-only, and one
+holding them recorded at 1 and name-only, both come in at the next
+unlock, `covers` rises, and a second unlock rewrites nothing; a
+directory coming up from the pre-generation shape gets them in the same
+pass as everything else; a record without `covers`, as 0.18.1 writes
+it, brings them in again; and two threads writing different files
+through one store leave a directory that opens.
+
 ## 6. How the wire pair becomes required
 
 Section 2 said the two fields go in optional and become required a
@@ -460,3 +541,6 @@ what section 4 required of it.
   refused every file as an older copy. Since 0.18.1 the newer client
   reads through both layers: the file underneath is the one it wrote,
   and making the outer layer took the key.
+* The two bullets above describe 0.18.1. Section 5.7 brings the two
+  files into the record, and the note's "every file" holds again from
+  the release after it.

@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::sessions::SharedSessions;
-use crate::vault::FileCipher;
+use crate::store::Store;
 
 use anyhow::Context;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -36,11 +36,12 @@ pub struct ConnectOptions {
     /// When any are set, a `wss://` connection is refused unless one of
     /// them matches a certificate the relay presents.
     pub pins: Vec<Pin>,
-    /// Where to keep envelopes the relay has not accepted yet, so they
-    /// survive a restart of the client. `None` keeps them in memory only.
-    pub outbox_path: Option<PathBuf>,
-    /// Encrypts the outbox file when the data directory has a passphrase.
-    pub outbox_cipher: Option<Arc<FileCipher>>,
+    /// The data directory whose outbox holds envelopes the relay has not
+    /// accepted yet, so they survive a restart of the client. The file
+    /// goes through the store, so it is under the data key and bound to
+    /// a generation like every other file there. `None` keeps them in
+    /// memory only.
+    pub outbox_store: Option<Store>,
     /// Invite token for relays that only register invited identities.
     pub invite_token: Option<String>,
     /// Forward-secret sessions and prekeys. Without one the client speaks
@@ -97,8 +98,7 @@ impl std::fmt::Debug for ConnectOptions {
             .field("extra_ca_certs", &self.extra_ca_certs)
             .field("proxy", &self.proxy)
             .field("pins", &self.pins)
-            .field("outbox_path", &self.outbox_path)
-            .field("outbox_cipher", &self.outbox_cipher.is_some())
+            .field("outbox_store", &self.outbox_store.is_some())
             .field("invite_token", &self.invite_token.is_some())
             .field("sessions", &self.sessions.is_some())
             .field("devices", &self.devices.is_some())

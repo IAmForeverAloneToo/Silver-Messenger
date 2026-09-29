@@ -14,12 +14,11 @@
 //!   on the chain this client replayed, so a relay that shows two people
 //!   two different logs is caught by the next message between them.
 //!
-//! The state is a small file in the data directory, encrypted like the
-//! outbox when the directory has a passphrase.
+//! The state is a file in the data directory, written and read through
+//! the store like every other file there: under the data key, bound to
+//! its name and a generation.
 
 use std::collections::HashMap;
-use std::fs;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
@@ -31,7 +30,7 @@ use silver_protocol::transparency::{
 use silver_protocol::{KeyBundle, Revocation, Succession, UserId};
 use tracing::warn;
 
-use crate::vault::FileCipher;
+use crate::store::Store;
 
 /// The file name, bound into its encryption.
 pub const LOG_NAME: &str = "transparency.json";
@@ -166,27 +165,32 @@ pub enum HeadCheck {
 }
 
 /// The log as this client has replayed it, with its file.
+#[derive(Debug)]
 pub struct LogStore {
     state: LogState,
-    path: Option<PathBuf>,
-    cipher: Option<Arc<FileCipher>>,
+    /// The directory the file is kept in, through whose bound writes it
+    /// is encrypted and bound to a generation like every other file
+    /// there (`docs/design/format-changes.md` section 5.7). `None`
+    /// keeps the state in memory only.
+    store: Option<Store>,
 }
 
 /// The store shared between the client task and the front end.
 pub type SharedLog = Arc<Mutex<LogStore>>;
 
 impl LogStore {
-    /// Load from `path` (a missing file is an empty log). Without a path
-    /// the state lives in memory only.
-    pub fn load(path: Option<PathBuf>, cipher: Option<Arc<FileCipher>>) -> anyhow::Result<Self> {
-        let state = match &path {
-            Some(p) if p.exists() => read(p, cipher.as_deref())?,
-            _ => LogState::default(),
+    /// Load from the data directory (a missing file is an empty log).
+    pub fn load(store: &Store) -> anyhow::Result<Self> {
+        let state = match store
+            .read_private_file(LOG_NAME)
+            .context("reading the transparency log")?
+        {
+            Some(bytes) => serde_json::from_slice(&bytes).context("parsing transparency.json")?,
+            None => LogState::default(),
         };
         Ok(Self {
             state,
-            path,
-            cipher,
+            store: Some(store.clone()),
         })
     }
 
@@ -194,8 +198,7 @@ impl LogStore {
     pub fn ephemeral() -> Self {
         Self {
             state: LogState::default(),
-            path: None,
-            cipher: None,
+            store: None,
         }
     }
 
@@ -492,48 +495,23 @@ impl LogStore {
     }
 
     fn persist(&self) {
-        let Some(path) = &self.path else {
+        let Some(store) = &self.store else {
             return;
         };
-        if let Err(e) = write(path, self.cipher.as_deref(), &self.state) {
-            warn!(
-                "could not save the transparency log to {}: {e:#}",
-                path.display()
-            );
+        // Synced by the store's write: the checkpoints are what catches a
+        // forked log, and a half-written file would be one fewer place to
+        // catch it.
+        let written = serde_json::to_vec(&self.state)
+            .map_err(anyhow::Error::from)
+            .and_then(|bytes| store.write_private_file(LOG_NAME, &bytes));
+        if let Err(e) = written {
+            warn!("could not save the transparency log: {e:#}");
         }
     }
 }
 
 fn key(subject: &Hash) -> String {
     subject.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn read(path: &Path, cipher: Option<&FileCipher>) -> anyhow::Result<LogState> {
-    let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    let plain = if FileCipher::is_encrypted(&bytes) {
-        let cipher =
-            cipher.context("the transparency log is encrypted but no passphrase was given")?;
-        // Either shape: `write` binds this file to its name alone, but the
-        // store's migration to generations stamps one onto every file it
-        // walks, this one included.
-        cipher.open_file(LOG_NAME, &bytes)?.plain.to_vec()
-    } else {
-        bytes
-    };
-    serde_json::from_slice(&plain).with_context(|| format!("parsing {}", path.display()))
-}
-
-fn write(path: &Path, cipher: Option<&FileCipher>, state: &LogState) -> anyhow::Result<()> {
-    let plain = serde_json::to_vec(state)?;
-    // Bound to its name alone, outside the store's generation record, so
-    // an older copy of this file put back is not caught (roadmap item 66).
-    let out = match cipher {
-        Some(c) => c.encrypt(LOG_NAME, &plain),
-        None => plain,
-    };
-    // Owner-only and synced: the checkpoints are what catches a forked
-    // log, and a half-written file would be one fewer place to catch it.
-    crate::store::write_atomic(path, &out)
 }
 
 #[cfg(test)]
@@ -835,13 +813,13 @@ mod tests {
     #[test]
     fn the_state_round_trips_through_its_file() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(LOG_NAME);
+        let store = Store::open(dir.path()).unwrap();
         let mut relay = FakeLog::new();
         let alice = Identity::generate();
         relay.add(&alice.user_id(), EntryKind::Bundle, [1; 32]);
-        let mut ours = LogStore::load(Some(path.clone()), None).unwrap();
+        let mut ours = LogStore::load(&store).unwrap();
         ours.apply(&relay.since(0, 10), 7).unwrap();
-        let again = LogStore::load(Some(path), None).unwrap();
+        let again = LogStore::load(&store).unwrap();
         assert_eq!(again.head(), relay.head());
         assert_eq!(again.verified_at_ms(), 7);
         assert_eq!(
@@ -850,22 +828,28 @@ mod tests {
         );
     }
 
-    /// The store's migration to generations stamps one onto this file
-    /// too, and a log written under its name alone has to load back once
-    /// it has been.
+    /// Through a protected store the file is under the data key and bound
+    /// to a generation like every other, and an older copy of it put back
+    /// is refused rather than read as the replay.
     #[test]
-    fn a_log_the_store_stamped_with_a_generation_still_loads() {
-        use crate::vault::Kdf;
+    fn a_protected_store_binds_the_log_and_refuses_an_older_copy() {
+        crate::keystore::use_mock_store();
         let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path()).unwrap();
+        store.load_or_create_identity().unwrap();
+        store.protect_with_keystore().unwrap();
+        LogStore::load(&store).unwrap().confirm(7);
         let path = dir.path().join(LOG_NAME);
-        let (_, cipher) = FileCipher::create("pw", Kdf::fast()).unwrap();
-        let cipher = Arc::new(cipher);
-        LogStore::load(Some(path.clone()), Some(cipher.clone()))
-            .unwrap()
-            .confirm(7);
-        let plain = cipher.decrypt(LOG_NAME, &fs::read(&path).unwrap()).unwrap();
-        fs::write(&path, cipher.encrypt_at(LOG_NAME, 1, &plain)).unwrap();
-        let again = LogStore::load(Some(path), Some(cipher)).unwrap();
-        assert_eq!(again.verified_at_ms(), 7);
+        let older = std::fs::read(&path).unwrap();
+        assert!(older.starts_with(crate::vault::GENERATION_MAGIC));
+        assert_eq!(LogStore::load(&store).unwrap().verified_at_ms(), 7);
+
+        LogStore::load(&store).unwrap().confirm(8);
+        std::fs::write(&path, &older).unwrap();
+        let err = format!("{:#}", LogStore::load(&store).unwrap_err());
+        assert!(
+            err.contains("not the version this directory last wrote"),
+            "an older copy of the log was read: {err}"
+        );
     }
 }

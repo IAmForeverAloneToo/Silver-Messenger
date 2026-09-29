@@ -445,7 +445,7 @@ async fn messages_written_while_offline_go_out_on_reconnect() {
 #[tokio::test]
 async fn outbox_survives_a_client_restart() {
     let dir = tempfile::tempdir().unwrap();
-    let outbox = dir.path().join("outbox.json");
+    let store = Store::open(dir.path()).unwrap();
     // A port nobody listens on yet.
     let addr = TcpListener::bind("127.0.0.1:0")
         .await
@@ -456,7 +456,7 @@ async fn outbox_survives_a_client_restart() {
     let alice = Arc::new(Identity::generate());
     let bob = Arc::new(Identity::generate());
     let options = || ConnectOptions {
-        outbox_path: Some(outbox.clone()),
+        outbox_store: Some(store.clone()),
         ..Default::default()
     };
 
@@ -944,7 +944,7 @@ async fn handshakes_wait_in_the_mailbox_and_sessions_survive_restarts() {
                 .unwrap()
                 .shared(),
         ),
-        outbox_path: Some(alice_dir.path().join("outbox.json")),
+        outbox_store: Some(alice_store.clone()),
         ..Default::default()
     };
     let (alice_c, mut alice_ev) =
