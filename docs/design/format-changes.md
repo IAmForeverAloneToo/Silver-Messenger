@@ -543,4 +543,4 @@ what section 4 required of it.
   and making the outer layer took the key.
 * The two bullets above describe 0.18.1. Section 5.7 brings the two
   files into the record, and the note's "every file" holds again from
-  the release after it.
+  0.19.0.
