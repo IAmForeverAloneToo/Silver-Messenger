@@ -731,7 +731,7 @@ those who want to pay for it (46).
         directory since 0.16.0 holds both files in that shape. Found when
         the migration that stamps every file stamped these two and their
         readers refused them (fixed in 0.18.1); the threat model names
-        the gap. Shipped after 0.18.1: both through the store's bound
+        the gap. Shipped in 0.19.0: both through the store's bound
         writes, with the rule for an unrecorded file left as it was,
         since it could not take the second kind of directory in without
         taking the attack in too; instead a number in the record itself

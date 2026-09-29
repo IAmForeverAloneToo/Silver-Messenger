@@ -8,7 +8,12 @@ A release's entry opens with a paragraph on what it is, then an
 then `Security`, `Added`, `Changed` and `Fixed` as the release needs
 them; older entries keep the shape they were written in.
 
-## Unreleased
+## 0.19.0 - 2026-09-29
+
+Roadmap item 66: the last two files in the data directory brought under
+the rollback protection of 0.16.0, so that every file there is bound to
+a generation and no older copy of any of them is read as current.
+Nothing on the wire changes; the relay is as it was.
 
 **Upgrading.** The data directory is touched once, at the first unlock:
 the relay's key log as replayed and the outbox are brought into the
