@@ -12,16 +12,16 @@ them; older entries keep the shape they were written in.
 
 Roadmap item 66: the last two files in the data directory brought under
 the rollback protection of 0.16.0, so that every file there is bound to
-a generation and no older copy of any of them is read as current.
-Nothing on the wire changes; the relay is as it was.
+a generation and no older copy of any of them is read as current, and
+a TLS library update for both programs. Nothing on the wire changes.
 
 **Upgrading.** The data directory is touched once, at the first unlock:
 the relay's key log as replayed and the outbox are brought into the
 record of what the directory writes, which every other file has been in
 since 0.16.0. A client older than 0.18.1 cannot open the directory
 afterwards; 0.18.1 can, and a directory it has been run on is brought
-in again at the next unlock by this version. Nothing on the wire
-changes; the relay is as it was. For a program built on
+in again at the next unlock by this version. The relay's one change is
+the rustls update below. For a program built on
 `silver-client`: `ConnectOptions` loses `outbox_path` and
 `outbox_cipher` and gains `outbox_store`, the store whose outbox the
 connection drains; `LogStore::load` takes the store; and the store's
@@ -39,6 +39,14 @@ connection drains; `LogStore::load` takes the store; and the store's
   through, in
   [docs/design/format-changes.md](docs/design/format-changes.md)
   section 5.7. The threat model's gap closes.
+- rustls 0.23.45, for RUSTSEC-2026-0285: rustls accepted a TLS 1.3
+  handshake message sent at the wrong encryption level when it followed
+  a key change in the same record. The transcript stays authenticated,
+  so a network attacker could neither alter nor complete a handshake
+  with it; what it allowed was a peer sending in plaintext what should
+  have been encrypted. Both the client (its connection to the relay)
+  and the relay (its built-in TLS) link rustls, so both carry the
+  update.
 
 ### Fixed
 
