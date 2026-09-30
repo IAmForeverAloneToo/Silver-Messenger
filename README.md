@@ -20,6 +20,20 @@ questions people ask first, with short answers, are in
 [docs/FAQ.md](docs/FAQ.md); how to build, test and propose a change is
 in [CONTRIBUTING.md](CONTRIBUTING.md).
 
+Contents:
+
+- [Layout](#layout)
+- [Quick start](#quick-start): [from the release
+  binaries](#from-the-release-binaries), [verifying a
+  release](#verifying-a-release), [updating](#updating), [from
+  source](#from-source), [first steps](#first-steps), [commands and
+  keys](#commands-and-keys), [options](#options), [pins and
+  proxies](#pins-and-proxies)
+- [Running a relay](#running-a-relay)
+- [What protects a message](#what-protects-a-message)
+- [Development](#development)
+- [License](#license)
+
 ## Layout
 
 The repository is a Cargo workspace with four crates:
@@ -199,15 +213,17 @@ code. On the computer you already use, `/devices link <link>` says what
 that computer would be given — your identity signs a certificate for it,
 so from then until you remove it that computer reads what is sent to you
 and writes in your name — and shows its id to compare against the one it
-printed. `/devices link confirm`, typed rather than pasted, takes it in:
-the new device gets your contacts, your groups and the last thirty days
-of history, and from then on every message reaches both, what you send on
+printed.
+
+`/devices link confirm`, typed rather than pasted, takes it in: the new
+device gets your contacts, your groups and the last thirty days of
+history, and from then on every message reaches both, what you send on
 one shows on the other, and contacts see one person with one id and one
-safety number. `/devices` lists your devices, `/devices remove
-<n>` cuts one off for good (a lost laptop, say), and `/devices leave
-confirm` on a linked computer erases it. Your identity key stays on the
-computer it was made on; a linked device holds keys of its own and a
-certificate from it. Needs a relay on 0.9.0.
+safety number. `/devices` lists your devices, `/devices remove <n>` cuts
+one off for good (a lost laptop, say), and `/devices leave confirm` on a
+linked computer erases it. Your identity key stays on the computer it
+was made on; a linked device holds keys of its own and a certificate
+from it. Needs a relay on 0.9.0.
 
 Sent messages carry a mark: `⋯` waiting for the relay, `✓` accepted by the
 relay, `✓✓` delivered to the contact's device, `✓✓` in colour read, `✗`
@@ -222,8 +238,8 @@ message dressed up to look like a saved file elsewhere opens nothing.
 | ------------------------------- | ------------------------------------------------------------ |
 | `/add <user-id or link> [alias]` | Add a contact by id or invite link                           |
 | `/invite [copy]`                | Show your invite link and a QR code of it; `copy` puts it on the clipboard |
-| `/copy [id [who]\|link]`        | Copy the last message of this chat, your id (or a contact's, by alias or id), or your invite link; a click on a chat's title copies that person's id too |
-| `/whois [who]`                  | A person's id, alias, verification and how messages with them are protected, in the System pane: the open chat's, or one by alias, id or enough of it |
+| `/copy [id [who]\|link]` | Copy the last message here, your id or a contact's (by alias or id), or your invite link |
+| `/whois [who]` | Show a person's id, alias, verification and how messages with them are protected: the open chat's, or by alias or id |
 | `/alias <name>`                 | Name the selected contact or group                           |
 | `/remove`                       | Forget the selected contact (history file stays on disk)     |
 | `/verify`                       | Show the safety number to compare with the selected contact  |
@@ -239,11 +255,11 @@ message dressed up to look like a saved file elsewhere opens nothing.
 | `/edit <text>`                  | Replace the text of the selected message of yours (or your last one) within a day of sending; it shows as edited |
 | `/delete`                       | Delete the selected message of yours (or your last one) for everyone, within a day of sending; a placeholder stays |
 | `/delete me`                    | Remove any message from your devices only; the other side keeps its copy |
-| `/timer <30s\|5m\|1h\|8h\|1d\|1w\|off>` | Messages in this chat disappear that long after you send them or they read them, on every device; in a group, admins only; `/timer` alone shows the setting |
-| `/files encrypt on\|off`, `/files decrypt` | Keep received files as ciphertext (needs a protected data directory; `/open` still reads them), or write a plain copy of the last one |
-| `/search <text>`                | Find messages in the selected chat or group, or in every chat and group from System; it reads the history files, so lines older than the screen holds are found |
+| `/timer <30s\|5m\|1h\|8h\|1d\|1w\|off>` | Messages here disappear that long after being sent or read, on every device (admins only in a group); `/timer` shows it |
+| `/files encrypt on\|off`, `/files decrypt` | Keep received files encrypted (needs a protected directory; `/open` still works), or write a plain copy of the last one |
+| `/search <text>` | Find messages in this chat or group, or in all of them from System; it reads the history files, not only the screen |
 | `/receipts on\|off`             | Tell contacts when you have read their messages (default on) |
-| `/notify all\|terminal\|desktop\|bell\|off` | Bell and a desktop notification (`all`: by the terminal or the desktop, whichever this terminal calls for; `terminal` or `desktop` forces one), bell only, or nothing |
+| `/notify all\|terminal\|desktop\|bell\|off` | Bell and a desktop notification (`all` picks the path; `terminal` or `desktop` forces one), bell only, or nothing |
 | `/marks ascii\|unicode\|auto`   | Draw the marks in ASCII if your terminal shows boxes for them |
 | `/theme dark\|light\|mono\|contrast` | Colours for a dark or a light background, none at all, or bright bold text on black for high contrast |
 | `/go <name>`                    | Open the chat whose name (or id) starts with `name`; `system` and `requests` name those |
@@ -251,19 +267,19 @@ message dressed up to look like a saved file elsewhere opens nothing.
 | `/reader on\|off`               | Start in reader mode next time (see below); `silver --reader` does it once |
 | `/history [n]`                  | In reader mode, read the last `n` lines of this chat with their times (default 10) |
 | `/unread`                       | Say what waits unread in every chat                          |
-| `/accept [n or id]`             | Accept a contact request or a group invitation: the open one, or one by its number or the sender's id (a typed reply to a request accepts it too) |
+| `/accept [n or id]` | Accept a contact request or group invitation: the open one, or by number or sender's id; a typed reply accepts too |
 | `/decline [n or id]`            | Turn one down: not now, where `/block` is never; nothing is sent, and the sender's next one waits without ringing |
 | `/requests`                     | List the requests and invitations waiting, with their numbers |
 | `/group new <name>`             | Make a group (needs a relay on 0.9.0); its pane opens after the contacts |
 | `/group add <contact>` / `remove <member>` / `leave` | Membership, by an admin; anyone may leave |
 | `/group members` / `info` / `rename <name>` / `admin add\|remove <member>` | List, describe, rename, appoint |
-| `/group invite [copy]` / `link reset` / `join <link>` | Show or copy the group's invite link (and its QR code), void old links, or ask to join by one (says who learns your id, then `/group join confirm`) |
+| `/group invite [copy]` / `link reset` / `join <link>` | Show, copy or void the group's invite link, or join by one: it says who learns your id, then `/group join confirm` |
 | `/group rejoin` / `forget`      | Ask the admins to re-add you after a missed change; drop a group you left or were removed from |
 | `/block [n, alias or id]`       | Drop everything from that id from now on: the open chat or request's, or one by number, alias or id |
 | `/unblock <id>`, `/blocked`     | Undo a block (enough of the id will do); list blocked ids    |
 | `/me`                           | Show your own id                                             |
 | `/devices`                      | List your identity's devices: their names, when each was linked, and which one this is |
-| `/devices link <link> [days]`   | Say what taking in a computer that printed a link with `silver --link` would grant it, and how much history goes with it (default 30 days, 0 for none); `/devices link confirm` goes ahead |
+| `/devices link <link> [days]` | Say what the computer behind the link would get, and `days` of history (default 30, 0 none); then `/devices link confirm` |
 | `/devices remove <n>` / `name <n> <name>` / `join` | Revoke a device, rename one, or add your devices to the groups they are not in yet (all on the primary) |
 | `/devices leave confirm`        | On a linked device: ask the primary to revoke it, erase its keys, contacts and history, and exit |
 | `/relay <ws-url>`               | Say what moving to another relay costs; `/relay confirm` writes it (used on next start) |
@@ -278,7 +294,8 @@ Mouse: click a chat, Requests or System in the list to open it, the wheel
 scrolls, the scrollbar on the right edge can be dragged, so can the line
 between the list and the chat to resize the list. Drag in the chat to select
 text (double click selects a word, triple click a whole message), double
-click a received file's line to open it.
+click a received file's line to open it, and click a chat's title to copy
+that person's id.
 
 Keys: `Tab` / `Shift-Tab` or `Alt-Up` / `Alt-Down` switch chats, `Up` /
 `Down` recall earlier lines, `Alt-Enter` starts a new line in a message,
@@ -289,18 +306,21 @@ selected, pressing it twice quits), `Ctrl-V`, `Shift-Insert` or a right
 click paste from the system clipboard, `Esc` clears the selection and then
 the input line, `Ctrl-Q` quits. Copies go to the system clipboard, or to
 the terminal's clipboard through OSC 52 over SSH and in tmux. Pasting keeps
-line breaks. New messages in chats you are not looking at ring the bell,
-raise a desktop notification — through the terminal where it raises one
-itself (WezTerm, kitty, foot, iTerm2, rxvt-unicode, and over SSH), and
-through the operating system everywhere else (Windows Terminal and the
-Windows console, Terminal.app, GNOME Terminal and every VTE terminal,
-Konsole, Alacritty) — and put the unread count in the window title;
-`/notify` adjusts that. A notification says `New message` and nothing
-else, ever: not who wrote, not what. If the
-terminal is narrower than 70 columns the list folds away and the chat title
-shows where you are. Everything the mouse does has a key or a command:
-`/go <name>` opens a chat by name and `/sidebar <columns>` resizes the
-list, so nothing needs the mouse.
+line breaks.
+
+New messages in chats you are not looking at ring the bell, raise a
+desktop notification — through the terminal where it raises one itself
+(WezTerm, kitty, foot, iTerm2, rxvt-unicode, and over SSH), and through
+the operating system everywhere else (Windows Terminal and the Windows
+console, Terminal.app, GNOME Terminal and every VTE terminal, Konsole,
+Alacritty) — and put the unread count in the window title; `/notify`
+adjusts that. A notification says `New message` and nothing else, ever:
+not who wrote, not what.
+
+If the terminal is narrower than 70 columns the list folds away and the
+chat title shows where you are. Everything the mouse does has a key or a
+command: `/go <name>` opens a chat by name and `/sidebar <columns>`
+resizes the list, so nothing needs the mouse.
 
 Reader mode, for a screen reader: `silver --reader` (or `/reader on`,
 which remembers it) runs the client as a line-at-a-time program with no
@@ -309,13 +329,15 @@ at the bottom of the terminal's own scrollback (`alice: hello`, or `alice,
 in team: hello` when that chat is not open; `you: …` for what you send;
 `alice edited: …`, `alice deleted a message`, `alice reacted 👍 to: …`),
 and the last line is where you type, its prompt naming the open chat
-(`alice> `). Switching chats reads `Chat: alice, 2 unread.` and the unread
-lines (or the last three); `Shift-Up` and `Shift-Down` select a message
-and say it, `/history [n]` reads the last lines back with their times,
-`/unread` says what waits where, `F1` prints the help as lines. The
-commands and keys are the ones above. `--theme contrast` is a palette for
-low vision in the full mode: bright bold text on black, and every colour
-pair at high contrast. docs/TERMINALS.md says how each screen reader was
+(`alice> `).
+
+Switching chats reads `Chat: alice, 2 unread.` and the unread lines (or
+the last three); `Shift-Up` and `Shift-Down` select a message and say
+it, `/history [n]` reads the last lines back with their times, `/unread`
+says what waits where, `F1` prints the help as lines. The commands and
+keys are the ones above. `--theme contrast` is a palette for low vision
+in the full mode: bright bold text on black, and every colour pair at
+high contrast. docs/TERMINALS.md says how each screen reader was
 checked, or that it has not been.
 
 ### Options
@@ -364,11 +386,14 @@ at rest: under a passphrase if you set one, otherwise under a key kept in
 this computer's key store (the Credential Manager on Windows, the Keychain
 on macOS, the Secret Service on Linux desktops), so a copied directory is
 useless elsewhere. Where there is no key store (a server, a container) the
-files are plain and the System pane says so at start. Received files go to
-`downloads/` inside it; they are ordinary files, not encrypted at rest, so
-other programs can open them, unless `/files encrypt on` keeps them
-encrypted too, in which case `/open` decrypts a private copy for the
-program that opens the file. The client keeps its keys out of core dumps, and out of reach of another
+files are plain and the System pane says so at start.
+
+Received files go to `downloads/` inside it; they are ordinary files,
+not encrypted at rest, so other programs can open them, unless `/files
+encrypt on` keeps them encrypted too, in which case `/open` decrypts a
+private copy for the program that opens the file.
+
+The client keeps its keys out of core dumps, and out of reach of another
 program running under your account as far as the platform allows: on
 Linux the process cannot be traced or read, on Windows it carries an
 access list that refuses being opened for reading, and on macOS neither
