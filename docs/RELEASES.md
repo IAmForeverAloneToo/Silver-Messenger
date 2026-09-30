@@ -147,6 +147,7 @@ Authenticode from `AUTHENTICODE_PFX` (the PKCS#12 file, base64) and
 certificate from `APPLE_CERTIFICATE_P12` (base64) and
 `APPLE_CERTIFICATE_PASSWORD`, then notarised under `APPLE_ID`,
 `APPLE_TEAM_ID` and `APPLE_APP_PASSWORD` (an app-specific password).
+
 With none of a platform's secrets the workflow says so and publishes
 that platform unsigned; with some but not all it fails, since a half-set
 secret is a mistake. A bare executable takes a signature but no stapled

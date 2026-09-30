@@ -116,6 +116,18 @@ schema, the same backup format, the same wire. Each note says what the
 relay's upgrade changes, then what an operator may be asked about
 clients.
 
+| Version | What the relay's upgrade changes |
+| --- | --- |
+| [0.19.0](#0190) | A dependency only (rustls); the schema stays at 3 and the backup format at 2 |
+| [0.18.1](#0181) | Nothing; on the client, two directories that would not open, open as they are |
+| [0.18.0](#0180) | Nothing; `/rekey` on the client republishes a bundle under the same identity |
+| [0.17.0](#0170) | One older client it stops taking: a linked device from before 0.16.0 |
+| [0.10.1](#0101) | Upgrade: the first review's Critical and High fixes; schema and backup format unchanged |
+| [0.10.0](#0100) | Nothing; the everyday features are content inside the envelopes |
+| [0.9.0](#090) | The schema moves to 3 and the backup format to 2; rolling back to 0.8.0 needs a restore |
+| [0.8.0](#080) | The schema moves to 2, the key transparency log; rolling back to 0.7.0 needs a restore |
+| [0.7.0](#070) | TLS in the relay, the admin socket, the schema version (1), metrics and JSON logs, arm64 and a container image |
+
 ### 0.19.0
 
 * **Relay: a dependency only.** rustls 0.23.45, for RUSTSEC-2026-0285,

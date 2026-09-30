@@ -76,11 +76,18 @@ elevation. That is the limit the threat model already named, and no
 software on the machine can close it; what the client does is raise the
 cost, and it differs by platform:
 
-| Platform | What the client does | What it leaves |
-| --- | --- | --- |
-| Linux | No core file; the process is not dumpable, so a same-user process may neither trace it nor read `/proc/<pid>/mem` | Root, and anything already attached |
-| Windows (0.16.0) | No core file; the process object carries a restricted access list, so opening it for reading is refused | An attacker who rewrites that list first, which a process's owner may do; and an administrator |
-| macOS | No core file. From 0.16.0 release builds carry an ad-hoc signature asking for the hardened runtime, which is **not verified** to restrict anything: treat macOS as having no protection here until somebody has checked it on a real Mac | A debugger run by the same user, which macOS allows for a program it started |
+- **Linux.** No core file; the process is not dumpable, so a same-user
+  process may neither trace it nor read `/proc/<pid>/mem`. What it
+  leaves: root, and anything already attached.
+- **Windows** (from 0.16.0). No core file; the process object carries a
+  restricted access list, so opening it for reading is refused. What it
+  leaves: an attacker who rewrites that list first, which a process's
+  owner may do; and an administrator.
+- **macOS.** No core file. From 0.16.0 release builds carry an ad-hoc
+  signature asking for the hardened runtime, which is **not verified**
+  to restrict anything: treat macOS as having no protection here until
+  somebody has checked it on a real Mac. What it leaves: a debugger run
+  by the same user, which macOS allows for a program it started.
 
 Pages of an unlocked client may also reach swap or a hibernation image;
 full-disk encryption is what answers that, not this program. Reading an
@@ -103,9 +110,11 @@ metadata the threat model says they see.
 | --- | --- |
 | `main` | Yes |
 | The latest release (`0.x.y` with the highest `x`) | Yes, as a patch release |
-| Earlier releases | No: upgrade. Clients and relays interoperate across the last two minor versions, so an upgrade does not need everyone to move at once. |
+| Earlier releases | No: upgrade |
 
-While the major version is 0 there is one supported line at a time. A
+Clients and relays interoperate across the last two minor versions, so
+an upgrade does not need everyone to move at once. While the major
+version is 0 there is one supported line at a time. A
 fix that changes the wire protocol is released together with a compatible
 client and relay, and the changelog says what stops working with older
 peers.
