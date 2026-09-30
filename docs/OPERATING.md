@@ -162,7 +162,7 @@ plain `ws://` is the right scheme for it. On the relay host, with the
 relay listening on `127.0.0.1:7777` and told its onion name with
 `--host`, add to `/etc/tor/torrc`:
 
-```
+```text
 HiddenServiceDir /var/lib/tor/silver-relay/
 HiddenServicePort 80 127.0.0.1:7777
 ```
@@ -332,7 +332,7 @@ Retention is journald's. What the journal still records is when each
 pseudonym was connected, so keep it short. To keep a week and no more
 than 200 MB, in `/etc/systemd/journald.conf`:
 
-```
+```ini
 [Journal]
 SystemMaxUse=200M
 MaxRetentionSec=1week
@@ -435,7 +435,7 @@ its own checksum before it gets its name.
 A backup on the same disk as the database is not a backup of the disk.
 Copy the files off the host, encrypted: for example
 
-```
+```sh
 age -r age1... -o relay-2026-09-04.backup.age /var/lib/silver-relay/backups/relay-2026-09-04T0213.backup
 ```
 
@@ -446,7 +446,7 @@ must be kept as private.
 Restoring is in UPGRADING.md ("Rolling back"). Do it once into a scratch
 directory before you need it:
 
-```
+```sh
 silver-relay restore /var/lib/silver-relay/backups/relay-2026-09-04T0213.backup --data-dir /tmp/check
 rm -r /tmp/check
 ```

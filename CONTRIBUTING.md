@@ -69,7 +69,9 @@ What CI runs on every push, beyond those:
   GitHub Action is pinned to a commit hash, every container image by
   digest, and the compiler to an exact version.
 * `tests/docs/check_links.py`: every cross-reference in the documents
-  resolves.
+  resolves. `tests/docs/check_render.py`: every document renders on
+  GitHub the way it reads in the source (`pip install cmarkgfm` to run
+  it here).
 
 Where the tests are:
 
