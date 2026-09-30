@@ -167,8 +167,10 @@ a shape:
   was checked against. An *argument* (a design note) says why: the
   decisions, the reasons, the alternatives not taken, dated, with
   corrections made after the code landed kept in a section of their
-  own. A *record* (`CHANGELOG.md`, `ROADMAP.md`, the audit reports) is
-  appended to and never rewritten for style.
+  own. A *record* (`CHANGELOG.md`, `ROADMAP.md`, the audit reports)
+  keeps its words: it is appended to, its markup may be repaired so
+  that it renders as written, and a summary may stand in front of it,
+  but an entry is not rewritten for style.
 * **One home per fact.** The README describes, the operator's guide
   operates, the protocol specifies, the threat model promises, the
   design notes argue, the changelog records. A fact wanted in two
@@ -185,7 +187,11 @@ a shape:
   its path, "protocol section 13.5", "roadmap item 52".
   `tests/docs/check_links.py` resolves every one, and CI runs it.
 * British spelling; the em dash, never `--`; commands, flags and file
-  names in code spans; *the client* and *the relay*.
+  names in code spans; *the client* and *the relay*. Every fenced code
+  block names its language (`sh`, `text`, `ini`, `rust`), and a nested
+  list starts at the column its parent's text starts at.
+  `tests/docs/check_render.py` renders every document the way GitHub
+  does and fails on what a reader would see wrong.
 
 ## Releasing
 

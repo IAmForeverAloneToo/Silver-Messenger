@@ -40,7 +40,7 @@ SECTION = re.compile(
 BARE = re.compile(r"(?<![\w.])(\d{1,2}\.\d{1,2}(?:\.\d)?)(?![\d.]| ?(?:KiB|KB|MiB|MB|bytes|GiB|%|x\b|k\b))")
 NUMBERED_HEADING = re.compile(r"^#{1,6}\s+(\d+(?:\.\d+){0,2})[.\s]")
 ROADMAP_ITEM = re.compile(r"\bitems? (\d+)(?:\.\d+)?")
-ROADMAP_LINE = re.compile(r"^(\d+)\. \[")
+ROADMAP_LINE = re.compile(r"^### (\d+)\. ")
 FENCE = re.compile(r"^(```|~~~)")
 
 
@@ -109,7 +109,8 @@ def markdown_named(path, mention):
 
 def check(rel, protocol_sections, items, problems):
     path = ROOT / rel
-    own_sections = numbered_headings(path)
+    # The roadmap's numbered headings are items, not sections.
+    own_sections = numbered_headings(path) if path != ROADMAP else set()
     heading_cache = {}
 
     def sections_of(target):
@@ -142,7 +143,7 @@ def check(rel, protocol_sections, items, problems):
                 m2.group(1)
                 for m2 in re.finditer(r"(?<![\w./-])([\w./-]+\.md)", before)
                 if m2.end() > len(before) - 80
-            ] or re.findall(r"of (?:the )?`?([\w./-]+\.md)", after)
+            ] or re.findall(r"of (?:the )?[`\[]?([\w./-]+\.md)", after)
             if re.search(r"report|audit|note's|that note|this note|its section|RFC|FIPS|draft", context, re.I):
                 continue
             if named:
