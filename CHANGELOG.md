@@ -8,6 +8,36 @@ A release's entry opens with a paragraph on what it is, then an
 then `Security`, `Added`, `Changed` and `Fixed` as the release needs
 them; older entries keep the shape they were written in.
 
+The releases, newest first; each version links to its entry.
+
+| Version | Date | What it was |
+| --- | --- | --- |
+| [0.19.0](#0190---2026-09-29) | 2026-09-29 | The last two files in the data directory under rollback protection (roadmap item 66); rustls updated |
+| [0.18.1](#0181---2026-09-11) | 2026-09-11 | Two data-directory fixes at the seams where a client older than 0.16.0 meets a newer one |
+| [0.18.0](#0180---2026-09-11) | 2026-09-11 | `/rekey`: the encryption key replaced under the same identity; v4 stays deniable |
+| [0.17.0](#0170---2026-09-10) | 2026-09-10 | The two fields 0.16.0 added as optional are required (roadmap item 57, second half) |
+| [0.16.0](#0160---2026-09-10) | 2026-09-10 | The second security review answered, and roadmap item 57's format changes |
+| [0.14.0](#0140---2026-09-08) | 2026-09-08 | Requests are chats you have not answered yet, and naming people (roadmap item 60) |
+| [0.13.0](#0130---2026-09-08) | 2026-09-08 | Desktop notifications that reach the desktop (roadmap item 59) |
+| [0.12.5](#0125---2026-09-08) | 2026-09-08 | `silver update` from behind a TLS-inspecting proxy |
+| [0.12.4](#0124---2026-09-07) | 2026-09-07 | The first-run question shows its answer as it is typed |
+| [0.12.3](#0123---2026-09-07) | 2026-09-07 | The release notes name the files a release publishes |
+| [0.12.2](#0122---2026-09-07) | 2026-09-07 | A release page carries the program and nothing else: fourteen files |
+| [0.12.1](#0121---2026-09-07) | 2026-09-07 | `silver update` could install nothing; the download is made runnable |
+| [0.12.0](#0120---2026-09-07) | 2026-09-07 | `silver update`: updating in place, from releases signed with minisign (roadmap item 58) |
+| [0.11.0](#0110---2026-09-07) | 2026-09-07 | The first security review's Medium, Low and Informational findings |
+| [0.10.1](#0101---2026-09-06) | 2026-09-06 | The first security review's Critical and High findings |
+| [0.10.0](#0100---2026-09-05) | 2026-09-05 | Phase 10: everyday features, reader mode, robustness, packages, a contributor guide and a FAQ |
+| [0.9.0](#090---2026-09-05) | 2026-09-05 | Phase 9: groups on MLS and multiple devices; relay schema 3 |
+| [0.8.0](#080---2026-09-05) | 2026-09-05 | Phase 8: the protocol finished, from the post-quantum ratchet to cover traffic; relay schema 2 |
+| [0.7.0](#070---2026-09-04) | 2026-09-04 | Phase 7: TLS in the relay, metrics, an admin socket, backups, a container image, an operator's guide |
+| [0.6.0](#060---2026-09-04) | 2026-09-04 | Phase 6: secure and private by default |
+| [0.5.0](#050---2026-09-04) | 2026-09-04 | Phase 5: a terminal client that feels native |
+| [0.4.0](#040---2026-09-04) | 2026-09-04 | Phase 4: receipts, files, notifications, invite links |
+| [0.3.0](#030---2026-09-04) | 2026-09-04 | Phase 3: forward secrecy |
+| [0.2.0](#020---2026-09-04) | 2026-09-04 | Phase 2: the trust model completed |
+| [0.1.0](#010---2026-09-04) | 2026-09-04 | First tagged release |
+
 ## 0.19.0 - 2026-09-29
 
 Roadmap item 66: the last two files in the data directory brought under

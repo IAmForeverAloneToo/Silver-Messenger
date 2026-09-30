@@ -7,6 +7,28 @@ it does not) and the operator's guide (`docs/OPERATING.md`: running a
 relay). Where an answer here and one of those documents differ, the
 document is right and this page needs a fix.
 
+The questions:
+
+- [What is it?](#what-is-it)
+- [Do I have to run a relay?](#do-i-have-to-run-a-relay)
+- [Can I talk to someone on a different relay?](#can-i-talk-to-someone-on-a-different-relay)
+- [What does the relay see?](#what-does-the-relay-see)
+- [How do I know I am talking to the right person?](#how-do-i-know-i-am-talking-to-the-right-person)
+- [Is it secure? What does "secure" mean here?](#is-it-secure-what-does-secure-mean-here)
+- [My encryption key may have been read. What do I do?](#my-encryption-key-may-have-been-read-what-do-i-do)
+- [What happens if I lose my laptop?](#what-happens-if-i-lose-my-laptop)
+- [Can I use it on my desktop and my laptop?](#can-i-use-it-on-my-desktop-and-my-laptop)
+- [Is there a phone app, or a window I can click in?](#is-there-a-phone-app-or-a-window-i-can-click-in)
+- [I forgot my passphrase.](#i-forgot-my-passphrase)
+- [Do messages disappear? Can I unsend one?](#do-messages-disappear-can-i-unsend-one)
+- [Where do files go? Is it safe to open them?](#where-do-files-go-is-it-safe-to-open-them)
+- [How long does the relay keep my messages?](#how-long-does-the-relay-keep-my-messages)
+- [How do I back up, and how do I move to a new computer?](#how-do-i-back-up-and-how-do-i-move-to-a-new-computer)
+- [What does it put in my computer's key store?](#what-does-it-put-in-my-computers-key-store)
+- [How do I update, and what breaks?](#how-do-i-update-and-what-breaks)
+- [Something is wrong. Where do I say so?](#something-is-wrong-where-do-i-say-so)
+- [Is it free?](#is-it-free)
+
 ## What is it?
 
 A messenger that runs in a terminal window: you type, the other person
