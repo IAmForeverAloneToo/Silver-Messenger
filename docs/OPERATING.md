@@ -7,6 +7,25 @@ when the host is compromised. Moving between versions is in
 [UPGRADING.md](UPGRADING.md), what the relay can and cannot see in
 [THREAT_MODEL.md](THREAT_MODEL.md).
 
+Contents:
+
+- [What you are running](#what-you-are-running)
+- [Installing](#installing)
+  - [TLS](#tls)
+  - [As an onion service](#as-an-onion-service)
+  - [The key clients pin](#the-key-clients-pin)
+  - [Flags and variables](#flags-and-variables)
+- [A first deployment, step by step](#a-first-deployment-step-by-step)
+- [Sizing](#sizing)
+- [The limits](#the-limits)
+- [The log](#the-log)
+- [Monitoring](#monitoring)
+- [Day to day](#day-to-day)
+- [Backups](#backups)
+- [Updates](#updates)
+- [After a compromise of the host](#after-a-compromise-of-the-host)
+- [Shutting a relay down](#shutting-a-relay-down)
+
 ## What you are running
 
 The relay stores and forwards. It holds each identity's signed key bundle
@@ -195,7 +214,7 @@ below; the rest:
 | --- | --- | --- |
 | `--listen <ADDR>` | `SILVER_RELAY_LISTEN` | Where to listen; default `0.0.0.0:7777` |
 | `--data-dir <DIR>` | `SILVER_RELAY_DATA` | The database; `/var/lib/silver-relay` under systemd |
-| `--host <NAME>` | `SILVER_RELAY_HOST` | Names clients reach the relay by, comma separated, which a bound login must carry; the ACME domains and the certificate's names count already |
+| `--host <NAME>` | `SILVER_RELAY_HOST` | Names clients reach the relay by, comma separated; the ACME domains and the certificate's names count already |
 | `--acme-domain`, `--acme-email`, `--acme-directory`, `--acme-root` | `SILVER_RELAY_ACME_DOMAIN`, `_EMAIL`, `_DIRECTORY`, `_ROOT` | The built-in TLS, above |
 | `--tls-cert`, `--tls-key` | `SILVER_RELAY_TLS_CERT`, `_KEY` | A certificate from elsewhere, above |
 | `--trusted-proxy <ADDR>` | `SILVER_RELAY_TRUSTED_PROXY` | Whose `X-Forwarded-For` names the client; loopback by default |
@@ -285,7 +304,7 @@ capitals with `SILVER_RELAY_` in front: `--max-connections` is
 | --- | --- | --- | --- |
 | `--invite-token` | none | Who may register a new identity | You want a closed relay; `admin invite-set` changes it without a restart |
 | `--max-identities` | 100000 | Identities the relay keeps, linked devices included (each person's devices count, at most eight per person) | A small relay: set it to the number of people you expect, times the devices each may link, with room |
-| `--registrations-per-hour` | 20 per address | New identities from one address; a linked device registers as one, and a device revocation costs one too; 0 closes registration | A shared address (a NAT, a Tor exit) registers many people at once |
+| `--registrations-per-hour` | 20 per address | New identities from one address (a linked device or a device revocation counts as one); 0 closes registration | A shared address (a NAT, a Tor exit) registers many people at once |
 | `--connections-per-address` | 16 | Open connections from one address | Many users behind one NAT (raise), or abuse (lower) |
 | `--max-connections` | 4096 | Open connections in total | The host is bigger or smaller than that |
 | `--idle-timeout-secs` | 120 | A silent connection is closed after this | Clients ping every 30 seconds; only if a network needs longer |
@@ -293,17 +312,29 @@ capitals with `SILVER_RELAY_` in front: `--max-connections` is
 | `--anonymous-sends-per-minute` | 30 | Messages a connection that never logs in may submit; 0 turns anonymous submission off | See "Abuse": turning it off costs senders their anonymity towards the relay |
 | `--lookups-per-minute` | 30 | Key lookups per connection; 0 turns them off rather than allowing one a minute | Rarely |
 | `--one-time-prekeys-per-user-per-hour` | 30 | One-time prekeys handed out for one user; 0 stops them being handed out | Rarely; beyond it, lookups get the bundle without one |
-| `--log-entries-per-user-per-hour` | 12 | Key changes one identity may add to the transparency log; 0 for no cap | The log is append-only and kept for good, so this is where its growth is bounded. A client publishing an unchanged bundle never adds one; an honest one adds a few a week |
+| `--log-entries-per-user-per-hour` | 12 | Key changes one identity may add to the transparency log; 0 for no cap | Rarely: an honest client adds a few entries a week, and none for an unchanged bundle |
 | `--max-mailbox-messages`, `--max-mailbox-mib` | 1000, 32 | A recipient's queue; 0 for no cap on either | Users who are offline for long stretches |
 | `--message-ttl-days` | 30 | How long an unacknowledged message is kept | A stricter retention policy (shorter), or long-absent users (longer) |
 | `--max-blob-mib` | 16 | Largest file; 0 turns file transfer off | Your users share bigger files, or none |
 | `--blob-storage-mib` | 1024 | Files on deposit in total | Disk |
 | `--mailbox-storage-mib` | 4096 | Queued messages in every mailbox together; 0 for no cap | Disk. Mail is freed as recipients acknowledge it and by `--message-ttl-days`; past the cap a send is answered `storage_full` |
 | `--blob-mib-per-address-per-hour` | 256 | Uploads from one address; 0 stops uploads | Abuse, or a shared address |
-| `--max-groups` | 100000 | Groups with a live epoch sequencer entry (one counter and one hash each; an entry idle for 180 days is retired and its headstone dropped 180 days after that, neither counting against the cap); 0 for no cap | A small relay, with room: a group costs the relay almost nothing, so this is a guard against a loop making entries, not a sizing knob |
+| `--max-groups` | 100000 | Groups with a live epoch sequencer entry; 0 for no cap | Rarely: a group costs the relay almost nothing, so this guards against a loop making entries rather than sizing anything |
 | `--trusted-proxy` | loopback | Whose `X-Forwarded-For` names the client | A TLS front on another host |
 | `--allow-unbound-auth` | off | Accept the older login, which signs the challenge without the relay's name and is worth the same at any relay | Only while clients older than 0.6.0 remain; the relay says at start what allowing it costs |
-| `--host` | the ACME domains and the names in `--tls-cert` | The names clients reach this relay by, which a bound login must name | A TLS front, an onion address, or an address clients use literally: without the name, a login collected by another relay under that name is taken here (protocol section 7.1). The relay says at start which names it takes, or that it knows none |
+| `--host` | the ACME domains and the names in `--tls-cert` | The names clients reach this relay by, which a bound login must name | A TLS front, an onion address, or an address clients use literally |
+
+Three of them in more detail:
+
+- `--log-entries-per-user-per-hour` is where the transparency log's
+  growth is bounded: the log is append-only and kept for good, and a
+  client publishing an unchanged bundle never adds an entry.
+- `--max-groups` counts sequencer entries, one counter and one hash
+  each. An entry idle for 180 days is retired, and its headstone is
+  dropped 180 days after that; neither counts against the cap.
+- `--host` matters because without the name, a login collected by
+  another relay under that name is taken here (protocol section 7.1).
+  The relay says at start which names it takes, or that it knows none.
 
 A limit that says no is counted (`silver_relay_refused_total` by reason in
 the metrics, and the hourly line in the log), so you see when one bites
@@ -355,17 +386,31 @@ say:
 | `silver_relay_uptime_seconds` | Since the last start |
 | `silver_relay_connections_open`, `silver_relay_connections_limit` | Open WebSocket connections against the cap |
 | `silver_relay_connected_addresses` | Distinct client addresses connected |
-| `silver_relay_refused_total{reason}` | Refusals by kind: `connection`, `registration`, `upload`. Refused logins are not one of these; they are `silver_relay_auth_failures_total` below |
+| `silver_relay_refused_total{reason}` | Refusals by kind: `connection`, `registration`, `upload` |
 | `silver_relay_idle_closed_total` | Connections closed for silence |
 | `silver_relay_slow_closed_total` | Connections closed because the client stopped reading what was written to it (a frame did not go within 30 seconds) |
 | `silver_relay_anonymous_submissions_total` | Messages submitted on connections that never logged in |
-| `silver_relay_auth_failures_total`, `silver_relay_auth_failure_addresses`, `silver_relay_auth_failures_max_per_address` | Failed logins in total, addresses that failed in the last hour, the most from one of them (the address itself is in the log, never here) |
+| `silver_relay_auth_failures_total`, `silver_relay_auth_failure_addresses`, `silver_relay_auth_failures_max_per_address` | Failed logins in total, addresses that failed in the last hour, the most from one of them |
 | `silver_relay_identities`, `silver_relay_mailboxes`, `silver_relay_messages_queued`, `silver_relay_mailbox_bytes` | What the store holds |
 | `silver_relay_blobs`, `silver_relay_blob_bytes`, `silver_relay_blob_bytes_limit` | Files on deposit against the cap |
-| `silver_relay_key_packages`, `silver_relay_groups`, `silver_relay_retired_groups`, `silver_relay_groups_limit` | MLS key packages on deposit (the last-resort ones not counted), groups with a live sequencer entry, entries retired for sitting still (kept so the ids stay taken), and the cap |
-| `silver_relay_group_commits_total`, `silver_relay_group_rejections_total` | Group commits the sequencer accepted and refused; rejections are normal when two members change a group at once, a steady stream of them is a client stuck on a stale epoch |
-| `silver_relay_devices`, `silver_relay_device_revocations_total` | Linked devices (identities whose bundle carries a device certificate; each is one of the identities above too) and device revocations held, which nothing removes |
+| `silver_relay_key_packages`, `silver_relay_groups`, `silver_relay_retired_groups`, `silver_relay_groups_limit` | MLS key packages on deposit, groups with a live sequencer entry, entries retired for sitting still, and the cap |
+| `silver_relay_group_commits_total`, `silver_relay_group_rejections_total` | Group commits the sequencer accepted and refused |
+| `silver_relay_devices`, `silver_relay_device_revocations_total` | Linked devices, and device revocations held |
 | `silver_relay_certificate_expiry_seconds`, `silver_relay_acme_failures_total` | When the served certificate expires (0 while there is none), and renewals that failed |
+
+Reading them:
+
+- A refused login is not a refusal: it is counted in
+  `silver_relay_auth_failures_total`. The failing address is in the
+  log, never in the metrics.
+- The last-resort key packages are not counted among the key packages
+  on deposit; retired group entries are kept so that their ids stay
+  taken.
+- Group rejections are normal when two members change a group at once;
+  a steady stream of them is a client stuck on a stale epoch.
+- A linked device is an identity whose bundle carries a device
+  certificate, so each is one of `silver_relay_identities` too. Device
+  revocations are held for good; nothing removes them.
 
 `deploy/alerts.yml` carries the rules worth waking up for: the relay
 down, a certificate that will not renew, a flood of failed logins or

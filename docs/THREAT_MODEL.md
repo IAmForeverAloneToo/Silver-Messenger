@@ -10,6 +10,30 @@ adding features. The wire format is specified in
 is in [SECURITY_ASSESSMENT.md](SECURITY_ASSESSMENT.md); how to report a
 problem is in [SECURITY.md](../SECURITY.md).
 
+Contents:
+
+- [What is assumed](#what-is-assumed)
+- [Assets](#assets)
+- [Actors](#actors)
+- [What each actor can and cannot do](#what-each-actor-can-and-cannot-do)
+  - [Relay operator](#relay-operator)
+  - [Network observer](#network-observer)
+  - [Stranger who knows your id](#stranger-who-knows-your-id)
+  - [Malicious contact](#malicious-contact)
+  - [Device thief](#device-thief)
+  - [Program running as you](#program-running-as-you)
+  - [A line you did not write](#a-line-you-did-not-write)
+  - [Holder of a compromised long-term Diffie–Hellman key](#holder-of-a-compromised-long-term-diffiehellman-key)
+  - [Holder of a compromised identity key](#holder-of-a-compromised-identity-key)
+  - [Future quantum adversary with a recording](#future-quantum-adversary-with-a-recording)
+  - [Supply-chain attacker](#supply-chain-attacker)
+- [Cryptographic design in brief](#cryptographic-design-in-brief)
+- [Trust decisions a user makes](#trust-decisions-a-user-makes)
+- [Supply chain](#supply-chain)
+- [What backs these claims](#what-backs-these-claims)
+- [Gaps and where they close](#gaps-and-where-they-close)
+- [Out of scope](#out-of-scope)
+
 ## What is assumed
 
 - The user's operating system, terminal and hardware are not compromised.
@@ -28,12 +52,12 @@ problem is in [SECURITY.md](../SECURITY.md).
 | --- | --- | --- |
 | Message content | The two endpoints, and sealed envelopes in transit | The point of the program |
 | Identity key (Ed25519) | `identity.json` on the primary, nowhere else | Whoever holds it *is* you: signs as you, starts sessions as you, links and revokes devices |
-| Long-term Diffie–Hellman key (X25519) | `identity.json` on each device, its own | Opens the sealed layer of every envelope addressed to that device; with the session state, reads v2 messages; from v4, starts sessions as its owner |
+| Long-term Diffie–Hellman key (X25519) | `identity.json` on each device, its own | Opens envelopes sealed to that device; reads v2 messages with the session state; from v4 starts sessions as its owner |
 | Device key and certificate | `identity.json` on a linked device (its own keys, and under `linked` the account's certificate for it) | Reads and writes as you on that device until the primary revokes it; the certificate itself is public |
 | Device list and revocations | `devices.json` on every device | Public, signed by the identity key; says which devices contacts seal to |
-| Prekeys and session state | `prekeys.json`, `sessions.json` | Current ratchet keys and the private halves of published prekeys: reads messages in flight and the ones not yet ratcheted past |
+| Prekeys and session state | `prekeys.json`, `sessions.json` | Current ratchet keys and the private halves of published prekeys: reads messages in flight and not yet ratcheted past |
 | Contact list and history | `contacts.json`, `history/`, `outbox.json` | Who you talk to and what was said |
-| Group state | `groups.mls`, `groups.json`, `history/group-*.jsonl` | The MLS tree and epoch secrets of every group, the key package private halves, who is in which group, what was said there |
+| Group state | `groups.mls`, `groups.json`, `history/group-*.jsonl` | The MLS tree and epoch secrets of every group, the key packages' private halves, who is in which group, what was said |
 | Received files | `downloads/`, as ordinary files unless `/files encrypt on` | Attachments people sent you |
 | Files in transit | Encrypted chunks in the relay database for up to 30 days | Ciphertext only; the key is in the message |
 | Social graph and timing | Relay memory and database, network path | Who talks to whom, when, how much |
@@ -604,11 +628,20 @@ program with no elevation, which read the keys out of the running client.
 What the client does anyway is raise the cost, and it differs by platform
 because what the platforms offer differs:
 
-| Platform | What is done | What it leaves |
-| --- | --- | --- |
-| Linux | No core file, and the process is not dumpable, so a process of the same user may neither trace it nor read `/proc/<pid>/mem` | Root, and anything already attached |
-| Windows | No core file, and the process object carries a restricted access list, so opening it for reading is refused | An attacker who rewrites that list first, which the owner of a process may do; and an administrator |
-| macOS | No core file. Release builds are signed ad hoc with the hardened runtime asked for, which *should* make macOS refuse a same-user attach — **unverified**: nobody has watched it do so on a real Mac, so this table still counts macOS as unprotected | A debugger run by the same user, which macOS allows for a program it started; a Developer ID signature and notarisation are what would settle it |
+- **Linux.** No core file, and the process is not dumpable, so a process
+  of the same user may neither trace it nor read `/proc/<pid>/mem`. What
+  it leaves: root, and anything already attached.
+- **Windows.** No core file, and the process object carries a restricted
+  access list, so opening it for reading is refused. What it leaves: an
+  attacker who rewrites that list first, which the owner of a process may
+  do; and an administrator.
+- **macOS.** No core file. Release builds are signed ad hoc with the
+  hardened runtime asked for, which *should* make macOS refuse a
+  same-user attach — **unverified**: nobody has watched it do so on a
+  real Mac, so this list still counts macOS as unprotected. What it
+  leaves: a debugger run by the same user, which macOS allows for a
+  program it started; a Developer ID signature and notarisation are what
+  would settle it.
 
 None of it touches a program that attached before the client started, and
 none of it is prevention. The boundary that does hold is the lock:
@@ -926,7 +959,9 @@ protection above. What is done about that:
   compiled into the client, which `silver update` checks against. The
   secret half is a repository secret and the release workflow signs
   with it, verifying its own signature against the published key
-  before anything is published. What that is worth is stated exactly:
+  before anything is published.
+
+  What that is worth is stated exactly:
   the key lives where the build lives, so whoever can run a workflow
   with secrets, or holds the maintainer's account, can sign, and the
   signature says what the attestation says, from a separate store, so
@@ -968,7 +1003,9 @@ protection above. What is done about that:
   installs, and it runs only when a person runs it: the interface's
   `/update` reports and installs nothing, and the `update_check` setting,
   off unless turned on, asks the releases page once a day and prints a
-  line, never downloading. What an update is checked against before the
+  line, never downloading.
+
+  What an update is checked against before the
   running binary is touched: the SHA-256 the release API reports, which
   arrives from a different origin than the bytes; the same hash in
   `SHA256SUMS`; the project's signature over `SHA256SUMS`, against the
