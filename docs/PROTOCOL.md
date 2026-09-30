@@ -37,7 +37,7 @@ reader must ignore fields it does not know.
 
 Every signature is over a domain-separated message:
 
-```
+```text
 sign(domain, m) = Ed25519_sign(IK, domain || 0x00 || m)
 ```
 
@@ -151,7 +151,7 @@ What a relay sees and routes:
 
 Sealing `body` (the bytes of section 4) from `A` to `B`:
 
-```
+```text
 EK_env       = fresh X25519 key pair
 shared       = X25519(EK_env.secret, IKdh_B)
 key          = HKDF-SHA256(salt = none, ikm = shared,
@@ -369,7 +369,7 @@ splits the plaintext into chunks of 65 536 bytes (`chunks = ceil(size /
 65536)`, at least 1; an empty file is one empty chunk). Chunk `i` of `n`
 is encrypted as
 
-```
+```text
 nonce_i     = nonce with its last four bytes XORed with i (4 BE)
 aad_i       = "silver-messenger/v1/blob-chunk" || blob (ASCII) || i (4 BE) || n (4 BE)
 ciphertext  = XChaCha20-Poly1305(key, nonce_i, chunk_i, aad = aad_i)
@@ -512,7 +512,7 @@ capability (13.1).
 
 `A` starts a session with `B` from `B`'s bundle, which must carry prekeys.
 
-```
+```text
 EK      = fresh X25519 key pair
 DH1     = X25519(IKdh_A.secret, SPK_B)
 DH2     = X25519(EK.secret,     IKdh_B)
@@ -522,7 +522,7 @@ DH4     = X25519(EK.secret,     OPK_B)            only if the bundle carried one
 
 **v2**, when the bundle carries no ML-KEM key:
 
-```
+```text
 SK      = HKDF-SHA256(salt = 32 zero bytes,
             ikm  = 0xFF * 32 || DH1 || DH2 || DH3 [|| DH4],
             info = "silver-messenger/v2/x3dh")     -> 32 bytes
@@ -532,7 +532,7 @@ SK      = HKDF-SHA256(salt = 32 zero bytes,
 relay handed one out, otherwise `pq_signed`; its id goes in `pq_prekey_id`
 and `CT` in `kem_ciphertext`:
 
-```
+```text
 CT, SS  = ML-KEM-768.Encaps(PQK_B)                CT 1088 bytes, SS 32 bytes
 SK      = HKDF-SHA256(salt = 32 zero bytes,
             ikm  = 0xFF * 32 || DH1 || DH2 || DH3 [|| DH4] || SS,
@@ -541,7 +541,7 @@ SK      = HKDF-SHA256(salt = 32 zero bytes,
 
 Both:
 
-```
+```text
 AD      = IK_A.public || IKdh_A.public || IK_B.public || IKdh_B.public     (4 × 32 bytes)
 session = SHA-256("silver-messenger/v2/session-id" || 0x00 || EK.public || SPK_B)[0..16]
 ```
@@ -603,7 +603,7 @@ the wrong one fails cleanly at the first tag.
 
 The construction follows the Signal specification with these functions:
 
-```
+```text
 KDF_RK(rk, dh_out) = HKDF-SHA256(salt = rk, ikm = dh_out,
                        info = "silver-messenger/v2/ratchet-root")  -> 64 bytes = rk' (32) || ck (32)
 KDF_CK(ck)         = (ck' = HMAC-SHA256(ck, 0x02), mk = HMAC-SHA256(ck, 0x01))
@@ -620,7 +620,7 @@ Responder `B`: `DHs = SPK_B` key pair, `DHr = none`, `RK = SK`,
 Each message is encrypted with `mk` from `KDF_CK(CKs)` under associated
 data
 
-```
+```text
 ad = AD || session (16) || header.dh (32) || header.pn (4 BE) || header.n (4 BE)
 ```
 
@@ -650,7 +650,7 @@ Each side keeps, in addition to its DH ratchet key pair, an ML-KEM ratchet
 key pair (`kem_self`) and the peer's latest ML-KEM public key
 (`kem_remote`). The root KDF gains the ML-KEM secret:
 
-```
+```text
 KDF_RK_PQ(rk, dh_out, ss) = HKDF-SHA256(salt = rk, ikm = dh_out || ss,
                               info = "silver-messenger/v4/ratchet-root")  -> rk' (32) || ck (32)
 ```
@@ -1203,7 +1203,7 @@ fixed byte layout, so relay and client compute the same value whatever
 version serialised the bundle, and one-time prekeys (which change with
 every lookup and are not part of the stored bundle) are left out:
 
-```
+```text
 SHA-256("silver-messenger/v4/transparency-bundle"
         || user_id (32) || dh_public (32) || signature (64)
         || prekeys? : 0x00, or 0x01 || signed.id (4 BE) || signed.public (32)

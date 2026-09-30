@@ -48,7 +48,7 @@ the client for your system:
 Rename it `silver` (`silver.exe` on Windows), make it executable on
 macOS and Linux (`chmod +x silver`), and point it at a relay once:
 
-```
+```sh
 .\silver.exe --relay wss://relay.example.org/ws     # Windows, in PowerShell or Windows Terminal
 ./silver --relay wss://relay.example.org/ws         # macOS and Linux
 ```
@@ -167,7 +167,7 @@ verifying a fingerprint). `/invite` shows it as a link
 (`silver://add/<id>?relay=…`) and as a QR code that a phone can scan, so
 nobody has to type 44 characters. Then:
 
-```
+```text
 /add <their-user-id or link> alice   # fetches their key from the relay and opens a chat
 hello!                               # anything not starting with / is sent to the selected chat
 /send ~/photo.jpg                    # sends a file (up to 16 MiB), encrypted like a message
@@ -320,7 +320,7 @@ checked, or that it has not been.
 
 ### Options
 
-```
+```text
 silver --relay <URL>       relay WebSocket URL; remembered in config.json   (env SILVER_RELAY)
 silver --data-dir <DIR>    where keys, contacts and history live            (env SILVER_DATA_DIR)
 silver --ca-cert <PEM>     extra trusted root certificates for wss://; remembered (env SILVER_CA_CERT)

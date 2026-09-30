@@ -45,13 +45,19 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   docs:
-    # Every cross-reference in the documents resolves: a relative link,
-    # a file named by its path, a protocol section, a roadmap item.
-    name: document links
+    # Every cross-reference in the documents resolves (a relative link,
+    # a file named by its path, a protocol section, a roadmap item), and
+    # every document renders on GitHub the way it reads in the source
+    # (boxes as checkboxes, fences with a language, cells and paragraphs
+    # a reader can take in). The renderer is GitHub's own, cmark-gfm,
+    # through its Python bindings.
+    name: documents
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: pip install cmarkgfm==2025.10.22
       - run: python3 tests/docs/check_links.py
+      - run: python3 tests/docs/check_render.py
 
   audit:
     name: advisories + licenses

@@ -171,7 +171,7 @@ re-initialisation path to the hybrid suite later; it was not needed.
 The group's own metadata lives in the group context, so it is agreed by
 every member, ordered by commits, and covered by the transcript hash:
 
-```
+```rust
 struct {
   uint8   version;          // 1
   opaque  name<0..64>;      // UTF-8, may be empty
@@ -238,7 +238,7 @@ MLS needs every member to apply the same commit for each epoch; two
 commits built on the same epoch fork the group. Something must pick one.
 The relay does, with one row per group it knows nothing else about:
 
-```
+```text
 group_id (32 bytes, random) -> { epoch: u64, next: [u8; 32], updated_at }
 ```
 

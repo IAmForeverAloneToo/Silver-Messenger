@@ -9,7 +9,7 @@ each version are in [CHANGELOG.md](../CHANGELOG.md).
 
 Take a backup and note what you are running:
 
-```
+```sh
 silver-relay backup /var/lib/silver-relay/before-0.8.0.backup
 silver-relay admin status
 ```
@@ -37,7 +37,7 @@ came with it, keeps `/etc/silver-relay/relay.env` and adds any setting a
 new version needs there, restarts the service and checks that it answers.
 Then:
 
-```
+```sh
 systemctl status silver-relay
 journalctl -u silver-relay -n 50
 silver-relay admin status
@@ -77,7 +77,7 @@ Stop the service, put the previous binary back, and if the previous
 version refuses the database (the version notes say when that happens),
 restore the backup you took before the upgrade:
 
-```
+```sh
 systemctl stop silver-relay
 silver-relay restore /var/lib/silver-relay/before-0.8.0.backup \
     --data-dir /var/lib/silver-relay --replace
