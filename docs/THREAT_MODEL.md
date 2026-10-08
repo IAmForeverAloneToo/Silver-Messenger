@@ -989,11 +989,21 @@ protection above. What is done about that:
   publish a release from any commit: standard GitHub behaviour, and a
   reason the account itself is the thing to protect.
 
-  What is in the tree is worth stating too. `cargo audit` reports no
-  vulnerability; it reports one unmaintained crate, `proc-macro-error2`,
-  a build-time procedural-macro helper reached through the verified
-  cryptography crates under OpenMLS, which is not in the binary. Several
-  dependencies appear in two major versions at once (`curve25519-dalek`,
+  What is in the tree is worth stating too. No crate with an advisory
+  against it is in either binary. `cargo audit` reports three against
+  crates that are in the lock file but in no build, `libcrux-hmac-drbg`
+  0.0.1 (RUSTSEC-2026-0329) and `libcrux-kem` 0.0.9 (RUSTSEC-2026-0330
+  and -0331): they come only with the optional libcrux backends of
+  OpenMLS and of `hpke-rs`, where this project uses the RustCrypto ones.
+  CI passes over those three by number, the reason written beside them
+  in `ci.yml`, until a release of either backend takes the fixed
+  versions; `cargo deny`, which reads the graph that is built, still
+  refuses every advisory. `cargo audit` also reports one unmaintained
+  crate, `proc-macro-error2`, a build-time procedural-macro helper
+  reached through the verified cryptography crates under OpenMLS, which
+  is not in the binary.
+
+  Several dependencies appear in two major versions at once (`curve25519-dalek`,
   `x25519-dalek`, `rand`, `getrandom`, `hkdf`/`hmac`/`sha2`,
   `tokio-tungstenite`) because upstreams have not converged; each
   duplicate is more code in the binary and more advisories to track, and

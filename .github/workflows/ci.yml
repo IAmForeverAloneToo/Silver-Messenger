@@ -62,6 +62,26 @@ jobs:
   audit:
     name: advisories + licenses
     runs-on: ubuntu-latest
+    env:
+      # Three advisories cargo audit is told to pass over, each by its
+      # number, because the crates they name are in the lock files but
+      # in no build. libcrux-hmac-drbg 0.0.1 (RUSTSEC-2026-0329) comes
+      # only with OpenMLS's optional libcrux backend
+      # (openmls_libcrux_crypto, its libcrux-provider feature), and
+      # libcrux-kem 0.0.9 (RUSTSEC-2026-0330 and -0331) only with
+      # hpke-rs's optional libcrux backend; this project uses the
+      # RustCrypto backend of each, and `cargo tree -i` finds no path to
+      # either crate under any feature or target. A lock file lists
+      # optional dependencies whether or not they are enabled, and cargo
+      # audit reads the lock file; cargo deny above reads the graph that
+      # is built and still refuses every advisory. No release of either
+      # backend takes the fixed versions yet (openmls_libcrux_crypto
+      # 0.4.0 pins the DRBG, hpke-rs 0.7 the KEM): drop these once one
+      # does.
+      NOT_BUILT: >-
+        --ignore RUSTSEC-2026-0329
+        --ignore RUSTSEC-2026-0330
+        --ignore RUSTSEC-2026-0331
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
@@ -76,11 +96,11 @@ jobs:
       - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
         with:
           tool: cargo-audit@0.22.2
-      - run: cargo audit --file Cargo.lock
+      - run: cargo audit --file Cargo.lock $NOT_BUILT
       # The fuzz targets have their own lockfile and their own tree; it is
       # not in a release, but a vulnerability there is still worth knowing
       # about (SM-S-07).
-      - run: cargo audit --file fuzz/Cargo.lock
+      - run: cargo audit --file fuzz/Cargo.lock $NOT_BUILT
 
   test:
     name: test (${{ matrix.os }})
