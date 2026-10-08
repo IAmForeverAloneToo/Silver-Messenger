@@ -10,6 +10,8 @@
 > convention of publishing reviews whole is in
 > [SECURITY.md](../../SECURITY.md); this is the exception it does not
 > yet name, and it is named here instead of made quietly.
+>
+> Commit hashes follow the history as rewritten on 2026-10-08.
 
 **Date:** 2026-09-09 · **Revision 3** (post counter-review verification)
 **Target:** `IAmForeverAloneToo/Silver-Messenger` (main branch, commit at clone time; workspace v0.14.0, ~64,300 lines of Rust across 4 crates)
@@ -209,7 +211,7 @@ Condensed from the four component audits and both subsequent review rounds; spot
 
 ## 7. Regression verification of the prior external audit
 
-The relay component re-verified the relay-side findings from `docs/audits/2026-09-security-audit.md` (commit 05e1168): SM-R-01, SM-R-02 (fix at lib.rs:2294-2306), SM-R-03, SM-R-04 (store.rs:1690), SM-R-05/06/07, SM-R-09, SM-R-10, SM-R-11, SM-R-12, SM-P-02 (identity.rs:114-117), SM-R-13 — **all confirmed fixed in the current tree**, with one regression-class note: the `0-means-one` bug SM-R-13 fixed for `per_minute` survives in `per_hour` (M-4). Client-side SM-C-03 (no v1 fallback) and SM-C-14 (session eviction) were likewise re-confirmed. SM-C-27's line about `silver.log` is stale in the historical document (already answered in audit-response.md:115; see I-2).
+The relay component re-verified the relay-side findings from `docs/audits/2026-09-security-audit.md` (commit dcb9127): SM-R-01, SM-R-02 (fix at lib.rs:2294-2306), SM-R-03, SM-R-04 (store.rs:1690), SM-R-05/06/07, SM-R-09, SM-R-10, SM-R-11, SM-R-12, SM-P-02 (identity.rs:114-117), SM-R-13 — **all confirmed fixed in the current tree**, with one regression-class note: the `0-means-one` bug SM-R-13 fixed for `per_minute` survives in `per_hour` (M-4). Client-side SM-C-03 (no v1 fallback) and SM-C-14 (session eviction) were likewise re-confirmed. SM-C-27's line about `silver.log` is stale in the historical document (already answered in audit-response.md:115; see I-2).
 
 ---
 

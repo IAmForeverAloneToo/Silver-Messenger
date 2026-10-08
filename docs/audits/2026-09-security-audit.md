@@ -3,13 +3,16 @@ title: Silver Messenger Security and Privacy Audit
 subtitle: Adversarial source review of the protocol, relay, client, terminal client, deployment and supply chain
 Subject: IAmForeverAloneToo/Silver-Messenger (Rust workspace: silver-protocol, silver-relay, silver-client, silver-tui)
 Version audited: 0.10.0 line, branch main
-Commit: 05e1168 ("Terminal tests: the layout test waits for the answer to be sent")
+Commit: dcb9127 ("Terminal tests: the layout test waits for the answer to be sent")
 Date: 6 September 2026
 Prepared by: Independent adversarial audit (read-only; no changes were made to the repository)
 Classification: Confidential to the maintainer until fixes ship, per SECURITY.md coordinated disclosure
 Methodology: White-box source review against docs/PROTOCOL.md and docs/THREAT_MODEL.md; OWASP ASVS 4.0.3 L2 used as a checklist; severity aligned with CVSS v3.1 qualitative bands (Appendix A)
-Note: Every finding quotes the file and line of the audited commit. Findings were verified by reading the code, and in one case by measurement (Appendix D); none was tested against a live relay. Line numbers refer to commit 05e1168.
+Note: Every finding quotes the file and line of the audited commit. Findings were verified by reading the code, and in one case by measurement (Appendix D); none was tested against a live relay. Line numbers refer to commit dcb9127.
 ---
+> **Published copy.** As delivered, except that commit hashes follow
+> the history as rewritten on 2026-10-08 (same trees, new hashes).
+
 # 1. Executive summary
 
 Silver Messenger is a terminal end-to-end-encrypted messenger with a self-hosted relay. It uses a sealed-sender envelope over a PQXDH handshake and a Double Ratchet with ML-KEM steps for one-to-one messages, MLS on a hybrid post-quantum ciphersuite for groups, a hash-chained key-transparency log, multi-device with certified device keys, and encryption at rest under an OS-key-store- or passphrase-wrapped data key. The project ships a detailed protocol specification, a threat model, an OWASP ASVS Level 2 self-assessment, Verifpal models, known-answer vectors, fuzz targets, reproducible builds and provenance attestations. This audit set out to test those claims adversarially, component by component, from the source.
@@ -39,7 +42,7 @@ Almost every finding has a small, local fix, and the first ten items of the reme
 
 ## 2.1 Scope
 
-The audit covered everything the repository ships at commit `05e1168` (version 0.10.0 on the `main` line), namely:
+The audit covered everything the repository ships at commit `dcb9127` (version 0.10.0 on the `main` line), namely:
 
 | Component | Path | Lines (Rust) | What it is |
 | --- | --- | --- | --- |

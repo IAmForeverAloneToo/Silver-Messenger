@@ -1,7 +1,7 @@
 # Design note: the response to the 2026 security audit
 
 Roadmap item 55. An independent adversarial review of the 0.10.0 line
-(commit `05e1168`) reported 76 findings; the report is published as
+(commit `dcb9127`) reported 76 findings; the report is published as
 [docs/audits/2026-09-security-audit.md](../audits/2026-09-security-audit.md).
 This note records, for every finding, what the code was found to do when
 the finding was checked against it, what is done about it, and in which
@@ -14,7 +14,7 @@ code wins and this note is corrected.
 ## 1. Decisions
 
 **How the findings were checked.** Every finding was traced in the
-source at `05e1168` before anything was changed: the cited lines, the
+source at `dcb9127` before anything was changed: the cited lines, the
 callers, the tests that enshrine the behaviour, and the vendored crates
 where a claim rested on one (rustls and webpki for the pin, hyper and
 axum-server for the missing timer, OpenMLS for the commit builder and
