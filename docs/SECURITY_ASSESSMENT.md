@@ -178,7 +178,7 @@ V6 and the threat model.
 | 8.1.4 Anti-automation on bulk data | Met | Per-connection and per-address rate limits, one-time prekey hand-out cap (30 per user per hour). |
 | 8.2.x Client-side (browser) data protection | N/A | |
 | 8.3.1 Sensitive data not in URLs | Met | There are no URLs with data. |
-| 8.3.2 Users can remove or export their data | Met | `--export-backup` (identity and contacts, under its own passphrase); deleting the data directory removes everything local; the relay drops mailboxes after 30 days and holds nothing else about a user but the bundle. There is no remote "delete my identity from the relay" yet. |
+| 8.3.2 Users can remove or export their data | Met | `--export-backup` (identity and contacts, and with `--with-history` the history with each contact, under its own passphrase); deleting the data directory removes everything local; the relay drops mailboxes after 30 days and holds nothing else about a user but the bundle. There is no remote "delete my identity from the relay" yet. |
 | 8.3.3 Users told what is collected | Met | The threat model, in the README's first paragraph. The client collects nothing; the releases page is asked only on `silver update`, or once a day under `update_check`, which is off unless turned on, and the README's "Updating" says what each tells the release host. |
 | 8.3.4 Sensitive data identified and protected | Met | Asset table; encryption at rest; sealed sender. |
 | 8.3.6 Sensitive data in memory wiped | Met | `Zeroize`/`ZeroizeOnDrop` on keys, session state, passphrases and plaintext buffers. |

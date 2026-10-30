@@ -172,7 +172,9 @@ Your own history lives in your data directory, not on the relay.
 ## How do I back up, and how do I move to a new computer?
 
 `silver --export-backup <file>` writes your identity and contacts under
-a passphrase of its own; `silver --import-backup <file>` restores them.
+a passphrase of its own, and with `--with-history` the history with each
+contact as well (not groups', which a backup does not hold);
+`silver --import-backup <file>` restores them.
 `silver --export-history <dir>` writes every conversation as text or
 JSON. To move for good, copy the whole data directory (it is encrypted
 at rest) or link the new computer as a device and remove the old one.

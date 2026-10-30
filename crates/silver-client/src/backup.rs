@@ -1,8 +1,8 @@
 //! Identity backup and restore.
 //!
 //! A backup is one self-contained file holding the identity keys, the
-//! contact list, the device list (or, on a linked device, its link) and
-//! nothing else, encrypted under a passphrase of its own (Argon2id and
+//! contact list, the device list (or, on a linked device, its link) and,
+//! when asked for, the history with each contact, encrypted under a passphrase of its own (Argon2id and
 //! XChaCha20-Poly1305, like the vault). Restoring it onto a fresh
 //! installation gives back the same user id, contacts and devices; message
 //! numbering starts a new epoch, so contacts see a reinstall rather than
@@ -17,7 +17,12 @@ use silver_protocol::encoding::b64;
 use silver_protocol::{Identity, IdentitySecrets, Revocation, now_ms};
 use zeroize::Zeroizing;
 
+use std::collections::BTreeMap;
+
+use silver_protocol::UserId;
+
 use crate::devices::{DevicesFile, Linked};
+use crate::linking::{Snapshot, SnapshotEntry, import_history};
 use crate::store::{Contact, Store};
 use crate::vault::{Kdf, VaultError, decrypt_with_passphrase, encrypt_with_passphrase};
 
@@ -54,12 +59,24 @@ pub struct BackupPayload {
     /// on. Absent in backups from before devices existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub devices: Option<DevicesFile>,
+    /// The history with each contact, oldest first, when the backup was
+    /// made with it (`--with-history`). Groups are not in a backup, so
+    /// neither is their history. A line whose disappearing-message timer
+    /// had run out is not in it either.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub history: BTreeMap<UserId, Vec<SnapshotEntry>>,
 }
 
 /// Write the store's identity and contacts to `path`, encrypted under
-/// `passphrase`.
-pub fn export_backup(store: &Store, path: &Path, passphrase: &str) -> anyhow::Result<()> {
-    export_backup_with(store, path, passphrase, Kdf::default_params())
+/// `passphrase`; with `history`, every contact's history too. How many
+/// lines of history went in.
+pub fn export_backup(
+    store: &Store,
+    path: &Path,
+    passphrase: &str,
+    history: bool,
+) -> anyhow::Result<usize> {
+    export_backup_with(store, path, passphrase, Kdf::default_params(), history)
 }
 
 #[doc(hidden)]
@@ -68,7 +85,8 @@ pub fn export_backup_with(
     path: &Path,
     passphrase: &str,
     kdf: Kdf,
-) -> anyhow::Result<()> {
+    history: bool,
+) -> anyhow::Result<usize> {
     if !store.has_identity() {
         bail!("there is no identity to back up yet");
     }
@@ -81,7 +99,14 @@ pub fn export_backup_with(
         revocation: Some(store.load_or_create_revocation(&identity, now)?),
         linked: store.load_linked()?,
         devices: Some(store.load_devices()?),
+        history: if history {
+            // All of it: the day count reaches back before the epoch.
+            Snapshot::gather(store, &[], u32::MAX, now)?.history
+        } else {
+            BTreeMap::new()
+        },
     };
+    let lines = payload.history.values().map(Vec::len).sum();
     let plaintext = Zeroizing::new(serde_json::to_vec(&payload)?);
     let ciphertext = encrypt_with_passphrase(passphrase, &kdf, BACKUP_AAD, &plaintext)?;
     let file = BackupFile {
@@ -96,7 +121,7 @@ pub fn export_backup_with(
     std::io::Write::write_all(&mut out, serde_json::to_string_pretty(&file)?.as_bytes())
         .with_context(|| format!("writing {}", path.display()))?;
     out.sync_all()?;
-    Ok(())
+    Ok(lines)
 }
 
 /// Decrypt a backup file.
@@ -116,10 +141,11 @@ pub fn read_backup(path: &Path, passphrase: &str) -> Result<BackupPayload, Vault
         .map_err(VaultError::Other)
 }
 
-/// Install a backup's identity and contacts into `store`. Refuses to replace
-/// an existing identity unless `force` is set. Message numbering starts
-/// over with a fresh epoch.
-pub fn import_backup(store: &Store, payload: BackupPayload, force: bool) -> anyhow::Result<()> {
+/// Install a backup's identity, contacts and any history into `store`.
+/// Refuses to replace an existing identity unless `force` is set. Message
+/// numbering starts over with a fresh epoch. How many lines of history
+/// were restored.
+pub fn import_backup(store: &Store, payload: BackupPayload, force: bool) -> anyhow::Result<usize> {
     if store.has_identity() && !force {
         bail!("this data directory already has an identity; pass --force to replace it");
     }
@@ -158,13 +184,21 @@ pub fn import_backup(store: &Store, payload: BackupPayload, force: bool) -> anyh
     let mut config = store.load_config()?;
     config.send_epoch = None;
     store.save_config(&config)?;
-    Ok(())
+    // History with the contacts restored, and only them. Where a received
+    // file was saved is a path on the computer the backup came from.
+    let mut history = payload.history;
+    history.retain(|peer, _| contacts.iter().any(|c| c.user_id == *peer));
+    for line in history.values_mut().flatten() {
+        line.entry.saved = None;
+    }
+    import_history(store, &history)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use silver_protocol::Identity;
+    use silver_protocol::envelope::ReceiptKind;
 
     #[test]
     fn backup_round_trips_into_a_fresh_store() {
@@ -189,7 +223,7 @@ mod tests {
         source.save_devices(&devices).unwrap();
 
         let file = source_dir.path().join("backup.json");
-        export_backup_with(&source, &file, "backup pass", Kdf::fast()).unwrap();
+        export_backup_with(&source, &file, "backup pass", Kdf::fast(), false).unwrap();
         let raw = fs::read_to_string(&file).unwrap();
         assert!(raw.contains(FORMAT));
         assert!(!raw.contains("signing_seed") && !raw.contains("peer") && !raw.contains("laptop"));
@@ -200,6 +234,7 @@ mod tests {
         ));
         let payload = read_backup(&file, "backup pass").unwrap();
         assert_eq!(payload.contacts.len(), 1);
+        assert!(payload.history.is_empty(), "history only when asked for");
         // The pre-signed revocation travels with the identity.
         let backed_up = payload.revocation.clone().expect("revocation in backup");
         assert_eq!(backed_up.identity, identity.user_id());
@@ -231,6 +266,53 @@ mod tests {
     }
 
     #[test]
+    fn history_comes_along_when_asked_for_and_only_what_should() {
+        use crate::store::{Direction, HistoryEntry};
+        let source_dir = tempfile::tempdir().unwrap();
+        let source = Store::open(source_dir.path()).unwrap();
+        source.load_or_create_identity().unwrap();
+        let peer = Identity::generate().user_id();
+        source.save_contacts(&[Contact::new(peer)]).unwrap();
+        let now = now_ms();
+        let mut said = HistoryEntry::new("m1", Direction::Sent, now - 5000, "hello");
+        said.saved = None;
+        source.append_history(&peer, &said).unwrap();
+        source
+            .append_receipt(&peer, ReceiptKind::Read, &["m1".to_owned()], now - 4000)
+            .unwrap();
+        let mut got = HistoryEntry::new("m2", Direction::Received, now - 3000, "a file");
+        got.saved = Some("/home/someone/Downloads/a.txt".into());
+        source.append_history(&peer, &got).unwrap();
+        // Gone by its timer: stays behind.
+        let mut gone = HistoryEntry::new("m3", Direction::Sent, now - 60_000, "secret");
+        gone.expire_after_s = 1;
+        source.append_history(&peer, &gone).unwrap();
+
+        let file = source_dir.path().join("backup.json");
+        let lines = export_backup_with(&source, &file, "pass", Kdf::fast(), true).unwrap();
+        assert_eq!(lines, 2);
+        assert!(
+            !fs::read_to_string(&file).unwrap().contains("hello"),
+            "encrypted"
+        );
+
+        let target_dir = tempfile::tempdir().unwrap();
+        let target = Store::open(target_dir.path()).unwrap();
+        let payload = read_backup(&file, "pass").unwrap();
+        assert_eq!(import_backup(&target, payload, false).unwrap(), 2);
+        let restored = target.load_history(&peer).unwrap();
+        let texts: Vec<&str> = restored.iter().map(|e| e.text.as_str()).collect();
+        assert_eq!(texts, ["hello", "a file"]);
+        assert_eq!(restored[0].receipt, Some(ReceiptKind::Read));
+        assert_eq!(restored[1].saved, None, "a path on the other computer");
+
+        // Restored again over itself: nothing doubles.
+        let payload = read_backup(&file, "pass").unwrap();
+        assert_eq!(import_backup(&target, payload, true).unwrap(), 0);
+        assert_eq!(target.load_history(&peer).unwrap().len(), 2);
+    }
+
+    #[test]
     fn a_linked_device_backs_up_and_restores_its_link() {
         let alice = Identity::generate();
         let source_dir = tempfile::tempdir().unwrap();
@@ -244,7 +326,7 @@ mod tests {
         };
         source.save_linked(Some(&linked)).unwrap();
         let file = source_dir.path().join("backup.json");
-        export_backup_with(&source, &file, "pass", Kdf::fast()).unwrap();
+        export_backup_with(&source, &file, "pass", Kdf::fast(), false).unwrap();
 
         let target_dir = tempfile::tempdir().unwrap();
         let target = Store::open(target_dir.path()).unwrap();

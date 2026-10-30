@@ -373,8 +373,8 @@ silver --no-keystore       keep the files unencrypted rather than under a key fr
 silver --reset-rollback-protection  start the record of what the directory last wrote again, when it is damaged and the client refuses to read; gives up telling whether a file was replaced with an older copy before now
 SILVER_PASSPHRASE=…        supplies the passphrase non-interactively (scripts, tests); used once, then forgotten, so /lock asks for it again
 silver --keep-passphrase   keep SILVER_PASSPHRASE in memory so /lock and the idle lock re-open without asking; for runs nobody is sitting at (env SILVER_KEEP_PASSPHRASE)
-silver --export-backup <F> write an encrypted backup of identity and contacts to F (asks for a passphrase for it)
-silver --import-backup <F> restore identity and contacts from F; add --force to replace an existing identity
+silver --export-backup <F> write an encrypted backup of identity and contacts to F (asks for a passphrase for it); add --with-history for the history with every contact too
+silver --import-backup <F> restore identity, contacts and any history from F; add --force to replace an existing identity
 SILVER_BACKUP_PASSPHRASE=… supplies the backup passphrase non-interactively
 silver --export-history <D> write every conversation to D (outside the data directory), a text file each, or JSON lines with --format json; deleted and expired messages are not there, nothing is overwritten
 silver --submit-authenticated  send on the authenticated connection instead of the relay's anonymous one (env SILVER_SUBMIT_AUTHENTICATED)

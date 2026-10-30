@@ -111,6 +111,12 @@ struct Args {
     #[arg(long, value_name = "FILE")]
     export_backup: Option<PathBuf>,
 
+    /// With --export-backup: put the history with every contact in the
+    /// backup too, so a restore brings the chats back (groups are not in a
+    /// backup, so neither is their history).
+    #[arg(long, requires = "export_backup")]
+    with_history: bool,
+
     /// Restore identity and contacts from a backup file into the data
     /// directory, then exit. Refuses to replace an existing identity unless
     /// --force is given.
@@ -426,8 +432,11 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
         let passphrase = backup_passphrase(&secrets, "Backup passphrase: ")?;
         let payload = silver_client::read_backup(&path, &passphrase)?;
         let user_id = silver_protocol::Identity::from_secrets(&payload.identity).user_id();
-        silver_client::import_backup(&store, payload, args.force)?;
+        let lines = silver_client::import_backup(&store, payload, args.force)?;
         println!("Restored identity {user_id} into {}.", data_dir.display());
+        if lines > 0 {
+            println!("{lines} line(s) of history came back with it.");
+        }
         return Ok(());
     }
 
@@ -473,11 +482,16 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
                 })?
             }
         };
-        silver_client::export_backup(&store, &path, &passphrase)?;
+        let lines = silver_client::export_backup(&store, &path, &passphrase, args.with_history)?;
         println!(
-            "Backup of identity {} and {} contact(s) written to {}.",
+            "Backup of identity {} and {} contact(s){} written to {}.",
             identity.user_id(),
             store.load_contacts()?.len(),
+            if args.with_history {
+                format!(", with {lines} line(s) of history,")
+            } else {
+                String::new()
+            },
             path.display()
         );
         return Ok(());

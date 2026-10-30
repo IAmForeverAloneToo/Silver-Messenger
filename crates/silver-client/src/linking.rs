@@ -601,29 +601,7 @@ impl Snapshot {
             }
         }
         store.save_blocked(&blocked)?;
-        let mut messages = 0;
-        for (peer, entries) in &self.history {
-            let known: HashSet<String> = store
-                .load_history(peer)?
-                .into_iter()
-                .map(|e| e.id)
-                .collect();
-            for line in entries {
-                if known.contains(&line.entry.id) {
-                    continue;
-                }
-                store.append_history(peer, &line.entry)?;
-                if let Some(receipt) = line.receipt {
-                    store.append_receipt(
-                        peer,
-                        receipt,
-                        std::slice::from_ref(&line.entry.id),
-                        line.entry.timestamp_ms,
-                    )?;
-                }
-                messages += 1;
-            }
-        }
+        let mut messages = import_history(store, &self.history)?;
         for (group, entries) in &self.group_history {
             let known: HashSet<String> = store
                 .load_group_history(group)?
@@ -643,6 +621,39 @@ impl Snapshot {
             messages,
         })
     }
+}
+
+/// Write lines of history with contacts into `store`, each as it stood
+/// with its receipt; a line already there is left alone. How many were
+/// written.
+pub fn import_history(
+    store: &Store,
+    history: &BTreeMap<UserId, Vec<SnapshotEntry>>,
+) -> anyhow::Result<usize> {
+    let mut messages = 0;
+    for (peer, entries) in history {
+        let known: HashSet<String> = store
+            .load_history(peer)?
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+        for line in entries {
+            if known.contains(&line.entry.id) {
+                continue;
+            }
+            store.append_history(peer, &line.entry)?;
+            if let Some(receipt) = line.receipt {
+                store.append_receipt(
+                    peer,
+                    receipt,
+                    std::slice::from_ref(&line.entry.id),
+                    line.entry.timestamp_ms,
+                )?;
+            }
+            messages += 1;
+        }
+    }
+    Ok(messages)
 }
 
 /// What taking a link came to: whose device this is now, and the
