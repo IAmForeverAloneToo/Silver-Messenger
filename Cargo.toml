@@ -123,7 +123,7 @@ apple-native-keyring-store = { version = "1", features = ["keychain"] }
 # the 1024-bit Diffie-Hellman, AES-128 in CBC mode. All three were in the
 # tree already, through the secret-service crate keyring 3 used and the
 # relay's certificate parser.
-num-bigint = "0.4"
+num-bigint = "0.5"
 aes = { version = "0.8", features = ["zeroize"] }
 cbc = { version = "0.1", features = ["alloc", "block-padding", "zeroize"] }
 tauri-winrt-notification = "0.8"
