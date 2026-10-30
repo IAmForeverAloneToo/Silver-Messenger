@@ -168,6 +168,12 @@ pub const COMMANDS: &[CommandInfo] = &[
         "send meaningless messages at random moments to contacts who do the same, so the relay cannot tell when you really talk (default off; costs bandwidth)",
     ),
     cmd(
+        "mute",
+        &[],
+        "[30m|8h|2d|1w|off]",
+        "stop the open chat or group notifying, for good or for a while (its unread count still shows; in a group, a message naming you with @ still notifies); /mute off or /unmute undoes it",
+    ),
+    cmd(
         "notify",
         &[],
         "all|terminal|desktop|bell|off",
@@ -348,7 +354,7 @@ pub const COMMANDS: &[CommandInfo] = &[
 
 pub const KEY_HELP: &[&str] = &[
     "Tab / Shift-Tab, Alt-Up / Alt-Down, or a click in the list   switch chats (a line typed and not sent stays with its chat, marked in the list)",
-    "Enter sends · Alt-Enter new line · Up / Down recall earlier lines · Tab completes /commands, paths, aliases and group names",
+    "Enter sends · Alt-Enter new line · Up / Down recall earlier lines · Tab completes /commands, paths, aliases and group names, and @names of group members (a mention notifies them even in a muted group)",
     "PgUp / PgDn or the mouse wheel scroll · Ctrl-Home / Ctrl-End jump · drag the scrollbar or the divider",
     "Drag to select text, double click a word, triple click a message, Shift-Up / Shift-Down for messages",
     "With one message selected, /reply, /react, /edit and /delete act on it",

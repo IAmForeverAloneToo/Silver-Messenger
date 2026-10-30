@@ -42,7 +42,7 @@ impl App {
         format!("{}> ", self.pane_name())
     }
 
-    fn pane_name(&self) -> String {
+    pub(super) fn pane_name(&self) -> String {
         let pane = self.selected_pane();
         match pane {
             super::Pane::Group(group) => self.group_name(&group),

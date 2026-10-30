@@ -218,7 +218,26 @@ nothing was duplicated. `silver-v0.13.0-x86_64-pc-windows-msvc.exe` is
 more for the whole item (the crate, the route, the tmux wrapping and
 the rest together), so the crate stays.
 
-## 7. Corrections
+## 7. Muting a chat, and mentions
+
+`/mute` stops one chat or group ringing, for good or until a time
+(`30m`, `8h`, `2d`, `1w`); `/mute off` or `/unmute` lifts it. What is
+muted is kept in `config.json` under `muted`, by `c:<user id>` or
+`g:<group id>`, each with the time it ends in milliseconds or `null`.
+It is this device's setting and is not synced. A muted chat still counts
+its unread messages and marks itself in the list; only the bell, the
+terminal sequence and the desktop notification are left out.
+
+A group message that names this user rings even in a muted group. The
+names people see are their own (aliases), so a mention cannot travel as
+a name: typed as `@` and the name the writer knows a member by, it is
+sent as `@` and the first eight characters of the member's id, and each
+reader's client shows it as `@` and the name that reader knows the
+member by (`@you` for the reader). It is ordinary text: nothing on the
+wire changes, and a client that does not know the convention shows the
+id.
+
+## 8. Corrections
 
 * This note first listed a group invitation and being added to a group
   among the events that ring (0.13.0). [requests.md](requests.md)

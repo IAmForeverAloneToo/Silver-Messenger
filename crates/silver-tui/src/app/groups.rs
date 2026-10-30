@@ -1180,7 +1180,105 @@ impl App {
     // --- sending -------------------------------------------------------------
 
     pub(super) fn send_group_text(&mut self, group: GroupId, text: String) {
+        let text = self.encode_mentions(&group, &text);
         self.send_group_content(group, Content::text(text.clone()), text);
+    }
+
+    /// The members a mention can name, with the name this side knows
+    /// each by, longest first so that "@ann marie" wins over "@ann".
+    fn mentionable(&self, group: &GroupId) -> Vec<(String, UserId)> {
+        let mut out: Vec<(String, UserId)> = self
+            .groups
+            .get(group)
+            .map(|r| r.identities())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|u| *u != self.account && *u != self.me)
+            .map(|u| (self.member_name(&u), u))
+            .collect();
+        out.sort_by_key(|(name, _)| std::cmp::Reverse(name.chars().count()));
+        out
+    }
+
+    /// `@name` as typed, with the name this side knows a member by, goes
+    /// out as `@` and the start of their id: names are each reader's own
+    /// (aliases), so only the id means the same person to everyone.
+    /// Each reader's client shows it under its own name for them again
+    /// ([`Self::decode_mentions`]); an older one shows the id.
+    pub(super) fn encode_mentions(&self, group: &GroupId, text: &str) -> String {
+        let members = self.mentionable(group);
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(at) = rest.find('@') {
+            out.push_str(&rest[..at]);
+            let after = &rest[at + 1..];
+            let hit = members.iter().find(|(name, _)| {
+                after.len() >= name.len()
+                    && after.is_char_boundary(name.len())
+                    && after[..name.len()].eq_ignore_ascii_case(name)
+                    && !after[name.len()..]
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_alphanumeric())
+            });
+            match hit {
+                Some((name, user)) => {
+                    out.push('@');
+                    out.push_str(&user.short());
+                    rest = &after[name.len()..];
+                }
+                None => {
+                    out.push('@');
+                    rest = after;
+                }
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// A group line as shown: `@` and the start of a member's id becomes
+    /// `@` and the name this side knows them by ("you" for this user).
+    pub fn decode_mentions(&self, group: &GroupId, text: &str) -> String {
+        if !text.contains('@') {
+            return text.to_owned();
+        }
+        let mut members = self
+            .groups
+            .get(group)
+            .map(|r| r.identities())
+            .unwrap_or_default();
+        members.push(self.account);
+        let mut out = text.to_owned();
+        for user in members {
+            let token = format!("@{}", user.short());
+            if out.contains(&token) {
+                out = out.replace(&token, &format!("@{}", self.member_name(&user)));
+            }
+        }
+        out
+    }
+
+    /// Whether a group line names this user.
+    pub(super) fn mentions_me(&self, text: &str) -> bool {
+        text.contains(&format!("@{}", self.account.short()))
+            || text.contains(&format!("@{}", self.me.short()))
+    }
+
+    /// Tab after `@` in a group's line: the members whose name starts
+    /// like what follows the `@`.
+    pub(super) fn mention_candidates(&self, group: &GroupId, partial: &str) -> Vec<String> {
+        let wanted = partial.to_lowercase();
+        let mut names: Vec<String> = self
+            .mentionable(group)
+            .into_iter()
+            .map(|(name, _)| name)
+            .filter(|name| name.to_lowercase().starts_with(&wanted))
+            .map(|name| format!("@{name} "))
+            .collect();
+        names.sort();
+        names.dedup();
+        names
     }
 
     pub(super) fn send_group_content(&mut self, group: GroupId, content: Content, shown: String) {
@@ -1479,6 +1577,7 @@ impl App {
                         }
                         _ => continue,
                     };
+                    let mentioned = self.mentions_me(&text);
                     if self.arrived_deleted(&conversation, &id, Some(from)) {
                         continue;
                     }
@@ -1503,7 +1602,7 @@ impl App {
                     if shown {
                         self.note_read(&conversation, std::slice::from_ref(&id), now_ms());
                     } else {
-                        self.notifier.announce();
+                        self.announce_for(super::Pane::Group(group), mentioned);
                         self.group_unread.entry(group).or_default().push(id);
                     }
                 }

@@ -156,14 +156,16 @@ fn draw_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(Paragraph::new(shown).block(block), area);
 }
 
-/// A chat's label with what it holds that is not on screen: a line typed
-/// and not sent.
-fn marked(app: &App, pane: Pane, label: String) -> String {
-    if app.has_draft(pane) {
-        format!("{label} {}", app.glyphs.draft)
-    } else {
-        label
+/// A chat's label with what it holds that is not on screen: that it is
+/// muted, and a line typed and not sent.
+fn marked(app: &App, pane: Pane, mut label: String) -> String {
+    if app.is_muted(pane) {
+        label = format!("{label} {}", app.glyphs.muted);
     }
+    if app.has_draft(pane) {
+        label = format!("{label} {}", app.glyphs.draft);
+    }
+    label
 }
 
 /// The chat list's rows, and the pane each one opens (`None` for a
@@ -542,6 +544,7 @@ fn request_rows(app: &App, from: UserId, width: usize) -> Vec<Row> {
         &lines,
         &|_| name.clone(),
         &|_| name.clone(),
+        &|text: &str| text.to_owned(),
         None,
         width,
     )
@@ -617,6 +620,7 @@ fn thread_rows(app: &App, peer: &UserId, width: usize) -> Vec<Row> {
         lines,
         &|_| peer_name.clone(),
         &|_| peer_name.clone(),
+        &|text: &str| text.to_owned(),
         marker,
         width,
     )
@@ -639,6 +643,7 @@ fn group_rows(app: &App, group: &silver_protocol::group::GroupId, width: usize) 
             None => String::new(),
         },
         &|user: &UserId| app.member_name(user),
+        &|text: &str| app.decode_mentions(group, text),
         marker,
         width,
     )
@@ -654,6 +659,7 @@ fn lines_rows(
     lines: &[ChatLine],
     name_of: &dyn Fn(&ChatLine) -> String,
     who: &dyn Fn(&UserId) -> String,
+    shown: &dyn Fn(&str) -> String,
     marker: Option<&str>,
     width: usize,
 ) -> Vec<Row> {
@@ -710,7 +716,8 @@ fn lines_rows(
                         Direction::Sent => "you".to_owned(),
                         Direction::Received => name_of(t),
                     };
-                    let first = t.text.lines().next().unwrap_or_default();
+                    let text = shown(&t.text);
+                    let first = text.lines().next().unwrap_or_default();
                     format!("{author}: {first}")
                 }
                 None => "a message you do not have".to_owned(),
@@ -772,9 +779,9 @@ fn lines_rows(
             Style::default()
         };
         let text = if line.edited {
-            format!("{} (edited)", line.text)
+            format!("{} (edited)", shown(&line.text))
         } else {
-            line.text.clone()
+            shown(&line.text)
         };
         rows.extend(
             wrap_message(prefix, &text, style, width)

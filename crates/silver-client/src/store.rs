@@ -212,6 +212,11 @@ pub struct Config {
     /// box drawing, no alternate screen.
     #[serde(default)]
     pub reader: bool,
+    /// Chats whose messages do not notify, by `c:<user id>` or
+    /// `g:<group id>`, each until a time in milliseconds or for good
+    /// (`/mute`). A mention still notifies.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub muted: BTreeMap<String, Option<u64>>,
 }
 
 fn default_downloads_quota_mib() -> u64 {
@@ -321,6 +326,7 @@ impl Default for Config {
             lock_after_minutes: 0,
             encrypted_downloads: false,
             reader: false,
+            muted: BTreeMap::new(),
         }
     }
 }

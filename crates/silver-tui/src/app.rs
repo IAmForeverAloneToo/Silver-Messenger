@@ -267,6 +267,24 @@ fn outage_cause(reason: &str) -> String {
     }
 }
 
+/// `30m`, `8h`, `2d` or `1w` as a span of time; nothing else.
+fn parse_span(text: &str) -> Option<Duration> {
+    let text = text.trim();
+    let unit = text.chars().last()?;
+    let n: u64 = text[..text.len() - unit.len_utf8()].parse().ok()?;
+    let secs = match unit {
+        'm' => 60,
+        'h' => 3600,
+        'd' => 86_400,
+        'w' => 604_800,
+        _ => return None,
+    };
+    if n == 0 {
+        return None;
+    }
+    Some(Duration::from_secs(n.checked_mul(secs)?))
+}
+
 /// An outage's length in words: seconds, then minutes, then hours.
 fn outage_length(d: Duration) -> String {
     let s = d.as_secs();
@@ -713,6 +731,8 @@ pub struct App {
     drafts: HashMap<Pane, (String, usize)>,
     /// The pane whose line the input holds.
     input_pane: Pane,
+    /// `Config::muted`: chats that do not notify, and until when.
+    muted: std::collections::BTreeMap<String, Option<u64>>,
     /// The terminal window has focus, as far as it tells us.
     pub focused: bool,
     /// Rows scrolled up from the bottom of the message pane.
@@ -957,6 +977,7 @@ impl App {
             history_draft: String::new(),
             drafts: HashMap::new(),
             input_pane: Pane::System,
+            muted: config.muted.clone(),
             focused: true,
             scroll: 0,
             max_scroll: 0,
@@ -1943,7 +1964,13 @@ impl App {
             KeyCode::Char('u') if ctrl => self.clear_input(),
             KeyCode::Char('a') if ctrl => self.cursor = self.line_start(),
             KeyCode::Char('e') if ctrl => self.cursor = self.line_end(),
-            KeyCode::Tab if self.input.starts_with('/') => self.complete(),
+            KeyCode::Tab
+                if self.input.starts_with('/')
+                    || self.completion.is_some()
+                    || self.mention_partial().is_some() =>
+            {
+                self.complete()
+            }
             KeyCode::Tab => self.select_next(),
             KeyCode::BackTab => self.select_prev(),
             KeyCode::Down if alt => self.select_next(),
@@ -2348,6 +2375,84 @@ impl App {
         }
     }
 
+    /// The key a chat is muted under in `Config::muted`.
+    fn mute_key(pane: Pane) -> Option<String> {
+        match pane {
+            Pane::Thread(id) => Some(format!("c:{id}")),
+            Pane::Group(group) => Some(format!("g:{group}")),
+            _ => None,
+        }
+    }
+
+    /// Whether a chat's messages do not notify now.
+    pub fn is_muted(&self, pane: Pane) -> bool {
+        Self::mute_key(pane)
+            .and_then(|key| self.muted.get(&key).copied())
+            .is_some_and(|until| until.is_none_or(|at| at > now_ms()))
+    }
+
+    /// Ring for a message in `pane`, unless the chat is muted and the
+    /// message does not name this user.
+    pub(super) fn announce_for(&mut self, pane: Pane, mentioned: bool) {
+        if mentioned || !self.is_muted(pane) {
+            self.notifier.announce();
+        }
+    }
+
+    /// `/mute [30m|8h|2d|1w|off]`: the open chat or group stops (or
+    /// starts again) notifying, for good or for a while. Its unread count
+    /// still shows; in a group, a message naming you still notifies.
+    fn cmd_mute(&mut self, args: &[&str]) {
+        let pane = self.selected_pane();
+        let Some(key) = Self::mute_key(pane) else {
+            self.toast("Open a chat or a group to mute it.");
+            return;
+        };
+        let name = self.pane_name();
+        let until = match args.first().map(|a| a.to_lowercase()) {
+            None => None,
+            Some(off) if off == "off" => {
+                let was = self.is_muted(pane);
+                self.muted.remove(&key);
+                self.save_muted();
+                self.toast(if was {
+                    format!("{name} notifies again.")
+                } else {
+                    format!("{name} was not muted.")
+                });
+                return;
+            }
+            Some(time) => match parse_span(&time) {
+                Some(span) => Some(now_ms() + span.as_millis() as u64),
+                None => {
+                    self.toast("Usage: /mute, /mute 30m|8h|2d|1w for a while, or /mute off.");
+                    return;
+                }
+            },
+        };
+        // Expired entries go whenever the list is written.
+        let now = now_ms();
+        self.muted
+            .retain(|_, until| until.is_none_or(|at| at > now));
+        self.muted.insert(key, until);
+        self.save_muted();
+        self.toast(match until {
+            None => format!("{name} is muted; /mute off undoes it."),
+            Some(at) => format!(
+                "{name} is muted until {}; /mute off undoes it sooner.",
+                ui::clock(at)
+            ),
+        });
+    }
+
+    fn save_muted(&mut self) {
+        let mut config = self.store.load_config().unwrap_or_default();
+        config.muted = self.muted.clone();
+        if let Err(e) = self.store.save_config(&config) {
+            self.toast(format!("Could not save config: {e}"));
+        }
+    }
+
     /// Whether a chat has a line typed and not sent, for the chat list.
     pub fn has_draft(&self, pane: Pane) -> bool {
         self.drafts.contains_key(&pane)
@@ -2702,6 +2807,8 @@ impl App {
             "accept" => self.cmd_accept(&rest),
             "requests" => self.cmd_requests(),
             "whois" | "who" => self.cmd_whois(&rest),
+            "mute" => self.cmd_mute(&rest),
+            "unmute" => self.cmd_mute(&["off"]),
             "block" => self.cmd_block(&rest),
             "unblock" => self.cmd_unblock(&rest),
             "blocked" => self.cmd_blocked(),
@@ -2746,6 +2853,10 @@ impl App {
             self.cursor = self.input.chars().count();
             return;
         }
+        if let Some((group, stem, partial)) = self.mention_partial() {
+            let candidates = self.mention_candidates(&group, &partial);
+            return self.offer(stem, candidates);
+        }
         let Some(body) = self.input.strip_prefix('/') else {
             return;
         };
@@ -2788,6 +2899,11 @@ impl App {
                 }
             }
         };
+        self.offer(stem, candidates);
+    }
+
+    /// The input as `stem` and the first candidate, the others a Tab away.
+    fn offer(&mut self, stem: String, candidates: Vec<String>) {
         match candidates.len() {
             0 => self.toast("Nothing to complete."),
             1 => {
@@ -2804,6 +2920,24 @@ impl App {
                 });
             }
         }
+    }
+
+    /// In a group's line, with the cursor at its end after `@` and the
+    /// start of a name: the group, the line before the `@`, and the start.
+    fn mention_partial(&self) -> Option<(silver_protocol::group::GroupId, String, String)> {
+        let group = self.selected_group()?;
+        if self.input.starts_with('/') || self.cursor != self.input.chars().count() {
+            return None;
+        }
+        let at = self.input.rfind('@')?;
+        let partial = &self.input[at + 1..];
+        if partial.contains(char::is_whitespace) {
+            return None;
+        }
+        if at > 0 && !self.input[..at].ends_with(char::is_whitespace) {
+            return None; // an address, not a mention
+        }
+        Some((group, self.input[..at].to_owned(), partial.to_owned()))
     }
 
     /// The names that start like `partial`, for Tab: contact aliases,
@@ -4401,7 +4535,7 @@ impl App {
                 if shown {
                     self.note_read(&conversation, std::slice::from_ref(&id), now_ms());
                 } else {
-                    self.notifier.announce();
+                    self.announce_for(Pane::Thread(from), false);
                 }
                 let wants = self.contacts[index].supports(capability::RECEIPTS);
                 if shown && wants && self.read_receipts {
@@ -6598,6 +6732,67 @@ mod tests {
         assert_eq!(app.group_list, vec![group]);
         assert!(app.groups.get(&other.group).is_none());
         assert_eq!(app.pane_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_mention_names_one_person_to_everyone_and_rings_through_a_mute() {
+        let (mut app, _dir) = app();
+        let (alice_id, mut alice) = engine();
+        let alice_id = alice_id.user_id();
+        let mut contact = Contact::new(alice_id);
+        contact.alias = Some("Alice".to_owned());
+        app.contacts.push(contact);
+        let created = alice.create("team", now_ms()).unwrap();
+        let group = created.group;
+        let out = add_me(&mut app, &mut alice, &group, 0);
+        deliver(&mut app, &out.envelopes[0]);
+        assert_eq!(app.group_list, vec![group], "from a contact: taken");
+        assert!(app.select_pane(Pane::Group(group)));
+
+        // Typed with the name this side knows her by, sent with her id.
+        let wire = app.encode_mentions(&group, "hi @alice! and @nobody, mail@example");
+        assert_eq!(
+            wire,
+            format!("hi @{}! and @nobody, mail@example", alice_id.short())
+        );
+        assert_eq!(
+            app.decode_mentions(&group, &wire),
+            "hi @Alice! and @nobody, mail@example"
+        );
+        assert!(!app.mentions_me(&wire));
+        assert!(app.mentions_me(&format!("@{} look", app.account.short())));
+        assert_eq!(
+            app.decode_mentions(&group, &format!("@{} look", app.account.short())),
+            "@you look"
+        );
+
+        // Tab after @ completes a member, and only in a group's line.
+        app.input = "hey @al".to_owned();
+        app.cursor = app.input.chars().count();
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(app.input, "hey @Alice ");
+
+        // Muted, the group stays quiet; for a while, it says until when.
+        app.cmd_mute(&[]);
+        assert!(app.is_muted(Pane::Group(group)));
+        assert!(
+            app.store
+                .load_config()
+                .unwrap()
+                .muted
+                .contains_key(&format!("g:{group}")),
+            "kept in config.json"
+        );
+        app.cmd_mute(&["off"]);
+        assert!(!app.is_muted(Pane::Group(group)));
+        app.cmd_mute(&["8h"]);
+        assert!(app.is_muted(Pane::Group(group)));
+        app.muted.insert(format!("g:{group}"), Some(now_ms() - 1));
+        assert!(!app.is_muted(Pane::Group(group)), "expired");
+        assert_eq!(parse_span("30m"), Some(Duration::from_secs(1800)));
+        assert_eq!(parse_span("0h"), None);
+        assert_eq!(parse_span("5x"), None);
+        assert_eq!(parse_span("h"), None);
     }
 
     #[tokio::test]

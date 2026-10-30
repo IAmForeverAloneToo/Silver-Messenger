@@ -880,7 +880,7 @@ impl App {
                 if shown {
                     self.note_read(&conversation, std::slice::from_ref(&id), now_ms());
                 } else {
-                    self.notifier.announce();
+                    self.announce_for(super::Pane::Thread(from), false);
                     self.unread.entry(from).or_default().push(id);
                 }
             }

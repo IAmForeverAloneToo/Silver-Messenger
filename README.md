@@ -260,6 +260,7 @@ message dressed up to look like a saved file elsewhere opens nothing.
 | `/search <text>` | Find messages in this chat or group, or in all of them from System; it reads the history files, not only the screen |
 | `/receipts on\|off`             | Tell contacts when you have read their messages (default on) |
 | `/notify all\|terminal\|desktop\|bell\|off` | Bell and a desktop notification (`all` picks the path; `terminal` or `desktop` forces one), bell only, or nothing |
+| `/mute [30m\|8h\|2d\|1w\|off]` | Stop the open chat or group notifying, for good or for a while; its unread count still shows, and in a group a message naming you with `@` still notifies. `/mute off` or `/unmute` undoes it |
 | `/marks ascii\|unicode\|auto`   | Draw the marks in ASCII if your terminal shows boxes for them |
 | `/theme dark\|light\|mono\|contrast` | Colours for a dark or a light background, none at all, or bright bold text on black for high contrast |
 | `/go <name>`                    | Open the chat whose name (or id) starts with `name`; `system` and `requests` name those |
@@ -287,8 +288,10 @@ message dressed up to look like a saved file elsewhere opens nothing.
 | `/help`, `/quit`                |                                                              |
 
 `F1` (or `/help`) opens a help overlay with all of this. `Tab` completes
-`/commands` and file paths, and the status line at the bottom says what the
-keys do where you are.
+`/commands` and file paths, and in a group `@` and the start of a member's
+name: a mention reaches them under whatever name they know that person by,
+and notifies them even in a group they muted. The status line at the
+bottom says what the keys do where you are.
 
 Mouse: click a chat, Requests or System in the list to open it, the wheel
 scrolls, the scrollbar on the right edge can be dragged, so can the line
@@ -297,7 +300,8 @@ text (double click selects a word, triple click a whole message), double
 click a received file's line to open it, and click a chat's title to copy
 that person's id.
 
-Keys: `Tab` / `Shift-Tab` or `Alt-Up` / `Alt-Down` switch chats, `Up` /
+Keys: `Tab` / `Shift-Tab` or `Alt-Up` / `Alt-Down` switch chats (a line
+typed and not sent stays with its chat, marked in the list), `Up` /
 `Down` recall earlier lines, `Alt-Enter` starts a new line in a message,
 `PgUp` / `PgDn` scroll and `Ctrl-Home` / `Ctrl-End` jump, `Shift-Up` /
 `Shift-Down` select messages, which `/reply`, `/react`, `/edit` and
