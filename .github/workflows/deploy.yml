@@ -57,12 +57,21 @@ jobs:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_HOST_KEY: ${{ vars.VPS_HOST_KEY }}
         run: |
-          test -n "$VPS_SSH_KEY" || { echo "::error::repository secret VPS_SSH_KEY is not set"; exit 1; }
-          test -n "$VPS_HOST" || { echo "::error::repository secret VPS_HOST is not set"; exit 1; }
-          if [ -z "$VPS_HOST_KEY" ]; then
-            echo "::error::repository variable VPS_HOST_KEY is not set. Run 'ssh-keyscan $VPS_HOST' from a machine you trust (or read the key off the server's console with 'ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub') and paste the line or lines in. Fetching the key here instead would trust whatever answers."
-            exit 1
+          # Every missing setting at once, rather than one a run.
+          missing=0
+          if [ -z "$VPS_SSH_KEY" ]; then
+            echo "::error::repository secret VPS_SSH_KEY is not set: the private key whose public half is in the server's authorized_keys (Settings, Secrets and variables, Actions, Secrets)"
+            missing=1
           fi
+          if [ -z "$VPS_HOST" ]; then
+            echo "::error::repository secret VPS_HOST is not set: the server's IP address or hostname (Settings, Secrets and variables, Actions, Secrets)"
+            missing=1
+          fi
+          if [ -z "$VPS_HOST_KEY" ]; then
+            echo "::error::repository variable VPS_HOST_KEY is not set. Run 'ssh-keyscan <host>' from a machine you trust (or read the key off the server's console with 'ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub') and paste the line or lines in (Settings, Secrets and variables, Actions, Variables). Fetching the key here instead would trust whatever answers."
+            missing=1
+          fi
+          [ "$missing" = 0 ] || exit 1
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
