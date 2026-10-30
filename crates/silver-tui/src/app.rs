@@ -232,6 +232,51 @@ pub struct SystemLine {
     pub text: String,
 }
 
+/// The relay out of reach: see [`App::note_outage`].
+struct Outage {
+    since: Instant,
+    tries: u32,
+    /// The System line as last written, to know it is still the last.
+    text: String,
+}
+
+/// Why the relay is out of reach, in words; what is not one of the usual
+/// network failures is given as it came, since it may matter (a
+/// certificate, a refusal).
+fn outage_cause(reason: &str) -> String {
+    let lower = reason.to_lowercase();
+    if lower.contains("connection refused") {
+        "nothing answers at its address".to_owned()
+    } else if lower.contains("reset")
+        || lower.contains("without closing handshake")
+        || lower.contains("broken pipe")
+    {
+        "the connection was cut".to_owned()
+    } else if lower.contains("timed out") || lower.contains("timeout") {
+        "it did not answer in time".to_owned()
+    } else if lower.contains("lookup address")
+        || lower.contains("name or service not known")
+        || lower.contains("no such host")
+        || lower.contains("dns")
+    {
+        "its name could not be looked up (offline?)".to_owned()
+    } else if lower.contains("network is unreachable") || lower.contains("no route to host") {
+        "this computer has no network route to it (offline?)".to_owned()
+    } else {
+        reason.to_owned()
+    }
+}
+
+/// An outage's length in words: seconds, then minutes, then hours.
+fn outage_length(d: Duration) -> String {
+    let s = d.as_secs();
+    match s {
+        0..=89 => format!("{}s", s.max(1)),
+        90..=5399 => format!("{} minutes", (s + 30) / 60),
+        _ => format!("{:.1} hours", s as f64 / 3600.0),
+    }
+}
+
 /// What the message pane shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Pane {
@@ -549,6 +594,10 @@ pub struct App {
     wiped: Option<String>,
     /// The relay refused this device as unlinked, and the user was told.
     unlinked_noted: bool,
+    /// Since when the relay has been out of reach, how many tries have
+    /// failed, and the System line that says so, kept up to date in place
+    /// rather than one line a retry. `None` while connected.
+    outage: Option<Outage>,
     pub connection: Connection,
     pub contacts: Vec<Contact>,
     /// Messages from unknown senders awaiting /accept, /decline or /block.
@@ -843,6 +892,7 @@ impl App {
             leaving: None,
             wiped: None,
             unlinked_noted: false,
+            outage: None,
             connection: Connection::Connecting,
             contacts,
             requests,
@@ -1366,6 +1416,39 @@ impl App {
             text,
         });
         self.trim_system();
+    }
+
+    /// The relay is out of reach: one System line says so, in words, and
+    /// each failed retry updates it while it is still the last line,
+    /// instead of adding a raw error a retry.
+    fn note_outage(&mut self, reason: &str, retry_in: Duration) {
+        let since = self.outage.as_ref().map_or_else(Instant::now, |o| o.since);
+        let tries = self.outage.as_ref().map_or(0, |o| o.tries) + 1;
+        let since_clock = ui::clock(now_ms().saturating_sub(since.elapsed().as_millis() as u64));
+        let text = silver_client::files::one_line(&format!(
+            "Can't reach the relay: {}. Trying again in {}s{}; messages wait until it is back.",
+            outage_cause(reason),
+            retry_in.as_secs(),
+            if tries > 1 {
+                format!(" (try {tries}, out since {since_clock})")
+            } else {
+                String::new()
+            }
+        ));
+        let last_is_ours = self
+            .outage
+            .as_ref()
+            .zip(self.system.last())
+            .is_some_and(|(o, line)| line.text == o.text);
+        if last_is_ours {
+            if let Some(line) = self.system.last_mut() {
+                line.text = text.clone();
+                line.timestamp_ms = now_ms();
+            }
+        } else {
+            self.system(Level::Warn, text.clone());
+        }
+        self.outage = Some(Outage { since, tries, text });
     }
 
     fn toast(&mut self, text: impl Into<String>) {
@@ -4065,7 +4148,16 @@ impl App {
         match ev {
             ClientEvent::Connected { relay_url } => {
                 self.connection = Connection::Connected;
-                self.system(Level::Info, format!("Connected to {relay_url}"));
+                match self.outage.take() {
+                    Some(outage) => self.system(
+                        Level::Info,
+                        format!(
+                            "Reached the relay again after {}; anything queued is going out now.",
+                            outage_length(outage.since.elapsed())
+                        ),
+                    ),
+                    None => self.system(Level::Info, format!("Connected to {relay_url}")),
+                }
                 self.deposit_key_packages();
                 // Reached over TLS: from now on, never without.
                 let mut config = self.store.load_config().unwrap_or_default();
@@ -4077,13 +4169,7 @@ impl App {
             }
             ClientEvent::Disconnected { reason, retry_in } => {
                 self.connection = Connection::Disconnected;
-                self.system(
-                    Level::Warn,
-                    format!(
-                        "Disconnected: {reason} (retrying in {}s)",
-                        retry_in.as_secs()
-                    ),
-                );
+                self.note_outage(&reason, retry_in);
                 if self.linked && !self.unlinked_noted && reason.contains("revoked") {
                     self.unlinked_noted = true;
                     self.system(
@@ -6272,6 +6358,51 @@ mod tests {
         assert_eq!(app.selected_pane(), Pane::Thread(bob));
         assert_eq!(app.input, "hi bob");
         assert_eq!(app.came_from, None);
+    }
+
+    #[tokio::test]
+    async fn an_outage_is_one_line_in_words_and_its_end_another() {
+        let (mut app, _dir) = app();
+        let before = app.system.len();
+        let down = |reason: &str, s| ClientEvent::Disconnected {
+            reason: reason.to_owned(),
+            retry_in: Duration::from_secs(s),
+        };
+        app.handle_client_event(down("IO error: Connection refused (os error 111)", 1));
+        app.handle_client_event(down(
+            "websocket error: WebSocket protocol error: Connection reset without closing handshake",
+            2,
+        ));
+        app.handle_client_event(down("IO error: Connection refused (os error 111)", 4));
+        assert_eq!(app.system.len(), before + 1, "one line, updated");
+        let line = &app.system.last().unwrap().text;
+        assert!(line.contains("nothing answers at its address"), "{line}");
+        assert!(line.contains("try 3"), "{line}");
+        assert!(!line.contains("os error"), "{line}");
+
+        // Something else said in between: the next retry starts a new line.
+        app.system(Level::Info, "something else");
+        app.handle_client_event(down("certificate expired", 8));
+        assert_eq!(app.system.len(), before + 3);
+        assert!(
+            app.system
+                .last()
+                .unwrap()
+                .text
+                .contains("certificate expired")
+        );
+
+        app.handle_client_event(ClientEvent::Connected {
+            relay_url: "ws://relay".to_owned(),
+        });
+        assert!(
+            app.system
+                .last()
+                .unwrap()
+                .text
+                .starts_with("Reached the relay again after")
+        );
+        assert!(app.outage.is_none());
     }
 
     fn engine() -> (Arc<Identity>, Groups) {
