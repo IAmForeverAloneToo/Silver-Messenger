@@ -996,7 +996,7 @@ dependencies = [
  "asn1-rs",
  "displaydoc",
  "nom 7.1.3",
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-traits",
  "rusticata-macros",
 ]
@@ -1533,7 +1533,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "01a33cb227f97ee5c419064c31d7c55a7d895f28d8019ccdadc311cc036500c4"
 dependencies = [
  "hax-lib-macros",
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-traits",
 ]
 
@@ -2672,6 +2672,16 @@ name = "num-bigint"
 version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367"
+dependencies = [
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
+name = "num-bigint"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93e7820bc0a80a0238e650327316f929ba18d5be054b647490a3a6a339f3e7c0"
 dependencies = [
  "num-integer",
  "num-traits",
@@ -4327,7 +4337,7 @@ dependencies = [
  "hmac 0.12.1",
  "keyring-core",
  "minisign-verify",
- "num-bigint",
+ "num-bigint 0.5.1",
  "openmls",
  "openmls_basic_credential",
  "openmls_memory_storage",
