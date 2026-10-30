@@ -457,7 +457,9 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
     // start an identity of its own.
     let link = args.link || (created && offer_link(&secrets)?);
     if created {
-        offer_passphrase(&mut store, &secrets)?;
+        // The key store is offered only where the start below would use it.
+        let keystore = !args.no_keystore && store.load_config()?.os_keystore;
+        offer_passphrase(&mut store, &secrets, keystore)?;
     }
     if let Some(path) = args.export_backup {
         let passphrase = match &secrets.backup_passphrase {
@@ -928,7 +930,7 @@ fn offer_link(secrets: &EnvSecrets) -> anyhow::Result<bool> {
 }
 
 /// First run: offer to protect the brand-new data directory.
-fn offer_passphrase(store: &mut Store, secrets: &EnvSecrets) -> anyhow::Result<()> {
+fn offer_passphrase(store: &mut Store, secrets: &EnvSecrets, keystore: bool) -> anyhow::Result<()> {
     if let Some(passphrase) = &secrets.passphrase {
         if !passphrase.is_empty() {
             store.set_passphrase(passphrase)?;
@@ -940,7 +942,8 @@ fn offer_passphrase(store: &mut Store, secrets: &EnvSecrets) -> anyhow::Result<(
     }
     println!("This is a new identity. You can protect your keys, contacts and history");
     println!("with a passphrase that is asked for at every start.");
-    if keystore::available() {
+    let mut keystore = keystore && keystore::available();
+    if keystore {
         println!(
             "Leave it empty to encrypt them with a key kept in this computer's key store instead;"
         );
@@ -948,10 +951,31 @@ fn offer_passphrase(store: &mut Store, secrets: &EnvSecrets) -> anyhow::Result<(
     } else {
         println!("Leave it empty for none; you can add one later with --set-passphrase.");
     }
-    let first = rpassword::prompt_password("Passphrase (optional): ")?;
-    if first.is_empty() {
-        return Ok(());
-    }
+    let first = loop {
+        let first = rpassword::prompt_password("Passphrase (optional): ")?;
+        if !first.is_empty() {
+            break first;
+        }
+        if !keystore {
+            println!("Stored unencrypted; --set-passphrase protects them later.");
+            return Ok(());
+        }
+        // Tried now, while the answer can still change: a store that
+        // answers but cannot keep a key (a Secret Service with no default
+        // collection) used to leave the files unencrypted with only a
+        // line in System to say so.
+        match store.protect_with_keystore() {
+            Ok(()) => {
+                println!("Encrypted with a key kept in this computer's key store.");
+                return Ok(());
+            }
+            Err(e) => {
+                println!("The key store could not keep the key ({e:#}).");
+                println!("Choose a passphrase, or leave it empty again to store them unencrypted.");
+                keystore = false;
+            }
+        }
+    };
     let second = rpassword::prompt_password("Repeat passphrase: ")?;
     if first != second {
         bail!("the passphrases do not match; start again");

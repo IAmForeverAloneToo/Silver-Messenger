@@ -69,7 +69,11 @@ type Secret = (OwnedObjectPath, Vec<u8>, Vec<u8>, String);
 pub fn probe() -> anyhow::Result<()> {
     zbus::block_on(async {
         let session = Session::open().await?;
-        session.find("probe").await.map(|_| ())
+        session.find("probe").await?;
+        // A service that answers but has no default collection cannot
+        // keep a new key (`set` files one there): no use for protecting a
+        // directory. Under WSL that is the usual state.
+        session.default_collection().await.map(|_| ())
     })
 }
 
@@ -112,14 +116,7 @@ pub fn set(name: &str, text: &str) -> anyhow::Result<()> {
                 .context("writing the key store entry")?;
             return Ok(());
         }
-        let collection: OwnedObjectPath = session
-            .service
-            .call("ReadAlias", &(TARGET,))
-            .await
-            .context("finding the key store's default collection")?;
-        if collection.as_str() == NONE {
-            bail!("the key store has no default collection");
-        }
+        let collection = session.default_collection().await?;
         session.unlock(&collection).await?;
         let attributes = attributes(name);
         let label = format!("{name}@{SERVICE}:{TARGET}");
@@ -242,6 +239,20 @@ impl Session {
 
     /// The one item filed under `name`. More than one is refused rather
     /// than one picked, as keyring 3 refused it.
+    /// The collection new entries go in: the one the `default` alias
+    /// names, which a service need not have.
+    async fn default_collection(&self) -> anyhow::Result<OwnedObjectPath> {
+        let collection: OwnedObjectPath = self
+            .service
+            .call("ReadAlias", &(TARGET,))
+            .await
+            .context("finding the key store's default collection")?;
+        if collection.as_str() == NONE {
+            bail!("the key store has no default collection");
+        }
+        Ok(collection)
+    }
+
     async fn find(&self, name: &str) -> anyhow::Result<Option<Found>> {
         let (unlocked, locked): (Vec<OwnedObjectPath>, Vec<OwnedObjectPath>) = self
             .service
