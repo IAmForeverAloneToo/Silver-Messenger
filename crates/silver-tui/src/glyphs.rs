@@ -57,6 +57,10 @@ pub struct Glyphs {
     pub reply: &'static str,
     /// A message with a disappearing-message timer.
     pub timer: &'static str,
+    /// A chat with a line typed and not sent.
+    pub draft: &'static str,
+    /// A chat whose messages do not notify (`/mute`).
+    pub muted: &'static str,
 }
 
 pub const UNICODE: Glyphs = Glyphs {
@@ -73,6 +77,8 @@ pub const UNICODE: Glyphs = Glyphs {
     arrow: "→",
     reply: "↳",
     timer: "⧖",
+    draft: "✎",
+    muted: "⊘",
 };
 
 pub const ASCII: Glyphs = Glyphs {
@@ -89,6 +95,8 @@ pub const ASCII: Glyphs = Glyphs {
     arrow: "->",
     reply: ">",
     timer: "~",
+    draft: "*",
+    muted: "-",
 };
 
 impl Glyphs {

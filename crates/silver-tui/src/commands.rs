@@ -347,7 +347,7 @@ pub const COMMANDS: &[CommandInfo] = &[
 ];
 
 pub const KEY_HELP: &[&str] = &[
-    "Tab / Shift-Tab, Alt-Up / Alt-Down, or a click in the list   switch chats",
+    "Tab / Shift-Tab, Alt-Up / Alt-Down, or a click in the list   switch chats (a line typed and not sent stays with its chat, marked in the list)",
     "Enter sends · Alt-Enter new line · Up / Down recall earlier lines · Tab completes /commands, paths, aliases and group names",
     "PgUp / PgDn or the mouse wheel scroll · Ctrl-Home / Ctrl-End jump · drag the scrollbar or the divider",
     "Drag to select text, double click a word, triple click a message, Shift-Up / Shift-Down for messages",

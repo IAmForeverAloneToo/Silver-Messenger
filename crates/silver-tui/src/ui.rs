@@ -156,6 +156,16 @@ fn draw_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(Paragraph::new(shown).block(block), area);
 }
 
+/// A chat's label with what it holds that is not on screen: a line typed
+/// and not sent.
+fn marked(app: &App, pane: Pane, label: String) -> String {
+    if app.has_draft(pane) {
+        format!("{label} {}", app.glyphs.draft)
+    } else {
+        label
+    }
+}
+
 /// The chat list's rows, and the pane each one opens (`None` for a
 /// divider or a hint): System, contacts, groups, then a divider and what
 /// waits -- strangers marked `?`, drawn dim, named by id alone.
@@ -202,7 +212,7 @@ fn sidebar_lines(app: &App, inner_width: usize) -> (Vec<Line<'static>>, Vec<Opti
                 } else {
                     contact.display_name()
                 };
-                row(label, unread, selected, false)
+                row(marked(app, pane, label), unread, selected, false)
             }
             Pane::Group(group) => {
                 let unread = app
@@ -214,7 +224,7 @@ fn sidebar_lines(app: &App, inner_width: usize) -> (Vec<Line<'static>>, Vec<Opti
                     Some(state) => format!("# {} ({state})", app.group_name(&group)),
                     None => format!("# {}", app.group_name(&group)),
                 };
-                row(label, unread, selected, false)
+                row(marked(app, pane, label), unread, selected, false)
             }
             Pane::Request(_) | Pane::Invitation(_) => {
                 if !divided {

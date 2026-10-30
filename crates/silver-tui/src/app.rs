@@ -707,6 +707,12 @@ pub struct App {
     history_pos: Option<usize>,
     /// What was being typed when recall started.
     history_draft: String,
+    /// What was typed in each chat and left unsent, with the cursor, kept
+    /// while another is open: a line follows its chat, never the user to
+    /// the next one, where Enter would send it to someone else.
+    drafts: HashMap<Pane, (String, usize)>,
+    /// The pane whose line the input holds.
+    input_pane: Pane,
     /// The terminal window has focus, as far as it tells us.
     pub focused: bool,
     /// Rows scrolled up from the bottom of the message pane.
@@ -949,6 +955,8 @@ impl App {
             history: Vec::new(),
             history_pos: None,
             history_draft: String::new(),
+            drafts: HashMap::new(),
+            input_pane: Pane::System,
             focused: true,
             scroll: 0,
             max_scroll: 0,
@@ -2300,6 +2308,51 @@ impl App {
         self.history_pos = None;
     }
 
+    /// The input line follows the open pane: what was typed in the pane
+    /// left is kept for it, and the one opened gets back its own.
+    ///
+    /// Text typed in System, where nothing is sent, goes along into a
+    /// chat that has none of its own: it was meant for one.
+    fn swap_draft(&mut self) {
+        let arriving = self.selected_pane();
+        let mut leaving = self.input_pane;
+        if leaving == arriving {
+            return;
+        }
+        self.input_pane = arriving;
+        // A request accepted while its line was being typed is a chat now.
+        if let Pane::Request(id) = leaving
+            && !self.panes().contains(&leaving)
+        {
+            leaving = Pane::Thread(id);
+        }
+        let text = std::mem::take(&mut self.input);
+        let cursor = std::mem::replace(&mut self.cursor, 0);
+        self.history_pos = None;
+        self.completion = None;
+        let carried = leaving == Pane::System
+            && arriving != Pane::System
+            && !text.is_empty()
+            && !self.drafts.contains_key(&arriving);
+        if carried {
+            self.input = text;
+            self.cursor = cursor;
+            return;
+        }
+        if !text.trim().is_empty() {
+            self.drafts.insert(leaving, (text, cursor));
+        }
+        if let Some((text, cursor)) = self.drafts.remove(&arriving) {
+            self.input = text;
+            self.cursor = cursor;
+        }
+    }
+
+    /// Whether a chat has a line typed and not sent, for the chat list.
+    pub fn has_draft(&self, pane: Pane) -> bool {
+        self.drafts.contains_key(&pane)
+    }
+
     fn clear_input(&mut self) {
         self.input.clear();
         self.cursor = 0;
@@ -2408,6 +2461,7 @@ impl App {
 
     fn select(&mut self, index: usize) {
         self.selected = index.min(self.pane_count() - 1);
+        self.swap_draft();
         self.came_from = None;
         self.scroll = 0;
         self.selection = None;
@@ -6403,6 +6457,41 @@ mod tests {
                 .starts_with("Reached the relay again after")
         );
         assert!(app.outage.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_typed_line_stays_with_its_chat() {
+        let (mut app, _dir) = app();
+        let bob = Identity::generate().user_id();
+        let carol = Identity::generate().user_id();
+        app.contacts.push(Contact::new(bob));
+        app.contacts.push(Contact::new(carol));
+
+        assert!(app.select_pane(Pane::Thread(bob)));
+        app.input = "for bob".to_owned();
+        app.cursor = 3;
+        assert!(app.select_pane(Pane::Thread(carol)));
+        assert!(app.input.is_empty(), "bob's line does not follow to carol");
+        assert!(app.has_draft(Pane::Thread(bob)));
+        app.input = "for carol".to_owned();
+        assert!(app.select_pane(Pane::Thread(bob)));
+        assert_eq!((app.input.as_str(), app.cursor), ("for bob", 3));
+        assert!(app.has_draft(Pane::Thread(carol)));
+        assert!(!app.has_draft(Pane::Thread(bob)), "open, it is the input");
+
+        // Typed in System, a line goes along into a chat without one ...
+        app.submit(); // sent to bob, or queued: either way gone from the input
+        assert!(app.select_pane(Pane::System));
+        app.input = "meant for bob".to_owned();
+        assert!(app.select_pane(Pane::Thread(bob)));
+        assert_eq!(app.input, "meant for bob");
+        // ... but not over one the chat already has.
+        app.input.clear();
+        assert!(app.select_pane(Pane::System));
+        app.input = "stray".to_owned();
+        assert!(app.select_pane(Pane::Thread(carol)));
+        assert_eq!(app.input, "for carol");
+        assert!(app.has_draft(Pane::System));
     }
 
     fn engine() -> (Arc<Identity>, Groups) {
