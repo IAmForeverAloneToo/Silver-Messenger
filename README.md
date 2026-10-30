@@ -260,7 +260,7 @@ message dressed up to look like a saved file elsewhere opens nothing.
 | `/search <text>` | Find messages in this chat or group, or in all of them from System; it reads the history files, not only the screen |
 | `/receipts on\|off`             | Tell contacts when you have read their messages (default on) |
 | `/notify all\|terminal\|desktop\|bell\|off` | Bell and a desktop notification (`all` picks the path; `terminal` or `desktop` forces one), bell only, or nothing |
-| `/mute [30m\|8h\|2d\|1w\|off]` | Stop the open chat or group notifying, for good or for a while; its unread count still shows, and in a group a message naming you with `@` still notifies. `/mute off` or `/unmute` undoes it |
+| `/mute [30m\|8h\|2d\|1w\|off]` | Stop the open chat or group notifying, for good or a while (an `@` mention still does); `/mute off` or `/unmute` undoes it |
 | `/marks ascii\|unicode\|auto`   | Draw the marks in ASCII if your terminal shows boxes for them |
 | `/theme dark\|light\|mono\|contrast` | Colours for a dark or a light background, none at all, or bright bold text on black for high contrast |
 | `/go <name>`                    | Open the chat whose name (or id) starts with `name`; `system` and `requests` name those |
