@@ -8,6 +8,7 @@
 # committed and needs nothing published anywhere else:
 #
 #   brew tap iamforeveralonetoo/silver https://github.com/IAmForeverAloneToo/Silver-Messenger
+#   brew trust iamforeveralonetoo/silver
 #   brew install silver-messenger
 #
 #   packaging/update.sh <version>                   # v0.10.0 or 0.10.0; SHA256SUMS is fetched
@@ -78,6 +79,7 @@ cat > "$repo/HomebrewFormula/silver-messenger.rb" <<EOF
 
 # The Homebrew tap of Silver Messenger lives in its repository:
 #   brew tap iamforeveralonetoo/silver $url
+#   brew trust iamforeveralonetoo/silver
 #   brew install silver-messenger
 # It installs the release archives by checksum. packaging/update.sh writes
 # this file for a release; edit it there.

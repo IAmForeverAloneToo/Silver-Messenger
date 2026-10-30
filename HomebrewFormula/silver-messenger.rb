@@ -2,6 +2,7 @@
 
 # The Homebrew tap of Silver Messenger lives in its repository:
 #   brew tap iamforeveralonetoo/silver https://github.com/IAmForeverAloneToo/Silver-Messenger
+#   brew trust iamforeveralonetoo/silver
 #   brew install silver-messenger
 # It installs the release archives by checksum. packaging/update.sh writes
 # this file for a release; edit it there.

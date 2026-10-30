@@ -199,6 +199,9 @@ jobs:
       - name: Tap, audit, install and test
         run: |
           brew tap iamforeveralonetoo/silver "$PWD"
+          # Homebrew loads a third-party tap's formulas only once it is
+          # trusted, as a person installing it is now asked to.
+          brew trust iamforeveralonetoo/silver
           brew audit --strict iamforeveralonetoo/silver/silver-messenger
           brew style iamforeveralonetoo/silver/silver-messenger
           brew install --formula iamforeveralonetoo/silver/silver-messenger

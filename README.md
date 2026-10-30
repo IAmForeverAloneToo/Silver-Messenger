@@ -87,6 +87,7 @@ checksum, so what arrives is what the release page carries.
 
 ```sh
 brew tap iamforeveralonetoo/silver https://github.com/IAmForeverAloneToo/Silver-Messenger
+brew trust iamforeveralonetoo/silver                     # Homebrew asks this of a tap once
 brew install silver-messenger                          # macOS and Linux (Homebrew)
 sudo apt install ./silver-messenger_<version>_amd64.deb   # Debian and Ubuntu, amd64 or arm64
 ```
