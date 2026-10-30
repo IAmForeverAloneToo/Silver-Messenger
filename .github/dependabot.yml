@@ -1,0 +1,27 @@
+# Dependency updates as pull requests, once a week and grouped, so that
+# a week's worth arrives as one PR per ecosystem rather than one each.
+# Security updates (when they are turned on in the repository's settings)
+# come as soon as an advisory is published, outside this schedule.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directories:
+      - "/"
+      - "/fuzz"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      cargo:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directories:
+      - "/"
+      - "/.github/actions/*"
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
