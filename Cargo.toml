@@ -51,7 +51,7 @@ hyper-util = { version = "0.1", features = ["tokio", "server-auto", "service"] }
 # dependencies of its own, and small enough to read in one sitting --
 # which is the point, for the one crate that decides whether a downloaded
 # binary is allowed to replace the running one.
-minisign-verify = "0.2"
+minisign-verify = "0.3"
 
 # serialization
 serde = { version = "1", features = ["derive"] }
