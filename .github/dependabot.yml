@@ -11,6 +11,30 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    # The next generation of the cryptography crates (dalek 3, the
+    # RustCrypto hybrid-array releases, rand 0.10) only works when moved
+    # together, as one planned change that keeps 0.20's keys, messages and
+    # vaults readable; one at a time they do not build. num-bigint stays at
+    # 0.4 while the certificate parser keeps it in the tree anyway.
+    ignore:
+      - dependency-name: ed25519-dalek
+        versions: [">=3"]
+      - dependency-name: x25519-dalek
+        versions: [">=3"]
+      - dependency-name: chacha20poly1305
+        versions: [">=0.11"]
+      - dependency-name: sha2
+        versions: [">=0.11"]
+      - dependency-name: hkdf
+        versions: [">=0.13"]
+      - dependency-name: hmac
+        versions: [">=0.13"]
+      - dependency-name: rand
+        versions: [">=0.9"]
+      - dependency-name: base64
+        versions: [">=0.23"]
+      - dependency-name: num-bigint
+        versions: [">=0.5"]
     groups:
       cargo:
         patterns: ["*"]
