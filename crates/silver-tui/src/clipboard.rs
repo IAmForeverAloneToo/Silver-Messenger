@@ -10,8 +10,19 @@
 //! machine they run on.
 
 use std::io::{Write, stdout};
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::thread;
+use std::time::Duration;
 
 use base64::Engine;
+
+/// How long the system clipboard has to answer when the client starts.
+/// Connecting is quick or never: under WSL a display that is set but has
+/// nothing behind it, or a Wayland compositor without the data-control
+/// protocol, used to hold the client at start for good.
+const OPEN_WAIT: Duration = Duration::from_secs(2);
+/// How long a read or a write has to come back once connected.
+const CALL_WAIT: Duration = Duration::from_secs(1);
 
 /// Where a copied text ended up.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -23,15 +34,76 @@ pub enum Copied {
 }
 
 pub struct Clipboard {
-    system: Option<arboard::Clipboard>,
+    system: Option<Worker>,
+}
+
+enum Request {
+    Get,
+    Set(String),
+}
+
+enum Answer {
+    Text(Option<String>),
+    Set(bool),
+}
+
+/// The system clipboard, on a thread of its own: every call waits a
+/// bounded time for it, and one that does not come back in time leaves
+/// the clipboard aside for the rest of the run (copying then goes to the
+/// terminal), rather than the whole client waiting with it.
+struct Worker {
+    requests: Sender<Request>,
+    answers: Receiver<Answer>,
+}
+
+impl Worker {
+    fn open() -> Option<Self> {
+        let (ready_tx, ready_rx) = channel();
+        let (requests, request_rx) = channel::<Request>();
+        let (answer_tx, answers) = channel();
+        thread::Builder::new()
+            .name("clipboard".into())
+            .spawn(move || {
+                let mut system = match arboard::Clipboard::new() {
+                    Ok(system) => system,
+                    Err(_) => {
+                        let _ = ready_tx.send(false);
+                        return;
+                    }
+                };
+                let _ = ready_tx.send(true);
+                for request in request_rx {
+                    let answer = match request {
+                        Request::Get => Answer::Text(system.get_text().ok()),
+                        Request::Set(text) => Answer::Set(system.set_text(text).is_ok()),
+                    };
+                    if answer_tx.send(answer).is_err() {
+                        return;
+                    }
+                }
+            })
+            .ok()?;
+        // A thread still stuck connecting is left to it: it holds nothing.
+        matches!(ready_rx.recv_timeout(OPEN_WAIT), Ok(true)).then_some(Self { requests, answers })
+    }
+
+    fn call(&self, request: Request) -> Option<Answer> {
+        self.requests.send(request).ok()?;
+        self.answers.recv_timeout(CALL_WAIT).ok()
+    }
 }
 
 impl Clipboard {
-    /// Connect to the system clipboard if there is one; otherwise copying
-    /// falls back to the terminal and pasting to what the terminal sends.
+    /// Connect to the system clipboard if there is one and it answers;
+    /// otherwise copying falls back to the terminal and pasting to what
+    /// the terminal sends.
     pub fn new() -> Self {
+        // Tests leave the clipboard of whoever runs them alone.
+        if cfg!(test) {
+            return Self { system: None };
+        }
         Self {
-            system: arboard::Clipboard::new().ok(),
+            system: Worker::open(),
         }
     }
 
@@ -42,11 +114,13 @@ impl Clipboard {
 
     /// The clipboard's text, if it has any.
     pub fn get(&mut self) -> Option<String> {
-        self.system
-            .as_mut()?
-            .get_text()
-            .ok()
-            .filter(|text| !text.is_empty())
+        match self.system.as_ref()?.call(Request::Get) {
+            Some(Answer::Text(text)) => text.filter(|text| !text.is_empty()),
+            _ => {
+                self.system = None; // it did not answer: not asked again
+                None
+            }
+        }
     }
 
     /// Put `text` on the clipboard.
@@ -60,10 +134,12 @@ impl Clipboard {
     /// breaks are kept; nothing else that moves a cursor is.
     pub fn set(&mut self, text: &str) -> Copied {
         let text = &silver_client::files::safe_text(text);
-        if let Some(system) = &mut self.system
-            && system.set_text(text.to_owned()).is_ok()
-        {
-            return Copied::System;
+        if let Some(system) = &self.system {
+            match system.call(Request::Set(text.to_owned())) {
+                Some(Answer::Set(true)) => return Copied::System,
+                Some(_) => {}
+                None => self.system = None,
+            }
         }
         let encoded = base64::engine::general_purpose::STANDARD.encode(text);
         let mut out = stdout();
