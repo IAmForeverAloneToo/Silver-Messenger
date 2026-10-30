@@ -118,6 +118,7 @@ clients.
 
 | Version | What the relay's upgrade changes |
 | --- | --- |
+| [0.20.0](#0200) | Upgrade: TLS and runtime advisories fixed; the Debian package's unit moves to `/usr/lib/systemd/system` |
 | [0.19.0](#0190) | A dependency only (rustls); the schema stays at 3 and the backup format at 2 |
 | [0.18.1](#0181) | Nothing; on the client, two directories that would not open, open as they are |
 | [0.18.0](#0180) | Nothing; `/rekey` on the client republishes a bundle under the same identity |
@@ -127,6 +128,25 @@ clients.
 | [0.9.0](#090) | The schema moves to 3 and the backup format to 2; rolling back to 0.8.0 needs a restore |
 | [0.8.0](#080) | The schema moves to 2, the key transparency log; rolling back to 0.7.0 needs a restore |
 | [0.7.0](#070) | TLS in the relay, the admin socket, the schema version (1), metrics and JSON logs, arm64 and a container image |
+
+### 0.20.0
+
+* **Relay: upgrade.** rustls, rustls-webpki, the bundled root
+  certificates and tokio move for the advisories the changelog lists,
+  among them roots that trusted the distrusted emSign intermediates; a
+  relay that terminates TLS itself, or fetches its certificate over
+  ACME, carries all of them. The schema stays at 3 and the backup
+  format at 2, and nothing on the wire changes.
+* **Debian package.** The relay's unit moves from `/lib/systemd/system`
+  to `/usr/lib/systemd/system`, and the upgrade moves it; on a merged
+  `/usr`, which Debian 12 and Ubuntu 22.04 and later always have, the
+  two paths are one and nothing else changes. On
+  an older system an enabled relay is linked to the old path: run
+  `systemctl reenable silver-relay` after the upgrade, before the next
+  boot.
+* **Clients.** Nothing to do. The operating system's key store is
+  reached a new way on Linux, but every entry is where earlier clients
+  filed it, so directories protected that way open as before.
 
 ### 0.19.0
 

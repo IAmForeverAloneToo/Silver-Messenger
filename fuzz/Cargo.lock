@@ -2629,7 +2629,7 @@ dependencies = [
 
 [[package]]
 name = "silver-client"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "aes",
  "anyhow",
@@ -2686,7 +2686,7 @@ dependencies = [
 
 [[package]]
 name = "silver-protocol"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "base64",
  "bs58",

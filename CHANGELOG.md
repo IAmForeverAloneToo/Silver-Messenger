@@ -12,6 +12,7 @@ The releases, newest first; each version links to its entry.
 
 | Version | Date | What it was |
 | --- | --- | --- |
+| [0.20.0](#0200---2026-10-30) | 2026-10-30 | TLS and runtime advisories fixed; the key store on Linux speaks to the Secret Service itself, over zbus 6 |
 | [0.19.0](#0190---2026-09-29) | 2026-09-29 | The last two files in the data directory under rollback protection (roadmap item 66); rustls updated |
 | [0.18.1](#0181---2026-09-11) | 2026-09-11 | Two data-directory fixes at the seams where a client older than 0.16.0 meets a newer one |
 | [0.18.0](#0180---2026-09-11) | 2026-09-11 | `/rekey`: the encryption key replaced under the same identity; v4 stays deniable |
@@ -37,6 +38,71 @@ The releases, newest first; each version links to its entry.
 | [0.3.0](#030---2026-09-04) | 2026-09-04 | Phase 3: forward secrecy |
 | [0.2.0](#020---2026-09-04) | 2026-09-04 | Phase 2: the trust model completed |
 | [0.1.0](#010---2026-09-04) | 2026-09-04 | First tagged release |
+
+## 0.20.0 - 2026-10-30
+
+Security updates to the TLS stack and the async runtime in both
+programs, published as advisories since 0.19.0, and the key store on
+Linux moved off three unmaintained crates: the client now speaks to the
+Secret Service itself, over `zbus` 6. Nothing on the wire changes, and
+the data directory is as it was.
+
+**Upgrading.** Nothing to do for a client. Every platform's key store
+entry is found where earlier clients filed it, so a data directory
+protected by the operating system's key store opens as before, and one
+this version protected still opens in 0.19.0. The relay's changes are
+the dependency updates below; its schema stays at 3 and its backup
+format at 2. The Debian package now installs the relay's unit in
+`/usr/lib/systemd/system`; on a system without a merged `/usr` (Debian
+11, Ubuntu 20.04 and older), an enabled relay is linked to the old
+path, so run `systemctl reenable silver-relay` after upgrading. For a
+program built on `silver-client`: the crate, and `silver-tui`, now need
+Rust 1.89, which `zbus` 6 requires; `silver-protocol` and the relay
+stay at 1.85, and the key store's functions are unchanged.
+
+### Security
+
+- rustls 0.23.46, for RUSTSEC-2026-0346 to -0349: `Debug` output of
+  client session values that showed TLS secrets, application data sent
+  to the outer server after an ECH rejection, Brotli certificate
+  decompression that could allocate up to 1 GiB before authentication,
+  and an unauthenticated ServerHello that could downgrade later
+  connections to classical key exchange. The build enables neither ECH
+  nor certificate compression, so the second and third cannot be
+  reached; the other two are taken as written.
+- rustls-webpki 0.103.16 (RUSTSEC-2026-0382), and webpki-roots and
+  webpki-root-certs 1.0.11 (RUSTSEC-2026-0381 and -0383): certificate
+  verification could accept the distrusted emSign intermediates. The
+  client checks the relay's certificate against these roots.
+- ctutils 0.4.7 (RUSTSEC-2026-0385), under the RustCrypto hashes and
+  MACs: mask generation and `u128` comparisons that were not constant
+  time.
+- tokio 1.54.1 (RUSTSEC-2026-0386), an unsoundness in the runtime both
+  programs run on.
+- One advisory has no fix this tree can take: crypto-bigint 0.5.5
+  (RUSTSEC-2026-0387), timing in arithmetic meant to be constant time,
+  fixed only in 0.7.6, which elliptic-curve 0.13 cannot use. It is
+  linked only with the P-256, P-384 and K-256 code of OpenMLS's and
+  hpke-rs's RustCrypto backends, and groups run on the one
+  X-Wing/Ed25519 ciphersuite, refusing any other before use, so no
+  secret of this program goes through it.
+  [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) ("Supply chain") says
+  so, and the advisory checks pass over it by number until both
+  backends move.
+
+### Changed
+
+- The key store on Linux talks to the Secret Service (GNOME Keyring,
+  KWallet) directly over `zbus` 6, in place of the `keyring` 3 crate,
+  whose backend brought in `zbus` 4 and with it `zbus_names`,
+  `zvariant` and `zvariant_derive`, unmaintained since
+  (RUSTSEC-2026-0370 to -0372). It opens the service's encrypted
+  session, unlocks through the service's own prompt, and files each
+  entry exactly where `keyring` 3 did. Windows and macOS keep their
+  native stores, through `keyring-core`, at the same places as before.
+  Desktop notifications on Linux move to `zbus` 6 with it.
+- The Debian package installs the relay's unit in
+  `/usr/lib/systemd/system` rather than `/lib/systemd/system`.
 
 ## 0.19.0 - 2026-09-29
 
