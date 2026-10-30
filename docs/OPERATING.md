@@ -103,19 +103,6 @@ to put the binary there:
    a public port with no TLS is not something to get by accident;
    `SILVER_ALLOW_PLAINTEXT=1` opens it to `0.0.0.0:7777` for a TLS front
    of your own.
-
-   The same script runs from GitHub Actions, and works for a private
-   repository: add the secrets `VPS_HOST` and `VPS_SSH_KEY` (a private
-   key whose public half is in the server's `authorized_keys`;
-   `VPS_USER` optionally, default `root`), put the server's own SSH host
-   key in the repository *variable* `VPS_HOST_KEY` (what `ssh-keyscan
-   <host>` prints, read once from somewhere you trust: the workflow will
-   not fetch it itself, since that would trust whoever answers), set
-   the variable `VPS_DOMAIN` for the built-in TLS, and run the **Deploy
-   relay** workflow. It builds a static binary on the runner and
-   installs it over SSH, so the server needs neither Rust nor access to
-   the repository; the same workflow can show status and logs or
-   restart the relay.
 4. **The container image.** Each release publishes
    `ghcr.io/iamforeveralonetoo/silver-relay` for amd64 and arm64: the
    release's own static binary and a CA bundle on an empty base,

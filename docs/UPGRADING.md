@@ -30,9 +30,8 @@ by its owner only) and encrypt it before it leaves the host, with `age`,
 
 ## Upgrading
 
-**With the installer** (a systemd service from `deploy/install.sh` or the
-"Deploy relay" workflow): run the installer again, or the workflow with
-`deploy`. It puts the new binary in place, installs the unit file that
+**With the installer** (a systemd service from `deploy/install.sh`): run
+the installer again. It puts the new binary in place, installs the unit file that
 came with it, keeps `/etc/silver-relay/relay.env` and adds any setting a
 new version needs there, restarts the service and checks that it answers.
 Then:

@@ -4,9 +4,8 @@
 #
 # Two ways to use it:
 #
-#   * Prebuilt (what the "Deploy relay" GitHub workflow does): put a
-#     `silver-relay` binary and `silver-relay.service` next to this script and
-#     run it. The server needs no compiler and no access to the repository.
+#   * Prebuilt: put a `silver-relay` binary (a release's static one) and
+#     `silver-relay.service` next to this script and run it. The server needs no compiler and no access to the repository.
 #
 #   * From source: with nothing next to it, the script installs Rust, clones
 #     the repository and builds the relay. The repository must be reachable
@@ -53,7 +52,7 @@
 # A private repository: SILVER_REPO=https://<token>@github.com/<owner>/<repo>.git
 # works, but git writes that URL into $SILVER_SRC_DIR/.git/config, so the
 # token sits in a file on the server for as long as the checkout does. A
-# deploy key or the "Deploy relay" workflow leaves nothing behind.
+# deploy key, or the prebuilt way above, leaves nothing behind.
 set -euo pipefail
 
 REPO_URL="${SILVER_REPO:-https://github.com/IAmForeverAloneToo/Silver-Messenger.git}"
@@ -172,7 +171,7 @@ else
     else
         log "Cloning $REPO_URL ($BRANCH) into $SRC_DIR"
         git clone -q --branch "$BRANCH" "$REPO_URL" "$SRC_DIR" ||
-            die "clone failed. Is the repository public? For a private one either run the Deploy relay workflow, or set SILVER_REPO=https://<token>@github.com/<owner>/<repo>.git"
+            die "clone failed. Is the repository public? For a private one either put a prebuilt silver-relay next to this script, or set SILVER_REPO=https://<token>@github.com/<owner>/<repo>.git"
     fi
     log "Deploying commit $(git -C "$SRC_DIR" rev-parse --short HEAD)"
 
