@@ -64,7 +64,7 @@ needs no second set of permissions.
 built in the release workflow from the Linux binaries with `dpkg-deb`,
 attached to the release beside them, in `SHA256SUMS` and attested like
 everything else. It installs `/usr/bin/silver`, `/usr/bin/silver-relay`,
-the relay's unit in `/lib/systemd/system/` with its path rewritten
+the relay's unit in `/usr/lib/systemd/system/` with its path rewritten
 (installed, not enabled), the documents and the copyright file; its
 `postinst` creates the relay's system user and runs `systemctl
 daemon-reload` where systemd is present; `prerm` stops and disables the

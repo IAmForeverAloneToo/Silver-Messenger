@@ -41,13 +41,13 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 root="$work/silver-messenger"
 doc="$root/usr/share/doc/silver-messenger"
-mkdir -p "$root/DEBIAN" "$root/usr/bin" "$root/lib/systemd/system" "$doc"
+mkdir -p "$root/DEBIAN" "$root/usr/bin" "$root/usr/lib/systemd/system" "$doc"
 
 install -m 0755 "$bindir/silver" "$root/usr/bin/silver"
 install -m 0755 "$bindir/silver-relay" "$root/usr/bin/silver-relay"
 sed 's|/usr/local/bin/silver-relay|/usr/bin/silver-relay|' \
-  "$repo/deploy/silver-relay.service" > "$root/lib/systemd/system/silver-relay.service"
-chmod 0644 "$root/lib/systemd/system/silver-relay.service"
+  "$repo/deploy/silver-relay.service" > "$root/usr/lib/systemd/system/silver-relay.service"
+chmod 0644 "$root/usr/lib/systemd/system/silver-relay.service"
 for name in README.md CHANGELOG.md; do
   src="$bindir/$name"
   [ -f "$src" ] || src="$repo/$name"

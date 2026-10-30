@@ -175,7 +175,7 @@ jobs:
             apt-get install -y -qq /pkg/*.deb >/dev/null
             silver --version
             silver-relay --version
-            test -f /lib/systemd/system/silver-relay.service
+            test -f /usr/lib/systemd/system/silver-relay.service
             getent passwd silver
             apt-get remove -y -qq silver-messenger >/dev/null
             test ! -e /usr/bin/silver'
