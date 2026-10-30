@@ -186,7 +186,10 @@ title is not a click target; `/group info` has what a group is.
 Nothing new is sent. Reading held messages sends no receipt; declining
 sends nothing; blocking sends nothing; to the sender the three are
 indistinguishable from silence, which `docs/THREAT_MODEL.md` ("Stranger
-who knows your id") already promises and a test now pins.
+who knows your id") already promises and a test now pins. Accepting
+makes the sender a contact, and from then on they are told what a
+contact is told: with read receipts on, the held messages are reported
+read when the chat opens on accepting.
 
 A stranger can ring the terminal once, with their first message. After a
 decline they cannot ring it again until they are accepted; after a block

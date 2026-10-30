@@ -59,7 +59,10 @@ def main():
     b.key(SHIFT_TAB)
     assert b.wait(" request 2 · "), "entry 2 opens"
     b.type("hello alice\r")
-    assert b.wait(f" {pair.a_id[:8]}… · {pair.a_id[:20]}"), "answering accepts and opens the chat"
+    assert b.wait_for(
+        lambda: "request" not in b.sc.display[0] and f" {pair.a_id[:8]}" in b.sc.display[0],
+        what="answering accepts and opens the chat",
+    )
     assert a.wait("hello alice"), "and the reply is delivered"
     assert b.has("second"), "the held message is in the chat"
     assert not b.has("first"), "the declined message was dropped with the decline"

@@ -35,6 +35,8 @@ use crate::theme::{Theme, ThemeName};
 use crate::{qr, ui};
 
 const TOAST_TTL: Duration = Duration::from_secs(6);
+/// How long a toast stands before typing may clear it.
+const TOAST_READ: Duration = Duration::from_millis(1500);
 /// A second Ctrl-C within this long quits.
 const QUIT_CONFIRM: Duration = Duration::from_secs(3);
 const SCROLL_STEP: usize = 5;
@@ -642,6 +644,11 @@ pub struct App {
     pub system: Vec<SystemLine>,
     /// 0 is the system pane; `i >= 1` selects `contacts[i - 1]`.
     pub selected: usize,
+    /// The chat a command left for the System pane to show its answer:
+    /// Esc goes back to it, and a command about the person in it
+    /// (`/verify` after `/whois`) runs there rather than failing for want
+    /// of an open chat. Forgotten whenever the user picks a pane.
+    came_from: Option<Pane>,
     pub input: String,
     /// Cursor position in `input`, in chars.
     pub cursor: usize,
@@ -886,6 +893,7 @@ impl App {
             notifier,
             system: Vec::new(),
             selected: 0,
+            came_from: None,
             input: String::new(),
             cursor: 0,
             history: Vec::new(),
@@ -1387,7 +1395,20 @@ impl App {
                 if self.input.is_empty() {
                     self.line_started = Instant::now();
                 }
-                self.handle_key(key)
+                let before = self.input.len();
+                let typed_at = self.cursor;
+                self.handle_key(key);
+                // Typing on means the last message was read: it gives way
+                // to the hint for what is being typed now. Not at once,
+                // so a key pressed as it appears does not hide it unread.
+                if (self.input.len(), self.cursor) != (before, typed_at)
+                    && self
+                        .toast
+                        .as_ref()
+                        .is_some_and(|(_, at)| at.elapsed() > TOAST_READ)
+                {
+                    self.toast = None;
+                }
             }
             Event::Paste(text) => self.insert_str(&text.replace("\r\n", "\n").replace('\r', "\n")),
             Event::Mouse(mouse) => match mouse.kind {
@@ -1869,6 +1890,13 @@ impl App {
             KeyCode::Esc if self.selection.is_some() || self.reader_cursor.is_some() => {
                 self.clear_selection()
             }
+            // Back to the chat a command left, with anything typed in
+            // the meantime still there to send.
+            KeyCode::Esc if self.came_from.is_some() => {
+                if let Some(pane) = self.came_from {
+                    self.select_pane(pane);
+                }
+            }
             KeyCode::Esc => self.clear_input(),
             KeyCode::Enter => self.submit(),
             KeyCode::Char(c) if !ctrl && !alt => {
@@ -2033,7 +2061,7 @@ impl App {
             // and a wholly non-Latin name is somebody's actual name.
             if silver_client::files::mixes_scripts(&self.contact_name(&id)) {
                 lines.push(
-                    "name: mixes alphabets whose letters look alike (Latin with Cyrillic or                      Greek), so it can be made to read as someone else's — compare safety                      numbers with /verify before trusting it"
+                    "name: mixes alphabets whose letters look alike (Latin with Cyrillic or Greek), so it can be made to read as someone else's — compare safety numbers with /verify before trusting it"
                         .to_owned(),
                 );
             }
@@ -2297,6 +2325,7 @@ impl App {
 
     fn select(&mut self, index: usize) {
         self.selected = index.min(self.pane_count() - 1);
+        self.came_from = None;
         self.scroll = 0;
         self.selection = None;
         self.reader_cursor = None;
@@ -2361,7 +2390,30 @@ impl App {
         self.remember(&line);
         match line.strip_prefix('/') {
             Some(command) => self.run_command(command),
+            // Nothing in System to send it to: keep it rather than lose
+            // it, so it can go once a chat is open.
+            None if self.selected_pane() == Pane::System => {
+                self.input = line;
+                self.cursor = self.input.chars().count();
+                self.toast(match self.came_from {
+                    Some(_) => format!(
+                        "Messages go to a chat, not System; Esc returns to {}.",
+                        self.came_from_name()
+                    ),
+                    None => "Messages go to a chat, not System: open one first, or /add <user-id>."
+                        .to_owned(),
+                });
+            }
             None => self.send_message(line),
+        }
+    }
+
+    /// The name of the chat `came_from` holds, for a hint.
+    fn came_from_name(&self) -> String {
+        match self.came_from {
+            Some(Pane::Thread(id) | Pane::Request(id)) => self.contact_name(&id),
+            Some(Pane::Group(group)) => self.group_name(&group),
+            _ => "the chat".to_owned(),
         }
     }
 
@@ -2434,6 +2486,37 @@ impl App {
         let mut parts = command.split_whitespace();
         let name = parts.next().unwrap_or_default();
         let rest: Vec<&str> = parts.collect();
+        // A command about the open chat's person, typed while System shows
+        // what an earlier one answered, means the chat it came from.
+        if let Some(pane) = self.came_from
+            && Self::about_open_chat(name, &rest)
+        {
+            self.select_pane(pane);
+        }
+        let before = self.selected_pane();
+        let toast_before = self.toast.as_ref().map(|(_, at)| *at);
+        self.dispatch(name, &rest);
+        if before != Pane::System && self.selected_pane() == Pane::System {
+            self.came_from = Some(before);
+            // Unless the command said something of its own.
+            if self.toast.as_ref().map(|(_, at)| *at) == toast_before {
+                self.toast(format!("Esc returns to {}.", self.came_from_name()));
+            }
+        }
+    }
+
+    /// Whether a command acts on the open chat's person when given no one
+    /// else: these follow `came_from` back to the chat.
+    fn about_open_chat(name: &str, rest: &[&str]) -> bool {
+        match name {
+            "verify" | "session" | "refresh" | "alias" | "files" => true,
+            "whois" | "who" => rest.is_empty(),
+            _ => false,
+        }
+    }
+
+    fn dispatch(&mut self, name: &str, rest: &[&str]) {
+        let rest = rest.to_vec();
         match name {
             "help" | "h" | "?" => self.print_help(),
             "me" | "id" => {
@@ -3738,57 +3821,67 @@ impl App {
                 user_id,
                 alias,
                 result,
-            } => match result {
-                Ok(bundle) => match self.contact_index(&user_id) {
-                    // An existing contact: compare with the pinned key.
-                    Some(index) => {
-                        let name = self.contacts[index].display_name();
-                        match (self.contacts[index].bundle.clone(), bundle) {
-                            (_, None) => self.system(
-                                Level::Warn,
-                                format!("The relay has no key for {name} right now."),
-                            ),
-                            (None, Some(new)) => {
-                                self.contacts[index].pin(Some(new));
-                                self.persist_contacts();
-                                self.system(Level::Info, format!("Got {name}'s key."));
+            } => {
+                // Done: "Looking up…" no longer says what is happening.
+                if self
+                    .toast
+                    .as_ref()
+                    .is_some_and(|(text, _)| text.starts_with("Looking up "))
+                {
+                    self.toast = None;
+                }
+                match result {
+                    Ok(bundle) => match self.contact_index(&user_id) {
+                        // An existing contact: compare with the pinned key.
+                        Some(index) => {
+                            let name = self.contacts[index].display_name();
+                            match (self.contacts[index].bundle.clone(), bundle) {
+                                (_, None) => self.system(
+                                    Level::Warn,
+                                    format!("The relay has no key for {name} right now."),
+                                ),
+                                (None, Some(new)) => {
+                                    self.contacts[index].pin(Some(new));
+                                    self.persist_contacts();
+                                    self.system(Level::Info, format!("Got {name}'s key."));
+                                }
+                                (Some(old), Some(new)) if old.dh_public == new.dh_public => {
+                                    // Same identity; keep the fresher prekeys.
+                                    self.contacts[index].pin(Some(new));
+                                    self.persist_contacts();
+                                    self.toast(format!("{name}'s key is unchanged."));
+                                }
+                                (Some(_), Some(new)) => self.note_key_change(index, new),
                             }
-                            (Some(old), Some(new)) if old.dh_public == new.dh_public => {
-                                // Same identity; keep the fresher prekeys.
-                                self.contacts[index].pin(Some(new));
-                                self.persist_contacts();
-                                self.toast(format!("{name}'s key is unchanged."));
-                            }
-                            (Some(_), Some(new)) => self.note_key_change(index, new),
                         }
-                    }
-                    None => {
-                        let found = bundle.is_some();
-                        let mut contact = Contact::new(user_id);
-                        contact.alias = alias.clone();
-                        contact.bundle = bundle.clone();
-                        let name = contact.display_name();
-                        self.contacts.push(contact);
-                        self.threads.entry(user_id).or_default();
-                        self.persist_contacts();
-                        self.sync_contact(silver_protocol::device::ContactAction::Add {
-                            user: user_id,
-                            alias,
-                            bundle: bundle.map(Box::new),
-                        });
-                        self.select(self.contacts.len());
-                        if found {
-                            self.system(Level::Info, format!("Added {name} ({user_id})"));
-                        } else {
-                            self.system(
+                        None => {
+                            let found = bundle.is_some();
+                            let mut contact = Contact::new(user_id);
+                            contact.alias = alias.clone();
+                            contact.bundle = bundle.clone();
+                            let name = contact.display_name();
+                            self.contacts.push(contact);
+                            self.threads.entry(user_id).or_default();
+                            self.persist_contacts();
+                            self.sync_contact(silver_protocol::device::ContactAction::Add {
+                                user: user_id,
+                                alias,
+                                bundle: bundle.map(Box::new),
+                            });
+                            self.select(self.contacts.len());
+                            if found {
+                                self.system(Level::Info, format!("Added {name} ({user_id})"));
+                            } else {
+                                self.system(
                                 Level::Warn,
                                 format!("Added {name}, but the relay has no key for them yet; they need to connect once before you can message them."),
                             );
+                            }
                         }
-                    }
-                },
-                Err(e) => self.toast(format!("Lookup failed: {e}")),
-            },
+                    },
+                    Err(e) => self.toast(format!("Lookup failed: {e}")),
+                }
+            }
             Internal::SendDone {
                 peer,
                 content,
@@ -5326,7 +5419,14 @@ impl App {
                 }
             },
             None => {
-                let here = self.waiting_here();
+                // With one entry waiting there is nothing to choose
+                // between: /accept takes it. Turning one down still needs
+                // it open or named.
+                let only = match self.waiting().as_slice() {
+                    [(_, pane)] if verb == "accept" => Some(*pane),
+                    _ => None,
+                };
+                let here = self.waiting_here().or(only);
                 if here.is_none() {
                     self.toast(format!(
                         "Open a request or an invitation first, or /{verb} <number or id>; /requests lists what waits."
@@ -5355,7 +5455,17 @@ impl App {
     /// Accept the request at `index`: its sender becomes a contact, their
     /// messages move into the chat, and the chat opens. Whose.
     fn accept_request(&mut self, index: usize) -> UserId {
+        // Unread until the chat opens below, which reads them: a contact
+        // now, they hear it as they would for anything read in their chat
+        // (with read receipts on), and this identity's other devices
+        // learn they were read here.
+        let held: Vec<_> = self.requests[index]
+            .messages
+            .iter()
+            .map(|m| m.id.clone())
+            .collect();
         let (from, count) = self.take_request(index);
+        self.unread.entry(from).or_default().extend(held);
         self.forget_declined(&from);
         self.sync_contact(silver_protocol::device::ContactAction::Add {
             user: from,
@@ -6095,6 +6205,73 @@ mod tests {
         assert_eq!(app.selected_pane(), Pane::Thread(second));
         assert!(app.contacts.iter().any(|c| c.user_id == second));
         assert!(app.waiting().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_only_request_is_accepted_bare_and_what_it_held_is_reported_read() {
+        let (mut app, _dir) = app();
+        app.read_receipts = true;
+        let from = Identity::generate().user_id();
+        app.requests.push(ContactRequest {
+            from,
+            first_seen_ms: 10,
+            messages: vec![HeldMessage {
+                id: "m1".to_owned(),
+                timestamp_ms: 10,
+                text: "hello".to_owned(),
+                sequence: Default::default(),
+                file: None,
+                caps: vec![capability::RECEIPTS.to_owned()],
+            }],
+        });
+        app.number_waiting();
+        // From System, with nothing open: the one waiting is the one meant.
+        assert_eq!(app.selected_pane(), Pane::System);
+        app.cmd_accept(&[]);
+        assert_eq!(app.selected_pane(), Pane::Thread(from));
+        assert!(app.unread.get(&from).is_none_or(|ids| ids.is_empty()));
+        assert!(!app.receipts.is_empty(), "a read receipt is queued");
+
+        // With two waiting, a bare /accept still needs one open or named.
+        let (a, b) = (
+            Identity::generate().user_id(),
+            Identity::generate().user_id(),
+        );
+        for (who, at) in [(a, 20), (b, 30)] {
+            app.requests.push(ContactRequest {
+                from: who,
+                first_seen_ms: at,
+                messages: Vec::new(),
+            });
+        }
+        app.number_waiting();
+        app.select(0);
+        app.cmd_accept(&[]);
+        assert_eq!(app.requests.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_command_answering_in_system_leaves_the_way_back_to_its_chat() {
+        let (mut app, _dir) = app();
+        let bob = Identity::generate().user_id();
+        app.contacts.push(Contact::new(bob));
+        assert!(app.select_pane(Pane::Thread(bob)));
+
+        app.run_command("whois");
+        assert_eq!(app.selected_pane(), Pane::System);
+        assert!(app.toast.as_ref().unwrap().0.starts_with("Esc returns to"));
+        // A command about the chat's person goes back to that chat ...
+        app.run_command("session");
+        assert_eq!(app.came_from, Some(Pane::Thread(bob)));
+        // ... and text typed in System is kept, not sent nowhere.
+        app.input = "hi bob".to_owned();
+        app.submit();
+        assert_eq!(app.input, "hi bob");
+        // Esc goes back, with it, ready to send there.
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert_eq!(app.selected_pane(), Pane::Thread(bob));
+        assert_eq!(app.input, "hi bob");
+        assert_eq!(app.came_from, None);
     }
 
     fn engine() -> (Arc<Identity>, Groups) {

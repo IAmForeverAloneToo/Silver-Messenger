@@ -216,7 +216,7 @@ pub const COMMANDS: &[CommandInfo] = &[
         "accept",
         &[],
         "[n|id]",
-        "accept a contact request or a group invitation: the open one, or one by number or sender (typing a reply to a request accepts it too)",
+        "accept a contact request or a group invitation: the open one (or the only one waiting), or one by number or sender (typing a reply to a request accepts it too)",
     ),
     cmd_taking(
         Arg::Person,

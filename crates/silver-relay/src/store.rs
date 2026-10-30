@@ -3187,7 +3187,7 @@ mod tests {
             );
             assert!(
                 bytes > 0,
-                "round {round}: four queued messages cannot weigh nothing --                  the sweep charged for mail an acknowledgement had already paid for"
+                "round {round}: four queued messages cannot weigh nothing -- the sweep charged for mail an acknowledgement had already paid for"
             );
         }
     }

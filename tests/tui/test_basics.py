@@ -18,13 +18,16 @@ def main():
     # says who and that they are not a contact, and a bare /accept there
     # takes it.
     b.key(SHIFT_TAB)
-    # The title is cut to the pane's width, so only the start of the id
-    # is certain to show.
-    assert b.wait(f" request 1 · not a contact · {pair.a_id[:20]}"), "the request's pane"
+    # The title has the whole id only where it fits, so only its start is
+    # certain to show.
+    assert b.wait(f" request 1 · not a contact · {pair.a_id[:8]}"), "the request's pane"
     assert b.has("? " + pair.a_id[:8]), "listed by id, marked a stranger"
     assert b.has("hello bob"), "every held message is readable there"
     b.type("/accept\r")
-    assert b.wait(f" {pair.a_id[:8]}… · {pair.a_id} · "), "the chat opens on acceptance"
+    assert b.wait_for(
+        lambda: "request" not in b.sc.display[0] and f" {pair.a_id[:8]}" in b.sc.display[0],
+        what="the chat opens on acceptance",
+    )
     assert b.has("hello bob"), "accepted message moves into the chat"
     b.type("/alias alice\r")
     b.type("hi alice\r")

@@ -201,7 +201,7 @@ pub fn swap(new: &Path, exe: &Path) -> anyhow::Result<PathBuf> {
                 // exactly what to do by hand, since a later start cannot.
                 Err(recovery) => Err(e).with_context(|| {
                     format!(
-                        "putting the new binary at {at}, and {} could not be put back either                          ({recovery:#}); the previous version is at {}, so rename that back to                          {at} by hand",
+                        "putting the new binary at {at}, and {} could not be put back either ({recovery:#}); the previous version is at {}, so rename that back to {at} by hand",
                         at,
                         backup.display()
                     )
@@ -252,7 +252,7 @@ pub fn rollback(exe: &Path) -> anyhow::Result<PathBuf> {
             Ok(()) => Err(e).with_context(|| format!("restoring {at}")),
             Err(recovery) => Err(e).with_context(|| {
                 format!(
-                    "restoring {at}, and the binary that was running could not be put back                      either ({recovery:#}); it is at {}, so rename that back to {at} by hand",
+                    "restoring {at}, and the binary that was running could not be put back either ({recovery:#}); it is at {}, so rename that back to {at} by hand",
                     aside.display()
                 )
             }),

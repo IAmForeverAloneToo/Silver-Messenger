@@ -51,14 +51,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     app.view.input = input;
     app.view.status = status;
     if app.help_open {
-        draw_help(frame, app);
+        draw_help(frame, app, main);
     }
 }
 
 /// The help overlay: every command and key, over the middle of the screen,
 /// scrolling when the terminal is too short for all of it.
-fn draw_help(frame: &mut Frame, app: &mut App) {
-    let area = frame.area();
+fn draw_help(frame: &mut Frame, app: &mut App, area: Rect) {
+    // On a clear ground: the panes' edges showing either side of the box
+    // read as stray letters. The status line below stays, with the keys
+    // the help takes.
+    frame.render_widget(Clear, area);
+    frame.render_widget(Block::new().style(app.theme.text), area);
     let width = area.width.saturating_sub(4).clamp(20, 108).min(area.width);
     let inner_width = width.saturating_sub(2) as usize;
     let heading =
@@ -271,31 +275,45 @@ fn draw_messages(frame: &mut Frame, app: &mut App, area: Rect) {
     let (title, rows) = match pane {
         Pane::Group(group) => (app.group_title(&group), group_rows(app, &group, width)),
         Pane::System => (" System ".to_owned(), system_rows(app, width)),
-        Pane::Request(from) => (request_title(app, from), request_rows(app, from, width)),
+        Pane::Request(from) => (
+            request_title(app, from, width),
+            request_rows(app, from, width),
+        ),
         Pane::Invitation(group) => (
             invitation_title(app, group),
             invitation_rows(app, group, width),
         ),
         Pane::Thread(id) => match app.contacts.iter().find(|c| c.user_id == id) {
             Some(contact) => (
-                format!(
-                    " {}{} · {}{}{}{} ",
-                    if contact.verified && !contact.revoked {
-                        format!("{} ", app.glyphs.verified)
-                    } else {
-                        String::new()
+                fit_id(
+                    width,
+                    |shown| {
+                        format!(
+                            " {}{}{shown}{}{}{} ",
+                            if contact.verified && !contact.revoked {
+                                format!("{} ", app.glyphs.verified)
+                            } else {
+                                String::new()
+                            },
+                            // Without an alias the name is the id's start,
+                            // which the id beside it already shows.
+                            if contact.alias.as_deref().is_some_and(|a| !a.is_empty()) {
+                                format!("{} · ", contact.display_name())
+                            } else {
+                                String::new()
+                            },
+                            if contact.revoked { " · revoked" } else { "" },
+                            app.encryption_label(contact)
+                                .map(|l| format!(" · {l}"))
+                                .unwrap_or_default(),
+                            if app.has_older_lines(&silver_client::Conversation::Contact(id)) {
+                                " · older lines in the file"
+                            } else {
+                                ""
+                            }
+                        )
                     },
-                    contact.display_name(),
-                    contact.user_id,
-                    if contact.revoked { " · revoked" } else { "" },
-                    app.encryption_label(contact)
-                        .map(|l| format!(" · {l}"))
-                        .unwrap_or_default(),
-                    if app.has_older_lines(&silver_client::Conversation::Contact(id)) {
-                        " · older lines in the file"
-                    } else {
-                        ""
-                    }
+                    &id,
                 ),
                 thread_rows(app, &id, width),
             ),
@@ -413,10 +431,13 @@ fn highlight_selection(frame: &mut Frame, app: &App, inner: Rect, start: usize, 
 
 fn system_rows(app: &App, width: usize) -> Vec<Row> {
     let mut rows = Vec::new();
+    let mut last_clock = None;
     for (i, line) in app.system.iter().enumerate() {
-        let style = match line.level {
-            Level::Info => Style::default(),
-            Level::Warn => app.theme.warn,
+        let (style, mark) = match line.level {
+            Level::Info => (Style::default(), "  "),
+            // Marked as well as coloured, so a warning stands out among
+            // the notices without colour too.
+            Level::Warn => (app.theme.warn, "! "),
             Level::Code => {
                 // Dark modules on a light ground whatever the theme, so a
                 // phone camera reads it.
@@ -427,10 +448,19 @@ fn system_rows(app: &App, width: usize) -> Vec<Row> {
                 continue;
             }
         };
-        let prefix = vec![Span::styled(
-            format!("{} ", clock(line.timestamp_ms)),
-            app.theme.dim,
-        )];
+        // The time once for lines written in the same minute, as a
+        // block of them usually is (the welcome, /whois, /help).
+        let now = clock(line.timestamp_ms);
+        let shown = if last_clock.as_ref() == Some(&now) {
+            " ".repeat(now.width())
+        } else {
+            now.clone()
+        };
+        last_clock = Some(now);
+        let prefix = vec![
+            Span::styled(format!("{shown} "), app.theme.dim),
+            Span::styled(mark, style),
+        ];
         rows.extend(
             wrap_message(prefix, &line.text, style, width)
                 .into_iter()
@@ -443,17 +473,38 @@ fn system_rows(app: &App, width: usize) -> Vec<Row> {
 /// The title of a request's pane: its number, that the writer is not a
 /// contact, their id, and how much waits. The label comes before the id
 /// so that a narrow pane, which cuts the title's end, never cuts it.
-fn request_title(app: &App, from: UserId) -> String {
+fn request_title(app: &App, from: UserId, width: usize) -> String {
     let n = app.number_of(Pane::Request(from)).unwrap_or(0);
     let count = app
         .requests
         .iter()
         .find(|r| r.from == from)
         .map_or(0, |r| r.messages.len());
-    format!(
-        " request {n} · not a contact · {from} · {count} message{} ",
-        if count == 1 { "" } else { "s" }
+    // Wide enough, the title has the whole id; else the start of it, and
+    // a click on the title or /whois gives the rest.
+    fit_id(
+        width,
+        |shown| {
+            format!(
+                " request {n} · not a contact · {shown} · {count} message{} ",
+                if count == 1 { "" } else { "s" }
+            )
+        },
+        &from,
     )
+}
+
+/// A title naming a person by id: with the whole id when it fits in
+/// `width`, else with its first characters, so the rest of the title (how
+/// the chat is protected, chiefly) is not what the border cuts off. A
+/// click on the title copies the whole id either way.
+fn fit_id(width: usize, title: impl Fn(&str) -> String, id: &UserId) -> String {
+    let full = title(&id.to_string());
+    if full.chars().count() <= width {
+        full
+    } else {
+        title(&format!("{}…", id.short()))
+    }
 }
 
 /// A stranger's held messages, laid out as a chat: every one, with its
@@ -870,17 +921,22 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     if pending > 0 {
         spans.push(Span::styled(format!("  {pending} queued"), app.theme.warn));
     }
-    match &app.toast {
-        Some((text, _)) => {
-            spans.push(Span::raw("  "));
-            spans.push(Span::styled(text.clone(), app.theme.toast));
-        }
-        None => {
-            spans.push(Span::styled(
-                format!("  {}", app.status_hint()),
-                app.theme.dim,
-            ));
-        }
+    let (message, style) = match &app.toast {
+        Some((text, _)) => (text.clone(), app.theme.toast),
+        None => (app.status_hint(), app.theme.dim),
+    };
+    // The message is what the line is for; the relay's address is the
+    // first thing to give way to it, and what still does not fit ends in
+    // an ellipsis rather than mid-word at the window's edge.
+    let width = area.width as usize;
+    let used = |spans: &[Span]| spans.iter().map(|s| s.content.width()).sum::<usize>();
+    if used(&spans) + 2 + message.width() > width {
+        spans.remove(1);
+    }
+    let room = width.saturating_sub(used(&spans) + 2);
+    if room > 0 {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(truncate(&message, room), style));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
