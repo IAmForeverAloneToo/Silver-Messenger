@@ -320,15 +320,15 @@ impl Desktop {
 }
 
 /// Linux: `org.freedesktop.Notifications` on the session bus, through the
-/// `zbus` the client already links for the key store. The connection is
-/// kept, and the id the service hands back is what the next notification
+/// `zbus` the client already links for the key store, driven by
+/// `zbus::block_on` on the thread [`Desktop::raise`] starts. The connection
+/// is kept, and the id the service hands back is what the next notification
 /// replaces, so the notification area never fills with identical lines.
 #[cfg(target_os = "linux")]
 mod desktop {
     use std::collections::HashMap;
 
-    use zbus::blocking::{Connection, Proxy};
-    use zbus::zvariant::Value;
+    use zbus::{Connection, Proxy, Variant};
 
     use super::{APP_TITLE, TEXT};
 
@@ -339,44 +339,50 @@ mod desktop {
     }
 
     pub fn raise(state: &mut State) -> Result<(), String> {
-        let connection = match &state.connection {
-            Some(c) => c.clone(),
-            None => {
-                let c = Connection::session().map_err(|e| format!("session bus: {e}"))?;
-                state.connection = Some(c.clone());
-                c
-            }
-        };
-        let proxy = Proxy::new(
-            &connection,
-            "org.freedesktop.Notifications",
-            "/org/freedesktop/Notifications",
-            "org.freedesktop.Notifications",
-        )
-        .map_err(|e| format!("notification service: {e}"))?;
-        let mut hints: HashMap<&str, Value> = HashMap::new();
-        hints.insert("urgency", Value::U8(1));
-        let id: u32 = proxy
-            .call(
-                "Notify",
-                &(
-                    APP_TITLE,
-                    state.replaces,
-                    "",
-                    TEXT,
-                    "",
-                    Vec::<&str>::new(),
-                    hints,
-                    -1i32,
-                ),
+        zbus::block_on(async {
+            let connection = match &state.connection {
+                Some(c) => c.clone(),
+                None => {
+                    let c = Connection::session()
+                        .await
+                        .map_err(|e| format!("session bus: {e}"))?;
+                    state.connection = Some(c.clone());
+                    c
+                }
+            };
+            let proxy = Proxy::new(
+                &connection,
+                "org.freedesktop.Notifications",
+                "/org/freedesktop/Notifications",
+                "org.freedesktop.Notifications",
             )
-            .map_err(|e| {
-                // A dead connection is dropped so the next try makes a new one.
-                state.connection = None;
-                format!("Notify: {e}")
-            })?;
-        state.replaces = id;
-        Ok(())
+            .await
+            .map_err(|e| format!("notification service: {e}"))?;
+            let mut hints: HashMap<&str, Variant> = HashMap::new();
+            hints.insert("urgency", Variant::U8(1));
+            let id: u32 = proxy
+                .call(
+                    "Notify",
+                    &(
+                        APP_TITLE,
+                        state.replaces,
+                        "",
+                        TEXT,
+                        "",
+                        Vec::<&str>::new(),
+                        hints,
+                        -1i32,
+                    ),
+                )
+                .await
+                .map_err(|e| {
+                    // A dead connection is dropped so the next try makes a new one.
+                    state.connection = None;
+                    format!("Notify: {e}")
+                })?;
+            state.replaces = id;
+            Ok(())
+        })
     }
 }
 

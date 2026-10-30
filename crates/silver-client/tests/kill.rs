@@ -55,12 +55,12 @@ fn write_until_killed(dir: &str, peer: UserId, locked: bool) -> ! {
         store.save_contacts(&contacts).expect("contacts");
         let entry = HistoryEntry::new(n.to_string(), Direction::Received, n, format!("line {n}"));
         store.append_history(&peer, &entry).expect("history");
-        if n % 3 == 0 {
+        if n.is_multiple_of(3) {
             store
                 .append_read(&conversation, &[n.to_string()], n)
                 .expect("read");
         }
-        if n % 5 == 0 {
+        if n.is_multiple_of(5) {
             store
                 .append_reaction(&conversation, &n.to_string(), None, "+1")
                 .expect("reaction");
@@ -182,14 +182,14 @@ fn kill_once(dir: &std::path::Path, peer: UserId, locked: bool, rng: &mut Rng) -
     }) {
         let n: u64 = entry.id.parse().unwrap();
         assert_eq!(entry.text, format!("line {n}"));
-        if n % 3 == 0 {
+        if n.is_multiple_of(3) {
             assert_eq!(
                 entry.read_at_ms,
                 Some(n),
                 "the read of a finished round is there"
             );
         }
-        if n % 5 == 0 {
+        if n.is_multiple_of(5) {
             assert_eq!(
                 entry.reactions.len(),
                 1,

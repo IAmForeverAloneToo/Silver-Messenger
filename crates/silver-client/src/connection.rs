@@ -966,14 +966,13 @@ impl Client {
 
     /// Drop every session with `peer`, for example after a key change.
     pub fn forget_sessions(&self, peer: &UserId) {
-        if let Some(sessions) = &self.sessions {
-            if let Err(e) = sessions
+        if let Some(sessions) = &self.sessions
+            && let Err(e) = sessions
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .forget(peer)
-            {
-                warn!("could not drop sessions with {peer}: {e:#}");
-            }
+        {
+            warn!("could not drop sessions with {peer}: {e:#}");
         }
     }
 
@@ -2931,11 +2930,11 @@ async fn handle_blob_frame(
                 download.received += 1;
             }
             report(&download.progress, download.received, expected);
-            if download.received == expected {
-                if let Some(download) = downloads.remove(&blob) {
-                    let chunks = download.chunks.into_iter().flatten().collect();
-                    let _ = download.reply.send(Ok(chunks));
-                }
+            if download.received == expected
+                && let Some(download) = downloads.remove(&blob)
+            {
+                let chunks = download.chunks.into_iter().flatten().collect();
+                let _ = download.reply.send(Ok(chunks));
             }
             true
         }

@@ -5,7 +5,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-rust-version.workspace = true
+# zbus 6, the session bus on Linux, needs 1.89; the protocol and the
+# relay stay at the workspace's version.
+rust-version = "1.89"
 
 [dependencies]
 silver-protocol = { workspace = true }
@@ -43,7 +45,23 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 directories = { workspace = true }
 unicode-normalization = { workspace = true }
-keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "async-secret-service", "async-io", "crypto-rust"] }
+
+# The OS key store (src/keystore.rs): the native one on Windows and macOS,
+# the Secret Service over the session bus everywhere else.
+[target.'cfg(windows)'.dependencies]
+keyring-core = { workspace = true }
+windows-native-keyring-store = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring-core = { workspace = true }
+apple-native-keyring-store = { workspace = true }
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+zbus = { workspace = true }
+num-bigint = { workspace = true }
+aes = { workspace = true }
+cbc = { workspace = true }
+hkdf = { workspace = true }
 
 [dev-dependencies]
 # Both already build as part of this crate's tree (argon2 pulls blake2,

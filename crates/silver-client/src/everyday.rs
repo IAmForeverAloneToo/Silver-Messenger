@@ -132,7 +132,7 @@ impl fmt::Display for Timer {
             (60 * 60, "hour"),
             (60, "minute"),
         ] {
-            if s % unit == 0 {
+            if s.is_multiple_of(unit) {
                 let n = s / unit;
                 return write!(f, "{n} {name}{}", if n == 1 { "" } else { "s" });
             }

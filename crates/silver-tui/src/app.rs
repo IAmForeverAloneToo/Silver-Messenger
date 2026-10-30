@@ -1038,11 +1038,10 @@ impl App {
                     self.tick_leave();
                     self.sweep_if_due();
                     self.prune_late();
-                    if let Some(after) = self.lock_after {
-                        if self.can_lock() && self.last_activity.elapsed() >= after {
+                    if let Some(after) = self.lock_after
+                        && self.can_lock() && self.last_activity.elapsed() >= after {
                             self.lock_requested = true;
                         }
-                    }
                 }
             }
             if let Some(word) = self.wiped.take() {

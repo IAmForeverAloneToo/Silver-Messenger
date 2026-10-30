@@ -670,12 +670,12 @@ impl Groups {
     fn clear_all_pending(&mut self) -> anyhow::Result<()> {
         let ids: Vec<GroupId> = self.file.groups.keys().copied().collect();
         for id in ids {
-            if let Ok(group) = load_handle(&mut self.handles, &self.provider, &id) {
-                if group.pending_commit().is_some() {
-                    group
-                        .clear_pending_commit(self.provider.storage())
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
-                }
+            if let Ok(group) = load_handle(&mut self.handles, &self.provider, &id)
+                && group.pending_commit().is_some()
+            {
+                group
+                    .clear_pending_commit(self.provider.storage())
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
             }
         }
         Ok(())
@@ -995,10 +995,10 @@ impl Groups {
     }
 
     fn delete_key_package_secret(&self, package: &KeyPackageRecord) {
-        if let Ok(kp) = parse_key_package(&package.data, self.provider.crypto()) {
-            if let Ok(hash_ref) = kp.hash_ref(self.provider.crypto()) {
-                let _ = self.provider.storage().delete_key_package(&hash_ref);
-            }
+        if let Ok(kp) = parse_key_package(&package.data, self.provider.crypto())
+            && let Ok(hash_ref) = kp.hash_ref(self.provider.crypto())
+        {
+            let _ = self.provider.storage().delete_key_package(&hash_ref);
         }
     }
 
@@ -2724,10 +2724,10 @@ fn identity_of(leaf: &LeafNode) -> Result<(UserId, UserId)> {
 /// sealing key present.
 fn verify_leaf(leaf: &LeafNode, expected: Option<&UserId>) -> Result<Leaf> {
     let (account, device) = identity_of(leaf)?;
-    if let Some(expected) = expected {
-        if account != *expected {
-            return Err(GroupError::KeyPackage("signed by another identity".into()));
-        }
+    if let Some(expected) = expected
+        && account != *expected
+    {
+        return Err(GroupError::KeyPackage("signed by another identity".into()));
     }
     let seal = leaf
         .extensions()

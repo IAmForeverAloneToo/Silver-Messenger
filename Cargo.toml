@@ -106,9 +106,26 @@ qrcode = { version = "0.14", default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
 open = "5"
-# The zbus version keyring already brings for the Secret Service, so the
-# notifications on Linux add no crate to the tree.
-zbus = "4.4"
+# The session bus on Linux: the key store's Secret Service client
+# (silver-client keystore/secret_service.rs) and the notifications. zbus 6
+# carries the D-Bus wire format itself, where zbus 4 and 5 left it to the
+# zvariant and zbus_names crates, which are no longer maintained. Client
+# calls only, on zbus's own runtime, driven by `zbus::block_on` from the
+# synchronous code that needs them.
+zbus = { version = "6.1", default-features = false, features = ["default-rt", "proxy"] }
+# The OS key store on Windows and macOS: keyring-core and its two native
+# stores, which file an entry exactly where keyring 3 did, so a data
+# directory protected by an earlier client still opens.
+keyring-core = "1"
+windows-native-keyring-store = { version = "1.1", default-features = false }
+apple-native-keyring-store = { version = "1", features = ["keychain"] }
+# The Secret Service's encrypted session (dh-ietf1024-sha256-aes128-cbc-pkcs7):
+# the 1024-bit Diffie-Hellman, AES-128 in CBC mode. All three were in the
+# tree already, through the secret-service crate keyring 3 used and the
+# relay's certificate parser.
+num-bigint = "0.4"
+aes = { version = "0.8", features = ["zeroize"] }
+cbc = { version = "0.1", features = ["alloc", "block-padding", "zeroize"] }
 tauri-winrt-notification = "0.8"
 
 [profile.release]

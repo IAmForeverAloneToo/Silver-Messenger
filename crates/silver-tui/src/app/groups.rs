@@ -1827,10 +1827,10 @@ impl App {
         }
         self.last_group_maintenance = Instant::now();
         let due = self.groups.self_updates_due(now_ms());
-        if let Some(group) = due.into_iter().find(|g| !self.groups.has_staged(g)) {
-            if let Ok(staged) = self.groups.stage_self_update(&group) {
-                self.run_staged(staged, Purpose::Refresh);
-            }
+        if let Some(group) = due.into_iter().find(|g| !self.groups.has_staged(g))
+            && let Ok(staged) = self.groups.stage_self_update(&group)
+        {
+            self.run_staged(staged, Purpose::Refresh);
         }
     }
 }

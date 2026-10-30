@@ -416,10 +416,10 @@ pub fn edit_distance(a: &str, b: &str) -> usize {
 /// `~/x` as the user's home directory plus `x`.
 pub fn expand_home(path: &str) -> PathBuf {
     let path = path.trim();
-    if let Some(rest) = path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")) {
-        if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
-            return PathBuf::from(home).join(rest);
-        }
+    if let Some(rest) = path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\"))
+        && let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+    {
+        return PathBuf::from(home).join(rest);
     }
     PathBuf::from(path)
 }

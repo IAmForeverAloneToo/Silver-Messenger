@@ -5,7 +5,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-rust-version.workspace = true
+# zbus 6, the session bus on Linux, needs 1.89; the protocol and the
+# relay stay at the workspace's version.
+rust-version = "1.89"
 
 [[bin]]
 name = "silver"

@@ -13,7 +13,21 @@ targets = [
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+# Each entry is a crate in the built graph whose advisory has no fix this
+# tree can take yet, with why it does not reach this project's secrets and
+# what removes it. Every other advisory still fails the check; ci.yml
+# passes over the same vulnerability for `cargo audit`, and
+# docs/THREAT_MODEL.md ("Supply chain") says the same.
+ignore = [
+    # crypto-bigint 0.5.5, timing in arithmetic meant to be constant-time.
+    # Fixed in 0.7.6, which elliptic-curve 0.13 cannot take; it comes in
+    # only with the P-256, P-384 and K-256 code of openmls_rust_crypto and
+    # hpke-rs-rust-crypto. Groups run on one ciphersuite, X-Wing with
+    # Ed25519, and a key package or group of any other is refused before
+    # use (silver-client groups/mod.rs), so no secret of ours goes through
+    # it. Drop once both move to an elliptic-curve on crypto-bigint 0.7.
+    { id = "RUSTSEC-2026-0387", reason = "P-curve code linked through OpenMLS, never run: one X25519/ML-KEM/Ed25519 ciphersuite" },
+]
 
 [licenses]
 version = 2
@@ -74,9 +88,6 @@ skip = [
 { name = "tungstenite" },
 { name = "webpki-roots" },
 { name = "windows-sys" },
-{ name = "windows-targets" },
-{ name = "windows_x86_64_gnu" },
-{ name = "windows_x86_64_msvc" },
 { name = "x25519-dalek" },
 ]
 

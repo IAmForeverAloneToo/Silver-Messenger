@@ -989,16 +989,37 @@ protection above. What is done about that:
   publish a release from any commit: standard GitHub behaviour, and a
   reason the account itself is the thing to protect.
 
-  What is in the tree is worth stating too. No crate with an advisory
-  against it is in either binary. `cargo audit` reports three against
+  What is in the tree is worth stating too. One crate with a
+  vulnerability against it is in the client binary, and none of this
+  project's secrets pass through it: `crypto-bigint` 0.5.5
+  (RUSTSEC-2026-0387, timing in arithmetic meant to be constant-time),
+  which comes only with the P-256, P-384 and K-256 code that
+  `openmls_rust_crypto` and `hpke-rs-rust-crypto` link. Groups run on
+  the one X-Wing and Ed25519 ciphersuite, and a key package or group
+  context of any other is refused before it is used, so that code never
+  runs; the fix, 0.7.6, waits on those crates moving to an
+  `elliptic-curve` built on it.
+
+  `cargo audit` reports three more against
   crates that are in the lock file but in no build, `libcrux-hmac-drbg`
   0.0.1 (RUSTSEC-2026-0329) and `libcrux-kem` 0.0.9 (RUSTSEC-2026-0330
   and -0331): they come only with the optional libcrux backends of
   OpenMLS and of `hpke-rs`, where this project uses the RustCrypto ones.
-  CI passes over those three by number, the reason written beside them
-  in `ci.yml`, until a release of either backend takes the fixed
-  versions; `cargo deny`, which reads the graph that is built, still
-  refuses every advisory. `cargo audit` also reports one unmaintained
+  CI passes over these four by number, the reason written beside them
+  in `ci.yml`, until upstream releases take the fixed versions;
+  `cargo deny`, which reads the graph that is built, skips the first in
+  `deny.toml` with the same reason and refuses every other advisory.
+
+  On Linux the client speaks to the Secret Service itself, over `zbus`
+  6, rather than through the `keyring` crate: every Secret Service
+  library still sat on the unmaintained `zvariant` and `zbus_names`,
+  which `zbus` 6 absorbed. That is one file of our own,
+  `keystore/secret_service.rs`, which files an entry where `keyring` 3
+  did and opens the specification's encrypted session (a 1024-bit
+  Diffie-Hellman, HKDF-SHA256, AES-128-CBC). The session hides the key
+  from something watching the bus, and from nothing running as you,
+  which can ask the service for it. Windows and macOS keep the native
+  stores through `keyring-core`. `cargo audit` also reports one unmaintained
   crate, `proc-macro-error2`, a build-time procedural-macro helper
   reached through the verified cryptography crates under OpenMLS, which
   is not in the binary.

@@ -2052,13 +2052,13 @@ impl Store {
         identity: &Identity,
         created_at_ms: u64,
     ) -> anyhow::Result<Revocation> {
-        if let Some(existing) = self.revocation()? {
-            if existing.identity == identity.user_id() {
-                return Ok(existing);
-            }
-            // The stored certificate is for a different key (a restored or
-            // rotated identity): mint a fresh one below.
+        if let Some(existing) = self.revocation()?
+            && existing.identity == identity.user_id()
+        {
+            return Ok(existing);
         }
+        // None stored, or one for a different key (a restored or rotated
+        // identity): mint a fresh one.
         let revocation = identity.revocation(created_at_ms);
         self.save_revocation(&revocation)?;
         Ok(revocation)
@@ -2169,10 +2169,10 @@ impl Store {
         // Last, so that a failure earlier leaves a directory whose key is
         // still where its vault says. A key store that cannot be reached
         // is not worth failing the wipe over: the files are already gone.
-        if let Some(name) = keystore_entry {
-            if crate::keystore::delete(&name).is_ok() {
-                self.clear_pending(&name);
-            }
+        if let Some(name) = keystore_entry
+            && crate::keystore::delete(&name).is_ok()
+        {
+            self.clear_pending(&name);
         }
         Ok(())
     }
@@ -4067,7 +4067,7 @@ mod tests {
     fn entry(i: u64) -> HistoryEntry {
         HistoryEntry::new(
             i.to_string(),
-            if i % 2 == 0 {
+            if i.is_multiple_of(2) {
                 Direction::Sent
             } else {
                 Direction::Received

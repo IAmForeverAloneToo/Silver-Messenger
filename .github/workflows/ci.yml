@@ -82,6 +82,15 @@ jobs:
         --ignore RUSTSEC-2026-0329
         --ignore RUSTSEC-2026-0330
         --ignore RUSTSEC-2026-0331
+      # One more that is built but never run: crypto-bigint 0.5.5
+      # (RUSTSEC-2026-0387), fixed only in 0.7.6, which elliptic-curve
+      # 0.13 cannot take. It comes only with the P-256, P-384 and K-256
+      # code of openmls_rust_crypto and hpke-rs-rust-crypto, and groups
+      # run on the one X-Wing/Ed25519 ciphersuite, refusing any other
+      # before use. deny.toml skips it for cargo deny with the same
+      # reason; drop both once those crates move to crypto-bigint 0.7.
+      NOT_RUN: >-
+        --ignore RUSTSEC-2026-0387
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
@@ -96,11 +105,11 @@ jobs:
       - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
         with:
           tool: cargo-audit@0.22.2
-      - run: cargo audit --file Cargo.lock $NOT_BUILT
+      - run: cargo audit --file Cargo.lock $NOT_BUILT $NOT_RUN
       # The fuzz targets have their own lockfile and their own tree; it is
       # not in a release, but a vulnerability there is still worth knowing
       # about (SM-S-07).
-      - run: cargo audit --file fuzz/Cargo.lock $NOT_BUILT
+      - run: cargo audit --file fuzz/Cargo.lock $NOT_BUILT $NOT_RUN
 
   test:
     name: test (${{ matrix.os }})
