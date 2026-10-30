@@ -70,10 +70,14 @@ pub fn probe() -> anyhow::Result<()> {
     zbus::block_on(async {
         let session = Session::open().await?;
         session.find("probe").await?;
-        // A service that answers but has no default collection cannot
-        // keep a new key (`set` files one there): no use for protecting a
-        // directory. Under WSL that is the usual state.
-        session.default_collection().await.map(|_| ())
+        // A service that answers but has nowhere to keep a new key is no
+        // use for protecting a directory: see `collection_for_new`. Under
+        // WSL that is the usual state.
+        if session.default_collection().await?.is_some() || session.has_no_collections().await? {
+            Ok(())
+        } else {
+            bail!("the key store has no default collection")
+        }
     })
 }
 
@@ -104,6 +108,29 @@ pub fn get(name: &str) -> anyhow::Result<Option<Zeroizing<String>>> {
 
 /// Keep `text` under `name`, replacing what was there.
 pub fn set(name: &str, text: &str) -> anyhow::Result<()> {
+    // A prompt (making the first wallet, unlocking one) waits for a
+    // person; one nobody answers, or that never shows, is given up on
+    // rather than waited for until the program is killed.
+    let (name, text) = (name.to_owned(), Zeroizing::new(text.to_owned()));
+    let (done, outcome) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("key store".into())
+        .spawn(move || {
+            let _ = done.send(set_now(&name, &text));
+        })
+        .context("starting the key store call")?;
+    outcome.recv_timeout(PROMPT_WAIT).unwrap_or_else(|_| {
+        bail!(
+            "the key store did not answer within {} minutes",
+            PROMPT_WAIT.as_secs() / 60
+        )
+    })
+}
+
+/// How long a prompt may wait for its answer.
+const PROMPT_WAIT: std::time::Duration = std::time::Duration::from_secs(180);
+
+fn set_now(name: &str, text: &str) -> anyhow::Result<()> {
     zbus::block_on(async {
         let session = Session::open().await?;
         if let Some(item) = session.find(name).await? {
@@ -116,7 +143,7 @@ pub fn set(name: &str, text: &str) -> anyhow::Result<()> {
                 .context("writing the key store entry")?;
             return Ok(());
         }
-        let collection = session.default_collection().await?;
+        let collection = session.collection_for_new().await?;
         session.unlock(&collection).await?;
         let attributes = attributes(name);
         let label = format!("{name}@{SERVICE}:{TARGET}");
@@ -237,22 +264,63 @@ impl Session {
             .context("reaching the key store entry")
     }
 
-    /// The one item filed under `name`. More than one is refused rather
-    /// than one picked, as keyring 3 refused it.
     /// The collection new entries go in: the one the `default` alias
     /// names, which a service need not have.
-    async fn default_collection(&self) -> anyhow::Result<OwnedObjectPath> {
+    async fn default_collection(&self) -> anyhow::Result<Option<OwnedObjectPath>> {
         let collection: OwnedObjectPath = self
             .service
             .call("ReadAlias", &(TARGET,))
             .await
             .context("finding the key store's default collection")?;
-        if collection.as_str() == NONE {
-            bail!("the key store has no default collection");
-        }
-        Ok(collection)
+        Ok((collection.as_str() != NONE).then_some(collection))
     }
 
+    /// Whether the service has no collection at all: one that starts
+    /// empty, as KWallet does before its first wallet, makes the default
+    /// collection when asked to, with a dialog of its own.
+    async fn has_no_collections(&self) -> anyhow::Result<bool> {
+        let collections: Vec<OwnedObjectPath> = self
+            .service
+            .get_property("Collections")
+            .await
+            .context("listing the key store's collections")?;
+        Ok(collections.is_empty())
+    }
+
+    /// Where a new entry goes: the default collection, made first on a
+    /// service that has none at all. One that has collections but no
+    /// default (GNOME Keyring with only its in-memory `session`, as under
+    /// WSL) is refused: making one there asks for a password nobody may
+    /// be there to give.
+    async fn collection_for_new(&self) -> anyhow::Result<OwnedObjectPath> {
+        if let Some(collection) = self.default_collection().await? {
+            return Ok(collection);
+        }
+        if !self.has_no_collections().await? {
+            bail!("the key store has no default collection");
+        }
+        let properties = HashMap::from([(
+            "org.freedesktop.Secret.Collection.Label",
+            Variant::from("Default keyring"),
+        )]);
+        let (made, prompt): (OwnedObjectPath, OwnedObjectPath) = self
+            .service
+            .call("CreateCollection", &(properties, TARGET))
+            .await
+            .context("making the key store's default collection")?;
+        if made.as_str() != NONE {
+            return Ok(made);
+        }
+        let result = self
+            .prompt(&prompt)
+            .await?
+            .context("the key store made no collection")?;
+        OwnedObjectPath::try_from(result)
+            .map_err(|_| anyhow!("the key store made something other than a collection"))
+    }
+
+    /// The one item filed under `name`. More than one is refused rather
+    /// than one picked, as keyring 3 refused it.
     async fn find(&self, name: &str) -> anyhow::Result<Option<Found>> {
         let (unlocked, locked): (Vec<OwnedObjectPath>, Vec<OwnedObjectPath>) = self
             .service
