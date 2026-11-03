@@ -8,6 +8,7 @@ mod glyphs;
 mod link;
 mod logfile;
 mod notify;
+mod onboarding;
 mod qr;
 mod reader;
 mod securitykey;
@@ -477,6 +478,41 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // A new directory at a terminal: the onboarding asks everything a new
+    // installation needs before anything is written (src/onboarding.rs).
+    // A script, an explicit --link, or a flag that prints and exits gets
+    // the start it always had.
+    let scripted = secrets.passphrase.is_some()
+        || args.link
+        || args.print_id
+        || args.print_invite
+        || args.export_backup.is_some();
+    let onboarded = if onboarding::wanted(&store, scripted) {
+        let config = store.load_config()?;
+        let ctx = onboarding::Context {
+            relay: args
+                .relay
+                .clone()
+                .or_else(|| config.relay_url.clone())
+                .unwrap_or_else(|| DEFAULT_RELAY_URL.to_owned()),
+            keystore: !args.no_keystore && config.os_keystore && keystore::available(),
+            security_key: silver_key::supported(),
+            theme: theme::choose(
+                args.theme.as_deref(),
+                &config.theme,
+                std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()),
+            ),
+        };
+        match onboarding::run(&mut store, &ctx, args.reader)? {
+            Some(outcome) => Some(outcome),
+            None => {
+                println!("Nothing was set up; the next start asks again.");
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
     let (mut identity, mut created) = store.load_or_create_identity()?;
     // A previous encryption key past its grace is erased on the way in
     // (`docs/design/dh-rotation.md` section 5).
@@ -485,8 +521,11 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
     }
     // A first run may be a second computer: offer to link it rather than
     // start an identity of its own.
-    let link = args.link || (created && offer_link(&secrets)?);
-    if created {
+    let onboarded_link = onboarded.as_ref().and_then(|o| o.link.clone());
+    let link = args.link
+        || onboarded_link.is_some()
+        || (created && onboarded.is_none() && offer_link(&secrets)?);
+    if created && onboarded.is_none() {
         // The key store is offered only where the start below would use it.
         let keystore = !args.no_keystore && store.load_config()?.os_keystore;
         offer_passphrase(&mut store, &secrets, keystore)?;
@@ -538,7 +577,9 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
         || args.invite.is_some()
         || args.no_keystore
     {
-        if let Some(relay) = args.relay {
+        // What the onboarding just asked for stands; the flag was its
+        // starting point.
+        if let Some(relay) = args.relay.filter(|_| onboarded.is_none()) {
             refuse_downgrade(&config, &relay)?;
             config.relay_url = Some(relay);
         }
@@ -692,7 +733,7 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
             identity,
             relay_url,
             options,
-            args.device_name,
+            onboarded_link.flatten().or(args.device_name),
             args.account,
         )
         .await;

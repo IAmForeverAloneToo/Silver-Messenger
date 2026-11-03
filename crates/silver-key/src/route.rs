@@ -147,6 +147,13 @@ pub fn find_hidraw() -> Result<Option<crate::hidraw::Hidraw>, Error> {
     }
 }
 
+/// Whether this system has a way to a security key at all: Linux and
+/// Windows; on Windows 10 that needs the helper beside the program too,
+/// which [`platform`] checks.
+pub fn supported() -> bool {
+    cfg!(any(target_os = "linux", windows))
+}
+
 /// The way to the key on this system.
 pub fn platform(prompt: Box<dyn Prompt + Send>) -> Result<Box<dyn Authenticator>, Error> {
     #[cfg(target_os = "linux")]

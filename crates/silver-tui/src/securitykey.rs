@@ -13,9 +13,9 @@ use zeroize::Zeroizing;
 use crate::{EnvSecrets, ask, new_passphrase};
 
 /// The PIN, the touch and a missing key, asked about at the terminal.
-struct TerminalPrompt {
+pub(crate) struct TerminalPrompt {
     /// What an empty PIN or giving up on the key leads to.
-    instead: &'static str,
+    pub(crate) instead: &'static str,
 }
 
 impl Prompt for TerminalPrompt {

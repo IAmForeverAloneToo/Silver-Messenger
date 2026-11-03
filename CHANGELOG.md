@@ -46,8 +46,9 @@ Unlocking the data directory with a FIDO2 security key (roadmap item
 67, docs/design/security-key.md): a YubiKey or any key with the
 `hmac-secret` extension, its PIN and a touch at every start, with a
 recovery passphrase for when no key can, and a second key as a spare.
-Nothing on the wire changes, and nothing changes for a directory that
-does not enroll a key.
+And a first start that sets everything up in one walk-through rather
+than leaving it to flags found afterwards. Nothing on the wire changes,
+and nothing changes for a directory that does not enroll a key.
 
 **Upgrading.** A directory that enrolls a security key gets a version 2
 `vault.json`, which 0.21.0 and older refuse to read: every device that
@@ -60,6 +61,16 @@ an ordinary passphrase. On Windows 10 the security key goes through
 
 ### Added
 
+- The first start at a terminal is an onboarding, full screen or one
+  question per line in reader mode: colours and marks, a new identity or
+  this computer linked to one you have, the relay with a proxy and a
+  pin, what protects the data at rest (a security key with its recovery
+  passphrase and a spare, a passphrase, the key store, or nothing), read
+  receipts, cover traffic and the idle lock, notifications, and a first
+  backup. Nothing is written until its last screen; quitting leaves the
+  directory as it was. It replaces the two line questions the first
+  start asked before (link? passphrase?); the flags remain for changing
+  things later, and a scripted start skips it.
 - `silver --add-security-key [NAME]` enrolls the key plugged in; the
   first asks for a recovery passphrase and replaces the passphrase or
   key store protection, moving the files to a fresh data key, and offers

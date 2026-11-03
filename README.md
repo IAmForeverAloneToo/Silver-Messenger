@@ -176,8 +176,19 @@ cargo run --release --bin silver -- --relay ws://relay.example.org:7777/ws
 
 ### First steps
 
-On first start the client generates an identity and shows your **user id** in
-the System pane. Share it with the person you want to talk to (any channel
+The first start at a terminal walks through setting up, full screen (or
+one question per line with `--reader`), before anything is written: the
+colours and marks; a new identity, or this computer linked to one you
+already use; the relay and a proxy such as Tor, and the relay's key pin
+if its operator published one; what protects your data at rest (a
+security key, a passphrase, this computer's key store, or nothing); read
+receipts, cover traffic and the idle lock; notifications; and a first
+backup. Ctrl-C there leaves the directory as it was, and the next start
+asks again. Everything it sets can be changed later with the options
+below. A start driven by a script (`SILVER_PASSPHRASE` set, or stdin not
+a terminal) skips it.
+
+The client then shows your **user id** in the System pane. Share it with the person you want to talk to (any channel
 works; the id *is* your public key, so comparing it out of band is the same as
 verifying a fingerprint). `/invite` shows it as a link
 (`silver://add/<id>?relay=…`) and as a QR code that a phone can scan, so
@@ -208,10 +219,9 @@ after the contacts, with each line showing who wrote it. Groups run on
 MLS (RFC 9420) with a post-quantum hybrid suite and need a relay on
 0.9.0; the relay never learns who is in a group.
 
-One identity can run on several computers. On the new one run `silver
---link` (or answer yes when a first start asks whether to link this
-computer to an identity you already have): it prints a link and a QR
-code. On the computer you already use, `/devices link <link>` says what
+One identity can run on several computers. On the new one, choose
+"Link to an identity I have" when the first start asks (or run `silver
+--link` on an empty data directory): it prints a link and a QR code. On the computer you already use, `/devices link <link>` says what
 that computer would be given — your identity signs a certificate for it,
 so from then until you remove it that computer reads what is sent to you
 and writes in your name — and shows its id to compare against the one it

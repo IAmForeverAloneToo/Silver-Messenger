@@ -36,7 +36,7 @@ use sha2::{Digest, Sha256};
 pub use ctap::{Info, Key};
 #[cfg(target_os = "linux")]
 pub use route::find_hidraw;
-pub use route::{Authenticator, Direct, Enrolled, Prompt, platform};
+pub use route::{Authenticator, Direct, Enrolled, Prompt, platform, supported};
 
 /// The salt the key is given for the WebAuthn `prf` input `input`:
 /// SHA-256 of "WebAuthn PRF", a zero byte, and the input.

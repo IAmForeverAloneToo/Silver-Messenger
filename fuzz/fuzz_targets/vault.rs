@@ -35,8 +35,16 @@ fuzz_target!(|data: &[u8]| {
         if let Ok(vault) = serde_json::from_str::<VaultFile>(text) {
             let _ = FileCipher::unlock_with_kek(&vault, &[7u8; 32]);
             let _ = FileCipher::unlock_with_kek(&vault, &[0u8; 32]);
-            let _ = vault.kdf.keystore_name();
-            let _ = vault.kdf.is_keystore();
+            let _ = vault.keystore_name();
+            let _ = vault.is_keystore();
+            // A version 2 vault's security key slots: each opened with a
+            // key's answer, which is cheap, unlike a passphrase slot.
+            if vault.has_security_keys() {
+                for (index, _) in vault.security_key_slots().take(4) {
+                    let _ = FileCipher::unlock_with_security_key(&vault, index, &[7u8; 32]);
+                }
+                let _ = vault.passphrase_slot();
+            }
         }
     }
 
