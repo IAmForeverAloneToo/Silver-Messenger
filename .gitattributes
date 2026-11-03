@@ -1,3 +1,6 @@
 # Screen snapshots are compared byte for byte; keep their line endings as
 # committed on every platform.
 crates/silver-tui/tests/snapshots/* text eol=lf
+# The client's compatibility fixtures are files a released version wrote,
+# read back byte for byte; no line ending of theirs is to be converted.
+crates/silver-client/tests/fixtures/** -text
