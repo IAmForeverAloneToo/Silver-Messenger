@@ -31,6 +31,8 @@ prebuilt/
 silver-relay-data/
 *.redb
 *.backup
+# ...except the client's compatibility fixtures, made-up identities on purpose.
+!crates/silver-client/tests/fixtures/**/*.backup
 
 # Private keys and certificates: a relay's --tls-cert and --tls-key, or a
 # signing key made with SILVER_KEY_DIR pointed here. The public signing key

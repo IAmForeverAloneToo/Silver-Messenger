@@ -242,10 +242,7 @@ impl Session {
         let shared = Zeroizing::new(theirs.modpow(&exponent, &prime).to_bytes_be());
         let mut input = Zeroizing::new([0u8; PRIME_BYTES]);
         input[PRIME_BYTES - shared.len()..].copy_from_slice(&shared);
-        let mut key = Zeroizing::new([0u8; 16]);
-        Hkdf::<Sha256>::new(None, input.as_slice())
-            .expand(&[], key.as_mut_slice())
-            .expect("16 bytes is a valid HKDF-SHA256 output");
+        let key = session_key(&input);
         Ok(Self {
             connection,
             service,
@@ -395,8 +392,7 @@ impl Session {
     fn encrypt(&self, plain: &[u8]) -> Secret {
         let mut iv = [0u8; 16];
         OsRng.fill_bytes(&mut iv);
-        let value = Encryptor::new((&*self.key).into(), (&iv).into())
-            .encrypt_padded_vec_mut::<Pkcs7>(plain);
+        let value = seal(&self.key, &iv, plain);
         (
             self.path.clone(),
             iv.to_vec(),
@@ -411,11 +407,32 @@ impl Session {
             .as_slice()
             .try_into()
             .map_err(|_| anyhow!("the key store entry came with no IV"))?;
-        Decryptor::new((&*self.key).into(), (&iv).into())
-            .decrypt_padded_vec_mut::<Pkcs7>(&value)
+        unseal(&self.key, &iv, &value)
             .map(Zeroizing::new)
-            .map_err(|_| anyhow!("the key store entry does not decrypt"))
+            .ok_or_else(|| anyhow!("the key store entry does not decrypt"))
     }
+}
+
+/// The session's AES-128 key: HKDF-SHA256 over the shared value, as wide as
+/// the group, with no salt and no info, as the specification has it.
+fn session_key(shared: &[u8; PRIME_BYTES]) -> Zeroizing<[u8; 16]> {
+    let mut key = Zeroizing::new([0u8; 16]);
+    Hkdf::<Sha256>::new(None, shared)
+        .expand(&[], key.as_mut_slice())
+        .expect("16 bytes is a valid HKDF-SHA256 output");
+    key
+}
+
+/// A secret as the session carries it: AES-128-CBC, PKCS #7 padding.
+fn seal(key: &[u8; 16], iv: &[u8; 16], plain: &[u8]) -> Vec<u8> {
+    Encryptor::new(key.into(), iv.into()).encrypt_padded_vec_mut::<Pkcs7>(plain)
+}
+
+/// [`seal`] undone; `None` for a value that is not a padded block sequence.
+fn unseal(key: &[u8; 16], iv: &[u8; 16], value: &[u8]) -> Option<Vec<u8>> {
+    Decryptor::new(key.into(), iv.into())
+        .decrypt_padded_vec_mut::<Pkcs7>(value)
+        .ok()
 }
 
 #[cfg(test)]
@@ -431,5 +448,31 @@ mod tests {
         let bytes = prime.to_bytes_be();
         assert!(bytes[..8].iter().all(|&b| b == 0xFF));
         assert!(bytes[PRIME_BYTES - 8..].iter().all(|&b| b == 0xFF));
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// The session's key derivation and cipher against values worked out
+    /// apart from this code (Python's `cryptography`: HKDF-SHA256 with no
+    /// salt and no info, then AES-128-CBC with PKCS #7), so that a change of
+    /// the crates underneath cannot move what the key store is sent.
+    #[test]
+    fn the_session_derives_and_seals_as_the_specification_has_it() {
+        let shared: [u8; PRIME_BYTES] = std::array::from_fn(|i| i as u8);
+        let key = session_key(&shared);
+        assert_eq!(hex(&*key), "d030a065c4f99245756b6fc30d00a294");
+        let iv: [u8; 16] = std::array::from_fn(|i| 16 + i as u8);
+        let sealed = seal(&key, &iv, b"a key store secret");
+        assert_eq!(
+            hex(&sealed),
+            "237423fac1cdb297519f95225c67320248f5865454b05d45ab94d5666b130c87"
+        );
+        assert_eq!(unseal(&key, &iv, &sealed).unwrap(), b"a key store secret");
+        assert!(
+            unseal(&key, &iv, &sealed[..17]).is_none(),
+            "not whole blocks"
+        );
     }
 }

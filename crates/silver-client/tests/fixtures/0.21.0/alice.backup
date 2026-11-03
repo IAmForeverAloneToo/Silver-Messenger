@@ -1,0 +1,12 @@
+{
+  "format": "silver-messenger-backup",
+  "version": 1,
+  "kdf": {
+    "algorithm": "argon2id",
+    "m_cost_kib": 8192,
+    "t_cost": 1,
+    "p_cost": 1,
+    "salt": "8fzUXRLxV3CFrh1sES5FNw=="
+  },
+  "ciphertext": "oBMS8tki04K6JcbLhxrvge3TdZjPmmrZU/K9Fc1L6JzGmUah9n7YAJi7BhCA55039biy0tyb662q1xKq9Q5py7+ad/FZGEjkHjgHEngz0e2H5w8aBLmYQw8wVlb7nLIrZ5l9FYyOKtWChh+n3HRFHYfICkRLZcdPnGYPYQZBCu6r3BStnLU8+2fuyhl+/ujCaoz5dv8kuZVOQan7oiTeiAQss8ioLxGQjuWL2l43i65AV6FR2a4qJqzl4WE6NRwOuJnqFAcEioElcnozi8Ka3qZCOvtTEmgiPM2FLsI8le5uZZ2xN7dEVDymqt8I/FpQ8CBAiLJBTRZgzpHCzyC0yklGZhk4RHP9LIB5e/xSJBf3X2WCvHWK8tcqjt8wiWcGpuij94vpOD/0kcSLGsOWOr0DMOLmOS79D6sLMN3nmyyfdcXVb7fgPtZU9trdKZTcTjg+Crar2Lfn0it3GVatuELjIh6GVEctwo8I1u9n5wX4Nsu6DS24tnsSSlyVab95H6ZX/AGFcB0irFKwhIaWwqb2PgIDAL28GEaURKfOaSeg00mZGqnmE7KJ2mSEUJNYWfk17lUqxDlzPRkiTH8m232rlhPKoLPrGPSmNx1Ua2Bk6a+vn7dQZjguyHA7VY62ATuOwj7rkkBdjvmRZL8T9noT2pCymNFnq/0hkMKBJ0si7jV3nzI6p2ObnFC1BPeQCTYqqjw3YZa9woaKh8zfcw5XazJQURYe5JEitbveaTPqGyR+Y+X59M1Rp1T3opvShAjykSNxJfCQW8qQppHMX++FrA8hb1ynfoFCpR+pMM8UfjX8GxfssHwPGFeW95PiTT4KAArpfHtRZSW265lfvwyPpLLlc4lcFzfOZhMj97U5bEm1Oq7nueyCV+2nU/BF9NpQog9Y+Ag8OOCsTZ7X1W+b8fHXvOoULbvLnm0YoGxM9OOsbLaUkwuni5gehw+t4cA08Rk/ptkQJFw0oHKVUrNogrtMujlPV5mb6ZS30xwH4q0QX2Fz4Tei8BHyiZL54q7TU5Yr9qcZAJ7q5MzALDV5bXBn7dMBFtsAegwdy9J+wVEmJXj+20GNM2O1szUSfMdYK469w+LrN9FJsC4Hq9UuRZjkMkzmQxQxE4FHwVKRkhqAlIGXme7vY3sSJLebYK6WKUDkZmC9Xnrf8oWubNkCXAUKRhaOY0fQ6Q2Y55TN+Wx2KhtQQzQ="
+}

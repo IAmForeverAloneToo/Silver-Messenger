@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "kdf": {
+    "algorithm": "argon2id",
+    "m_cost_kib": 8192,
+    "t_cost": 1,
+    "p_cost": 1,
+    "salt": "ChA9w6IDkUOFe3wd0CCFHg=="
+  },
+  "wrapped_key": "ST9pyvAcuQH6cS5cF+yeE0DA8dBKDFE62LaqfzthVfmXjMO2Pxys3abm9ATIa/bgrKd6HDk+V8a+3DSiRZmf8/YtpTTrnbx4",
+  "state_generation": 9,
+  "wrapped_naming_key": "GYYisC8i8mgbSON5FHb9+4e+XmdRaAtILadruUCUnTVtsmo8irRvGmWjaJLpalqCvSvWhBC1frHmFCEaUvLKhUfo1WgnJDC1"
+}
