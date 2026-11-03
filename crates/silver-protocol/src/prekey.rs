@@ -126,7 +126,7 @@ impl PrekeySecret {
     pub fn generate(id: u32, created_at_ms: u64) -> Self {
         Self::from_bytes(
             id,
-            StaticSecret::random_from_rng(rand::rngs::OsRng).to_bytes(),
+            StaticSecret::random_from_rng(&mut crate::rng::OsRng).to_bytes(),
             created_at_ms,
         )
     }

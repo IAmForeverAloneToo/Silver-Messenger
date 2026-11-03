@@ -66,6 +66,7 @@ pub mod identity;
 pub mod lifecycle;
 pub mod pq;
 pub mod prekey;
+pub mod rng;
 pub mod session;
 pub mod transparency;
 pub mod verify;

@@ -5,8 +5,8 @@ use std::fmt;
 use std::str::FromStr;
 use std::sync::RwLock;
 
+use crate::rng::OsRng;
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
-use rand::rngs::OsRng;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -234,7 +234,7 @@ impl Identity {
         Self {
             signing: SigningKey::generate(&mut OsRng),
             dh: RwLock::new(DhKeys {
-                current: StaticSecret::random_from_rng(OsRng),
+                current: StaticSecret::random_from_rng(&mut OsRng),
                 previous: None,
             }),
         }
@@ -292,7 +292,7 @@ impl Identity {
     /// Returns the new public key. The caller writes the secrets to disk
     /// before publishing the key, never after.
     pub fn rotate_dh(&self, now_ms: u64) -> DhPublic {
-        let fresh = StaticSecret::random_from_rng(OsRng);
+        let fresh = StaticSecret::random_from_rng(&mut OsRng);
         let mut dh = self.dh_mut();
         let old = std::mem::replace(&mut dh.current, fresh);
         dh.previous = Some((old, now_ms.saturating_add(DH_ROTATION_GRACE_MS)));

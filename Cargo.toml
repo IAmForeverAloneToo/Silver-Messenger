@@ -56,21 +56,25 @@ minisign-verify = "0.3"
 # serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-base64 = "0.22"
+# Without its default `simd-unsafe` feature: the speed is not needed here,
+# and the code that would bring it is unsafe.
+base64 = { version = "0.23", default-features = false, features = ["std"] }
 bs58 = "0.5"
 
-# crypto (pinned to the mutually compatible rand_core 0.6 generation)
-ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
-x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
-chacha20poly1305 = "0.10"
-hkdf = "0.12"
-hmac = "0.12"
-sha2 = "0.10"
-rand = "0.8"
+# crypto: the rand_core 0.10 generation, the one ml-kem, openmls and argon2
+# are on, moved together (docs/vectors and tests/compat.rs in silver-client
+# pin that nothing on the wire or on disk moved with it)
+ed25519-dalek = { version = "3", features = ["rand_core", "zeroize"] }
+x25519-dalek = { version = "3", features = ["static_secrets", "zeroize"] }
+chacha20poly1305 = "0.11"
+hkdf = "0.13"
+hmac = "0.13"
+sha2 = "0.11"
+rand = "0.10"
 zeroize = { version = "1", features = ["derive"] }
-# ML-KEM-768 (FIPS 203) for the post-quantum half of the handshake. Uses the
-# rand_core 0.10 generation internally; keys are made from seeds we draw
-# ourselves, so nothing else has to move.
+# ML-KEM-768 (FIPS 203) for the post-quantum half of the handshake, on the
+# same rand_core 0.10 generation as the crates above; keys are made from
+# seeds drawn from the operating system's generator.
 ml-kem = { version = "0.3", features = ["zeroize", "getrandom"] }
 # Groups on MLS (RFC 9420); the post-quantum feature brings the hybrid
 # X-Wing ciphersuite of draft-ietf-mls-pq-ciphersuites (docs/design/groups.md).
@@ -124,8 +128,8 @@ apple-native-keyring-store = { version = "1", features = ["keychain"] }
 # tree already, through the secret-service crate keyring 3 used and the
 # relay's certificate parser.
 num-bigint = "0.4"
-aes = { version = "0.8", features = ["zeroize"] }
-cbc = { version = "0.1", features = ["alloc", "block-padding", "zeroize"] }
+aes = { version = "0.9", features = ["zeroize"] }
+cbc = { version = "0.2", features = ["alloc", "block-padding", "zeroize"] }
 tauri-winrt-notification = "0.8"
 
 [profile.release]

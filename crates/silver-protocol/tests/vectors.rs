@@ -18,12 +18,14 @@ use std::fmt::Debug;
 use std::path::PathBuf;
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
+use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use hkdf::Hkdf;
-use rand::{CryptoRng, RngCore};
+use rand::Rng;
+use rand::rand_core::{TryCryptoRng, TryRng};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::convert::Infallible;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use silver_protocol::blob::{BlobKey, seal_chunk};
@@ -89,16 +91,18 @@ impl VectorRng {
     }
 }
 
-impl RngCore for VectorRng {
-    fn next_u32(&mut self) -> u32 {
-        u32::from_le_bytes(self.draw())
+impl TryRng for VectorRng {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Infallible> {
+        Ok(u32::from_le_bytes(self.draw()))
     }
 
-    fn next_u64(&mut self) -> u64 {
-        u64::from_le_bytes(self.draw())
+    fn try_next_u64(&mut self) -> Result<u64, Infallible> {
+        Ok(u64::from_le_bytes(self.draw()))
     }
 
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Infallible> {
         for byte in dest {
             if self.used == 32 {
                 let mut h = Sha256::new();
@@ -111,15 +115,11 @@ impl RngCore for VectorRng {
             *byte = self.block[self.used];
             self.used += 1;
         }
-    }
-
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
-        self.fill_bytes(dest);
         Ok(())
     }
 }
 
-impl CryptoRng for VectorRng {}
+impl TryCryptoRng for VectorRng {}
 
 // ---------------------------------------------------------------------------
 // The file format and the runner
@@ -318,9 +318,10 @@ fn dh_public(secret: &[u8; 32]) -> [u8; 32] {
 }
 
 fn xchacha_encrypt(key: &[u8], nonce: &[u8], plaintext: &[u8], aad: &[u8]) -> Vec<u8> {
-    XChaCha20Poly1305::new(Key::from_slice(key))
+    XChaCha20Poly1305::new_from_slice(key)
+        .expect("a 32-byte key")
         .encrypt(
-            XNonce::from_slice(nonce),
+            &XNonce::try_from(nonce).expect("a 24-byte nonce"),
             Payload {
                 msg: plaintext,
                 aad,
@@ -1102,8 +1103,8 @@ fn kdf() {
             KdfIn::Chain { chain } => {
                 let (next, message_key) = internals::kdf_chain(chain);
                 let hmac = |byte: u8| -> [u8; 32] {
-                    use hmac::{Hmac, Mac};
-                    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(chain).unwrap();
+                    use hmac::{Hmac, KeyInit, Mac};
+                    let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(chain).unwrap();
                     mac.update(&[byte]);
                     mac.finalize().into_bytes().into()
                 };
@@ -3147,9 +3148,10 @@ fn device() {
                 assert_eq!(sealed.nonce, nonce);
                 let mut aad = PROVISION_DOMAIN.to_vec();
                 aad.extend_from_slice(device.as_bytes());
-                let by_hand = XChaCha20Poly1305::new(Key::from_slice(&key))
+                let by_hand = XChaCha20Poly1305::new_from_slice(&key)
+                    .expect("a 32-byte key")
                     .encrypt(
-                        XNonce::from_slice(&nonce),
+                        &XNonce::try_from(&nonce[..]).expect("a 24-byte nonce"),
                         Payload {
                             msg: plaintext.as_bytes(),
                             aad: &aad,

@@ -56,38 +56,49 @@ allow = [
 # deny catches is a *new* name joining the list: that is a duplicate this
 # repository introduced, and it wants a look before it is accepted
 # (SM-S-07). `cargo deny check bans` lists what each entry stands for.
+# The AEAD, AES and Ed25519 names (aead, aes, chacha20poly1305, cipher,
+# ed25519, ed25519-dalek, inout, poly1305, universal-hash) are the older
+# generation openmls_rust_crypto 0.6 and hpke-rs 0.7 still build on, the
+# newest there is; this repository's own code moved to the next one.
 multiple-versions = "deny"
 wildcards = "allow"
 skip = [
+{ name = "aead" },
+{ name = "aes" },
 { name = "base64" },
 { name = "block-buffer" },
 { name = "chacha20" },
+{ name = "chacha20poly1305" },
+{ name = "cipher" },
 { name = "const-oid" },
 { name = "cpufeatures" },
 { name = "crypto-common" },
 { name = "curve25519-dalek" },
 { name = "der" },
 { name = "digest" },
+{ name = "ed25519" },
+{ name = "ed25519-dalek" },
 { name = "foldhash" },
 { name = "getrandom" },
 { name = "hashbrown" },
 { name = "hkdf" },
 { name = "hmac" },
+{ name = "inout" },
 { name = "nom" },
 { name = "pkcs8" },
+{ name = "poly1305" },
 { name = "rand" },
 { name = "rand_chacha" },
 { name = "rand_core" },
 { name = "sha1" },
 { name = "sha2" },
-{ name = "sha3" },
 { name = "signature" },
 { name = "spki" },
 { name = "syn" },
 { name = "tokio-tungstenite" },
 { name = "tungstenite" },
+{ name = "universal-hash" },
 { name = "webpki-roots" },
-{ name = "windows-sys" },
 { name = "x25519-dalek" },
 ]
 

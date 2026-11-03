@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
-use rand::Rng;
+use rand::{Rng, RngExt};
 use silver_protocol::envelope::PAD_BLOCK;
 use silver_protocol::{Content, UserId};
 
@@ -38,18 +38,18 @@ pub const INTERVAL: Range<Duration> = Duration::from_secs(30)..Duration::from_se
 /// padding blocks plus a random remainder: seven in ten add nothing to the
 /// framing, two in ten one block, one in ten two.
 pub fn message() -> Content {
-    message_with(&mut rand::thread_rng())
+    message_with(&mut rand::rng())
 }
 
 fn message_with<R: Rng>(rng: &mut R) -> Content {
-    let blocks = match rng.gen_range(0..10) {
+    let blocks = match rng.random_range(0..10) {
         0..=6 => 0,
         7..=8 => 1,
         _ => 2,
     };
-    let len = blocks * PAD_BLOCK + rng.gen_range(0..PAD_BLOCK);
+    let len = blocks * PAD_BLOCK + rng.random_range(0..PAD_BLOCK);
     let pad = (0..len)
-        .map(|_| char::from(b'a' + rng.gen_range(0..26u8)))
+        .map(|_| char::from(b'a' + rng.random_range(0..26u8)))
         .collect();
     Content::Cover { pad }
 }
@@ -70,7 +70,7 @@ impl CoverSchedule {
     /// their window opens or extends, and if they were not being covered
     /// yet, the first cover message is scheduled.
     pub fn heard(&mut self, peer: UserId, now: Instant) {
-        self.heard_with(peer, now, &mut rand::thread_rng());
+        self.heard_with(peer, now, &mut rand::rng());
     }
 
     fn heard_with<R: Rng>(&mut self, peer: UserId, now: Instant, rng: &mut R) {
@@ -91,7 +91,7 @@ impl CoverSchedule {
     /// The contacts whose next cover message is due, each rescheduled;
     /// contacts not heard from within [`WINDOW`] are dropped instead.
     pub fn take_due(&mut self, now: Instant) -> Vec<UserId> {
-        self.take_due_with(now, &mut rand::thread_rng())
+        self.take_due_with(now, &mut rand::rng())
     }
 
     fn take_due_with<R: Rng>(&mut self, now: Instant, rng: &mut R) -> Vec<UserId> {
@@ -133,7 +133,7 @@ impl CoverSchedule {
 
 fn interval<R: Rng>(rng: &mut R) -> Duration {
     let span = (INTERVAL.end - INTERVAL.start).as_secs_f64();
-    INTERVAL.start + Duration::from_secs_f64(span * rng.gen_range(0.0..1.0))
+    INTERVAL.start + Duration::from_secs_f64(span * rng.random_range(0.0..1.0))
 }
 
 #[cfg(test)]

@@ -19,14 +19,14 @@
 use std::collections::HashMap;
 
 use aes::cipher::block_padding::Pkcs7;
-use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+use aes::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit};
 use anyhow::{Context, anyhow, bail};
 use futures_util::StreamExt;
 use hkdf::Hkdf;
 use num_bigint::BigUint;
-use rand::RngCore;
-use rand::rngs::OsRng;
+use rand::Rng;
 use sha2::Sha256;
+use silver_protocol::rng::OsRng;
 use zbus::{Connection, OwnedObjectPath, OwnedVariant, Proxy, Variant};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -425,13 +425,13 @@ fn session_key(shared: &[u8; PRIME_BYTES]) -> Zeroizing<[u8; 16]> {
 
 /// A secret as the session carries it: AES-128-CBC, PKCS #7 padding.
 fn seal(key: &[u8; 16], iv: &[u8; 16], plain: &[u8]) -> Vec<u8> {
-    Encryptor::new(key.into(), iv.into()).encrypt_padded_vec_mut::<Pkcs7>(plain)
+    Encryptor::new(key.into(), iv.into()).encrypt_padded_vec::<Pkcs7>(plain)
 }
 
 /// [`seal`] undone; `None` for a value that is not a padded block sequence.
 fn unseal(key: &[u8; 16], iv: &[u8; 16], value: &[u8]) -> Option<Vec<u8>> {
     Decryptor::new(key.into(), iv.into())
-        .decrypt_padded_vec_mut::<Pkcs7>(value)
+        .decrypt_padded_vec::<Pkcs7>(value)
         .ok()
 }
 

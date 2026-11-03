@@ -61,7 +61,7 @@ impl KemPublic {
 
     /// The same, with the encapsulation's 32 random bytes drawn from `rng`,
     /// so a handshake or ratchet step can be replayed from a seed.
-    pub fn encapsulate_with_rng<R: rand::RngCore + rand::CryptoRng>(
+    pub fn encapsulate_with_rng<R: rand::CryptoRng>(
         &self,
         rng: &mut R,
     ) -> Result<(Vec<u8>, Zeroizing<[u8; KEM_SECRET_LEN]>), ProtocolError> {
@@ -142,7 +142,7 @@ pub struct PqPrekeySecret {
 impl PqPrekeySecret {
     pub fn generate(id: u32, created_at_ms: u64) -> Self {
         let mut seed = [0u8; 64];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+        rand::Rng::fill_bytes(&mut crate::rng::OsRng, &mut seed);
         Self::from_seed(id, seed, created_at_ms)
     }
 
@@ -226,12 +226,12 @@ pub struct KemRatchetKey {
 
 impl KemRatchetKey {
     pub fn generate() -> Self {
-        Self::generate_with_rng(&mut rand::rngs::OsRng)
+        Self::generate_with_rng(&mut crate::rng::OsRng)
     }
 
     /// A ratchet key whose seed comes from `rng`, so a ratchet step can be
     /// replayed from a seed.
-    pub fn generate_with_rng<R: rand::RngCore + rand::CryptoRng>(rng: &mut R) -> Self {
+    pub fn generate_with_rng<R: rand::CryptoRng>(rng: &mut R) -> Self {
         let mut seed = [0u8; 64];
         rng.fill_bytes(&mut seed);
         Self { seed }

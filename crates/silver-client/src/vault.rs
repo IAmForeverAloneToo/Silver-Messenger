@@ -12,13 +12,13 @@ use std::fmt;
 use anyhow::{Context, bail};
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
+use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use hmac::{Hmac, Mac};
-use rand::RngCore;
-use rand::rngs::OsRng;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use silver_protocol::encoding::{b64, b64_array, b64_opt, from_base64, to_base64};
+use silver_protocol::rng::OsRng;
 use zeroize::Zeroizing;
 
 const VAULT_AAD: &[u8] = b"silver-messenger/v1/vault";
@@ -344,7 +344,7 @@ impl FileCipher {
     /// already has the directory is a lot of disk for an attacker who, in
     /// the cases that matter, also has the key.
     pub fn history_name(&self, id: &str) -> String {
-        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(self.naming_key.as_slice())
+        let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(self.naming_key.as_slice())
             .expect("HMAC takes a key of any length");
         mac.update(HISTORY_NAME_DOMAIN);
         mac.update(id.as_bytes());
@@ -562,10 +562,10 @@ fn derive(kdf: &Kdf, passphrase: &str) -> anyhow::Result<Zeroizing<[u8; 32]>> {
 fn seal(key: &[u8; 32], aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
     let mut nonce = [0u8; 24];
     OsRng.fill_bytes(&mut nonce);
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(key));
+    let cipher = XChaCha20Poly1305::new_from_slice(key).expect("a 32-byte key");
     let ciphertext = cipher
         .encrypt(
-            XNonce::from_slice(&nonce),
+            &XNonce::try_from(&nonce[..]).expect("a 24-byte nonce"),
             Payload {
                 msg: plaintext,
                 aad,
@@ -579,10 +579,10 @@ fn seal(key: &[u8; 32], aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
 
 fn open(key: &[u8; 32], aad: &[u8], bytes: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
     let (nonce, ciphertext) = bytes.split_first_chunk::<24>()?;
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(key));
+    let cipher = XChaCha20Poly1305::new_from_slice(key).expect("a 32-byte key");
     cipher
         .decrypt(
-            XNonce::from_slice(nonce),
+            &XNonce::try_from(&nonce[..]).expect("a 24-byte nonce"),
             Payload {
                 msg: ciphertext,
                 aad,

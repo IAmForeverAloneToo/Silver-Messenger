@@ -7,10 +7,10 @@
 //! end-to-end encrypted message ([`Content::File`](crate::Content)), so the
 //! relay stores bytes it cannot read for a recipient it cannot name.
 
+use crate::rng::OsRng;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
-use rand::RngCore;
-use rand::rngs::OsRng;
+use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -104,9 +104,10 @@ pub fn seal_chunk(
     if plaintext.len() > CHUNK_BYTES {
         return Err(ProtocolError::TooLarge(plaintext.len()));
     }
-    XChaCha20Poly1305::new(Key::from_slice(&key.key))
+    XChaCha20Poly1305::new_from_slice(&key.key)
+        .expect("a 32-byte key")
         .encrypt(
-            XNonce::from_slice(&key.chunk_nonce(index)),
+            &XNonce::try_from(&key.chunk_nonce(index)[..]).expect("a 24-byte nonce"),
             Payload {
                 msg: plaintext,
                 aad: &aad(blob, index, total),
@@ -126,9 +127,10 @@ pub fn open_chunk(
     if ciphertext.len() > MAX_CHUNK_CIPHERTEXT {
         return Err(ProtocolError::TooLarge(ciphertext.len()));
     }
-    XChaCha20Poly1305::new(Key::from_slice(&key.key))
+    XChaCha20Poly1305::new_from_slice(&key.key)
+        .expect("a 32-byte key")
         .decrypt(
-            XNonce::from_slice(&key.chunk_nonce(index)),
+            &XNonce::try_from(&key.chunk_nonce(index)[..]).expect("a 24-byte nonce"),
             Payload {
                 msg: ciphertext,
                 aad: &aad(blob, index, total),

@@ -40,9 +40,9 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
-use rand::RngCore;
-use rand::rngs::OsRng;
+use rand::Rng;
 use silver_protocol::blob::{MAX_CHUNK_CIPHERTEXT, MAX_CHUNKS, is_valid_blob_id};
+use silver_protocol::rng::OsRng;
 use silver_protocol::wire::{
     ClientFrame, ErrorCode, MAX_FRAME_BYTES, ServerFrame, feature, normalize_host, verify_auth,
     verify_auth_bound,

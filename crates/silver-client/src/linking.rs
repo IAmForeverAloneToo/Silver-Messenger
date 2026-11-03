@@ -18,8 +18,7 @@ use std::fmt;
 use std::str::FromStr;
 use std::time::Duration;
 
-use rand::RngCore;
-use rand::rngs::OsRng;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use silver_protocol::blob::MAX_FILE_BYTES;
 use silver_protocol::device::{
@@ -27,6 +26,7 @@ use silver_protocol::device::{
 };
 use silver_protocol::envelope::ReceiptKind;
 use silver_protocol::group::GroupId;
+use silver_protocol::rng::OsRng;
 use silver_protocol::{DeviceCertificate, DeviceRevocation, KeyBundle, UserId};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};

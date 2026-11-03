@@ -11,11 +11,11 @@
 //! [`seal_provision`]). Devices of one account keep each other informed
 //! with [`Sync`] content.
 
+use crate::rng::OsRng;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
+use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use hkdf::Hkdf;
-use rand::rngs::OsRng;
-use rand::{CryptoRng, RngCore};
+use rand::CryptoRng;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
@@ -437,7 +437,7 @@ pub fn seal_provision(
 }
 
 /// [`seal_provision`] drawing the nonce from `rng`; for test vectors.
-pub fn seal_provision_with_rng<R: RngCore + CryptoRng>(
+pub fn seal_provision_with_rng<R: CryptoRng>(
     key: &[u8; 32],
     device: &UserId,
     plaintext: &[u8],
@@ -448,10 +448,10 @@ pub fn seal_provision_with_rng<R: RngCore + CryptoRng>(
     }
     let mut nonce = [0u8; 24];
     rng.fill_bytes(&mut nonce);
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(key));
+    let cipher = XChaCha20Poly1305::new_from_slice(key).expect("a 32-byte key");
     let ciphertext = cipher
         .encrypt(
-            XNonce::from_slice(&nonce),
+            &XNonce::try_from(&nonce[..]).expect("a 24-byte nonce"),
             Payload {
                 msg: plaintext,
                 aad: &provision_aad(device),
@@ -470,10 +470,10 @@ pub fn open_provision(
     if provision.ciphertext.len() > MAX_PROVISION_BYTES + 16 {
         return Err(ProtocolError::TooLarge(provision.ciphertext.len()));
     }
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(key));
+    let cipher = XChaCha20Poly1305::new_from_slice(key).expect("a 32-byte key");
     cipher
         .decrypt(
-            XNonce::from_slice(&provision.nonce),
+            &XNonce::try_from(&provision.nonce[..]).expect("a 24-byte nonce"),
             Payload {
                 msg: &provision.ciphertext,
                 aad: &provision_aad(device),

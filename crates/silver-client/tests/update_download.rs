@@ -209,9 +209,9 @@ struct SigningKey {
 impl SigningKey {
     fn new() -> Self {
         let mut seed = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+        rand::Rng::fill_bytes(&mut silver_protocol::rng::OsRng, &mut seed);
         let mut key_id = [0u8; 8];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut key_id);
+        rand::Rng::fill_bytes(&mut silver_protocol::rng::OsRng, &mut key_id);
         Self {
             signing: ed25519_dalek::SigningKey::from_bytes(&seed),
             key_id,

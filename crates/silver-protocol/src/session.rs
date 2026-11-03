@@ -18,12 +18,12 @@
 //! This module is pure state and cryptography; which session to use for a
 //! peer, and where sessions are stored, is the client's business.
 
+use crate::rng::OsRng;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
+use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
-use rand::rngs::OsRng;
-use rand::{CryptoRng, RngCore};
+use rand::CryptoRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
@@ -292,7 +292,7 @@ impl Session {
     /// ratchet key seed (64 bytes, only for the post-quantum ratchet), then
     /// the first ratchet key (32 bytes). Exists so the published test
     /// vectors can replay a handshake; every other caller wants `initiate`.
-    pub fn initiate_with_rng<R: RngCore + CryptoRng>(
+    pub fn initiate_with_rng<R: CryptoRng>(
         me: &Identity,
         peer: &KeyBundle,
         rng: &mut R,
@@ -592,7 +592,7 @@ impl Session {
     /// to encapsulate to). A message that does not start a new chain draws
     /// nothing. Exists for the published test vectors; every other caller
     /// wants `decrypt`.
-    pub fn decrypt_with_rng<R: RngCore + CryptoRng>(
+    pub fn decrypt_with_rng<R: CryptoRng>(
         &mut self,
         message: &RatchetMessage,
         rng: &mut R,
@@ -603,7 +603,7 @@ impl Session {
         Ok(plaintext)
     }
 
-    fn decrypt_advancing<R: RngCore + CryptoRng>(
+    fn decrypt_advancing<R: CryptoRng>(
         &mut self,
         message: &RatchetMessage,
         rng: &mut R,
@@ -683,7 +683,7 @@ impl Session {
     /// post-quantum-ratchet session each half also does an ML-KEM step: the
     /// receiving chain mixes in the secret from the peer's ciphertext, the
     /// sending chain a fresh secret we encapsulate to the peer's key.
-    fn dh_ratchet<R: RngCore + CryptoRng>(
+    fn dh_ratchet<R: CryptoRng>(
         &mut self,
         header: &RatchetHeader,
         rng: &mut R,
@@ -891,7 +891,7 @@ fn kdf_chain(chain: &Key32) -> (Key32, Key32) {
 
 fn hmac_byte(key: &Key32, input: u8) -> Key32 {
     let mut mac =
-        <Hmac<Sha256> as Mac>::new_from_slice(&key.0).expect("HMAC accepts any key length");
+        <Hmac<Sha256> as KeyInit>::new_from_slice(&key.0).expect("HMAC accepts any key length");
     mac.update(&[input]);
     let mut out = Key32([0u8; 32]);
     out.0.copy_from_slice(&mac.finalize().into_bytes());
@@ -962,10 +962,10 @@ fn aead_encrypt(
     aad: &[u8],
 ) -> Result<Vec<u8>, ProtocolError> {
     let material = message_key_material(message_key);
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(&material[..32]));
+    let cipher = XChaCha20Poly1305::new_from_slice(&material[..32]).expect("a 32-byte key");
     cipher
         .encrypt(
-            XNonce::from_slice(&material[32..]),
+            &XNonce::try_from(&material[32..]).expect("a 24-byte nonce"),
             Payload {
                 msg: plaintext,
                 aad,
@@ -980,10 +980,10 @@ fn aead_decrypt(
     aad: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>, ProtocolError> {
     let material = message_key_material(message_key);
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(&material[..32]));
+    let cipher = XChaCha20Poly1305::new_from_slice(&material[..32]).expect("a 32-byte key");
     cipher
         .decrypt(
-            XNonce::from_slice(&material[32..]),
+            &XNonce::try_from(&material[32..]).expect("a 24-byte nonce"),
             Payload {
                 msg: ciphertext,
                 aad,

@@ -19,9 +19,9 @@ use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard};
 
 use anyhow::Context;
-use rand::RngCore;
-use rand::rngs::OsRng;
+use rand::Rng;
 use silver_protocol::encoding::{from_base64, to_base64};
+use silver_protocol::rng::OsRng;
 use zeroize::Zeroizing;
 
 #[cfg(all(unix, not(target_os = "macos")))]

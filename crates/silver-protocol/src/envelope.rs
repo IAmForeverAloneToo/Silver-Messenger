@@ -13,11 +13,11 @@
 //! from the outside; v4 and v5 bodies omit the sealed-layer signature,
 //! which the relay cannot see either.
 
+use crate::rng::OsRng;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
+use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use hkdf::Hkdf;
-use rand::rngs::OsRng;
-use rand::{CryptoRng, RngCore};
+use rand::CryptoRng;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use x25519_dalek::{EphemeralSecret, PublicKey};
@@ -706,7 +706,7 @@ pub fn seal_bytes(
 /// order: the ephemeral key (32 bytes), the nonce (24 bytes), then the 16
 /// bytes the envelope id is made from. Exists so the published test
 /// vectors can replay an envelope; every other caller wants `seal_bytes`.
-pub fn seal_bytes_with_rng<R: RngCore + CryptoRng>(
+pub fn seal_bytes_with_rng<R: CryptoRng>(
     sender: &Identity,
     recipient: &KeyBundle,
     body: &[u8],
@@ -731,7 +731,7 @@ pub fn seal_bytes_unsigned(
 
 /// [`seal_bytes_unsigned`] with its random choices drawn from `rng`, in
 /// the order [`seal_bytes_with_rng`] documents. For the test vectors.
-pub fn seal_bytes_unsigned_with_rng<R: RngCore + CryptoRng>(
+pub fn seal_bytes_unsigned_with_rng<R: CryptoRng>(
     sender: &Identity,
     recipient: &KeyBundle,
     body: &[u8],
@@ -752,7 +752,7 @@ pub fn seal_bytes_unsigned_to(
     seal_bytes_to(sender, to, dh_public, body, false, &mut OsRng)
 }
 
-fn seal_bytes_inner<R: RngCore + CryptoRng>(
+fn seal_bytes_inner<R: CryptoRng>(
     sender: &Identity,
     recipient: &KeyBundle,
     body: &[u8],
@@ -769,7 +769,7 @@ fn seal_bytes_inner<R: RngCore + CryptoRng>(
     )
 }
 
-fn seal_bytes_to<R: RngCore + CryptoRng>(
+fn seal_bytes_to<R: CryptoRng>(
     sender: &Identity,
     to: UserId,
     recipient_dh: &DhPublic,
@@ -809,10 +809,10 @@ fn seal_bytes_to<R: RngCore + CryptoRng>(
     plaintext.extend_from_slice(&signature);
     plaintext.extend_from_slice(body);
 
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(key.as_slice()));
+    let cipher = XChaCha20Poly1305::new_from_slice(key.as_slice()).expect("a 32-byte key");
     let ciphertext = cipher
         .encrypt(
-            XNonce::from_slice(&nonce),
+            &XNonce::try_from(&nonce[..]).expect("a 24-byte nonce"),
             Payload {
                 msg: &plaintext,
                 aad: &aad(&to, &ephemeral_public),
@@ -894,9 +894,9 @@ pub fn open_bytes(recipient: &Identity, envelope: &Envelope) -> Result<Opened, P
             return Err(ProtocolError::WeakKey);
         }
         let key = derive_key(shared.as_bytes(), &envelope.ephemeral_public.0, &public.0);
-        let cipher = XChaCha20Poly1305::new(Key::from_slice(key.as_slice()));
+        let cipher = XChaCha20Poly1305::new_from_slice(key.as_slice()).expect("a 32-byte key");
         match cipher.decrypt(
-            XNonce::from_slice(&envelope.nonce),
+            &XNonce::try_from(&envelope.nonce[..]).expect("a 24-byte nonce"),
             Payload {
                 msg: &envelope.ciphertext,
                 aad: &aad(&envelope.to, &envelope.ephemeral_public.0),

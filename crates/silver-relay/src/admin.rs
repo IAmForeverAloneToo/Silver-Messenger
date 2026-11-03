@@ -194,9 +194,9 @@ async fn delete_ban(
 /// Twenty-four characters from the operating system's randomness, in the
 /// alphabet an invite link can carry.
 fn random_token() -> String {
-    use rand::RngCore;
+    use rand::Rng;
     let mut bytes = [0u8; 18];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    silver_protocol::rng::OsRng.fill_bytes(&mut bytes);
     use base64::Engine as _;
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }

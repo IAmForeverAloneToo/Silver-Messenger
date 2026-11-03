@@ -9,9 +9,9 @@
 //! is keyed by. `docs/PROTOCOL.md` section 13 is the specification;
 //! `docs/design/groups.md` the reasoning.
 
-use hmac::{Hmac, Mac};
-use rand::RngCore;
-use rand::rngs::OsRng;
+use crate::rng::OsRng;
+use hmac::{Hmac, KeyInit, Mac};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
