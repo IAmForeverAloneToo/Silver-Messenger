@@ -12,6 +12,7 @@ The releases, newest first; each version links to its entry.
 
 | Version | Date | What it was |
 | --- | --- | --- |
+| [0.21.0](#0210---2026-11-03) | 2026-11-03 | A day of the client in use: drafts per chat, `/mute` and @mentions, history in backups, KWallet tried for real |
 | [0.20.0](#0200---2026-10-30) | 2026-10-30 | TLS and runtime advisories fixed; the key store on Linux speaks to the Secret Service itself, over zbus 6 |
 | [0.19.0](#0190---2026-09-29) | 2026-09-29 | The last two files in the data directory under rollback protection (roadmap item 66); rustls updated |
 | [0.18.1](#0181---2026-09-11) | 2026-09-11 | Two data-directory fixes at the seams where a client older than 0.16.0 meets a newer one |
@@ -38,6 +39,103 @@ The releases, newest first; each version links to its entry.
 | [0.3.0](#030---2026-09-04) | 2026-09-04 | Phase 3: forward secrecy |
 | [0.2.0](#020---2026-09-04) | 2026-09-04 | Phase 2: the trust model completed |
 | [0.1.0](#010---2026-09-04) | 2026-09-04 | First tagged release |
+
+## 0.21.0 - 2026-11-03
+
+The terminal client after a day spent using it and reading it: a line
+typed to one person no longer follows you into the next chat, a busy
+chat or group can be muted and a mention still gets through, a backup
+can carry the chats, and the key store was tried against KWallet and
+against WSL's keyring and fixed where it fell short. Nothing on the
+wire changes; mentions are ordinary text.
+
+**Upgrading.** Nothing to do for a client. A backup made with
+`--with-history` still restores in 0.20.0, which leaves the history
+out; `config.json` gains a `muted` list, which 0.20.0 ignores and drops
+the next time it writes the file. A contact who accepts your request
+now reports what it held as read, if they keep read receipts on. The
+relay's changes are dependency updates only; its schema stays at 3 and
+its backup format at 2. Installing from the Homebrew tap now asks for
+`brew trust iamforeveralonetoo/silver` between the tap and the install,
+as Homebrew does of every third-party tap.
+
+### Added
+
+- **Each chat keeps its own unsent line.** Switching chats used to
+  carry the input line along, so a message half typed to one person was
+  sent to whoever was open when Enter was pressed. Every chat now keeps
+  its own line and cursor, the list marks a chat holding one with ✎
+  (`*` in ASCII), and a line typed in System goes along into the next
+  chat if that chat has none.
+- **`/mute [30m|8h|2d|1w|off]`** for the open chat or group, for good
+  or for a while; `/unmute` undoes it. A muted chat still counts its
+  unread messages and is marked ⊘ (`-`) in the list; it is kept in
+  `config.json` on this device.
+- **Mentions in groups.** `@` and the start of a member's name
+  completes with Tab. A mention travels as `@` and the start of the
+  member's id, since names are each reader's own aliases, and every
+  reader's client shows it under the name that reader knows them by
+  (`@you` for the reader). A message that names you notifies even in a
+  muted group. [docs/design/notifications.md](docs/design/notifications.md)
+  has both.
+- **`--export-backup --with-history`** puts the history with every
+  contact in the backup, each line as it stands (edits, reactions,
+  receipts), and `--import-backup` restores it, leaving out lines gone
+  by their timer and skipping lines already there. Groups are not in a
+  backup, so neither is their history.
+
+### Changed
+
+- **After a command answers in System, Esc goes back** to the chat it
+  came from, with anything typed in the meantime, and `/verify`,
+  `/session`, `/refresh`, `/alias`, `/files` and a bare `/whois` typed
+  there act on that chat rather than asking for one to be selected.
+- **A relay outage is one line in words**, "Can't reach the relay:
+  nothing answers at its address", updated in place with each retry
+  and closed by one line saying when it came back, where each retry
+  used to add a raw error to System.
+- **Accepting a request reports its messages as read** (with read
+  receipts on), as anything read in a contact's chat is. A bare
+  `/accept` takes the only request or invitation waiting.
+- **Titles name a person by the start of their id** when the whole id
+  would push out how the chat is protected; a click on the title still
+  copies the whole id.
+- **The status line and System pane read more easily**: a message
+  gives way to the hint once typing resumes and "Looking up…" goes when
+  the lookup ends; a line too long ends in an ellipsis rather than at
+  the window's edge; the help opens on a clear screen; System shows the
+  time once per minute and marks warnings with `!`.
+- **The first run offers the key store only where it can keep a key.**
+  On a Secret Service with no default collection, as under WSL, the
+  first run used to offer the key store, fail to create the key, and
+  store the directory unencrypted with only a System line to say so.
+  The key store is tried at once now; if it cannot keep the key the
+  question is asked again, and an empty second answer says plainly that
+  the files are stored unencrypted. It is not offered under
+  `--no-keystore` or with `os_keystore` off.
+- **KWallet, tried for real**: on a fresh account it has no wallet
+  until asked for one, which the change above read as "no key store".
+  The client now asks it to make its default wallet, and KWallet shows
+  its own setup and password dialogs. A key store prompt nobody answers
+  is given up after three minutes.
+- Dependencies: tokio-util 0.7.20, redb 4.4.0, tokio-rustls 0.26.6,
+  rustls-native-certs 0.8.5, hyper-util 0.1.21, serde_json 1.0.154,
+  zeroize 1.9.1, ml-kem 0.3.3, openmls 0.9.2, thiserror 2.0.21,
+  clap 4.6.7, uuid 1.29.0, unicode-normalization 0.1.26, arboard 3.7.0,
+  open 5.4.5, nix 0.31, rlimit 0.11 and minisign-verify 0.3. The next
+  generation of the cryptography crates (dalek 3, chacha20poly1305
+  0.11 and the rest) is left for one planned change.
+
+### Fixed
+
+- **A clipboard that does not answer no longer holds the client.** A
+  display that was set but answered nothing (WSL without WSLg running,
+  a compositor without data-control) held the client at start before
+  anything was drawn. The clipboard now runs on a thread of its own
+  with a time limit on every call, and one that does not answer is set
+  aside for the run, copying going to the terminal instead.
+- Strings with runs of spaces inside them: `/whois`'s warning about a
+  name mixing alphabets, and two of the updater's error messages.
 
 ## 0.20.0 - 2026-10-30
 

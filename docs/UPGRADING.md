@@ -117,6 +117,7 @@ clients.
 
 | Version | What the relay's upgrade changes |
 | --- | --- |
+| [0.21.0](#0210) | Dependency updates only; the schema stays at 3 and the backup format at 2 |
 | [0.20.0](#0200) | Upgrade: TLS and runtime advisories fixed; the Debian package's unit moves to `/usr/lib/systemd/system` |
 | [0.19.0](#0190) | A dependency only (rustls); the schema stays at 3 and the backup format at 2 |
 | [0.18.1](#0181) | Nothing; on the client, two directories that would not open, open as they are |
@@ -127,6 +128,17 @@ clients.
 | [0.9.0](#090) | The schema moves to 3 and the backup format to 2; rolling back to 0.8.0 needs a restore |
 | [0.8.0](#080) | The schema moves to 2, the key transparency log; rolling back to 0.7.0 needs a restore |
 | [0.7.0](#070) | TLS in the relay, the admin socket, the schema version (1), metrics and JSON logs, arm64 and a container image |
+
+### 0.21.0
+
+* **Relay: optional.** Dependency updates only (redb, tokio-rustls,
+  hyper-util and others), none for an advisory. The schema stays at 3
+  and the backup format at 2, and nothing on the wire changes. The
+  "Deploy relay" GitHub workflow is gone; the installer and the
+  container image are as they were.
+* **Clients.** Nothing to do. Mentions in groups are ordinary text, so
+  an older client shows `@` and the start of an id where a newer one
+  shows a name.
 
 ### 0.20.0
 
