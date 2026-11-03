@@ -40,6 +40,44 @@ The releases, newest first; each version links to its entry.
 | [0.2.0](#020---2026-09-04) | 2026-09-04 | Phase 2: the trust model completed |
 | [0.1.0](#010---2026-09-04) | 2026-09-04 | First tagged release |
 
+## Unreleased
+
+Unlocking the data directory with a FIDO2 security key (roadmap item
+67, docs/design/security-key.md): a YubiKey or any key with the
+`hmac-secret` extension, its PIN and a touch at every start, with a
+recovery passphrase for when no key can, and a second key as a spare.
+Nothing on the wire changes, and nothing changes for a directory that
+does not enroll a key.
+
+**Upgrading.** A directory that enrolls a security key gets a version 2
+`vault.json`, which 0.21.0 and older refuse to read: every device that
+opens such a directory needs this version or later. Removing the last
+key brings the file back to version 1, with the recovery passphrase as
+an ordinary passphrase. On Windows 10 the security key goes through
+`silver-key.exe`, published with the release, which must sit beside
+`silver.exe`; `silver update` replaces `silver.exe` only, so a new
+`silver-key.exe` is fetched by hand when a release changes it.
+
+### Added
+
+- `silver --add-security-key [NAME]` enrolls the key plugged in; the
+  first asks for a recovery passphrase and replaces the passphrase or
+  key store protection, moving the files to a fresh data key, and offers
+  to enroll a spare straight away. At start the client asks for the
+  key's PIN and its touch, or takes the recovery passphrase instead;
+  `/lock` and the idle lock work as they do with a passphrase.
+- `silver --remove-security-key NAME` takes a lost, stolen or retired
+  key off, moving the files to a fresh data key wrapped under every slot
+  that stays; a key that cannot be had then can be dropped in the same
+  step. `--set-passphrase` on such a directory changes the recovery
+  passphrase the same way.
+- The crate `silver-key`: a CTAP2 client of its own (CBOR, CTAPHID, PIN
+  protocols 1 and 2, `hmac-secret` with the salt passed as WebAuthn's
+  `prf` passes it), `/dev/hidraw` on Linux, Windows 11's `webauthn.dll`,
+  and the Windows 10 helper; a software authenticator tests all of it
+  without hardware, and `tests/fixtures/security-key` pins a version 2
+  directory.
+
 ## 0.21.0 - 2026-11-03
 
 The terminal client after a day spent using it and reading it: a line

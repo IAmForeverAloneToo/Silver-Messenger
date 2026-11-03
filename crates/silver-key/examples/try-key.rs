@@ -36,16 +36,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let id = key.register(RP, &pin)?;
     println!("credential: {} bytes", id.len());
-    let ids = [id];
     let fingerprint = |s: &[u8; 32]| -> String {
         Sha256::digest(s)[..8]
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect()
     };
-    let (_, a) = key.prf(RP, &ids, b"one", &pin)?;
-    let (_, b) = key.prf(RP, &ids, b"one", &pin)?;
-    let (_, c) = key.prf(RP, &ids, b"two", &pin)?;
+    let (_, a) = key.prf(RP, &[(&id[..], &b"one"[..])], &pin)?;
+    let (_, b) = key.prf(RP, &[(&id[..], &b"one"[..])], &pin)?;
+    let (_, c) = key.prf(RP, &[(&id[..], &b"two"[..])], &pin)?;
     println!("input one: {}", fingerprint(&a));
     println!("input one: {}", fingerprint(&b));
     println!("input two: {}", fingerprint(&c));

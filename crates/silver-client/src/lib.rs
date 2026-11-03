@@ -77,7 +77,7 @@ pub const BUNDLE_CAPABILITIES: &[&str] = &[silver_protocol::bundle::capability::
 pub use silver_protocol as protocol;
 pub use store::{
     Config, Contact, ContactRequest, Conversation, Declined, Deletion, Direction, HeldMessage,
-    HistoryEntry, LOG_FILE, MAX_DECLINED, Protection, Reaction, Store,
+    HistoryEntry, LOG_FILE, MAX_DECLINED, Missing, Protection, Reaction, Store,
 };
 pub use tls::{ConnectOptions, Observed, Pin};
 pub use vault::{FileCipher, VaultError};

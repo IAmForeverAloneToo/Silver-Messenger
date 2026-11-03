@@ -44,7 +44,7 @@ The repository is a Cargo workspace with five crates:
 | `silver-relay`    | The relay server binary (`silver-relay`). Authenticates clients, stores key bundles, queues envelopes per recipient. |
 | `silver-client`   | Client core with no UI: relay connection with auto-reconnect, local store (keys, contacts, history). |
 | `silver-tui`      | The terminal client binary (`silver`), built on ratatui.                   |
-| `silver-key`      | Talking to a FIDO2 security key (CTAP2, `hmac-secret`, the PIN), for unlocking with one; in progress. |
+| `silver-key`      | Unlocking with a FIDO2 security key: CTAP2 with `hmac-secret`, and `silver-key.exe`, the Windows 10 helper. |
 
 ## Quick start
 
@@ -369,9 +369,11 @@ silver --no-mouse          leave the mouse to the terminal: no wheel scrolling, 
 silver --ascii             draw marks in ASCII (v, vv, x, ..); chosen by itself in the classic Windows console (env SILVER_ASCII)
 silver --theme <NAME>      dark (default), light for a light background, mono for no colour, or contrast for bright bold text on black; NO_COLOR means mono (env SILVER_THEME)
 silver --reader            reader mode for a screen reader: one line per event, no box drawing, no colours, no mouse; /reader on makes it the default (env SILVER_READER)
-silver --set-passphrase    encrypt keys, contacts and history under a passphrase (asked at every start)
+silver --set-passphrase    encrypt keys, contacts and history under a passphrase (asked at every start); with a security key, changes its recovery passphrase
 silver --remove-passphrase drop the passphrase; files stay encrypted under this computer's key store where there is one
 silver --no-keystore       keep the files unencrypted rather than under a key from this computer's key store; remembered
+silver --add-security-key [NAME]  unlock with a FIDO2 security key (a YubiKey, say): its PIN and a touch at every start; the first also sets a recovery passphrase
+silver --remove-security-key <NAME>  take off a key that was lost, stolen or retired; the directory moves to a fresh key under the ones that stay
 silver --reset-rollback-protection  start the record of what the directory last wrote again, when it is damaged and the client refuses to read; gives up telling whether a file was replaced with an older copy before now
 SILVER_PASSPHRASE=…        supplies the passphrase non-interactively (scripts, tests); used once, then forgotten, so /lock asks for it again
 silver --keep-passphrase   keep SILVER_PASSPHRASE in memory so /lock and the idle lock re-open without asking; for runs nobody is sitting at (env SILVER_KEEP_PASSPHRASE)
@@ -393,6 +395,19 @@ this computer's key store (the Credential Manager on Windows, the Keychain
 on macOS, the Secret Service on Linux desktops), so a copied directory is
 useless elsewhere. Where there is no key store (a server, a container) the
 files are plain and the System pane says so at start.
+
+A security key can take the place of both (`--add-security-key`, on
+Linux and Windows): any FIDO2 key with the `hmac-secret` extension, such
+as a YubiKey, its PIN and a touch at every start, so that a stolen
+computer does not open even with the key still in it. Enrolling the
+first key sets a recovery passphrase, to write down and put away, which
+opens the directory when no key can; a second key can be enrolled as a
+spare. On Linux the key's device node must be readable by you, which the
+udev rule libfido2's packages install sees to. On Windows 11 Windows
+asks for the PIN and the touch itself; on Windows 10, whose own API
+cannot do it, `silver-key.exe` from the release, kept beside
+`silver.exe`, does it in a window of its own after a UAC prompt, since
+Windows 10 lets only an elevated program reach the key.
 
 Received files go to `downloads/` inside it; they are ordinary files,
 not encrypted at rest, so other programs can open them, unless `/files
@@ -497,8 +512,9 @@ against, and what it does not, is in
   deletions, reactions and timers are content inside the encrypted body
   and look to the relay like short messages.
 * **At rest.** Everything in the data directory is encrypted under a
-  data key wrapped by the operating system's key store or a passphrase
-  (Argon2id); each file is bound to its name and a generation, so an
+  data key wrapped by the operating system's key store, a passphrase
+  (Argon2id), or a security key's `hmac-secret` with its PIN and a
+  touch; each file is bound to its name and a generation, so an
   older copy put back into a live directory is refused. `/lock` and the
   idle lock take the keys out of memory.
 * **Backups.** `--export-backup` writes the identity, the revocation

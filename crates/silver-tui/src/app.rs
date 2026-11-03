@@ -805,6 +805,8 @@ pub enum Surface {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AtRest {
     Passphrase,
+    /// A security key, or its recovery passphrase.
+    SecurityKey,
     Keystore,
     /// Plain files, and why.
     Plain(String),
@@ -1008,7 +1010,7 @@ impl App {
         app.refresh_group_list();
         app.system(Level::Info, "Welcome to Silver Messenger.");
         match &app.at_rest {
-            AtRest::Passphrase => {}
+            AtRest::Passphrase | AtRest::SecurityKey => {}
             AtRest::Keystore => app.system(
                 Level::Info,
                 "Keys, contacts and history are encrypted with a key kept in this computer's key store: a copy of the data directory is useless elsewhere. A passphrase (--set-passphrase) protects them from anyone using this account too.",
@@ -1149,10 +1151,10 @@ impl App {
         Ok(exit)
     }
 
-    /// Locking only means something when a passphrase stands between the
-    /// files and the next start.
+    /// Locking only means something when a passphrase or a security key
+    /// stands between the files and the next start.
     fn can_lock(&self) -> bool {
-        self.at_rest == AtRest::Passphrase
+        matches!(self.at_rest, AtRest::Passphrase | AtRest::SecurityKey)
     }
 
     /// `/lock`: drop the keys and ask for the passphrase again.

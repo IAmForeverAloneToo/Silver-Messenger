@@ -351,27 +351,45 @@ impl<D: Device> Key<D> {
         Ok(credential_id)
     }
 
-    /// The secret for the WebAuthn `prf` input `input`, from whichever of
-    /// `credentials` this key holds: its index and the 32 bytes. Asks for
-    /// the PIN's token, then the touch.
+    /// The secret for one of `candidates`, each a credential id and the
+    /// WebAuthn `prf` input that goes with it: whichever this key holds,
+    /// its index and the 32 bytes. One PIN token, then each credential in
+    /// turn until the key knows one; the touch is asked for only then.
     pub fn prf(
         &mut self,
         rp_id: &str,
-        credentials: &[Vec<u8>],
-        input: &[u8],
+        candidates: &[(&[u8], &[u8])],
         pin: &str,
     ) -> Result<(usize, Zeroizing<[u8; 32]>), Error> {
         self.info.check()?;
-        if credentials.is_empty() {
+        if candidates.is_empty() {
             return Err(Error::NoCredentials);
         }
         let (ours, shared) = self.agree()?;
         let token = self.pin_token(pin, PERMISSION_GA, rp_id, &ours, &shared)?;
+        for (index, (id, input)) in candidates.iter().enumerate() {
+            match self.assert_one(rp_id, id, input, &ours, &shared, &token) {
+                Err(Error::NoCredentials) => continue,
+                other => return other.map(|secret| (index, secret)),
+            }
+        }
+        Err(Error::NoCredentials)
+    }
+
+    fn assert_one(
+        &mut self,
+        rp_id: &str,
+        id: &[u8],
+        input: &[u8],
+        ours: &Value,
+        shared: &Shared,
+        token: &[u8],
+    ) -> Result<Zeroizing<[u8; 32]>, Error> {
         let protocol = shared.protocol();
         let salt_enc = shared.encrypt(&prf_salt(input));
         let salt_auth = shared.authenticate(&salt_enc);
         let mut hmac_secret = vec![
-            (1, ours),
+            (1, ours.clone()),
             (2, Value::Bytes(salt_enc)),
             (3, Value::Bytes(salt_auth)),
         ];
@@ -380,40 +398,31 @@ impl<D: Device> Key<D> {
         }
         let mut client_data_hash = [0u8; 32];
         random(&mut client_data_hash);
-        let allow = credentials
-            .iter()
-            .map(|id| {
-                Value::map([
-                    ("id", Value::Bytes(id.clone())),
-                    ("type", Value::from("public-key")),
-                ])
-            })
-            .collect();
+        let allow = Value::Array(vec![Value::map([
+            ("id", Value::Bytes(id.to_vec())),
+            ("type", Value::from("public-key")),
+        ])]);
         let params = Value::map([
             (1, Value::from(rp_id)),
             (2, Value::Bytes(client_data_hash.to_vec())),
-            (3, Value::Array(allow)),
+            (3, allow),
             (4, Value::map([("hmac-secret", Value::map(hmac_secret))])),
             (
                 6,
-                Value::Bytes(protocol.authenticate(&token, &client_data_hash)),
+                Value::Bytes(protocol.authenticate(token, &client_data_hash)),
             ),
             (7, Value::Int(protocol.number())),
         ]);
         let answer = self.command(GET_ASSERTION, &params)?;
-        // The credential is left out when the allow list had only one.
-        let index = match answer
+        // The credential may be left out, the allow list having had one.
+        if let Some(answered) = answer
             .get(1)
             .and_then(|c| c.get("id"))
             .and_then(Value::as_bytes)
+            && answered != id
         {
-            Some(id) => credentials
-                .iter()
-                .position(|c| c == id)
-                .ok_or(Error::Malformed("an unknown credential answered"))?,
-            None if credentials.len() == 1 => 0,
-            None => return Err(Error::Malformed("no credential in the answer")),
-        };
+            return Err(Error::Malformed("another credential answered"));
+        }
         let auth_data = answer
             .get(2)
             .and_then(Value::as_bytes)
@@ -434,7 +443,7 @@ impl<D: Device> Key<D> {
         }
         let mut out = Zeroizing::new([0u8; 32]);
         out.copy_from_slice(&output);
-        Ok((index, out))
+        Ok(out)
     }
 }
 

@@ -1,4 +1,5 @@
-#![forbid(unsafe_code)]
+// Unsafe only in the Windows modules, which call the Windows API.
+#![deny(unsafe_code)]
 //! Talking to a FIDO2 security key: what Silver Messenger needs to unlock
 //! a data directory with one (docs/design/security-key.md), and nothing
 //! else.
@@ -16,18 +17,26 @@
 
 pub mod cbor;
 mod ctap;
+pub mod helper_wire;
 pub mod hid;
 #[cfg(target_os = "linux")]
 pub mod hidraw;
 pub mod pin;
+mod route;
 #[cfg(any(test, feature = "soft"))]
 pub mod soft;
 #[cfg(test)]
 mod soft_tests;
+#[cfg(windows)]
+#[allow(unsafe_code)]
+pub mod windows;
 
 use sha2::{Digest, Sha256};
 
 pub use ctap::{Info, Key};
+#[cfg(target_os = "linux")]
+pub use route::find_hidraw;
+pub use route::{Authenticator, Direct, Enrolled, Prompt, platform};
 
 /// The salt the key is given for the WebAuthn `prf` input `input`:
 /// SHA-256 of "WebAuthn PRF", a zero byte, and the input.
@@ -66,6 +75,15 @@ pub enum Error {
     Hid(u8),
     #[error("the key's answer is malformed: {0}")]
     Malformed(&'static str),
+    #[error("cancelled")]
+    Cancelled,
+    /// No way to reach a key here.
+    #[error("{0}")]
+    Unavailable(&'static str),
+    #[error("the security key helper failed; its window said why")]
+    Helper,
+    #[error("Windows: {0}")]
+    Windows(String),
     #[error("the key did not answer in time")]
     Timeout,
     #[error("talking to the key: {0}")]

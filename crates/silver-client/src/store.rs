@@ -52,7 +52,12 @@ use crate::files::FileInfo;
 use crate::rollback::{COVERS_LOG_AND_OUTBOX, Generations, STATE_FILE, STATE_PREVIOUS_FILE, State};
 use crate::sequence::Seen;
 use crate::sessions::{PrekeyFile, SessionsFile};
-use crate::vault::{FileCipher, Kdf, LINE_PREFIX, VaultError, VaultFile};
+use crate::vault::{
+    FileCipher, Kdf, LINE_PREFIX, SECURITY_KEY_RP, SlotKey, SlotKind, VaultError, VaultFile,
+    fresh_slot_salt,
+};
+use silver_key::Authenticator;
+use zeroize::Zeroizing;
 
 const VAULT_FILE: &str = "vault.json";
 /// Key store entries this directory may not need, written down before the
@@ -835,6 +840,63 @@ pub enum Protection {
     Keystore,
     /// Encrypted under a key a passphrase unlocks.
     Passphrase,
+    /// Encrypted under a key a security key unlocks, touch and PIN, or a
+    /// recovery passphrase.
+    SecurityKey,
+}
+
+/// What to do about a security key that did not answer while the
+/// directory is moved to a fresh data key ([`Store::remove_security_key`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Missing {
+    /// Ask it again (another key plugged in, say).
+    Retry,
+    /// Drop its slot: it opens nothing from now on.
+    Drop,
+    /// Change nothing.
+    Cancel,
+}
+
+/// The recovery passphrase slot's name.
+const RECOVERY_LABEL: &str = "recovery";
+
+/// The secret of whichever enrolled key is plugged in: the index of its
+/// slot, and the 32 bytes.
+fn ask_security_key(
+    vault: &VaultFile,
+    auth: &mut dyn Authenticator,
+) -> anyhow::Result<(usize, Zeroizing<[u8; 32]>)> {
+    let slots: Vec<(usize, &[u8], &[u8; 32], &str)> = vault
+        .security_key_slots()
+        .filter_map(|(index, slot)| match &slot.kind {
+            SlotKind::Fido2 {
+                credential_id,
+                salt,
+                rp_id,
+            } => Some((index, credential_id.as_slice(), salt, rp_id.as_str())),
+            SlotKind::Passphrase { .. } => None,
+        })
+        .collect();
+    let rp_id = slots.first().context("no security key is enrolled")?.3;
+    if slots.iter().any(|slot| slot.3 != rp_id) {
+        bail!("the enrolled security keys are under different relying parties");
+    }
+    let candidates: Vec<(&[u8], &[u8])> = slots.iter().map(|s| (s.1, &s.2[..])).collect();
+    let (which, output) = auth
+        .secret(rp_id, &candidates)
+        .map_err(security_key_error)?;
+    let index = slots.get(which).context("the key answered for no slot")?.0;
+    Ok((index, output))
+}
+
+/// A security key's error as the rest of the client carries errors; the
+/// original stays reachable with `downcast_ref`.
+fn security_key_error(e: silver_key::Error) -> anyhow::Error {
+    match e {
+        silver_key::Error::NoCredentials => anyhow::Error::new(e)
+            .context("the security key plugged in is not one enrolled for this data directory"),
+        e => anyhow::Error::new(e),
+    }
 }
 
 /// Handle to the data directory.
@@ -915,7 +977,8 @@ impl Store {
     /// How the directory is protected on disk.
     pub fn protection(&self) -> Protection {
         match self.read_vault() {
-            Ok(Some(vault)) if vault.kdf.is_keystore() => Protection::Keystore,
+            Ok(Some(vault)) if vault.has_security_keys() => Protection::SecurityKey,
+            Ok(Some(vault)) if vault.is_keystore() => Protection::Keystore,
             Ok(Some(_)) => Protection::Passphrase,
             Ok(None) => Protection::None,
             // An unreadable vault is treated as a passphrase one: the
@@ -1028,7 +1091,7 @@ impl Store {
     fn vault_needs_key(&self, name: &str) -> anyhow::Result<bool> {
         Ok(self
             .read_vault()?
-            .is_some_and(|vault| vault.kdf.is_keystore() && vault.kdf.keystore_name() == name))
+            .is_some_and(|vault| vault.keystore_name().as_deref() == Some(name)))
     }
 
     fn read_vault(&self) -> anyhow::Result<Option<VaultFile>> {
@@ -1353,10 +1416,10 @@ impl Store {
         let vault = self
             .read_vault()?
             .context("the data directory is not protected")?;
-        if !vault.kdf.is_keystore() {
-            bail!("the data directory is protected by a passphrase, not the key store");
-        }
-        let kek = crate::keystore::load(&vault.kdf.keystore_name())?.context(
+        let Some(name) = vault.keystore_name() else {
+            bail!("the data directory is not protected by the key store");
+        };
+        let kek = crate::keystore::load(&name)?.context(
             "this computer's key store has no key for this data directory: it was copied from \
              another computer or account, or the key was removed; restore from a backup or \
              start over with a fresh data directory",
@@ -1524,6 +1587,10 @@ impl Store {
             Protection::Passphrase => {
                 bail!("a passphrase is already set; remove it first to change it")
             }
+            Protection::SecurityKey => bail!(
+                "a security key protects the data directory; its recovery passphrase is changed \
+                 instead"
+            ),
             Protection::Keystore => {
                 self.ensure_unlocked()?;
                 let old = self.read_vault()?.context("reading the vault")?;
@@ -1535,7 +1602,9 @@ impl Store {
                 // happens the vault still names this key and settling the
                 // note keeps it, and once it happens the note is the only
                 // record that the superseded key is still in the store.
-                let old_name = old.kdf.keystore_name();
+                let old_name = old
+                    .keystore_name()
+                    .context("the vault names no key store key")?;
                 self.add_pending(&old_name)?;
                 let anchor = self.anchor();
                 self.rotate_key(&cipher, |c| {
@@ -1571,6 +1640,12 @@ impl Store {
     /// encrypted under a key kept there; otherwise they are stored
     /// unencrypted again. Says which happened.
     pub fn remove_passphrase(&mut self) -> anyhow::Result<Protection> {
+        if self.protection() == Protection::SecurityKey {
+            bail!(
+                "a security key protects the data directory, and its recovery passphrase stays \
+                 while it does; remove the security keys first"
+            );
+        }
         if self.protection() != Protection::Passphrase {
             bail!("no passphrase is set");
         }
@@ -1638,7 +1713,7 @@ impl Store {
         // Before the vault goes, since the vault is the only other record
         // that the key exists: a crash between the two used to leave a key
         // opening a copy of the directory taken while it was encrypted.
-        let keystore_name = vault.kdf.is_keystore().then(|| vault.kdf.keystore_name());
+        let keystore_name = vault.keystore_name();
         if let Some(name) = &keystore_name {
             self.add_pending(name)?;
         }
@@ -1653,6 +1728,268 @@ impl Store {
             self.clear_pending(name);
         }
         Ok(Protection::None)
+    }
+
+    // --- security keys (docs/design/security-key.md) ----------------------
+
+    /// The names of the security keys that open this directory.
+    pub fn security_keys(&self) -> anyhow::Result<Vec<String>> {
+        Ok(self
+            .read_vault()?
+            .map(|vault| {
+                vault
+                    .security_key_slots()
+                    .map(|(_, slot)| slot.label.clone())
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// Unlock with whichever enrolled security key is plugged in: its PIN,
+    /// then its touch. The recovery passphrase goes through
+    /// [`Store::unlock`].
+    pub fn unlock_with_security_key(&mut self, auth: &mut dyn Authenticator) -> anyhow::Result<()> {
+        let vault = self
+            .read_vault()?
+            .filter(VaultFile::has_security_keys)
+            .context("no security key protects the data directory")?;
+        let (index, output) = ask_security_key(&vault, auth)?;
+        let cipher = FileCipher::unlock_with_security_key(&vault, index, &output)?;
+        self.cipher = Some(Arc::new(cipher));
+        self.seal_stragglers()?;
+        self.finish_rotation(&vault)?;
+        self.load_generations()?;
+        Ok(())
+    }
+
+    /// Enroll a security key, named `label`, to open the directory.
+    ///
+    /// The first key needs `recovery`, the recovery passphrase, which
+    /// opens the directory when no key can; it replaces whatever protected
+    /// the directory before, and the files move to a fresh data key, so
+    /// that the old passphrase or key store key opens nothing written from
+    /// now on. A second key is only a slot more, and needs the directory
+    /// unlocked and nothing else.
+    pub fn add_security_key(
+        &mut self,
+        auth: &mut dyn Authenticator,
+        label: &str,
+        recovery: Option<&str>,
+    ) -> anyhow::Result<()> {
+        self.add_security_key_with(auth, label, recovery, Kdf::default_params())
+    }
+
+    #[doc(hidden)]
+    pub fn add_security_key_with(
+        &mut self,
+        auth: &mut dyn Authenticator,
+        label: &str,
+        recovery: Option<&str>,
+        kdf: Kdf,
+    ) -> anyhow::Result<()> {
+        self.ensure_unlocked()?;
+        let label = label.trim();
+        if label.is_empty() {
+            bail!("a security key needs a name");
+        }
+        let protection = self.protection();
+        let vault = self.read_vault()?;
+        if let Some(vault) = &vault
+            && vault.slots.iter().any(|slot| slot.label == label)
+        {
+            bail!("a security key named {label:?} is already enrolled");
+        }
+        let recovery = match protection {
+            Protection::SecurityKey => None,
+            _ => {
+                let recovery = recovery
+                    .filter(|r| !r.is_empty())
+                    .context("the first security key needs a recovery passphrase")?;
+                Some(SlotKey::passphrase(recovery, kdf, RECOVERY_LABEL)?)
+            }
+        };
+        // The key first: until it has answered nothing has changed.
+        let salt = fresh_slot_salt();
+        let enrolled = auth
+            .enroll(SECURITY_KEY_RP, &salt)
+            .map_err(security_key_error)?;
+        let key = SlotKey::security_key(
+            enrolled.credential_id,
+            salt,
+            SECURITY_KEY_RP,
+            label,
+            &enrolled.secret,
+        );
+        match (protection, recovery) {
+            (Protection::SecurityKey, _) => {
+                let mut vault = vault.context("reading the vault")?;
+                let cipher = self
+                    .cipher
+                    .clone()
+                    .context("the data directory is locked")?;
+                cipher.add_slot(&mut vault, &key);
+                self.write_vault(&vault)
+            }
+            (Protection::None, Some(recovery)) => {
+                let cipher = Arc::new(FileCipher::fresh());
+                // The vault first; see `protect_with_keystore`.
+                self.write_vault(&cipher.wrap_slots(&[key, recovery], None))?;
+                self.cipher = Some(cipher.clone());
+                self.recrypt_all(None, Some(&cipher)).context(
+                    "the security key is enrolled, but not every file could be encrypted; the \
+                     rest are sealed the next time the directory is unlocked",
+                )?;
+                self.load_generations()
+            }
+            (_, Some(recovery)) => {
+                let cipher = self
+                    .cipher
+                    .clone()
+                    .context("the data directory is locked")?;
+                // As in `set_passphrase_with`: noted before the rotation,
+                // taken out after it.
+                let old_name = vault.as_ref().and_then(VaultFile::keystore_name);
+                if let Some(name) = &old_name {
+                    self.add_pending(name)?;
+                }
+                let anchor = self.anchor();
+                let slots = [key, recovery];
+                self.rotate_key(&cipher, |c| Ok(c.wrap_slots(&slots, anchor)))?;
+                if let Some(name) = old_name {
+                    crate::keystore::delete(&name).context(
+                        "the security key is enrolled and the files are under a new key, but \
+                         the old key could not be taken out of the key store; remove it by hand",
+                    )?;
+                    self.clear_pending(&name);
+                }
+                Ok(())
+            }
+            (_, None) => unreachable!("asked for above"),
+        }
+    }
+
+    /// Take the security key named `label` off: the directory moves to a
+    /// fresh data key, so that an old copy of `vault.json` and the removed
+    /// key together open nothing written afterwards.
+    ///
+    /// Wrapping the new key needs every slot that stays: the recovery
+    /// passphrase, and each other key once, plugged in, PIN and touch. A
+    /// key that cannot be had is put to `missing`, which says to try it
+    /// again, to drop it, or to give up. With no key left, the recovery
+    /// passphrase becomes the directory's ordinary passphrase.
+    pub fn remove_security_key(
+        &mut self,
+        label: &str,
+        auth: &mut dyn Authenticator,
+        recovery: &str,
+        missing: &mut dyn FnMut(&str, &anyhow::Error) -> Missing,
+    ) -> anyhow::Result<Protection> {
+        self.rekey_security_keys(
+            Some(label),
+            auth,
+            recovery,
+            recovery,
+            missing,
+            Kdf::default_params(),
+        )
+    }
+
+    /// The recovery passphrase changed from `old` to `new`, the directory
+    /// moved to a fresh data key under every key as for a removal, so that
+    /// the old passphrase opens nothing written from now on.
+    pub fn change_recovery_passphrase(
+        &mut self,
+        auth: &mut dyn Authenticator,
+        old: &str,
+        new: &str,
+        missing: &mut dyn FnMut(&str, &anyhow::Error) -> Missing,
+    ) -> anyhow::Result<Protection> {
+        self.rekey_security_keys(None, auth, old, new, missing, Kdf::default_params())
+    }
+
+    #[doc(hidden)]
+    pub fn rekey_security_keys(
+        &mut self,
+        without: Option<&str>,
+        auth: &mut dyn Authenticator,
+        recovery: &str,
+        new_recovery: &str,
+        missing: &mut dyn FnMut(&str, &anyhow::Error) -> Missing,
+        kdf: Kdf,
+    ) -> anyhow::Result<Protection> {
+        self.ensure_unlocked()?;
+        if new_recovery.is_empty() {
+            bail!("the recovery passphrase must not be empty");
+        }
+        let vault = self
+            .read_vault()?
+            .filter(VaultFile::has_security_keys)
+            .context("no security key protects the data directory")?;
+        if let Some(label) = without
+            && !vault
+                .security_key_slots()
+                .any(|(_, slot)| slot.label == label)
+        {
+            bail!("no security key named {label:?} is enrolled");
+        }
+        if !FileCipher::is_recovery_passphrase(&vault, recovery)? {
+            return Err(VaultError::WrongPassphrase.into());
+        }
+        let cipher = self
+            .cipher
+            .clone()
+            .context("the data directory is locked")?;
+        let mut slots = Vec::new();
+        for (_, slot) in vault.security_key_slots() {
+            if Some(slot.label.as_str()) == without {
+                continue;
+            }
+            let SlotKind::Fido2 {
+                credential_id,
+                rp_id,
+                ..
+            } = &slot.kind
+            else {
+                unreachable!("a security key slot");
+            };
+            // A fresh salt: an output seen before opens nothing new.
+            let salt = fresh_slot_salt();
+            loop {
+                match auth.secret(rp_id, &[(credential_id, &salt)]) {
+                    Ok((_, output)) => {
+                        slots.push(SlotKey::security_key(
+                            credential_id.clone(),
+                            salt,
+                            rp_id,
+                            &slot.label,
+                            &output,
+                        ));
+                        break;
+                    }
+                    Err(e) => {
+                        let e = security_key_error(e);
+                        match missing(&slot.label, &e) {
+                            Missing::Retry => continue,
+                            Missing::Drop => break,
+                            Missing::Cancel => return Err(e),
+                        }
+                    }
+                }
+            }
+        }
+        let recovery_label = vault
+            .passphrase_slot()
+            .map_or(RECOVERY_LABEL.to_owned(), |(_, slot)| slot.label.clone());
+        let anchor = self.anchor();
+        if slots.is_empty() {
+            self.rotate_key(&cipher, |c| {
+                c.wrap_under_passphrase(new_recovery, kdf.clone(), anchor)
+            })?;
+            return Ok(Protection::Passphrase);
+        }
+        slots.push(SlotKey::passphrase(new_recovery, kdf, &recovery_label)?);
+        self.rotate_key(&cipher, |c| Ok(c.wrap_slots(&slots, anchor)))?;
+        Ok(Protection::SecurityKey)
     }
 
     fn ensure_unlocked(&self) -> anyhow::Result<()> {
@@ -2127,8 +2464,7 @@ impl Store {
             .read_vault()
             .ok()
             .flatten()
-            .filter(|vault| vault.kdf.is_keystore())
-            .map(|vault| vault.kdf.keystore_name());
+            .and_then(|vault| vault.keystore_name());
         // Noted before the vault naming it goes, so a wipe that dies partway
         // through still has the key taken out on the next start rather than
         // leaving it beside whatever copy was made first.
@@ -3863,7 +4199,7 @@ mod tests {
         // forgets its key too.
         let raw_before = fs::read(&identity_path).unwrap();
         let old_vault = again.read_vault().unwrap().unwrap();
-        let name = old_vault.kdf.keystore_name();
+        let name = old_vault.keystore_name().unwrap();
         let old_kek = crate::keystore::load(&name).unwrap().unwrap();
         again
             .set_passphrase_with("correct horse", Kdf::fast())
@@ -3915,7 +4251,12 @@ mod tests {
         let (mut store, dir) = temp_store();
         store.load_or_create_identity().unwrap();
         store.protect_with_keystore().unwrap();
-        let name = store.read_vault().unwrap().unwrap().kdf.keystore_name();
+        let name = store
+            .read_vault()
+            .unwrap()
+            .unwrap()
+            .keystore_name()
+            .unwrap();
         assert!(crate::keystore::load(&name).unwrap().is_some());
 
         // Both halves of the log, which at `debug` name envelope ids,
@@ -3954,7 +4295,12 @@ mod tests {
 
         // The key the vault names stays, whatever else failed.
         store.protect_with_keystore().unwrap();
-        let name = store.read_vault().unwrap().unwrap().kdf.keystore_name();
+        let name = store
+            .read_vault()
+            .unwrap()
+            .unwrap()
+            .keystore_name()
+            .unwrap();
         store.drop_unused_kek(&name);
         assert!(crate::keystore::load(&name).unwrap().is_some());
 
@@ -4000,7 +4346,12 @@ mod tests {
         let mut store = Store::open(dir.path()).unwrap();
         store.load_or_create_identity().unwrap();
         store.protect_with_keystore().unwrap();
-        let live = store.read_vault().unwrap().unwrap().kdf.keystore_name();
+        let live = store
+            .read_vault()
+            .unwrap()
+            .unwrap()
+            .keystore_name()
+            .unwrap();
         store.add_pending(&live).unwrap();
         drop(store);
         let store = Store::open(dir.path()).unwrap();
@@ -4023,7 +4374,12 @@ mod tests {
         let mut store = Store::open(dir.path()).unwrap();
         store.load_or_create_identity().unwrap();
         store.protect_with_keystore().unwrap();
-        let name = store.read_vault().unwrap().unwrap().kdf.keystore_name();
+        let name = store
+            .read_vault()
+            .unwrap()
+            .unwrap()
+            .keystore_name()
+            .unwrap();
         store.add_pending(&name).unwrap();
         drop(store);
 
@@ -4053,7 +4409,12 @@ mod tests {
         let mut store = Store::open(dir.path()).unwrap();
         store.load_or_create_identity().unwrap();
         store.protect_with_keystore().unwrap();
-        let name = store.read_vault().unwrap().unwrap().kdf.keystore_name();
+        let name = store
+            .read_vault()
+            .unwrap()
+            .unwrap()
+            .keystore_name()
+            .unwrap();
 
         // Stop after the vault is gone but before the key is.
         store.add_pending(&name).unwrap();
@@ -4861,5 +5222,40 @@ mod tests {
         let read: Contact = serde_json::from_str(&json).unwrap();
         assert_eq!(read.pinned_by, None);
         assert_eq!(read.verified_by, None);
+    }
+
+    /// A directory the key store protected moves to a security key: a
+    /// fresh data key, and the key store's key taken out, since it would
+    /// still open a copy taken before the change.
+    #[test]
+    fn a_key_store_directory_enrolling_a_security_key_leaves_nothing_in_the_key_store() {
+        let (mut store, dir) = bound_store();
+        let name = store
+            .read_vault()
+            .unwrap()
+            .unwrap()
+            .keystore_name()
+            .unwrap();
+        assert!(crate::keystore::load(&name).unwrap().is_some());
+        let key = std::sync::Arc::new(std::sync::Mutex::new(
+            silver_key::soft::SoftKey::new([3; 32]).with_pin("4831"),
+        ));
+        let mut auth = silver_key::soft::authenticator(key.clone(), "4831");
+        store
+            .add_security_key_with(&mut auth, "YubiKey", Some("recovery"), Kdf::fast())
+            .unwrap();
+        assert_eq!(store.protection(), Protection::SecurityKey);
+        assert!(crate::keystore::load(&name).unwrap().is_none());
+        assert!(store.read_pending().is_empty());
+        // The key store has nothing to say about it from now on.
+        assert!(store.unlock_with_keystore().is_err());
+        let mut again = Store::open(dir.path()).unwrap();
+        again.unlock_with_security_key(&mut auth).unwrap();
+        assert!(again.load_or_create_identity().is_ok());
+        // Neither the passphrase nor the key store can be put in its place
+        // while a key protects it.
+        assert!(again.set_passphrase_with("x", Kdf::fast()).is_err());
+        assert!(again.remove_passphrase().is_err());
+        assert!(again.protect_with_keystore().is_err());
     }
 }

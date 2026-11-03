@@ -127,7 +127,7 @@ impl Shared {
     }
 
     pub(crate) fn encrypt_with_iv(&self, iv: &[u8; 16], plain: &[u8]) -> Vec<u8> {
-        assert!(plain.len() % 16 == 0, "whole AES blocks only");
+        assert!(plain.len().is_multiple_of(16), "whole AES blocks only");
         let body = Encryptor::new_from_slices(self.aes_key(), iv)
             .expect("32-byte key, 16-byte IV")
             .encrypt_padded_vec::<NoPadding>(plain);

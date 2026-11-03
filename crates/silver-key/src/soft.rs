@@ -539,3 +539,55 @@ impl Device for SoftKey {
         Ok(self.outgoing.pop_front())
     }
 }
+
+/// One software key shared between the [`crate::Key`]s opened on it, as one
+/// key plugged in is shared between the program's runs.
+impl Device for std::sync::Arc<std::sync::Mutex<SoftKey>> {
+    fn write_report(&mut self, report: &[u8; REPORT]) -> Result<(), Error> {
+        self.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .write_report(report)
+    }
+
+    fn read_report(&mut self, timeout: Duration) -> Result<Option<[u8; REPORT]>, Error> {
+        self.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .read_report(timeout)
+    }
+}
+
+/// A [`Prompt`](crate::Prompt) that answers with one PIN every time, for
+/// tests. `None` is a key nobody types a PIN for.
+#[derive(Clone)]
+pub struct FixedPin(pub Option<String>);
+
+impl crate::Prompt for FixedPin {
+    fn pin(&mut self, _retries: Option<u32>, wrong: bool) -> Option<zeroize::Zeroizing<String>> {
+        if wrong {
+            return None;
+        }
+        self.0.clone().map(zeroize::Zeroizing::new)
+    }
+
+    fn new_pin(&mut self) -> Option<zeroize::Zeroizing<String>> {
+        self.0.clone().map(zeroize::Zeroizing::new)
+    }
+
+    fn insert(&mut self) -> bool {
+        false
+    }
+
+    fn touch(&mut self) -> Box<dyn FnMut() + Send> {
+        Box::new(|| {})
+    }
+}
+
+/// An [`Authenticator`](crate::Authenticator) on `key`, the PIN prompt
+/// answering with `pin` (and giving up once it was wrong).
+pub fn authenticator(
+    key: std::sync::Arc<std::sync::Mutex<SoftKey>>,
+    pin: &str,
+) -> impl crate::Authenticator {
+    let pin = FixedPin(Some(pin.to_owned()));
+    crate::Direct::new(move || Ok(Some(key.clone())), pin)
+}

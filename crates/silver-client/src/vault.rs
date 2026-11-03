@@ -6,6 +6,12 @@
 //! and bound to its own name, so files cannot be swapped for one another.
 //! Line-oriented files (history) encrypt each line separately, so appending
 //! stays cheap.
+//!
+//! A directory unlocked by a security key has a version 2 vault instead
+//! (docs/design/security-key.md, section 3): several slots, each wrapping
+//! the same data key under its own key-encryption key, one per enrolled
+//! key and one for the recovery passphrase. Every other directory keeps
+//! the version 1 file exactly.
 
 use std::fmt;
 
@@ -13,6 +19,7 @@ use anyhow::{Context, bail};
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -39,11 +46,24 @@ pub const LINE_PREFIX: &str = "enc:";
 /// in the operating system's key store rather than under a passphrase.
 pub const KEYSTORE_ALGORITHM: &str = "os-keystore";
 const PASSPHRASE_ALGORITHM: &str = "argon2id";
+/// The relying party every security key credential is made under: one
+/// string for the program, the same on every system, because a
+/// credential answers only under the one it was made with.
+pub const SECURITY_KEY_RP: &str = "silver-messenger.local";
+/// In front of a security key slot's credential id and salt, when its
+/// key-encryption key is derived from the key's output.
+const FIDO_SLOT_INFO: &[u8] = b"silver-messenger/v2/vault/fido2-slot\0";
+/// Associated data for the data key a rotation is moving off, which a
+/// version 2 vault keeps wrapped under the current data key: whichever
+/// slot opened that one opens it too.
+const PREVIOUS_AAD: &[u8] = b"silver-messenger/v2/vault/previous";
 
 #[derive(Debug, thiserror::Error)]
 pub enum VaultError {
     #[error("wrong passphrase")]
     WrongPassphrase,
+    #[error("the security key's answer does not open this vault")]
+    WrongSecurityKey,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -109,18 +129,28 @@ impl Kdf {
 }
 
 /// Contents of `vault.json`.
+///
+/// Version 1 wraps the data key once, under the key `kdf` describes.
+/// Version 2 has `slots` instead of `kdf`, `wrapped_key` and
+/// `wrapped_naming_key`; the rest is common to both.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VaultFile {
     pub version: u32,
-    pub kdf: Kdf,
-    /// `nonce || XChaCha20-Poly1305(data key)` under the stretched passphrase.
-    #[serde(with = "b64")]
+    /// Version 1: how the key-encryption key is made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kdf: Option<Kdf>,
+    /// Version 1: `nonce || XChaCha20-Poly1305(data key)` under the
+    /// key-encryption key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty", with = "b64")]
     pub wrapped_key: Vec<u8>,
-    /// The data key the directory is being moved off, wrapped under the
-    /// same new key-encryption key. Present only while a rotation is under
-    /// way: it says that some files are still under the old key and that
-    /// reading them is expected. When the last one has been rewritten the
-    /// field goes, and with it the old key.
+    /// The data key the directory is being moved off. Present only while a
+    /// rotation is under way: it says that some files are still under the
+    /// old key and that reading them is expected. When the last one has
+    /// been rewritten the field goes, and with it the old key.
+    ///
+    /// Version 1 wraps it under the same key-encryption key as the data
+    /// key; version 2 under the current data key, so that every slot
+    /// reaches it.
     #[serde(default, skip_serializing_if = "Option::is_none", with = "b64_opt")]
     pub previous_key: Option<Vec<u8>>,
     /// Which version of `state` belongs to this directory, or `None` in a
@@ -134,8 +164,8 @@ pub struct VaultFile {
     /// something is in `state`, encrypted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state_generation: Option<u64>,
-    /// The key history file names are MACed under (SM-C-25), wrapped
-    /// under the same key-encryption key as the data key.
+    /// Version 1: the key history file names are MACed under (SM-C-25),
+    /// wrapped under the same key-encryption key as the data key.
     ///
     /// A key of its own, and kept here rather than derived from the data
     /// key, because the data key rotates: a passphrase set or dropped
@@ -147,6 +177,138 @@ pub struct VaultFile {
     /// alone.
     #[serde(default, skip_serializing_if = "Option::is_none", with = "b64_opt")]
     pub wrapped_naming_key: Option<Vec<u8>>,
+    /// Version 2: the ways in.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slots: Vec<Slot>,
+}
+
+impl VaultFile {
+    /// Whether the key-encryption key is kept in the key store.
+    pub fn is_keystore(&self) -> bool {
+        self.version == 1 && self.kdf.as_ref().is_some_and(Kdf::is_keystore)
+    }
+
+    /// The name the key store keeps the key-encryption key under, for a
+    /// vault that keeps it there.
+    pub fn keystore_name(&self) -> Option<String> {
+        self.kdf
+            .as_ref()
+            .filter(|_| self.is_keystore())
+            .map(Kdf::keystore_name)
+    }
+
+    /// Whether security keys open this directory.
+    pub fn has_security_keys(&self) -> bool {
+        self.version == 2
+    }
+
+    /// The security key slots: index, and the slot.
+    pub fn security_key_slots(&self) -> impl Iterator<Item = (usize, &Slot)> {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| matches!(slot.kind, SlotKind::Fido2 { .. }))
+    }
+
+    /// The recovery passphrase's slot.
+    pub fn passphrase_slot(&self) -> Option<(usize, &Slot)> {
+        self.slots
+            .iter()
+            .enumerate()
+            .find(|(_, slot)| matches!(slot.kind, SlotKind::Passphrase { .. }))
+    }
+}
+
+/// One way into a version 2 vault: the data key and the naming key
+/// wrapped under a key-encryption key of the slot's own.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Slot {
+    #[serde(flatten)]
+    pub kind: SlotKind,
+    /// What the person called it ("YubiKey", "recovery").
+    pub label: String,
+    #[serde(with = "b64")]
+    pub wrapped_key: Vec<u8>,
+    #[serde(with = "b64")]
+    pub wrapped_naming_key: Vec<u8>,
+}
+
+/// What a slot's key-encryption key is made from.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum SlotKind {
+    /// A security key's `hmac-secret` output for `salt`, as WebAuthn's
+    /// `prf` input, from the credential `credential_id`. In the clear, as
+    /// an Argon2 salt is: meaningless without the key.
+    Fido2 {
+        #[serde(with = "b64")]
+        credential_id: Vec<u8>,
+        #[serde(with = "b64_array")]
+        salt: [u8; 32],
+        rp_id: String,
+    },
+    /// The recovery passphrase, stretched as a passphrase is.
+    Passphrase { kdf: Kdf },
+}
+
+/// A slot's key-encryption key, made and ready to wrap under.
+pub struct SlotKey {
+    kind: SlotKind,
+    label: String,
+    kek: Zeroizing<[u8; 32]>,
+}
+
+impl SlotKey {
+    /// A security key slot: `output` is the key's secret for `salt`.
+    pub fn security_key(
+        credential_id: Vec<u8>,
+        salt: [u8; 32],
+        rp_id: &str,
+        label: &str,
+        output: &[u8; 32],
+    ) -> Self {
+        Self {
+            kek: fido_kek(output, &credential_id, &salt),
+            kind: SlotKind::Fido2 {
+                credential_id,
+                salt,
+                rp_id: rp_id.to_owned(),
+            },
+            label: label.to_owned(),
+        }
+    }
+
+    /// The recovery passphrase's slot.
+    pub fn passphrase(passphrase: &str, kdf: Kdf, label: &str) -> anyhow::Result<Self> {
+        Ok(Self {
+            kek: derive(&kdf, passphrase)?,
+            kind: SlotKind::Passphrase { kdf },
+            label: label.to_owned(),
+        })
+    }
+}
+
+/// A fresh salt for a security key slot.
+pub fn fresh_slot_salt() -> [u8; 32] {
+    let mut salt = [0u8; 32];
+    OsRng.fill_bytes(&mut salt);
+    salt
+}
+
+/// A security key slot's key-encryption key: HKDF-SHA256 over the key's
+/// output, with the credential and the salt in the info, so that a slot's
+/// wrapping cannot be moved to another slot and still open.
+fn fido_kek(output: &[u8; 32], credential_id: &[u8], salt: &[u8; 32]) -> Zeroizing<[u8; 32]> {
+    let mut info = FIDO_SLOT_INFO.to_vec();
+    let len = u16::try_from(credential_id.len()).unwrap_or(u16::MAX);
+    info.extend_from_slice(&len.to_be_bytes());
+    info.extend_from_slice(credential_id);
+    info.extend_from_slice(salt);
+    let mut kek = Zeroizing::new([0u8; 32]);
+    Hkdf::<Sha256>::new(None, output)
+        .expand(&info, kek.as_mut_slice())
+        .expect("32 bytes is a valid HKDF-SHA256 output");
+    kek
 }
 
 /// A file that opened, and the generation it says it was written at.
@@ -182,13 +344,14 @@ impl FileCipher {
         Ok((
             VaultFile {
                 version: 1,
-                kdf,
+                kdf: Some(kdf),
                 wrapped_key,
                 previous_key: None,
                 // A fresh directory has no `state` yet; the store writes
                 // one and stamps this on the first write.
                 state_generation: None,
                 wrapped_naming_key: Some(seal(&kek, NAMING_AAD, naming_key.as_slice())),
+                slots: Vec::new(),
             },
             Self {
                 key,
@@ -198,13 +361,126 @@ impl FileCipher {
         ))
     }
 
-    /// Recover the data key from `vault` with `passphrase`.
-    pub fn unlock(vault: &VaultFile, passphrase: &str) -> Result<Self, VaultError> {
-        if vault.version != 1 || vault.kdf.algorithm != PASSPHRASE_ALGORITHM {
-            return Err(anyhow::anyhow!("unsupported vault format").into());
+    /// A fresh data key and naming key, not yet written down anywhere.
+    pub fn fresh() -> Self {
+        let mut key = Zeroizing::new([0u8; 32]);
+        OsRng.fill_bytes(key.as_mut_slice());
+        Self {
+            key,
+            previous: None,
+            naming_key: fresh_naming_key(),
         }
-        let kek = derive(&vault.kdf, passphrase)?;
+    }
+
+    /// Recover the data key from `vault` with `passphrase`: the
+    /// passphrase of a version 1 vault, or the recovery passphrase of a
+    /// version 2 one.
+    pub fn unlock(vault: &VaultFile, passphrase: &str) -> Result<Self, VaultError> {
+        if vault.version == 2 {
+            let (index, slot) = check_v2(vault)?
+                .passphrase_slot()
+                .ok_or_else(|| anyhow::anyhow!("the vault has no recovery passphrase"))?;
+            let SlotKind::Passphrase { kdf } = &slot.kind else {
+                unreachable!("a passphrase slot");
+            };
+            let kek = derive(kdf, passphrase)?;
+            return Self::unwrap_slot(vault, index, &kek).map_err(|e| match e {
+                VaultError::WrongSecurityKey => VaultError::WrongPassphrase,
+                other => other,
+            });
+        }
+        let kdf = match &vault.kdf {
+            Some(kdf) if vault.version == 1 && kdf.algorithm == PASSPHRASE_ALGORITHM => kdf,
+            _ => return Err(anyhow::anyhow!("unsupported vault format").into()),
+        };
+        let kek = derive(kdf, passphrase)?;
         Self::unwrap(vault, &kek)
+    }
+
+    /// Recover the data key from the security key slot at `index` of a
+    /// version 2 vault, with the key's secret for that slot's salt.
+    pub fn unlock_with_security_key(
+        vault: &VaultFile,
+        index: usize,
+        output: &[u8; 32],
+    ) -> Result<Self, VaultError> {
+        let slot = check_v2(vault)?
+            .slots
+            .get(index)
+            .ok_or_else(|| anyhow::anyhow!("no such slot"))?;
+        let SlotKind::Fido2 {
+            credential_id,
+            salt,
+            ..
+        } = &slot.kind
+        else {
+            return Err(anyhow::anyhow!("not a security key slot").into());
+        };
+        Self::unwrap_slot(vault, index, &fido_kek(output, credential_id, salt))
+    }
+
+    fn unwrap_slot(vault: &VaultFile, index: usize, kek: &[u8; 32]) -> Result<Self, VaultError> {
+        let slot = &vault.slots[index];
+        let key = open(kek, VAULT_AAD, &slot.wrapped_key).ok_or(VaultError::WrongSecurityKey)?;
+        let key = to_key(&key, "a key")?;
+        let naming_key =
+            open(kek, NAMING_AAD, &slot.wrapped_naming_key).ok_or(VaultError::WrongSecurityKey)?;
+        let naming_key = to_key(&naming_key, "a naming key")?;
+        let previous = match &vault.previous_key {
+            Some(wrapped) => {
+                let old = open(&key, PREVIOUS_AAD, wrapped).ok_or_else(|| {
+                    anyhow::anyhow!("the vault's previous key does not open under its data key")
+                })?;
+                Some(to_key(&old, "a previous key")?)
+            }
+            None => None,
+        };
+        Ok(Self {
+            key,
+            previous,
+            naming_key,
+        })
+    }
+
+    /// Whether `passphrase` is the recovery passphrase of `vault`, a
+    /// version 2 one.
+    pub fn is_recovery_passphrase(vault: &VaultFile, passphrase: &str) -> anyhow::Result<bool> {
+        match Self::unlock(vault, passphrase) {
+            Ok(_) => Ok(true),
+            Err(VaultError::WrongPassphrase) => Ok(false),
+            Err(e) => Err(anyhow::anyhow!(e)),
+        }
+    }
+
+    /// The data key and naming key wrapped under each of `slots`: a
+    /// version 2 vault.
+    pub fn wrap_slots(&self, slots: &[SlotKey], state_generation: Option<u64>) -> VaultFile {
+        VaultFile {
+            version: 2,
+            kdf: None,
+            wrapped_key: Vec::new(),
+            previous_key: self
+                .previous
+                .as_ref()
+                .map(|old| seal(&self.key, PREVIOUS_AAD, old.as_slice())),
+            state_generation,
+            wrapped_naming_key: None,
+            slots: slots.iter().map(|slot| self.slot(slot)).collect(),
+        }
+    }
+
+    /// `slot` added to a version 2 vault, the others left as they are.
+    pub fn add_slot(&self, vault: &mut VaultFile, slot: &SlotKey) {
+        vault.slots.push(self.slot(slot));
+    }
+
+    fn slot(&self, slot: &SlotKey) -> Slot {
+        Slot {
+            kind: slot.kind.clone(),
+            label: slot.label.clone(),
+            wrapped_key: seal(&slot.kek, VAULT_AAD, self.key.as_slice()),
+            wrapped_naming_key: seal(&slot.kek, NAMING_AAD, self.naming_key.as_slice()),
+        }
     }
 
     /// Make a fresh data key wrapped under `kek`, a random key the caller
@@ -224,7 +500,7 @@ impl FileCipher {
 
     /// Recover the data key from a key-store vault with its `kek`.
     pub fn unlock_with_kek(vault: &VaultFile, kek: &[u8; 32]) -> Result<Self, VaultError> {
-        if vault.version != 1 || !vault.kdf.is_keystore() {
+        if !vault.is_keystore() {
             return Err(anyhow::anyhow!("unsupported vault format").into());
         }
         Self::unwrap(vault, kek)
@@ -318,7 +594,7 @@ impl FileCipher {
     fn wrapped(&self, kdf: Kdf, kek: &[u8; 32], state_generation: Option<u64>) -> VaultFile {
         VaultFile {
             version: 1,
-            kdf,
+            kdf: Some(kdf),
             wrapped_key: seal(kek, VAULT_AAD, self.key.as_slice()),
             previous_key: self
                 .previous
@@ -326,6 +602,7 @@ impl FileCipher {
                 .map(|old| seal(kek, VAULT_AAD, old.as_slice())),
             state_generation,
             wrapped_naming_key: Some(seal(kek, NAMING_AAD, self.naming_key.as_slice())),
+            slots: Vec::new(),
         }
     }
 
@@ -517,6 +794,21 @@ fn file_aad(name: &str, at: Option<u64>) -> Vec<u8> {
     }
 }
 
+/// A version 2 vault, checked for the shape one must have.
+fn check_v2(vault: &VaultFile) -> Result<&VaultFile, VaultError> {
+    if vault.version != 2 || vault.slots.is_empty() || vault.kdf.is_some() {
+        return Err(anyhow::anyhow!("unsupported vault format").into());
+    }
+    Ok(vault)
+}
+
+fn to_key(bytes: &[u8], what: &str) -> Result<Zeroizing<[u8; 32]>, VaultError> {
+    let key: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("vault holds {what} of the wrong size"))?;
+    Ok(Zeroizing::new(key))
+}
+
 /// A random key for MACing history file names.
 fn fresh_naming_key() -> Zeroizing<[u8; 32]> {
     let mut key = Zeroizing::new([0u8; 32]);
@@ -627,7 +919,7 @@ mod tests {
     fn a_file_cannot_ask_for_more_work_than_the_program_will_do() {
         let (mut vault, _) = FileCipher::create("hunter2", Kdf::fast()).unwrap();
         assert!(FileCipher::unlock(&vault, "hunter2").is_ok());
-        let sane = vault.kdf.clone();
+        let sane = vault.kdf.clone().unwrap();
         for kdf in [
             Kdf {
                 m_cost_kib: u32::MAX,
@@ -642,7 +934,7 @@ mod tests {
                 ..sane.clone()
             },
         ] {
-            vault.kdf = kdf;
+            vault.kdf = Some(kdf);
             let refusal = FileCipher::unlock(&vault, "hunter2").unwrap_err();
             assert!(
                 refusal.to_string().contains("more work"),
@@ -662,7 +954,7 @@ mod tests {
 
         let rotating = old.rotating();
         let vault = rotating
-            .wrap_under_passphrase("hunter2", vault.kdf, None)
+            .wrap_under_passphrase("hunter2", vault.kdf.unwrap(), None)
             .unwrap();
         assert!(vault.previous_key.is_some());
         let rotating = FileCipher::unlock(&vault, "hunter2").unwrap();
@@ -693,7 +985,7 @@ mod tests {
         let settled = rotating.settled();
         assert!(
             settled
-                .wrap_under_passphrase("hunter2", vault.kdf, None)
+                .wrap_under_passphrase("hunter2", vault.kdf.unwrap(), None)
                 .unwrap()
                 .previous_key
                 .is_none()
@@ -766,8 +1058,8 @@ mod tests {
     fn the_data_key_moves_between_a_key_store_key_and_a_passphrase() {
         let kek = [9u8; 32];
         let (vault, cipher) = FileCipher::create_with_kek(&kek);
-        assert!(vault.kdf.is_keystore());
-        assert!(vault.kdf.keystore_name().starts_with("data-key-"));
+        assert!(vault.is_keystore());
+        assert!(vault.keystore_name().unwrap().starts_with("data-key-"));
         let blob = cipher.encrypt("contacts.json", b"[1]");
         let again = FileCipher::unlock_with_kek(&vault, &kek).unwrap();
         assert_eq!(
@@ -799,5 +1091,81 @@ mod tests {
             by_kek.decrypt("contacts.json", &blob).unwrap().as_slice(),
             b"[1]"
         );
+    }
+
+    fn two_slots(cipher: &FileCipher) -> (VaultFile, [u8; 32]) {
+        let output = [7u8; 32];
+        let slots = [
+            SlotKey::security_key(vec![1, 2, 3], [5; 32], SECURITY_KEY_RP, "key", &output),
+            SlotKey::passphrase("recovery words", Kdf::fast(), "recovery").unwrap(),
+        ];
+        (cipher.wrap_slots(&slots, Some(4)), output)
+    }
+
+    #[test]
+    fn a_version_2_vault_opens_by_either_slot_and_by_nothing_else() {
+        let cipher = FileCipher::fresh();
+        let blob = cipher.encrypt("contacts.json", b"[1]");
+        let (vault, output) = two_slots(&cipher);
+        let json = serde_json::to_string(&vault).unwrap();
+        let vault: VaultFile = serde_json::from_str(&json).unwrap();
+        assert!(vault.has_security_keys() && !vault.is_keystore());
+        assert_eq!(vault.state_generation, Some(4));
+        assert!(vault.kdf.is_none() && vault.wrapped_key.is_empty());
+
+        let by_key = FileCipher::unlock_with_security_key(&vault, 0, &output).unwrap();
+        let by_words = FileCipher::unlock(&vault, "recovery words").unwrap();
+        for c in [&by_key, &by_words] {
+            assert_eq!(
+                c.decrypt("contacts.json", &blob).unwrap().as_slice(),
+                b"[1]"
+            );
+            assert_eq!(c.history_name("x"), cipher.history_name("x"));
+        }
+        assert!(matches!(
+            FileCipher::unlock_with_security_key(&vault, 0, &[8; 32]),
+            Err(VaultError::WrongSecurityKey)
+        ));
+        assert!(matches!(
+            FileCipher::unlock(&vault, "other words"),
+            Err(VaultError::WrongPassphrase)
+        ));
+        // The passphrase slot is not a security key's.
+        assert!(FileCipher::unlock_with_security_key(&vault, 1, &output).is_err());
+        assert!(FileCipher::unlock_with_kek(&vault, &output).is_err());
+    }
+
+    #[test]
+    fn a_rotation_under_a_version_2_vault_reads_both_keys_from_any_slot() {
+        let old = FileCipher::fresh();
+        let before = old.encrypt("contacts.json", b"[1]");
+        let rotating = old.rotating();
+        let (vault, output) = two_slots(&rotating);
+        assert!(vault.previous_key.is_some());
+        for c in [
+            FileCipher::unlock_with_security_key(&vault, 0, &output).unwrap(),
+            FileCipher::unlock(&vault, "recovery words").unwrap(),
+        ] {
+            assert_eq!(
+                c.decrypt("contacts.json", &before).unwrap().as_slice(),
+                b"[1]"
+            );
+        }
+        let (settled, _) = two_slots(&rotating.settled());
+        assert!(settled.previous_key.is_none());
+    }
+
+    #[test]
+    fn a_malformed_version_2_vault_is_refused() {
+        let (mut vault, output) = two_slots(&FileCipher::fresh());
+        vault.kdf = Some(Kdf::fast());
+        assert!(FileCipher::unlock_with_security_key(&vault, 0, &output).is_err());
+        let (mut vault, output) = two_slots(&FileCipher::fresh());
+        vault.slots.clear();
+        assert!(FileCipher::unlock_with_security_key(&vault, 0, &output).is_err());
+        assert!(FileCipher::unlock(&vault, "recovery words").is_err());
+        let (mut vault, _) = two_slots(&FileCipher::fresh());
+        vault.version = 3;
+        assert!(FileCipher::unlock(&vault, "recovery words").is_err());
     }
 }

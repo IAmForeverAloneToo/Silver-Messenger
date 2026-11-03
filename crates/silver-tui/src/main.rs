@@ -10,6 +10,7 @@ mod logfile;
 mod notify;
 mod qr;
 mod reader;
+mod securitykey;
 mod terminal;
 mod theme;
 mod ui;
@@ -92,6 +93,17 @@ struct Args {
     /// unencrypted otherwise.
     #[arg(long)]
     remove_passphrase: bool,
+
+    /// Enroll a FIDO2 security key (a YubiKey, say) to unlock keys,
+    /// contacts and history: its PIN and a touch at every start. The first
+    /// asks for a recovery passphrase too. Then exit.
+    #[arg(long, value_name = "NAME", num_args = 0..=1, default_missing_value = "")]
+    add_security_key: Option<String>,
+
+    /// Remove the security key enrolled as NAME (lost, stolen or retired),
+    /// moving the directory to a fresh key, then exit.
+    #[arg(long, value_name = "NAME")]
+    remove_security_key: Option<String>,
 
     /// Keep keys, contacts and history as plain files rather than encrypting
     /// them with a key from this computer's key store. Remembered; a
@@ -388,11 +400,20 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
     }
     let mut store = Store::open(&data_dir)?;
     open_protected(&mut store, &mut secrets)?;
+    if let Some(name) = &args.add_security_key {
+        return securitykey::add(&mut store, &mut secrets, Some(name.as_str()));
+    }
+    if let Some(name) = &args.remove_security_key {
+        return securitykey::remove(&mut store, &mut secrets, name);
+    }
+    if args.set_passphrase && store.protection() == Protection::SecurityKey {
+        return securitykey::change_recovery(&mut store, &mut secrets);
+    }
     if args.set_passphrase {
         if store.has_passphrase() {
             bail!("a passphrase is already set; run --remove-passphrase first to change it");
         }
-        let passphrase = new_passphrase(&mut secrets)?;
+        let passphrase = new_passphrase(&mut secrets, "passphrase")?;
         store.set_passphrase(&passphrase)?;
         println!(
             "Keys, contacts and history in {} are now encrypted under your passphrase.",
@@ -475,11 +496,14 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
             Some(p) => p.clone(),
             None => {
                 println!("Choose a passphrase for the backup file; it is needed to restore it.");
-                new_passphrase(&mut EnvSecrets {
-                    passphrase: None,
-                    backup_passphrase: None,
-                    keep: false,
-                })?
+                new_passphrase(
+                    &mut EnvSecrets {
+                        passphrase: None,
+                        backup_passphrase: None,
+                        keep: false,
+                    },
+                    "passphrase",
+                )?
             }
         };
         let lines = silver_client::export_backup(&store, &path, &passphrase, args.with_history)?;
@@ -550,6 +574,7 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
     // into this computer's key store.
     let at_rest = match store.protection() {
         Protection::Passphrase => AtRest::Passphrase,
+        Protection::SecurityKey => AtRest::SecurityKey,
         Protection::Keystore => AtRest::Keystore,
         Protection::None if !config.os_keystore => {
             AtRest::Plain("os_keystore is off in config.json".into())
@@ -749,9 +774,9 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
             Exit::Lock => {
                 // `app` is gone, and with it the client, the identity, the
                 // sessions and the data key.
-                println!("Locked. The passphrase opens it again; Ctrl-C quits.");
+                println!("Locked. Unlock it again to carry on; Ctrl-C quits.");
                 store = Store::open(&data_dir)?;
-                unlock(&mut store, &mut secrets)?;
+                open_protected(&mut store, &mut secrets)?;
                 identity = store.load_or_create_identity()?.0;
                 created = false;
             }
@@ -854,6 +879,7 @@ fn open_protected(store: &mut Store, secrets: &mut EnvSecrets) -> anyhow::Result
         Protection::None => Ok(()),
         Protection::Keystore => store.unlock_with_keystore(),
         Protection::Passphrase => unlock(store, secrets),
+        Protection::SecurityKey => securitykey::unlock(store, secrets),
     }
 }
 
@@ -887,7 +913,9 @@ fn unlock(store: &mut Store, secrets: &mut EnvSecrets) -> anyhow::Result<()> {
     bail!("too many failed attempts")
 }
 
-fn new_passphrase(secrets: &mut EnvSecrets) -> anyhow::Result<Zeroizing<String>> {
+/// A new passphrase, asked for twice; `what` names it ("passphrase",
+/// "recovery passphrase").
+fn new_passphrase(secrets: &mut EnvSecrets, what: &str) -> anyhow::Result<Zeroizing<String>> {
     if let Some(passphrase) = secrets.spend() {
         if passphrase.is_empty() {
             bail!("SILVER_PASSPHRASE is set but empty");
@@ -895,11 +923,11 @@ fn new_passphrase(secrets: &mut EnvSecrets) -> anyhow::Result<Zeroizing<String>>
         return Ok(passphrase);
     }
     loop {
-        let first = ask("New passphrase: ")?;
+        let first = ask(&format!("New {what}: "))?;
         if first.is_empty() {
-            bail!("the passphrase must not be empty");
+            bail!("the {what} must not be empty");
         }
-        let second = ask("Repeat passphrase: ")?;
+        let second = ask(&format!("Repeat {what}: "))?;
         if first == second {
             return Ok(first);
         }
@@ -955,7 +983,8 @@ fn offer_passphrase(store: &mut Store, secrets: &EnvSecrets, keystore: bool) -> 
         return Ok(());
     }
     println!("This is a new identity. You can protect your keys, contacts and history");
-    println!("with a passphrase that is asked for at every start.");
+    println!("with a passphrase that is asked for at every start (or later, with");
+    println!("--add-security-key, with a security key such as a YubiKey).");
     let mut keystore = keystore && keystore::available();
     if keystore {
         println!(

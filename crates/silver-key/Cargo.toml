@@ -5,7 +5,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-rust-version.workspace = true
+# Let chains, as the client it is built into.
+rust-version = "1.89"
 
 [features]
 # The software authenticator (src/soft.rs), for the tests of the crates that
@@ -26,6 +27,32 @@ zeroize = { workspace = true }
 thiserror = { workspace = true }
 unicode-normalization = { workspace = true }
 
+[[bin]]
+name = "silver-key"
+path = "src/bin/silver-key.rs"
+
 # For one constant, O_NONBLOCK, when opening /dev/hidraw.
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { workspace = true }
+
+# Windows' own WebAuthn API, HID, the pipe and the elevated start; the
+# generation of windows-sys already in the tree, with more of its modules.
+# rpassword for the helper's PIN prompt.
+[target.'cfg(windows)'.dependencies]
+rpassword = { workspace = true }
+windows-sys = { version = "0.61", features = [
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Devices_HumanInterfaceDevice",
+    "Win32_Foundation",
+    "Win32_Networking_WindowsWebServices",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }

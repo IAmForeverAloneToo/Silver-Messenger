@@ -299,3 +299,38 @@ non-discoverable credential:
 Not yet tried: Windows 11's API with `prf`, and macOS.
 
 ## 10. Corrections
+
+Where the code, once written, differs from what is above:
+
+* **The previous data key in a version 2 vault** (section 3) is wrapped
+  under the current data key, not under a slot's key-encryption key:
+  with several slots there is no one key-encryption key to wrap it
+  under, and under the data key every slot reaches it.
+* **Changing the recovery passphrase** (section 4) moves the directory to
+  a fresh data key and wraps it under every slot again, as removing a key
+  does, rather than rewrapping the passphrase slot alone; otherwise an
+  old `vault.json` and the old passphrase would go on opening what is
+  written afterwards. It is `--set-passphrase` on a directory a security
+  key protects, and asks for the current recovery passphrase and each
+  key once.
+* **Each key is asked for its own salt.** An unlock with two keys
+  enrolled cannot pass one salt for both, since each slot has its own:
+  the client gets one PIN token and asks for each credential in turn,
+  and the key answers, after its touch, only for the one it holds.
+* **The helper's request and answer** (section 5) are in
+  `crates/silver-key/src/helper_wire.rs`: the request is the command
+  line, hex only, refused if it holds anything the client would not
+  write; the answer is 1,063 bytes (a status, the index, the secret, and
+  for an enrollment the credential id). Windows 10's route is chosen by
+  `webauthn.dll`'s API version: below 4, the helper.
+* **`silver update`** replaces `silver.exe` only; the helper is not yet
+  among what it fetches. A release that changes the helper says so, and
+  it is replaced by hand meanwhile.
+* **macOS** has no route yet (section 7 named it with Linux): it needs an
+  IOKit HID transport, which waits for a Mac to try it on, as section 9
+  said of macOS before. `--add-security-key` says so there.
+* **The unlock prompt** is the terminal's, before the interface opens:
+  the client asks for the PIN, then for the touch, and an empty PIN or
+  `r` at "no key found" goes to the recovery passphrase. With
+  `SILVER_PASSPHRASE` set, the recovery passphrase is used and the key is
+  not asked for, since a run nobody sits at has nobody to touch it.

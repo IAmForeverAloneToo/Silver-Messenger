@@ -14,3 +14,9 @@ whose output it is, with
 `cargo test -p silver-client --test compat -- --ignored write_fixtures`
 after pointing `fixture_dir` at the new version's directory; existing
 sets are never rewritten.
+
+`security-key/` is a data directory under a version 2 `vault.json`
+(docs/design/security-key.md): one security key, the software
+authenticator of `silver-key` with the seed and PIN in
+`tests/security_key.rs`, and a recovery passphrase, written with
+`cargo test -p silver-client --test security_key -- --ignored write_fixture`.

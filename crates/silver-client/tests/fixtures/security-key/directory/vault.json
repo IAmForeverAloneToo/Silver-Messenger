@@ -1,0 +1,28 @@
+{
+  "version": 2,
+  "state_generation": 1,
+  "slots": [
+    {
+      "kind": "fido2",
+      "credential_id": "vbNodNtyvDYjOG7cNqNsHAPysStBlzNvNLZWV7WxDQvt",
+      "salt": "LjHlJOmnejhMis/2A61zmer6kx25ad7F2sTDIHkXPsE=",
+      "rp_id": "silver-messenger.local",
+      "label": "fixture key",
+      "wrapped_key": "Olo2aP1OpEkMSLRaLinl5Bqqe7dNeoGhUPbnLl11r5f/SRlsvKp81HUNftdE3otju4jjp0Q0XlaVvfkpYP1yJCXAgimQhj6T",
+      "wrapped_naming_key": "E3OD6zCNWaxNHGJKeLCmHr1cyqIFSZiqu7KhpDRAGQc6z3H4UkAeK+iJO0+DQulBd1eLmHJF65p1txyQ/MP7BTfmw+CdIGQ1"
+    },
+    {
+      "kind": "passphrase",
+      "kdf": {
+        "algorithm": "argon2id",
+        "m_cost_kib": 8192,
+        "t_cost": 1,
+        "p_cost": 1,
+        "salt": "WVD/jxMPVO37CDRKtCAArQ=="
+      },
+      "label": "recovery",
+      "wrapped_key": "LFZfDNVszZojkjW5fcBab1+SEPoopt9GlRpKFzW9+EmjcPMr0xOkgfClPNSz1ThKVw8h2n3HoqOrX+7qEYO5oL1uVgBYjKYi",
+      "wrapped_naming_key": "GEQ53l0GfxXjad8vGNA9Wv55YD90xQOhs2AOPnIpMn2o5cx7EYkLcLH4cm5XvQQZRDgiD+1mElU+g5kP15NxQrfgzSWSxLC0"
+    }
+  ]
+}

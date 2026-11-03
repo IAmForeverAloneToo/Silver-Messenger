@@ -124,7 +124,9 @@ jobs:
           pfx="$RUNNER_TEMP/authenticode.pfx"
           printf '%s' "$AUTHENTICODE_PFX" | base64 -d > "$pfx"
           signtool="$(ls "/c/Program Files (x86)/Windows Kits/10/bin/"*/x64/signtool.exe | sort -V | tail -1)"
-          for bin in silver silver-relay; do
+          # silver-key.exe is the Windows 10 security key helper, run
+          # elevated: of the three, the one a signature matters most for.
+          for bin in silver silver-relay silver-key; do
             exe="target/${{ matrix.target }}/release/$bin.exe"
             "$signtool" sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f "$pfx" /p "$AUTHENTICODE_PASSWORD" "$exe"
             "$signtool" verify /pa "$exe"
@@ -225,8 +227,11 @@ jobs:
           name="silver-messenger-${version}-${{ matrix.target }}"
           mkdir -p "dist/$name/sbom"
           ext=""
-          case "${{ matrix.target }}" in *windows*) ext=".exe" ;; esac
-          for bin in silver silver-relay; do
+          bins="silver silver-relay"
+          # On Windows, the security key helper too: silver.exe looks for it
+          # beside itself (docs/design/security-key.md, section 5).
+          case "${{ matrix.target }}" in *windows*) ext=".exe"; bins="$bins silver-key" ;; esac
+          for bin in $bins; do
             cp "target/${{ matrix.target }}/release/$bin$ext" "dist/$name/"
           done
           cp README.md CHANGELOG.md LICENSE "dist/$name/"
@@ -252,7 +257,7 @@ jobs:
           # version and target so one release's assets never collide, and
           # listed in SHA256SUMS, which is what both the updater and a
           # person check against.
-          for bin in silver silver-relay; do
+          for bin in $bins; do
             cp "target/${{ matrix.target }}/release/$bin$ext" \
                "dist/$bin-${version}-${{ matrix.target }}$ext"
           done
@@ -435,6 +440,7 @@ jobs:
           | **macOS**, Apple silicon | \`silver-v${version}-aarch64-apple-darwin\` |
           | **macOS**, Intel | \`silver-v${version}-x86_64-apple-darwin\` |
           | **Windows** | \`silver-v${version}-x86_64-pc-windows-msvc.exe\` |
+          | **Windows 10**, with a security key | that, and \`silver-key-v${version}-x86_64-pc-windows-msvc.exe\` beside it, renamed \`silver-key.exe\` |
           | **Debian or Ubuntu** | \`silver-messenger_${version}_amd64.deb\` (or \`_arm64\`) |
           | **Running a relay** | \`silver-relay-v${version}-<your target>\` |
 

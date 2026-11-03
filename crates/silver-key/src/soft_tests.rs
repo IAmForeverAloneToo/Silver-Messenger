@@ -21,8 +21,9 @@ fn secret(
     input: &[u8],
     pin: &str,
 ) -> Result<(usize, [u8; 32]), Error> {
+    let candidates: Vec<(&[u8], &[u8])> = ids.iter().map(|id| (&id[..], input)).collect();
     Key::open(soft)?
-        .prf(RP, ids, input, pin)
+        .prf(RP, &candidates, pin)
         .map(|(i, s)| (i, *s))
 }
 
@@ -98,7 +99,7 @@ fn a_key_that_holds_none_of_them_says_so() {
     let id = register(&mut a);
     let r = Key::open(&mut a)
         .unwrap()
-        .prf("example.org", &[id], b"x", PIN);
+        .prf("example.org", &[(&id[..], &b"x"[..])], PIN);
     assert!(matches!(r, Err(Error::NoCredentials)));
 }
 
@@ -168,7 +169,7 @@ fn the_touch_is_announced_once_per_command() {
         counter.fetch_add(1, Ordering::SeqCst);
     });
     let id = key.register(RP, PIN).unwrap();
-    key.prf(RP, &[id], b"x", PIN).unwrap();
+    key.prf(RP, &[(&id[..], &b"x"[..])], PIN).unwrap();
     assert_eq!(asked.load(Ordering::SeqCst), 2);
 }
 
@@ -182,7 +183,7 @@ fn a_key_without_a_pin_gets_one_and_then_works() {
     key.set_pin(PIN).unwrap();
     assert_eq!(key.info().client_pin, Some(true));
     let id = key.register(RP, PIN).unwrap();
-    key.prf(RP, &[id], b"x", PIN).unwrap();
+    key.prf(RP, &[(&id[..], &b"x"[..])], PIN).unwrap();
 }
 
 #[test]
@@ -192,7 +193,7 @@ fn the_pin_is_compared_in_nfc() {
     let mut key = Key::open(&mut soft).unwrap();
     key.set_pin("caf\u{e9}1").unwrap();
     let id = key.register(RP, "cafe\u{301}1").unwrap();
-    key.prf(RP, &[id], b"x", "caf\u{e9}1").unwrap();
+    key.prf(RP, &[(&id[..], &b"x"[..])], "caf\u{e9}1").unwrap();
 }
 
 #[test]
@@ -226,4 +227,48 @@ fn without_the_pin_the_credential_does_not_answer_at_all() {
     ]);
     let r = channel.cbor(0x02, Some(&params), &mut || {});
     assert!(matches!(r, Err(Error::NoCredentials)), "{r:?}");
+}
+
+#[test]
+fn each_credential_is_asked_with_its_own_input() {
+    // Two keys' slots, each with its own salt: the key answers for its
+    // own, with that slot's input, after one PIN.
+    let mut mine = SoftKey::new(SEED).with_pin(PIN);
+    let mut other = SoftKey::new([0x11; 32]).with_pin(PIN);
+    let theirs = register(&mut other);
+    let ours = register(&mut mine);
+    let candidates: [(&[u8], &[u8]); 2] = [(&theirs, b"their salt"), (&ours, b"our salt")];
+    let (index, s) = Key::open(&mut mine)
+        .unwrap()
+        .prf(RP, &candidates, PIN)
+        .unwrap();
+    assert_eq!(index, 1);
+    assert_eq!(
+        s.as_slice(),
+        &secret(&mut mine, &[ours], b"our salt", PIN).unwrap().1
+    );
+    // One touch for the answer, none for the credential it does not hold.
+    assert_eq!(mine.touches(), 3);
+}
+
+#[test]
+fn the_authenticator_asks_for_a_pin_when_the_key_has_none_and_then_answers() {
+    use crate::Authenticator;
+    use std::sync::Mutex;
+    let key = Arc::new(Mutex::new(SoftKey::new(SEED)));
+    let mut auth = crate::soft::authenticator(key.clone(), PIN);
+    let enrolled = auth.enroll(RP, b"salt").unwrap();
+    let (index, s) = auth
+        .secret(RP, &[(&enrolled.credential_id, b"salt")])
+        .unwrap();
+    assert_eq!(index, 0);
+    assert_eq!(*s, *enrolled.secret);
+    // A wrong PIN, and a prompt that then gives up: cancelled, one try
+    // spent.
+    let mut wrong = crate::soft::authenticator(key.clone(), "9999");
+    assert!(matches!(
+        wrong.secret(RP, &[(&enrolled.credential_id, b"salt")]),
+        Err(Error::Cancelled)
+    ));
+    assert_eq!(key.lock().unwrap().retries(), 7);
 }

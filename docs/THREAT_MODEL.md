@@ -499,6 +499,32 @@ With the data directory alone:
   when the vault cannot be read at all rather than when it says no: an
   unreadable vault is the absence of an answer, and acting on it would
   throw away the key that opens every file in the directory.
+- With a security key (docs/design/security-key.md), the data key is
+  wrapped under a secret only the key computes, and only after its PIN
+  and a touch: the credential is made with `credProtect` level 3, so the
+  key does not even admit to holding it without the PIN, and the key
+  locks itself after eight wrong ones. A thief with the computer and the
+  key in it still needs the PIN; with the key alone, nothing at all. The
+  recovery passphrase that comes with the first key opens the directory
+  too, stretched as a passphrase is, so it is as strong as it is chosen
+  to be and is meant to be written down and kept away from the computer.
+  Removing a key, or changing the recovery passphrase, moves the files
+  to a fresh data key as changing a passphrase does, so an old
+  `vault.json` and a removed key open nothing written afterwards; every
+  slot that stays is wrapped again under a fresh salt.
+- On Windows 10 the key is reached through an elevated helper,
+  `silver-key.exe`, because Windows 10 hides security keys from every
+  program that is not elevated and its own API does not pass
+  `hmac-secret` through. The client never runs elevated; the helper reads
+  its request from its command line (credential ids and salts, nothing
+  secret), asks for the PIN in its own window, and writes one fixed-size
+  answer to a named pipe that admits only this user, and the client
+  checks that the process at the other end is the one it started before
+  reading. A program running as you could start the helper itself, but it
+  would need you to approve a UAC prompt nobody asked for, then type your
+  PIN into a window nobody asked for, then touch the key: three warnings.
+  Until the Windows binaries are signed the UAC prompt names an unknown
+  publisher, as it does for any unsigned program.
 - Where there is neither key store nor passphrase, the files are plain
   and the client says so at start.
 - Plain or not, on Unix the data directory and every file in it are the
