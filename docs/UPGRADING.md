@@ -117,6 +117,7 @@ clients.
 
 | Version | What the relay's upgrade changes |
 | --- | --- |
+| [0.22.0](#0220) | Dependency updates only; the schema stays at 3 and the backup format at 2 |
 | [0.21.0](#0210) | Dependency updates only; the schema stays at 3 and the backup format at 2 |
 | [0.20.0](#0200) | Upgrade: TLS and runtime advisories fixed; the Debian package's unit moves to `/usr/lib/systemd/system` |
 | [0.19.0](#0190) | A dependency only (rustls); the schema stays at 3 and the backup format at 2 |
@@ -128,6 +129,17 @@ clients.
 | [0.9.0](#090) | The schema moves to 3 and the backup format to 2; rolling back to 0.8.0 needs a restore |
 | [0.8.0](#080) | The schema moves to 2, the key transparency log; rolling back to 0.7.0 needs a restore |
 | [0.7.0](#070) | TLS in the relay, the admin socket, the schema version (1), metrics and JSON logs, arm64 and a container image |
+
+### 0.22.0
+
+* **Relay: optional.** Dependency updates only (rand, sha2, zbus and
+  others), none for an advisory. The schema stays at 3 and the backup
+  format at 2, and nothing on the wire changes.
+* **Clients.** Nothing to do unless a data directory enrolls a security
+  key: its `vault.json` becomes version 2, which 0.21.0 and older refuse
+  to read, so every device that opens that directory needs 0.22.0 or
+  later first. On Windows 10 a security key needs `silver-key.exe` from
+  the release beside `silver.exe`.
 
 ### 0.21.0
 

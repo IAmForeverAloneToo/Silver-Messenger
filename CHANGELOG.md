@@ -12,6 +12,7 @@ The releases, newest first; each version links to its entry.
 
 | Version | Date | What it was |
 | --- | --- | --- |
+| [0.22.0](#0220---2026-11-03) | 2026-11-03 | Unlocking with a security key (roadmap item 67), and a first start that sets everything up |
 | [0.21.0](#0210---2026-11-03) | 2026-11-03 | A day of the client in use: drafts per chat, `/mute` and @mentions, history in backups, KWallet tried for real |
 | [0.20.0](#0200---2026-10-30) | 2026-10-30 | TLS and runtime advisories fixed; the key store on Linux speaks to the Secret Service itself, over zbus 6 |
 | [0.19.0](#0190---2026-09-29) | 2026-09-29 | The last two files in the data directory under rollback protection (roadmap item 66); rustls updated |
@@ -40,7 +41,7 @@ The releases, newest first; each version links to its entry.
 | [0.2.0](#020---2026-09-04) | 2026-09-04 | Phase 2: the trust model completed |
 | [0.1.0](#010---2026-09-04) | 2026-09-04 | First tagged release |
 
-## Unreleased
+## 0.22.0 - 2026-11-03
 
 Unlocking the data directory with a FIDO2 security key (roadmap item
 67, docs/design/security-key.md): a YubiKey or any key with the
@@ -57,7 +58,9 @@ key brings the file back to version 1, with the recovery passphrase as
 an ordinary passphrase. On Windows 10 the security key goes through
 `silver-key.exe`, published with the release, which must sit beside
 `silver.exe`; `silver update` replaces `silver.exe` only, so a new
-`silver-key.exe` is fetched by hand when a release changes it.
+`silver-key.exe` is fetched by hand when a release changes it. The
+relay's changes are dependency updates only; its schema stays at 3 and
+its backup format at 2.
 
 ### Added
 
