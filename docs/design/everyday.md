@@ -89,7 +89,8 @@ Non-goals, for this item:
 * Editing or deleting files' contents on the relay. A file message deleted
   for everyone loses its key with the message on conforming clients; the
   encrypted blob expires on the relay's schedule as any blob does.
-* Threads, forwarding, stickers, formatting, mentions, typing indicators.
+* Threads, forwarding, stickers, formatting, mentions (since added, as
+  plain text: section 11), typing indicators.
 * Syncing history beyond what devices already do: an edit or a deletion
   made while a device was off waits in that device's mailbox like any
   message; a device linked later starts from the snapshot, which carries
@@ -533,3 +534,8 @@ Written after the six steps landed; PROTOCOL.md sections 4.7, 13.1,
 * **A newcomer's timer** (5.1) is sent by the client that added them
   after any add, join by link or rejoin; when the newcomer's client is
   older the engine refuses to send it and the admin's client says so.
+* **Mentions** (a non-goal in section 2) came in 0.21.0, as ordinary text
+  rather than a content kind: `@` and the start of the member's id on the
+  wire, shown under each reader's own name for them, nothing new in the
+  protocol. [notifications.md](notifications.md) (section 7) has the
+  design, along with `/mute`, which a mention gets through.
