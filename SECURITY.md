@@ -46,9 +46,9 @@ note beside it.
 ## What is in scope
 
 Everything this repository ships: `silver` (the terminal client),
-`silver-relay`, the `silver-protocol` and `silver-client` crates, the
-release and deploy workflows, and the relay installer. The relay the
-maintainer runs is a test instance: in scope for protocol and relay
+`silver-relay`, the `silver-protocol`, `silver-client` and `silver-key`
+crates, the release and deploy workflows, and the relay installer. The
+relay the maintainer runs is a test instance: in scope for protocol and relay
 bugs, but do not run load or denial-of-service tests against it.
 
 Reports that matter most, roughly in order:

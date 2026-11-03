@@ -4468,6 +4468,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "silver-key"
+version = "0.21.0"
+dependencies = [
+ "aes 0.9.4",
+ "cbc",
+ "hkdf 0.13.0",
+ "hmac 0.13.0",
+ "libc",
+ "p256",
+ "rand 0.10.2",
+ "sha2 0.11.0",
+ "thiserror 2.0.21",
+ "unicode-normalization",
+ "zeroize",
+]
+
+[[package]]
 name = "silver-protocol"
 version = "0.21.0"
 dependencies = [

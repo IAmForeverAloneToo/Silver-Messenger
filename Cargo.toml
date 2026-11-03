@@ -5,6 +5,7 @@ members = [
     "crates/silver-relay",
     "crates/silver-client",
     "crates/silver-tui",
+    "crates/silver-key",
 ]
 # The fuzz targets need nightly and libfuzzer; they build on their own.
 exclude = ["fuzz"]
@@ -21,6 +22,7 @@ rust-version = "1.85"
 silver-protocol = { path = "crates/silver-protocol" }
 silver-relay = { path = "crates/silver-relay" }
 silver-client = { path = "crates/silver-client" }
+silver-key = { path = "crates/silver-key" }
 
 # async runtime & networking
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time", "net", "fs", "io-util", "signal"] }
@@ -130,6 +132,12 @@ apple-native-keyring-store = { version = "1", features = ["keychain"] }
 num-bigint = "0.4"
 aes = { version = "0.9", features = ["zeroize"] }
 cbc = { version = "0.2", features = ["alloc", "block-padding", "zeroize"] }
+# The security key's PIN protocol (crates/silver-key): ECDH on P-256 with
+# the key. The generation OpenMLS's P-256 ciphersuites already build, with
+# no feature beyond the curve arithmetic, so it adds nothing to the tree.
+p256 = { version = "0.13", default-features = false, features = ["arithmetic"] }
+# One constant (O_NONBLOCK) for /dev/hidraw; in the tree through tokio.
+libc = "0.2"
 tauri-winrt-notification = "0.8"
 
 [profile.release]

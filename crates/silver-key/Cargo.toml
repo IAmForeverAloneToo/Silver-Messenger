@@ -1,0 +1,31 @@
+[package]
+name = "silver-key"
+description = "Talking to a FIDO2 security key for Silver Messenger: CTAP2 with hmac-secret, credProtect and the PIN"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+# The software authenticator (src/soft.rs), for the tests of the crates that
+# build on this one; never in a release build.
+soft = []
+
+[dependencies]
+# Every one of these was in the tree already: p256 through OpenMLS's
+# P-256 ciphersuites, the rest through the client.
+p256 = { workspace = true }
+aes = { workspace = true }
+cbc = { workspace = true }
+hkdf = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+zeroize = { workspace = true }
+thiserror = { workspace = true }
+unicode-normalization = { workspace = true }
+
+# For one constant, O_NONBLOCK, when opening /dev/hidraw.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }

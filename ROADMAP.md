@@ -22,7 +22,7 @@ Numbers never move: the code, the tests and the audit reports cite them.
 | 53 | [Distribution](#53-distribution) | one box: the signing certificate and the Apple membership in the release secrets |
 | 49 | [Usernames scoped to a relay](#49-usernames-scoped-to-a-relay) | a need that has not appeared; parked |
 | 64 | [The identity key somewhere the memory is not](#64-the-identity-key-somewhere-the-memory-is-not) | a decision; not a condition of 1.0 |
-| 67 | [Unlocking with a security key](#67-unlocking-with-a-security-key) | the code, in the order its design note gives; not a condition of 1.0 |
+| 67 | [Unlocking with a security key](#67-unlocking-with-a-security-key) | the rest of the code (67.2 onwards), in the order its design note gives; not a condition of 1.0 |
 
 Phases: [1](#phase-1-make-what-exists-reliable) make what exists
 reliable · [2](#phase-2-complete-the-trust-model) complete the trust
@@ -812,7 +812,7 @@ with the questions that come in.
 | 64 | [The identity key somewhere the memory is not](#64-the-identity-key-somewhere-the-memory-is-not) | L | Undecided |
 | 65 | [The documents](#65-the-documents) | L | Shipped in 0.18.1 |
 | 66 | [The two files outside the generation record](#66-the-two-files-outside-the-generation-record) | S | Shipped in 0.19.0 |
-| 67 | [Unlocking with a security key](#67-unlocking-with-a-security-key) | L | Designed |
+| 67 | [Unlocking with a security key](#67-unlocking-with-a-security-key) | L | Open, 1 of 6 boxes done |
 
 ### 55. Independent review
 
@@ -1123,7 +1123,7 @@ threat model's gap closes.
 
 ### 67. Unlocking with a security key
 
-Designed (L).
+Open (L): 1 of 6 boxes done.
 
 The data directory unlocked by a FIDO2 security key, touch and PIN, as
 well as by a passphrase or the key store: a stolen computer does not
@@ -1138,7 +1138,9 @@ WSL. The argument and the order are in
 [docs/design/security-key.md](docs/design/security-key.md); not the
 identity key (item 64), and not a condition of 1.0.
 
-- [ ] 67.1 The CTAP2 client and a software authenticator for the tests.
+- [x] 67.1 The CTAP2 client and a software authenticator for the tests:
+  `crates/silver-key`, a client of its own over `/dev/hidraw` on Linux,
+  with no crate added to the tree.
 - [ ] 67.2 The version 2 vault: slots, the recovery passphrase, version 1
   read unchanged, fixtures.
 - [ ] 67.3 Enrolling, unlocking and removing a key; the unlock prompt.

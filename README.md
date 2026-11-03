@@ -36,7 +36,7 @@ Contents:
 
 ## Layout
 
-The repository is a Cargo workspace with four crates:
+The repository is a Cargo workspace with five crates:
 
 | Crate             | What it is                                                                 |
 | ----------------- | -------------------------------------------------------------------------- |
@@ -44,6 +44,7 @@ The repository is a Cargo workspace with four crates:
 | `silver-relay`    | The relay server binary (`silver-relay`). Authenticates clients, stores key bundles, queues envelopes per recipient. |
 | `silver-client`   | Client core with no UI: relay connection with auto-reconnect, local store (keys, contacts, history). |
 | `silver-tui`      | The terminal client binary (`silver`), built on ratatui.                   |
+| `silver-key`      | Talking to a FIDO2 security key (CTAP2, `hmac-secret`, the PIN), for unlocking with one; in progress. |
 
 ## Quick start
 

@@ -244,11 +244,19 @@ docs/THREAT_MODEL.md gains a paragraph on this when the code lands.
 ## 7. What it is built with
 
 * **Directly over USB (Linux, macOS, Windows 10's helper):** a CTAP2
-  client in Rust with `hmac-secret`, `credProtect` and `clientPin`. Which
-  crate (or a small client of our own over `hidapi`, in the manner of
-  the Secret Service client) is decided in the first step of the work,
-  with the same weight as any new dependency: maintained, audited where
-  it can be, and in `cargo deny`'s good books.
+  client of our own, the crate `silver-key`, in the manner of the Secret
+  Service client: CBOR, CTAPHID, PIN protocols 1 and 2,
+  `authenticatorMakeCredential` with `hmac-secret` and `credProtect`, and
+  `authenticatorGetAssertion` with `hmac-secret`, in about 1,500
+  lines that can be read in a sitting. It adds no crate to the tree: the
+  P-256 arithmetic is the `p256` OpenMLS already builds, and AES-CBC,
+  HMAC and HKDF are the client's. The crates there were (`ctap-hid-fido2`,
+  Mozilla's `authenticator`) each bring a CBOR library, a HID library
+  and a second generation of the cryptography crates, for far more than
+  the two commands used here. On Linux the key is `/dev/hidraw*`, found
+  by the FIDO usage page in its report descriptor, with no `hidapi`;
+  Windows 10's helper gets its own HID transport in step 5, and macOS
+  one when there is a Mac to try it on.
 * **Windows 11:** `webauthn.dll` through the `windows` crate, with the
   `prf` extension.
 * **Tests:** a software authenticator in the test suite, which answers
