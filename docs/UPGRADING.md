@@ -117,6 +117,7 @@ clients.
 
 | Version | What the relay's upgrade changes |
 | --- | --- |
+| [Unreleased](#unreleased) | `X-Forwarded-For` is believed only from `--trusted-proxy`; the schema stays at 3 and the backup format at 2 |
 | [0.23.1](#0231) | Nothing; the fixes are the client's |
 | [0.23.0](#0230) | Nothing; the changes are the client's |
 | [0.22.0](#0220) | Dependency updates only; the schema stays at 3 and the backup format at 2 |
@@ -131,6 +132,24 @@ clients.
 | [0.9.0](#090) | The schema moves to 3 and the backup format to 2; rolling back to 0.8.0 needs a restore |
 | [0.8.0](#080) | The schema moves to 2, the key transparency log; rolling back to 0.7.0 needs a restore |
 | [0.7.0](#070) | TLS in the relay, the admin socket, the schema version (1), metrics and JSON logs, arm64 and a container image |
+
+### Unreleased
+
+* **Relay: recommended.** The fixes from a security review of the
+  relay (see the changelog's `Security` entries).
+  Behind a TLS front, check `--trusted-proxy` before upgrading: an empty
+  setting no longer means loopback, it means nobody. Running
+  `deploy/install.sh` again sets `127.0.0.1,::1` for its own Caddy front
+  and clears it for the relay's built-in TLS; a front of your own needs
+  `SILVER_RELAY_TRUSTED_PROXY` set to its address in `relay.env`. Leave
+  it unset behind Tor or any proxy that does not write the header
+  itself.
+* **What a client may see.** On a relay with an invite token, a client
+  that has not registered is told `invite_required` for lookups until
+  it publishes with the token. A `revoke_device` for a device another
+  account revoked first is refused until the device claims the account.
+* **Rolling back** to 0.23.1 needs nothing: the schema and the backup
+  format are unchanged.
 
 ### 0.23.1
 

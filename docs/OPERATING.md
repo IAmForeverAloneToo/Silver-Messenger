@@ -180,6 +180,13 @@ identity: give it to people the way you would an invite link. This
 recipe was run live with 0.18.0: a relay that knew only its onion name,
 reached through Tor by two clients, a message each way.
 
+Leave `--trusted-proxy` unset here. Tor connects from `127.0.0.1` and
+passes the client's own headers through untouched, so naming loopback
+would let every onion client pick the address it is counted, limited and
+banned under. Unset, every onion client shares one address, so raise
+`--connections-per-address` and `--registrations-per-hour` to what the
+relay's users need.
+
 ### The key clients pin
 
 A client can pin the relay's TLS public key (`silver --pin`) and then
@@ -204,7 +211,7 @@ below; the rest:
 | `--host <NAME>` | `SILVER_RELAY_HOST` | Names clients reach the relay by, comma separated; the ACME domains and the certificate's names count already |
 | `--acme-domain`, `--acme-email`, `--acme-directory`, `--acme-root` | `SILVER_RELAY_ACME_DOMAIN`, `_EMAIL`, `_DIRECTORY`, `_ROOT` | The built-in TLS, above |
 | `--tls-cert`, `--tls-key` | `SILVER_RELAY_TLS_CERT`, `_KEY` | A certificate from elsewhere, above |
-| `--trusted-proxy <ADDR>` | `SILVER_RELAY_TRUSTED_PROXY` | Whose `X-Forwarded-For` names the client; loopback by default |
+| `--trusted-proxy <ADDR>` | `SILVER_RELAY_TRUSTED_PROXY` | Whose `X-Forwarded-For` names the client; nobody's by default (the installer sets `127.0.0.1,::1` for Caddy) |
 | `--admin-socket <PATH>` | `SILVER_RELAY_ADMIN_SOCKET` | The Unix socket `silver-relay admin` uses ("Day to day") |
 | `--metrics-listen <ADDR>` | `SILVER_RELAY_METRICS_LISTEN` | Prometheus metrics ("Monitoring"); loopback or a private network |
 | `--log-format json` | `SILVER_RELAY_LOG_FORMAT` | One JSON object per line, for a log collector |
@@ -307,7 +314,7 @@ capitals with `SILVER_RELAY_` in front: `--max-connections` is
 | `--mailbox-storage-mib` | 4096 | Queued messages in every mailbox together; 0 for no cap | Disk. Mail is freed as recipients acknowledge it and by `--message-ttl-days`; past the cap a send is answered `storage_full` |
 | `--blob-mib-per-address-per-hour` | 256 | Uploads from one address; 0 stops uploads | Abuse, or a shared address |
 | `--max-groups` | 100000 | Groups with a live epoch sequencer entry; 0 for no cap | Rarely: a group costs the relay almost nothing, so this guards against a loop making entries rather than sizing anything |
-| `--trusted-proxy` | loopback | Whose `X-Forwarded-For` names the client | A TLS front on another host |
+| `--trusted-proxy` | none | Whose `X-Forwarded-For` names the client | A TLS front on this host that writes the header: `127.0.0.1,::1`; never Tor |
 | `--allow-unbound-auth` | off | Accept the older login, which signs the challenge without the relay's name and is worth the same at any relay | Only while clients older than 0.6.0 remain; the relay says at start what allowing it costs |
 | `--host` | the ACME domains and the names in `--tls-cert` | The names clients reach this relay by, which a bound login must name | A TLS front, an onion address, or an address clients use literally |
 
@@ -479,8 +486,9 @@ Restoring is in UPGRADING.md ("Rolling back"). Do it once into a scratch
 directory before you need it:
 
 ```sh
-silver-relay restore /var/lib/silver-relay/backups/relay-2026-09-04T0213.backup --data-dir /tmp/check
-rm -r /tmp/check
+check=$(mktemp -d)                               # private, and nobody else's
+silver-relay restore /var/lib/silver-relay/backups/relay-2026-09-04T0213.backup --data-dir "$check/data"
+rm -r "$check"
 ```
 
 The certificate's key and the ACME account live in `acme/` under the

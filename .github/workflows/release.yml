@@ -494,6 +494,9 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v') || inputs.tag != ''
     needs: build
     runs-on: ubuntu-latest
+    # Publishing an image is publishing a release, and goes under the same
+    # environment's protection rules as the release job (SM-S-09).
+    environment: release
     permissions:
       contents: read
       packages: write

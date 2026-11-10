@@ -43,6 +43,72 @@ The releases, newest first; each version links to its entry.
 | [0.2.0](#020---2026-09-04) | 2026-09-04 | Phase 2: the trust model completed |
 | [0.1.0](#010---2026-09-04) | 2026-09-04 | First tagged release |
 
+## Unreleased
+
+A security review of the relay on its own, with every finding that the
+code could fix fixed.
+Nothing a client sends or reads changes shape; a few things a relay
+used to take, it now refuses, and say so.
+
+**Upgrading.** The relay no longer believes any `X-Forwarded-For`
+header unless `--trusted-proxy` names the front that sends it; until
+now it believed one from loopback by default. A relay behind Caddy
+installed with `deploy/install.sh` gets `SILVER_RELAY_TRUSTED_PROXY=
+127.0.0.1,::1` from the installer when it is run again; one behind a
+front of your own needs the setting added by hand, or every client
+counts as the front's one address against the per-address limits. The
+schema stays at 3 and the backup format at 2.
+
+### Security
+
+- Connections: one that sends nothing is closed after ten seconds
+  (an HTTP/2 preface no longer slips past the request timeout), and at
+  most 1024 wait at once; one that does not read is closed once a few
+  frames are waiting, rather than growing the relay's memory with
+  every ping it answers; closing never waits more than five seconds.
+- The per-minute budgets belong to the address: reconnecting no longer
+  refills them. An IPv6 address counts by its /64.
+- `X-Forwarded-For` is believed only from `--trusted-proxy`, and only
+  its last entry.
+- Storage: a file chunk is charged at least 1 KiB, so empty chunks
+  cannot fill the store uncounted; the caps on groups and identities
+  are counted without reading every table, and refuse when the count
+  fails; a bundle may carry 32 capabilities and take 16 KiB; an
+  account may hold 256 device revocations; lookups of key packages for
+  identities that have none, and group commits that would be refused,
+  cost no write.
+- Revocations: a stranger who revoked an account's device-to-be first
+  no longer makes it unrevocable, since the account the device claims
+  may replace another account's statement; a revocation or succession
+  sent again adds nothing to the log; an older succession cannot take
+  a later one back; an account's revocation closes only the
+  connections of devices that claim it.
+- On a relay that requires an invite, keys that have not registered
+  may not read the directory or the log, and wrong invites cost the
+  address its registrations.
+- Restoring a backup checks the signed statements it holds and counts
+  the mailboxes and files again rather than taking the counters on
+  trust.
+- Files on disk: the database is made private as it is made and never
+  opened through a link; backup and ACME files are made afresh rather
+  than written through what was left at their names; the admin socket
+  will not close a directory that is not the relay's own (such as
+  `/tmp`).
+- ACME: a cached certificate for other names, or one that no longer
+  fits the key, is ordered again instead of failing every look; an
+  issued certificate must name every configured domain; a stuck
+  certificate authority times out after fifteen minutes; a saved
+  account is used only with the directory it was made at.
+- The relay shuts down cleanly on SIGTERM; a restored backup's header
+  is escaped before it is printed; a ban given as an IPv4-mapped
+  address is lifted by the plain one.
+- The installer refuses a prebuilt binary or unit file that others can
+  write to, checks the binary against a `SHA256SUMS` beside it, keeps
+  the environment file private while it edits it, and builds with
+  `--locked`. The backup unit makes its state directory private; the
+  release's container image job runs under the `release` environment;
+  the soak test's input reaches its script through the environment.
+
 ## 0.23.1 - 2026-11-10
 
 Three fixes found running 0.23.0's update and first start on a real

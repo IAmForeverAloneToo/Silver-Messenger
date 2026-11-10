@@ -28,7 +28,7 @@ use instant_acme::{
 };
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::tls::{self, CertStore};
 
@@ -42,6 +42,11 @@ pub const CHECK_EVERY: Duration = Duration::from_secs(12 * 3600);
 /// then ever less often.
 const RETRY_FIRST: Duration = Duration::from_secs(60);
 const RETRY_LONGEST: Duration = Duration::from_secs(12 * 3600);
+/// The longest one look at the certificate may take, the order and its
+/// validation included. A certificate authority that stops answering in
+/// the middle would otherwise hold the renewal task for good, and the
+/// certificate would run out with nothing said.
+const ENSURE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Clone, Debug)]
 pub struct AcmeConfig {
@@ -66,7 +71,15 @@ pub struct AcmeConfig {
 pub async fn run(config: AcmeConfig, store: Arc<CertStore>) {
     let mut retry = RETRY_FIRST;
     loop {
-        match ensure(&config, &store).await {
+        let attempt = tokio::time::timeout(ENSURE_TIMEOUT, ensure(&config, &store))
+            .await
+            .unwrap_or_else(|_| {
+                Err(anyhow::anyhow!(
+                    "the certificate authority took longer than {} minutes",
+                    ENSURE_TIMEOUT.as_secs() / 60
+                ))
+            });
+        match attempt {
             Ok(next) => {
                 retry = RETRY_FIRST;
                 tokio::time::sleep(next).await;
@@ -92,6 +105,25 @@ async fn ensure(config: &AcmeConfig, store: &Arc<CertStore>) -> anyhow::Result<D
     prepare_cache(&config.cache)?;
     let key = load_or_create_key(&config.cache)?;
     let mut chain = load_chain(&config.cache)?;
+    // A cached chain is used only if it is for every configured name and
+    // fits the key: one left from before the names changed, or from before
+    // `key.pem` was deleted, is ordered again rather than served or
+    // refused at every look forever.
+    if let Some(certs) = &chain {
+        let unusable = match covers(certs, &config.domains) {
+            Err(missing) => Some(format!("is not for {missing}")),
+            Ok(()) => tls::certified(
+                certs.clone(),
+                PrivateKeyDer::Pkcs8(key.serialize_der().into()),
+            )
+            .err()
+            .map(|_| "does not fit the key".to_owned()),
+        };
+        if let Some(why) = unusable {
+            warn!("the cached certificate {why}; ordering a new one");
+            chain = None;
+        }
+    }
     if let Some(certs) = &chain
         && !store.has_certificate()
     {
@@ -109,6 +141,9 @@ async fn ensure(config: &AcmeConfig, store: &Arc<CertStore>) -> anyhow::Result<D
     };
     if due {
         let certs = order(config, &account, &key, store).await?;
+        if let Err(missing) = covers(&certs, &config.domains) {
+            bail!("the certificate authority issued a certificate that is not for {missing}");
+        }
         save_chain(&config.cache, &certs)?;
         install(store, &certs, &key)?;
         info!(
@@ -120,6 +155,25 @@ async fn ensure(config: &AcmeConfig, store: &Arc<CertStore>) -> anyhow::Result<D
         chain = Some(certs);
     }
     Ok(next_check(chain.as_deref(), SystemTime::now()))
+}
+
+/// Whether the leaf of `certs` names every one of `domains`; the first it
+/// does not, if any.
+fn covers(certs: &[CertificateDer<'static>], domains: &[String]) -> Result<(), String> {
+    let names: Vec<String> = certs
+        .first()
+        .map(|leaf| tls::dns_names(leaf))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|n| n.to_ascii_lowercase())
+        .collect();
+    match domains
+        .iter()
+        .find(|d| !names.contains(&d.to_ascii_lowercase()))
+    {
+        Some(missing) => Err(missing.clone()),
+        None => Ok(()),
+    }
 }
 
 fn prepare_cache(dir: &Path) -> anyhow::Result<()> {
@@ -137,9 +191,15 @@ fn prepare_cache(dir: &Path) -> anyhow::Result<()> {
 /// previous file in one step.
 fn write_private(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     let tmp = path.with_extension("tmp");
+    // Made afresh, never written through whatever was left at the name.
+    match std::fs::remove_file(&tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("removing {}", tmp.display())),
+    }
     {
         let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
+        options.write(true).create_new(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -226,12 +286,32 @@ async fn account(config: &AcmeConfig) -> anyhow::Result<Account> {
     let path = config.cache.join("account.json");
     match std::fs::read(&path) {
         Ok(bytes) => {
-            let credentials: AccountCredentials = serde_json::from_slice(&bytes)
-                .with_context(|| format!("{} is unreadable", path.display()))?;
-            return builder
-                .from_credentials(credentials)
-                .await
-                .context("using the saved ACME account");
+            // An account belongs to one certificate authority. One saved
+            // while the relay pointed at another (a staging directory, say)
+            // would carry on there whatever `--acme-directory` now says.
+            let saved_for = serde_json::from_slice::<serde_json::Value>(&bytes)
+                .ok()
+                .and_then(|v| {
+                    v.get("directory")
+                        .and_then(|d| d.as_str())
+                        .map(str::to_owned)
+                });
+            if saved_for
+                .as_deref()
+                .is_none_or(|saved| saved == config.directory)
+            {
+                let credentials: AccountCredentials = serde_json::from_slice(&bytes)
+                    .with_context(|| format!("{} is unreadable", path.display()))?;
+                return builder
+                    .from_credentials(credentials)
+                    .await
+                    .context("using the saved ACME account");
+            }
+            info!(
+                "the saved ACME account is at {}, not {}; creating one there",
+                saved_for.unwrap_or_default(),
+                config.directory
+            );
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
@@ -464,6 +544,23 @@ mod tests {
         }
         std::fs::write(dir.path().join("key.pem"), "not a key").unwrap();
         assert!(load_or_create_key(dir.path()).is_err());
+    }
+
+    #[test]
+    fn a_chain_covers_the_configured_names_or_says_which_it_lacks() {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert =
+            rcgen::CertificateParams::new(vec!["a.example".to_owned(), "B.example".to_owned()])
+                .unwrap()
+                .self_signed(&key)
+                .unwrap();
+        let chain = vec![cert.der().clone()];
+        assert!(covers(&chain, &["a.example".to_owned(), "b.EXAMPLE".to_owned()]).is_ok());
+        assert_eq!(
+            covers(&chain, &["a.example".to_owned(), "c.example".to_owned()]),
+            Err("c.example".to_owned())
+        );
+        assert!(covers(&[], &["a.example".to_owned()]).is_err());
     }
 
     #[test]

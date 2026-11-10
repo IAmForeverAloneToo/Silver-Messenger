@@ -36,7 +36,10 @@
 #                        as the installer set up before 0.7.0. An install that
 #                        already runs Caddy keeps it unless SILVER_TLS=builtin is
 #                        given, which switches it over and stops Caddy.
-#   SILVER_BINARY        path to a prebuilt relay binary (default: silver-relay next to this script)
+#   SILVER_BINARY        path to a prebuilt relay binary (default: silver-relay next to this script).
+#                        With a release's SHA256SUMS beside it, the binary must be
+#                        one it lists; a binary or unit file anyone but its owner
+#                        can write to is refused either way.
 #   SILVER_BRANCH        git branch to deploy         (default main)
 #   SILVER_REPO          git repository URL
 #   SILVER_SRC_DIR       where the source is checked out (default /opt/silver-messenger)
@@ -100,11 +103,42 @@ esac
 command -v systemctl >/dev/null || die "this script expects a systemd-based distribution"
 command -v curl >/dev/null || die "curl is required"
 
+# A file this script installs as root must be one nobody else could have
+# changed: not writable by its group or by others (a binary left in /tmp, or
+# in a directory other users share, could have been swapped).
+checked() { # checked FILE: die unless FILE is fit to install
+    local file="$1" mode
+    mode=$(stat -L -c '%a' "$file") || die "cannot read $file"
+    if [ $((8#$mode & 8#022)) -ne 0 ]; then
+        die "$file can be written by users other than its owner (mode $mode); fix that, or download it again, before installing it as root"
+    fi
+}
+# And the binary, when the release's SHA256SUMS is beside it, must be one
+# the list names, under whatever name it was saved as.
+released() { # released FILE: die unless SHA256SUMS beside FILE lists its hash
+    local file="$1" sums hash
+    sums="$(dirname "$file")/SHA256SUMS"
+    if [ ! -f "$sums" ]; then
+        printf 'warning: no SHA256SUMS next to %s; it is installed unchecked\n' "$file" >&2
+        return
+    fi
+    hash=$(sha256sum "$file" | cut -d' ' -f1)
+    grep -q "^$hash " "$sums" || die "$file is not one of the files $sums lists"
+}
+
 if [ -n "$PREBUILT" ] && [ -f "$PREBUILT" ]; then
     # ------------------------------------------------------------------ prebuilt
     log "Installing prebuilt relay from $PREBUILT"
     UNIT_SRC="${SILVER_UNIT:-$(dirname "$PREBUILT")/silver-relay.service}"
     [ -f "$UNIT_SRC" ] || die "expected the unit file at $UNIT_SRC"
+    checked "$PREBUILT"
+    released "$PREBUILT"
+    checked "$UNIT_SRC"
+    for extra in silver-relay-backup.service silver-relay-backup.timer; do
+        if [ -f "$(dirname "$UNIT_SRC")/$extra" ]; then
+            checked "$(dirname "$UNIT_SRC")/$extra"
+        fi
+    done
     install -m 755 "$PREBUILT" "$BIN.new"
 else
 
@@ -177,7 +211,9 @@ else
 
     # ---- 5. build -----------------------------------------------------------------
     log "Building the relay (this takes a few minutes on a small VPS)"
-    (cd "$SRC_DIR" && cargo build --release -p silver-relay)
+    # --locked: what is built is what Cargo.lock names, never whatever newer
+    # dependency the registry happens to offer today.
+    (cd "$SRC_DIR" && cargo build --release --locked -p silver-relay)
     install -m 755 "$SRC_DIR/target/release/silver-relay" "$BIN.new"
     UNIT_SRC="$SRC_DIR/deploy/silver-relay.service"
 
@@ -191,6 +227,9 @@ if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
 fi
 mkdir -p "$ENV_DIR"
 if [ ! -f "$ENV_FILE" ]; then
+    # Made private, and opened to the service's group below; never readable
+    # by everyone, even for a moment.
+    (umask 077 && : >"$ENV_FILE")
     printf 'SILVER_RELAY_LISTEN=%s\nRUST_LOG=info\n# silver-relay admin ... talks to the relay here (root, or the silver user):\nSILVER_RELAY_ADMIN_SOCKET=/run/silver-relay/admin.sock\n# Uncomment to only let people with this token register new identities:\n# SILVER_RELAY_INVITE_TOKEN=change-me\n# Messages an unauthenticated connection may submit per minute (0 turns anonymous submission off):\n# SILVER_RELAY_ANONYMOUS_SENDS_PER_MINUTE=30\n# Encrypted files: largest file in MiB (0 turns file transfer off) and total storage in MiB:\n# SILVER_RELAY_MAX_BLOB_MIB=16\n# SILVER_RELAY_BLOB_STORAGE_MIB=1024\n# Prometheus metrics on a private address (never the public one), and JSON logs for a collector:\n# SILVER_RELAY_METRICS_LISTEN=127.0.0.1:9107\n# SILVER_RELAY_LOG_FORMAT=json\n' "$LISTEN" >"$ENV_FILE"
 fi
 # Installs from before 0.7.0 have no admin socket configured; add it.
@@ -232,10 +271,11 @@ set_env() { # set_env KEY VALUE: set or replace KEY in the relay's environment f
     # Written with awk rather than sed: a value is operator-supplied and a
     # sed replacement reads & and the delimiter, so a domain with one in it
     # corrupted the file (SM-S-03).
+    # The copy is made private: the file may hold the invite token.
     if grep -q "^$1=" "$ENV_FILE"; then
-        awk -v key="$1" -v value="$2" \
+        (umask 077 && awk -v key="$1" -v value="$2" \
             'index($0, key "=") == 1 { print key "=" value; next } { print }' \
-            "$ENV_FILE" >"$ENV_FILE.new"
+            "$ENV_FILE" >"$ENV_FILE.new")
         cat "$ENV_FILE.new" >"$ENV_FILE"   # keep the mode and the group
         rm -f "$ENV_FILE.new"
     else
@@ -252,6 +292,8 @@ if [ -n "$DOMAIN" ] && [ "$SILVER_TLS" = builtin ]; then
     fi
     set_env SILVER_DOMAIN "$DOMAIN"
     set_env SILVER_RELAY_LISTEN 0.0.0.0:443
+    # The relay is the front: the peer is the client.
+    unset_env SILVER_RELAY_TRUSTED_PROXY
     set_env SILVER_RELAY_ACME_DOMAIN "$DOMAIN"
     # The name a bound login must carry. The ACME domain gives the same
     # answer, but saying it here keeps it right if the domain moves.
@@ -281,6 +323,9 @@ elif [ -n "$DOMAIN" ]; then
 
     # The relay listens only locally; Caddy terminates TLS and proxies the WebSocket.
     set_env SILVER_RELAY_LISTEN 127.0.0.1:7777
+    # Caddy, on this host, says who the client was; nothing else is
+    # believed about it (the relay trusts no front unless named).
+    set_env SILVER_RELAY_TRUSTED_PROXY 127.0.0.1,::1
     set_env SILVER_DOMAIN "$DOMAIN"
     # Behind a front the relay obtains no certificate, so this is the only
     # place it learns the name clients reach it by; a bound login (protocol

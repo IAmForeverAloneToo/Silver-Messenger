@@ -315,15 +315,12 @@ pub async fn serve_unix(
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
         // The socket is made by `bind` under whatever umask is in force and
         // narrowed afterwards, so for that moment it can be reachable by
         // anyone. Shutting the directory instead closes the window without
         // an unsafe call to `umask`, and holds wherever the relay runs
         // rather than only where the systemd unit sets `UMask=0077`.
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-            .with_context(|| format!("restricting {}", parent.display()))?;
+        private_socket_dir(parent)?;
     }
     // A socket file left by an earlier run would refuse the bind.
     match std::fs::remove_file(&path) {
@@ -337,6 +334,53 @@ pub async fn serve_unix(
         .with_context(|| format!("restricting {}", path.display()))?;
     axum::serve(listener, router(state, tls)).await?;
     Ok(())
+}
+
+/// See that `dir`, where the admin socket goes, is a directory only the
+/// relay's user can enter: made so if the relay makes it, narrowed if it
+/// is the relay's own, and refused otherwise. A directory somebody else
+/// owns -- `/tmp`, say, for a socket path given as `/tmp/admin.sock` -- is
+/// not the relay's to close, and a link is not followed to one.
+#[cfg(unix)]
+fn private_socket_dir(dir: &Path) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    let metadata = match std::fs::symlink_metadata(dir) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(dir)
+                .with_context(|| format!("creating {}", dir.display()));
+        }
+        Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+    };
+    anyhow::ensure!(
+        metadata.file_type().is_dir(),
+        "{} is not a directory; give the admin socket a directory of the relay's own",
+        dir.display()
+    );
+    if metadata.permissions().mode() & 0o077 == 0 {
+        return Ok(());
+    }
+    // Whose the directory is, told by a file made in it: the process's
+    // own user owns what it makes.
+    let probe = dir.join(format!(".silver-relay-{}", std::process::id()));
+    let mine = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+        .and_then(|file| file.metadata())
+        .map(|made| made.uid() == metadata.uid());
+    let _ = std::fs::remove_file(&probe);
+    anyhow::ensure!(
+        mine.unwrap_or(false),
+        "{} is open to other users and is not the relay's to close; give the admin socket a directory of the relay's own",
+        dir.display()
+    );
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("restricting {}", dir.display()))
 }
 
 #[cfg(unix)]

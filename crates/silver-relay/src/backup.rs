@@ -1002,6 +1002,7 @@ pub fn load<R: Read>(store: &Store, input: R) -> anyhow::Result<(Header, Summary
     for version in header.schema..SCHEMA_VERSION {
         store::migrate(&txn, version)?;
     }
+    store::check_restored(&txn).context("the backup holds what a relay would not have written")?;
     txn.open_table(store::META)?
         .insert(SCHEMA, SCHEMA_VERSION)?;
     txn.commit()?;
@@ -1055,9 +1056,19 @@ fn part_of(dest: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// A new file only its owner can read. Whatever was at `path` goes first,
+/// and the file is then made with `O_EXCL`: so a link left there, in a
+/// directory others can write to, is neither followed nor written through,
+/// and a file left there by someone else with looser permissions is not
+/// written into and kept.
 fn private_file(path: &Path) -> io::Result<File> {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
     let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -1241,7 +1252,7 @@ mod tests {
         store.set_succession(&carol.succeed_to(&dave, 50)).unwrap();
         let laptop = Identity::generate();
         store
-            .set_device_revocation(&carol.revoke_device(&laptop.user_id(), 55))
+            .set_device_revocation(&carol.revoke_device(&laptop.user_id(), 55), false, 256)
             .unwrap();
         (store, bob, carol)
     }
@@ -1349,6 +1360,63 @@ mod tests {
         load(&target, bytes.as_slice()).unwrap();
         assert!(target.bundle(&dave.user_id()).unwrap().is_none());
         assert_eq!(target.stats().unwrap().bundles, 2);
+    }
+
+    #[test]
+    fn a_restore_counts_again_and_refuses_statements_that_do_not_verify() {
+        let (store, bob, _) = populated();
+        let before = store.stats().unwrap();
+        // Counters a relay would never have written: the file store and
+        // the mailboxes empty, and the next message in the first slot.
+        {
+            let txn = store.db.begin_write().unwrap();
+            {
+                let mut meta = txn.open_table(store::META).unwrap();
+                meta.insert("blob_bytes", 0).unwrap();
+                meta.insert("mailbox_bytes", 0).unwrap();
+                meta.insert("next_seq", 0).unwrap();
+            }
+            txn.open_table(store::USAGE)
+                .unwrap()
+                .insert(bob.user_id().as_bytes().as_slice(), (0, 0))
+                .unwrap();
+            txn.commit().unwrap();
+        }
+        let (bytes, _) = dump(&store);
+        let restored = Store::in_memory().unwrap();
+        load(&restored, bytes.as_slice()).unwrap();
+        let after = restored.stats().unwrap();
+        assert_eq!(after.blob_bytes, before.blob_bytes);
+        assert_eq!(
+            (after.mailboxes, after.messages, after.bytes),
+            (before.mailboxes, before.messages, before.bytes)
+        );
+        let meta = |store: &Store, key: &str| {
+            let txn = store.db.begin_read().unwrap();
+            let table = txn.open_table(store::META).unwrap();
+            table.get(key).unwrap().map(|g| g.value())
+        };
+        assert_eq!(meta(&restored, "mailbox_bytes"), Some(before.bytes));
+        assert!(meta(&restored, "next_seq").unwrap() >= before.messages);
+        // A forged revocation, filed under somebody who never made one.
+        let dave = Identity::generate();
+        let mut forged = bob.revocation(1);
+        forged.identity = dave.user_id();
+        {
+            let txn = store.db.begin_write().unwrap();
+            txn.open_table(store::REVOCATIONS)
+                .unwrap()
+                .insert(
+                    dave.user_id().as_bytes().as_slice(),
+                    serde_json::to_vec(&forged).unwrap().as_slice(),
+                )
+                .unwrap();
+            txn.commit().unwrap();
+        }
+        let (bytes, _) = dump(&store);
+        let target = Store::in_memory().unwrap();
+        assert!(load(&target, bytes.as_slice()).is_err());
+        assert!(!target.is_revoked(&dave.user_id()).unwrap());
     }
 
     #[test]

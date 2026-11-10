@@ -106,7 +106,9 @@ impl BanTarget {
     /// The store key: `address:<ip>` or `identity:<id>`.
     pub fn key(&self) -> String {
         match self {
-            Self::Address(addr) => format!("address:{addr}"),
+            // As the bans are checked, so a ban given as `::ffff:a.b.c.d`
+            // is lifted by `a.b.c.d` and stays lifted across a restart.
+            Self::Address(addr) => format!("address:{}", canonical_address(*addr)),
             Self::Identity(user) => format!("identity:{user}"),
         }
     }
@@ -178,6 +180,20 @@ pub const GROUP_HEADSTONE_TTL: Duration = Duration::from_secs(180 * 24 * 60 * 60
 /// deposit replaces the whole list and a client has no reason to repeat
 /// it.
 const KEY_PACKAGE_DEPOSITS_PER_MINUTE: u32 = 1;
+/// Capabilities a bundle may carry, and how long each name may be. A
+/// client today signs a handful of short names; the rest of a frame is not
+/// for parking bytes in the store and the transparency log.
+const MAX_CAPS: usize = 32;
+const MAX_CAP_BYTES: usize = 32;
+/// The most a bundle may take in the store once its one-time prekeys are
+/// taken out. The largest a client writes (both signed prekeys and eight
+/// devices) is under a quarter of this; the log keeps every bundle that
+/// changes, for good.
+const MAX_STORED_BUNDLE_BYTES: usize = 16 * 1024;
+/// Device revocations one account may have issued: many times the
+/// devices it may have at once, so that an account can go through devices
+/// for years, and few enough that a lookup of it stays one frame.
+const MAX_DEVICE_REVOCATIONS_PER_ACCOUNT: usize = 256;
 /// Bundle publishes one connection may make per minute. A client
 /// publishes once on connecting, and twice more when it links or renames
 /// a device; six leaves room for that and for a reconnect.
@@ -186,11 +202,9 @@ const PUBLISHES_PER_MINUTE: u32 = 6;
 /// a full mailbox acknowledges as fast as it reads, so this is well above
 /// the per-recipient message cap.
 const ACKS_PER_MINUTE: u32 = 4000;
-/// What a blob chunk is charged against an address's upload budget at
-/// least, whatever it holds. A chunk costs a database entry and a key
-/// however small it is, so charging bytes alone let a client fill the
-/// store with empty chunks that no budget ever noticed.
-const CHUNK_OVERHEAD_BYTES: usize = 1024;
+/// What a blob chunk is charged at least, against an address's upload
+/// budget and the store's caps alike, whatever it holds.
+const CHUNK_OVERHEAD_BYTES: usize = store::CHUNK_OVERHEAD_BYTES as usize;
 /// Envelopes the relay will have delivered to one connection and not yet
 /// seen acknowledged. A client acknowledges every envelope it is handed,
 /// so a mailbox drains a page at a time at the speed the client reads it;
@@ -209,6 +223,15 @@ const OUTBOUND_QUEUE: usize = DELIVERY_WINDOW + 16;
 /// it likes: the idle timeout does not fire, because the connection is not
 /// idle from the relay's side, it is blocked.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Most bytes one connection may have waiting to be written: a few of the
+/// largest frames the relay sends.
+const MAX_WRITE_BUFFER: usize = 4 * MAX_FRAME_BYTES + 64 * 1024;
+
+/// How long closing a connection may take. A client that does not read
+/// keeps the close handshake from finishing, which held the task, its
+/// buffers and its connection slot for good.
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Abuse controls applied per connection, plus the registration policy.
 #[derive(Clone, Debug)]
@@ -245,8 +268,9 @@ pub struct Policy {
     /// File bytes one address may upload per hour, in MiB.
     pub blob_mib_per_address_per_hour: u32,
     /// Addresses of TLS fronts (Caddy, nginx) whose `X-Forwarded-For`
-    /// header names the real client. Empty means the loopback addresses,
-    /// where the installer puts the front.
+    /// header names the real client. Empty means none: every connection
+    /// counts under the address it came from. The installer names the
+    /// loopback addresses when it puts Caddy in front.
     pub trusted_proxies: Vec<IpAddr>,
     /// Write user ids into the log as they are. Off, the log shows a
     /// pseudonym that holds for this run of the relay only, so the log
@@ -326,8 +350,11 @@ impl Default for Policy {
 impl Policy {
     fn blob_limits(&self) -> BlobLimits {
         BlobLimits {
-            // Each chunk carries a 16-byte authentication tag.
-            max_blob_bytes: u64::from(self.max_blob_mib) * 1024 * 1024 + u64::from(MAX_CHUNKS) * 16,
+            // Each chunk carries a 16-byte authentication tag, and a short
+            // last chunk is charged as a whole row.
+            max_blob_bytes: u64::from(self.max_blob_mib) * 1024 * 1024
+                + u64::from(MAX_CHUNKS) * 16
+                + store::CHUNK_OVERHEAD_BYTES,
             max_total_bytes: u64::from(self.blob_storage_mib) * 1024 * 1024,
         }
     }
@@ -345,6 +372,23 @@ pub fn canonical_address(addr: IpAddr) -> IpAddr {
             Some(v4) => IpAddr::V4(v4),
             None => IpAddr::V6(v6),
         },
+        v4 => v4,
+    }
+}
+
+/// What the per-address limits count by: an IPv4 address as it is, an
+/// IPv6 address by its /64. A single IPv6 host is normally given a whole
+/// /64 and may use any address in it, so counting each /128 on its own
+/// gave one host an endless supply of fresh addresses: no connection cap,
+/// no registration rate, no upload budget. Bans stay on the exact
+/// address the operator named.
+pub fn limit_key(addr: IpAddr) -> IpAddr {
+    match canonical_address(addr) {
+        IpAddr::V6(v6) => {
+            let mut octets = v6.octets();
+            octets[8..].fill(0);
+            IpAddr::V6(std::net::Ipv6Addr::from(octets))
+        }
         v4 => v4,
     }
 }
@@ -445,17 +489,19 @@ impl Bucket {
     }
 }
 
-/// Per-connection state for an authenticated client.
-struct Conn {
-    addr: IpAddr,
+/// The rate limits a connection works under.
+///
+/// They are per connection, so that one busy client does not starve
+/// another behind the same address, but they are not *new* per
+/// connection: a closed connection hands its buckets back to its address,
+/// and the next connection from there picks them up as they were. Started
+/// full every time, they reset on every reconnect, and a client that
+/// reconnected after each burst had no limit at all.
+struct Budget {
     sends: Bucket,
+    anonymous_sends: Bucket,
     lookups: Bucket,
     blobs: Bucket,
-    /// The client published prekeys, so it speaks protocol v2: it gets
-    /// prekey status reports and one-time prekeys with its lookups.
-    prekeys: bool,
-    /// The client deposited key packages, so it may ask for others'.
-    key_packages: bool,
     deposits: Bucket,
     /// Bundle publishes. A publish verifies a bundle's worth of
     /// signatures, writes three durable transactions and, when the bundle
@@ -467,26 +513,92 @@ struct Conn {
     /// Acknowledgements, which are durable writes. Sized well above a
     /// full mailbox drain, so an honest client never meets it.
     acks: Bucket,
+}
+
+impl Budget {
+    fn new(policy: &Policy) -> Self {
+        Self {
+            sends: Bucket::per_minute(policy.sends_per_minute),
+            anonymous_sends: Bucket::per_minute(policy.anonymous_sends_per_minute),
+            lookups: Bucket::per_minute(policy.lookups_per_minute),
+            blobs: Bucket::per_minute(policy.blob_chunks_per_minute),
+            deposits: Bucket::per_minute(KEY_PACKAGE_DEPOSITS_PER_MINUTE),
+            publishes: Bucket::per_minute(PUBLISHES_PER_MINUTE),
+            acks: Bucket::per_minute(ACKS_PER_MINUTE),
+        }
+    }
+}
+
+/// A [`Budget`] on loan to one connection; it goes back to its address
+/// when the connection ends, whichever way it ends.
+struct BudgetLease {
+    state: Arc<RelayState>,
+    key: IpAddr,
+    budget: Option<Budget>,
+}
+
+impl std::ops::Deref for BudgetLease {
+    type Target = Budget;
+    fn deref(&self) -> &Budget {
+        self.budget.as_ref().expect("held until drop")
+    }
+}
+
+impl std::ops::DerefMut for BudgetLease {
+    fn deref_mut(&mut self) -> &mut Budget {
+        self.budget.as_mut().expect("held until drop")
+    }
+}
+
+impl Drop for BudgetLease {
+    fn drop(&mut self) {
+        if let Some(budget) = self.budget.take() {
+            self.state.return_budget(self.key, budget);
+        }
+    }
+}
+
+/// Per-connection state for an authenticated client.
+struct Conn {
+    addr: IpAddr,
+    budget: BudgetLease,
+    /// The client published prekeys, so it speaks protocol v2: it gets
+    /// prekey status reports and one-time prekeys with its lookups.
+    prekeys: bool,
+    /// The client deposited key packages, so it may ask for others'.
+    key_packages: bool,
     /// The client's bundle advertises the `devices` capability, so it
     /// seals per device: its lookups get the linked devices' bundles, one
     /// prekey popped from each. A client that does not would waste them.
     devices: bool,
+    /// The key has a bundle here: it published one on this connection, or
+    /// had one when it was last asked.
+    registered: bool,
 }
 
 impl Conn {
-    fn new(policy: &Policy, addr: IpAddr) -> Self {
+    fn new(state: &Arc<RelayState>, addr: IpAddr) -> Self {
         Self {
             addr,
-            sends: Bucket::per_minute(policy.sends_per_minute),
-            lookups: Bucket::per_minute(policy.lookups_per_minute),
-            blobs: Bucket::per_minute(policy.blob_chunks_per_minute),
+            budget: state.lease_budget(addr),
             prekeys: false,
             key_packages: false,
-            deposits: Bucket::per_minute(KEY_PACKAGE_DEPOSITS_PER_MINUTE),
-            publishes: Bucket::per_minute(PUBLISHES_PER_MINUTE),
-            acks: Bucket::per_minute(ACKS_PER_MINUTE),
             devices: false,
+            registered: false,
         }
+    }
+
+    /// Whether this connection may read the directory and the log. On a
+    /// relay that takes new identities only with an invite, a key that
+    /// has not registered is somebody without one: logging in proves only
+    /// that it holds a key, which anyone can make, and what the relay
+    /// holds is for the people it was opened to.
+    fn may_read(&mut self, state: &RelayState, me: &UserId) -> bool {
+        if self.registered || state.invite_token().is_none() {
+            return true;
+        }
+        self.registered = state.bundle(me).is_some();
+        self.registered
     }
 }
 
@@ -497,6 +609,9 @@ struct AddressState {
     registrations: Bucket,
     blob_bytes: Bucket,
     last_seen: Instant,
+    /// Budgets handed back by connections that ended, for the next ones
+    /// to pick up; at most one per connection the address may hold.
+    spare: Vec<Budget>,
 }
 
 impl AddressState {
@@ -508,6 +623,7 @@ impl AddressState {
                 f64::from(policy.blob_mib_per_address_per_hour) * 1024.0 * 1024.0,
             ),
             last_seen: Instant::now(),
+            spare: Vec::new(),
         }
     }
 }
@@ -759,16 +875,24 @@ impl RelayState {
     /// client is one address however it reached the socket.
     pub fn client_address(&self, peer: Option<IpAddr>, headers: &HeaderMap) -> IpAddr {
         let peer = canonical_address(peer.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED)));
-        let trusted = if self.policy.trusted_proxies.is_empty() {
-            peer.is_loopback()
-        } else {
-            self.policy.trusted_proxies.contains(&peer)
-        };
+        // Only the fronts the operator named. Loopback used to be trusted by
+        // default, and anything that reaches the relay from this host
+        // without rewriting the header -- Tor for an onion service, a
+        // stream proxy, a local user -- then chose the address it was
+        // counted, limited and banned under.
+        let trusted = self
+            .policy
+            .trusted_proxies
+            .iter()
+            .any(|p| canonical_address(*p) == peer);
         if trusted {
             // The front appends the client to whatever it was handed, so the
-            // last entry is the one it saw itself.
+            // last entry of the last line is the one it saw itself; a front
+            // that adds a line of its own leaves the client's line first.
             let forwarded = headers
-                .get("x-forwarded-for")
+                .get_all("x-forwarded-for")
+                .iter()
+                .next_back()
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.rsplit(',').next())
                 .and_then(|v| v.trim().parse::<IpAddr>().ok());
@@ -793,9 +917,10 @@ impl RelayState {
                 .fetch_add(1, Ordering::Relaxed);
             return Err("the relay has as many connections as it takes; try again shortly");
         }
+        let key = limit_key(addr);
         let mut addresses = self.addresses();
         let entry = addresses
-            .entry(addr)
+            .entry(key)
             .or_insert_with(|| AddressState::new(&self.policy));
         if entry.connections >= self.policy.connections_per_address {
             self.counters
@@ -809,15 +934,44 @@ impl RelayState {
         self.connections.fetch_add(1, Ordering::Relaxed);
         Ok(ConnectionGuard {
             state: self.clone(),
-            addr,
+            addr: key,
         })
+    }
+
+    /// The rate-limit budget for a new connection from `addr`: one an
+    /// earlier connection from there handed back, as it left it, or a
+    /// full one if there is none.
+    fn lease_budget(self: &Arc<Self>, addr: IpAddr) -> BudgetLease {
+        let key = limit_key(addr);
+        let budget = self
+            .addresses()
+            .get_mut(&key)
+            .and_then(|a| a.spare.pop())
+            .unwrap_or_else(|| Budget::new(&self.policy));
+        BudgetLease {
+            state: self.clone(),
+            key,
+            budget: Some(budget),
+        }
+    }
+
+    fn return_budget(&self, key: IpAddr, budget: Budget) {
+        let cap = self.policy.connections_per_address.max(1) as usize;
+        let mut addresses = self.addresses();
+        let entry = addresses
+            .entry(key)
+            .or_insert_with(|| AddressState::new(&self.policy));
+        entry.last_seen = Instant::now();
+        if entry.spare.len() < cap {
+            entry.spare.push(budget);
+        }
     }
 
     /// Whether `addr` may register one more new identity this hour.
     fn registration_allowed(&self, addr: IpAddr) -> bool {
         let mut addresses = self.addresses();
         let entry = addresses
-            .entry(addr)
+            .entry(limit_key(addr))
             .or_insert_with(|| AddressState::new(&self.policy));
         entry.last_seen = Instant::now();
         entry.registrations.try_take()
@@ -827,7 +981,7 @@ impl RelayState {
     fn upload_allowed(&self, addr: IpAddr, bytes: usize) -> bool {
         let mut addresses = self.addresses();
         let entry = addresses
-            .entry(addr)
+            .entry(limit_key(addr))
             .or_insert_with(|| AddressState::new(&self.policy));
         entry.last_seen = Instant::now();
         entry.blob_bytes.try_take_n(bytes as f64)
@@ -1161,7 +1315,7 @@ impl RelayState {
         conn: &mut Conn,
     ) -> ServerFrame {
         use silver_protocol::group::{MAX_KEY_PACKAGE_BYTES, MAX_KEY_PACKAGES};
-        if !conn.deposits.try_take() {
+        if !conn.budget.deposits.try_take() {
             return ServerFrame::error(
                 ErrorCode::RateLimited,
                 "key packages were deposited a moment ago; wait a minute",
@@ -1217,8 +1371,23 @@ impl RelayState {
                 "deposit your own key packages before asking for others'",
             );
         }
-        if !conn.lookups.try_take() {
+        if !conn.budget.lookups.try_take() {
             return ServerFrame::error(ErrorCode::RateLimited, "too many lookups; slow down");
+        }
+        let none = ServerFrame::KeyPackageResult {
+            user_id: user,
+            package: None,
+            last_resort: false,
+        };
+        // Asked first, so that lookups of made-up identities neither grow
+        // the hand-out buckets nor cost a write transaction each.
+        match self.store.holds_key_packages(&user) {
+            Ok(true) => {}
+            Ok(false) => return none,
+            Err(e) => {
+                error!("looking for key packages: {e:#}");
+                return ServerFrame::error(ErrorCode::Internal, "storage error");
+            }
         }
         let now = now_ms();
         let handed = if self.handout_allowed(&user) {
@@ -1237,11 +1406,7 @@ impl RelayState {
                 package: Some(package),
                 last_resort,
             },
-            Ok(None) => ServerFrame::KeyPackageResult {
-                user_id: user,
-                package: None,
-                last_resort: false,
-            },
+            Ok(None) => none,
             Err(e) => {
                 error!("taking a key package: {e:#}");
                 ServerFrame::error(ErrorCode::Internal, "storage error")
@@ -1269,7 +1434,9 @@ impl RelayState {
         let exists = self.store.group_epoch(&group).unwrap_or(None).is_some();
         if !exists
             && self.policy.max_groups > 0
-            && self.store.group_count().unwrap_or(0) >= self.policy.max_groups
+            // Counted without reading every entry, and failing closed: an
+            // error that let creation through would let the cap through.
+            && self.store.group_rows().unwrap_or(u64::MAX) >= self.policy.max_groups
         {
             return refuse(ErrorCode::Forbidden, None);
         }
@@ -1358,13 +1525,24 @@ impl RelayState {
         let Some(bundle) = self.bundle(&revocation.identity) else {
             return Err((ErrorCode::Forbidden, "no such identity on this relay"));
         };
-        self.store.set_revocation(&revocation).map_err(|e| {
+        // The first statement stands. A revocation is served to anyone who
+        // looks the identity up, so anyone can send it again; each copy
+        // taken would be another entry in the log, for good.
+        let new = self.store.set_revocation(&revocation).map_err(|e| {
             error!("storing revocation: {e:#}");
             (ErrorCode::Internal, "storage error")
         })?;
+        if !new {
+            return Ok(());
+        }
         self.disconnect(&revocation.identity, "revoked by its owner");
+        // Only the devices that really are this account's: a list may name
+        // any key, and its owner's revocation is no reason to close a
+        // stranger's connection.
         for device in &bundle.devices {
-            self.close_with(&device.device, "this device's account has been revoked");
+            if self.device_account(&device.device) == Some(revocation.identity) {
+                self.close_with(&device.device, "this device's account has been revoked");
+            }
         }
         Ok(())
     }
@@ -1425,10 +1603,34 @@ impl RelayState {
                 "that is not a device of this account on this relay",
             ));
         }
-        let new = self.store.set_device_revocation(&revocation).map_err(|e| {
-            error!("storing device revocation: {e:#}");
-            (ErrorCode::Internal, "storage error")
-        })?;
+        // A device holds one statement. The account its bundle claims may
+        // put its own in place of another account's: that one binds
+        // nothing, and if it could stand, any account that listed the key
+        // while it had published nothing, and revoked it first, would make
+        // the device one its real account can never revoke.
+        let stored = self
+            .store
+            .set_device_revocation(&revocation, claims_me, MAX_DEVICE_REVOCATIONS_PER_ACCOUNT)
+            .map_err(|e| {
+                error!("storing device revocation: {e:#}");
+                (ErrorCode::Internal, "storage error")
+            })?;
+        let new = match stored {
+            store::DeviceRevocationStored::New => true,
+            store::DeviceRevocationStored::Held => false,
+            store::DeviceRevocationStored::Taken => {
+                return Err((
+                    ErrorCode::Forbidden,
+                    "another account's revocation of that key is held; revoke it once it claims this account",
+                ));
+            }
+            store::DeviceRevocationStored::Full => {
+                return Err((
+                    ErrorCode::TooLarge,
+                    "this account has revoked as many devices as a relay keeps",
+                ));
+            }
+        };
         // Only a device that claims this account is cut off: for one that
         // published nothing there is nothing to drop, and the id may yet
         // belong to somebody who is nobody's device.
@@ -1598,11 +1800,19 @@ impl RelayState {
         if self.is_revoked(&succession.new) {
             return Err((ErrorCode::Forbidden, "the successor has been revoked"));
         }
-        self.store.set_succession(&succession).map_err(|e| {
+        let stored = self.store.set_succession(&succession).map_err(|e| {
             error!("storing succession: {e:#}");
             (ErrorCode::Internal, "storage error")
         })?;
-        Ok(())
+        match stored {
+            store::SuccessionStored::New | store::SuccessionStored::Held => Ok(()),
+            // An older handover sent again, by anyone who was served it,
+            // would otherwise take a later one back.
+            store::SuccessionStored::Older => Err((
+                ErrorCode::Stale,
+                "a later succession for that identity is held",
+            )),
+        }
     }
 
     fn is_revoked(&self, user: &UserId) -> bool {
@@ -1952,6 +2162,9 @@ impl RelayState {
         if bundle.verify().is_err() {
             return Err((ErrorCode::BadSignature, "bundle signature is invalid"));
         }
+        if bundle.caps.len() > MAX_CAPS || bundle.caps.iter().any(|c| c.len() > MAX_CAP_BYTES) {
+            return Err((ErrorCode::TooLarge, "too many capabilities"));
+        }
         // A revoked identity is dead: it cannot be published again. Nor can
         // a revoked device, under the claim it makes now or the one it
         // made before; a revocation by an account this key never claimed
@@ -2019,13 +2232,27 @@ impl RelayState {
                 let given = invite.unwrap_or_default();
                 let matches: bool = token.as_bytes().ct_eq(given.as_bytes()).into();
                 if !matches {
+                    // Each wrong guess costs the address a registration,
+                    // so the token cannot be guessed at frame speed.
+                    if !self.registration_allowed(addr) {
+                        self.counters
+                            .refused_registrations
+                            .fetch_add(1, Ordering::Relaxed);
+                        return Err((
+                            ErrorCode::RateLimited,
+                            "too many new identities from this address; try again later",
+                        ));
+                    }
                     return Err((
                         ErrorCode::InviteRequired,
                         "this relay requires an invite token to register a new identity",
                     ));
                 }
             }
-            if self.policy.max_identities > 0 && self.stats().bundles >= self.policy.max_identities
+            // Counted without reading the tables: `stats` reads every group
+            // entry, and any key may ask for this. Failing closed.
+            if self.policy.max_identities > 0
+                && self.store.bundle_count().unwrap_or(u64::MAX) >= self.policy.max_identities
             {
                 self.counters
                     .refused_registrations
@@ -2064,6 +2291,9 @@ impl RelayState {
             .is_some_and(|k| k.len() > MAX_PQ_ONE_TIME_PREKEYS)
         {
             return Err((ErrorCode::TooLarge, "too many one-time ML-KEM prekeys"));
+        }
+        if serde_json::to_vec(&bundle).map_or(true, |b| b.len() > MAX_STORED_BUNDLE_BYTES) {
+            return Err((ErrorCode::TooLarge, "the bundle is too large"));
         }
         let storage = |e: anyhow::Error| {
             error!("storing bundle: {e:#}");
@@ -2308,13 +2538,184 @@ pub async fn serve(
         shutdown.await;
         stop.graceful_shutdown(Some(Duration::from_secs(5)));
     });
-    let mut server = axum_server::from_tcp(listener.into_std()?)?;
+    let mut server = axum_server::from_tcp(listener.into_std()?)?
+        .acceptor(FirstBytes::new(axum_server::accept::DefaultAcceptor::new()));
     set_http_timeouts(server.http_builder());
     server
         .handle(handle)
         .serve(router(state).into_make_service_with_connect_info::<SocketAddr>())
         .await?;
     Ok(())
+}
+
+/// How long a connection may take to send its first bytes, after any TLS
+/// handshake.
+const FIRST_BYTES_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Connections that have not yet shown a request, at most. Past this a new
+/// one is closed at once: a host that opens connections and says nothing
+/// fills this and not the process's file descriptors.
+const MAX_PENDING_CONNECTIONS: usize = 1024;
+
+/// The bytes an HTTP/2 connection starts with.
+const H2_PREFACE: &[u8; 24] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+
+/// Accepts a connection only once it has sent its first bytes, within
+/// [`FIRST_BYTES_TIMEOUT`], and only if they are not HTTP/2.
+///
+/// The HTTP server first waits, with no timer, for enough bytes to tell
+/// HTTP/1 from HTTP/2, and its header timeout starts only after that. So a
+/// connection that sent nothing (or `PRI`, or an HTTP/2 preface and then
+/// nothing) was held for ever, below every limit the relay counts, which
+/// start at the WebSocket upgrade; enough of them used up the process's
+/// file descriptors. The relay is a WebSocket over HTTP/1.1 and has no use
+/// for HTTP/2.
+#[derive(Clone)]
+pub(crate) struct FirstBytes<A> {
+    inner: A,
+    pending: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl<A> FirstBytes<A> {
+    pub(crate) fn new(inner: A) -> Self {
+        Self {
+            inner,
+            pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+}
+
+/// Gives a pending place back when the first bytes are in, or the
+/// connection is dropped.
+struct PendingPlace(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for PendingPlace {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+impl<A, I, S> axum_server::accept::Accept<I, S> for FirstBytes<A>
+where
+    A: axum_server::accept::Accept<I, S>,
+    A::Stream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    A::Service: Send + 'static,
+    A::Future: Send + 'static,
+{
+    type Stream = Prefixed<A::Stream>;
+    type Service = A::Service;
+    type Future = std::pin::Pin<
+        Box<dyn Future<Output = std::io::Result<(Self::Stream, Self::Service)>> + Send>,
+    >;
+
+    fn accept(&self, stream: I, service: S) -> Self::Future {
+        let pending = self.pending.clone();
+        let place = if pending.fetch_add(1, Ordering::Relaxed) >= MAX_PENDING_CONNECTIONS {
+            pending.fetch_sub(1, Ordering::Relaxed);
+            None
+        } else {
+            Some(PendingPlace(pending))
+        };
+        let accepted = self.inner.accept(stream, service);
+        Box::pin(async move {
+            let Some(_place) = place else {
+                return Err(std::io::Error::other(
+                    "too many connections waiting to say anything",
+                ));
+            };
+            let (mut stream, service) = accepted.await?;
+            let prefix = tokio::time::timeout(FIRST_BYTES_TIMEOUT, async {
+                use tokio::io::AsyncReadExt;
+                let mut prefix = Vec::with_capacity(H2_PREFACE.len());
+                // As many bytes as it takes to tell HTTP/1 from HTTP/2: up
+                // to the preface's length, or fewer once they stop matching it.
+                while prefix.len() < H2_PREFACE.len() && H2_PREFACE.starts_with(&prefix) {
+                    let mut chunk = [0u8; 24];
+                    let n = stream
+                        .read(&mut chunk[..H2_PREFACE.len() - prefix.len()])
+                        .await?;
+                    if n == 0 {
+                        return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+                    }
+                    prefix.extend_from_slice(&chunk[..n]);
+                }
+                Ok(prefix)
+            })
+            .await
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "no request"))??;
+            if prefix.as_slice() == H2_PREFACE.as_slice() {
+                return Err(std::io::Error::other("HTTP/2 is not served"));
+            }
+            Ok((
+                Prefixed {
+                    prefix,
+                    at: 0,
+                    inner: stream,
+                },
+                service,
+            ))
+        })
+    }
+}
+
+/// A stream with bytes already read off it put back in front.
+pub(crate) struct Prefixed<S> {
+    prefix: Vec<u8>,
+    at: usize,
+    inner: S,
+}
+
+impl<S: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for Prefixed<S> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        if self.at < self.prefix.len() {
+            let n = (self.prefix.len() - self.at).min(buf.remaining());
+            let at = self.at;
+            buf.put_slice(&self.prefix[at..at + n]);
+            self.at += n;
+            return std::task::Poll::Ready(Ok(()));
+        }
+        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Prefixed<S> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+
+    fn poll_write_vectored(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.inner).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
 }
 
 /// How long a connection may take to send its request line and headers.
@@ -2330,6 +2731,7 @@ const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) fn set_http_timeouts(
     builder: &mut hyper_util::server::conn::auto::Builder<hyper_util::rt::TokioExecutor>,
 ) {
+    // The first bytes are [`FirstBytes`]'s to time; from there on this.
     builder
         .http1()
         .timer(hyper_util::rt::TokioTimer::new())
@@ -2354,6 +2756,12 @@ async fn ws_handler(
         .filter(|h| !h.is_empty());
     ws.max_message_size(MAX_FRAME_BYTES)
         .max_frame_size(MAX_FRAME_BYTES)
+        // What may wait to be written. The library answers every ping with
+        // a pong whether or not the client reads, and by default kept them
+        // all: a client that sent pings and read nothing made the relay
+        // hold about a byte for every byte it sent, until the process ran
+        // out of memory. Past this the connection fails and is closed.
+        .max_write_buffer_size(MAX_WRITE_BUFFER)
         .on_upgrade(move |socket| handle_socket(socket, state, addr, host))
 }
 
@@ -2374,7 +2782,7 @@ async fn handle_socket(
         Err(why) => {
             debug!(%addr, "connection refused: {why}");
             let _ = send(&mut sink, &ServerFrame::error(ErrorCode::RateLimited, why)).await;
-            let _ = sink.close().await;
+            let _ = tokio::time::timeout(CLOSE_TIMEOUT, sink.close()).await;
             return;
         }
     };
@@ -2492,7 +2900,7 @@ async fn handle_socket(
     };
 
     let (tx, mut rx) = mpsc::channel(OUTBOUND_QUEUE);
-    let mut conn = Conn::new(&state.policy, addr);
+    let mut conn = Conn::new(&state, addr);
     // The sender goes to the registry and is not kept here: the queue
     // ending is how this task learns its session was replaced or evicted.
     let session_id = state.register(user, tx);
@@ -2520,7 +2928,7 @@ async fn handle_socket(
                 }
                 Some(Outbound::Close(why)) => {
                     debug!(%who, session_id, "closing: {why}");
-                    let _ = sink.close().await;
+                    let _ = tokio::time::timeout(CLOSE_TIMEOUT, sink.close()).await;
                     return; // whoever sent this owns the registry entry now
                 }
                 // The registry let go of this session: it was replaced by
@@ -2564,13 +2972,17 @@ async fn handle_socket(
 async fn anonymous_session(
     mut sink: Sink,
     mut stream: Stream,
-    state: &RelayState,
+    state: &Arc<RelayState>,
     first: ClientFrame,
     addr: IpAddr,
 ) {
     debug!("anonymous submission session opened");
-    let mut bucket = Bucket::per_minute(state.policy.anonymous_sends_per_minute);
-    let mut blobs = Bucket::per_minute(state.policy.blob_chunks_per_minute);
+    let mut budget = state.lease_budget(addr);
+    let Budget {
+        anonymous_sends: bucket,
+        blobs,
+        ..
+    } = &mut *budget;
     let mut next = Some(first);
     loop {
         let frame = match next.take() {
@@ -2599,16 +3011,16 @@ async fn anonymous_session(
         let replies: Vec<ServerFrame> = match frame {
             ClientFrame::Send { envelope } => {
                 state.anonymous_submissions.fetch_add(1, Ordering::Relaxed);
-                vec![state.submit(envelope, &mut bucket, None)]
+                vec![state.submit(envelope, bucket, None)]
             }
             ClientFrame::BlobPut {
                 blob,
                 index,
                 total,
                 data,
-            } => vec![state.put_blob(blob, index, total, &data, &mut blobs, addr)],
+            } => vec![state.put_blob(blob, index, total, &data, blobs, addr)],
             ClientFrame::BlobGet { blob } => {
-                if answer(&mut sink, state, state.open_blob(&blob, &mut blobs))
+                if answer(&mut sink, state, state.open_blob(&blob, blobs))
                     .await
                     .is_err()
                 {
@@ -2617,14 +3029,14 @@ async fn anonymous_session(
                 continue;
             }
             ClientFrame::GroupCreate { group, epoch, next } => {
-                vec![state.group_create(group, epoch, next, &mut bucket, addr)]
+                vec![state.group_create(group, epoch, next, bucket, addr)]
             }
             ClientFrame::GroupCommit {
                 group,
                 epoch,
                 token,
                 next,
-            } => vec![state.group_commit(group, epoch, token, next, &mut bucket)],
+            } => vec![state.group_commit(group, epoch, token, next, bucket)],
             ClientFrame::Ping => vec![ServerFrame::Pong],
             _ => vec![ServerFrame::error(
                 ErrorCode::Unauthenticated,
@@ -2641,6 +3053,16 @@ async fn anonymous_session(
 }
 
 fn handle_frame(state: &RelayState, me: &UserId, frame: ClientFrame, conn: &mut Conn) -> Answer {
+    if matches!(
+        frame,
+        ClientFrame::Lookup { .. } | ClientFrame::LogSince { .. } | ClientFrame::KeyPackage { .. }
+    ) && !conn.may_read(state, me)
+    {
+        return Answer::from(ServerFrame::error(
+            ErrorCode::InviteRequired,
+            "this relay serves its directory to registered identities; publish with an invite first",
+        ));
+    }
     let replies: Vec<ServerFrame> = match frame {
         ClientFrame::Auth { .. } => vec![ServerFrame::error(
             ErrorCode::Malformed,
@@ -2652,8 +3074,8 @@ fn handle_frame(state: &RelayState, me: &UserId, frame: ClientFrame, conn: &mut 
             // one that leaves something behind for good (a transparency
             // entry, which a fresh signed prekey makes different every
             // time).
-            if !conn.publishes.try_take() {
-                if let Some(quiet) = conn.publishes.should_warn() {
+            if !conn.budget.publishes.try_take() {
+                if let Some(quiet) = conn.budget.publishes.should_warn() {
                     warn!(who = %state.who(me), quiet, "publish rate limit hit");
                 }
                 return Answer::from(ServerFrame::error(
@@ -2668,6 +3090,7 @@ fn handle_frame(state: &RelayState, me: &UserId, frame: ClientFrame, conn: &mut 
             match state.publish(me, bundle, invite.as_deref(), conn.addr) {
                 Ok(report) => {
                     conn.devices = devices;
+                    conn.registered = true;
                     let mut replies = vec![ServerFrame::Published];
                     if let Some(report) = report {
                         conn.prekeys = true;
@@ -2684,8 +3107,8 @@ fn handle_frame(state: &RelayState, me: &UserId, frame: ClientFrame, conn: &mut 
             }
         }
         ClientFrame::LogSince { index } => {
-            if !conn.lookups.try_take() {
-                if let Some(quiet) = conn.lookups.should_warn() {
+            if !conn.budget.lookups.try_take() {
+                if let Some(quiet) = conn.budget.lookups.should_warn() {
                     warn!(who = %state.who(me), quiet, "lookup rate limit hit");
                 }
                 return Answer::from(ServerFrame::error(
@@ -2697,8 +3120,8 @@ fn handle_frame(state: &RelayState, me: &UserId, frame: ClientFrame, conn: &mut 
             vec![ServerFrame::LogEntries { entries, head }]
         }
         ClientFrame::Lookup { user_id } => {
-            if !conn.lookups.try_take() {
-                if let Some(quiet) = conn.lookups.should_warn() {
+            if !conn.budget.lookups.try_take() {
+                if let Some(quiet) = conn.budget.lookups.should_warn() {
                     warn!(who = %state.who(me), quiet, "lookup rate limit hit");
                 }
                 return Answer::from(ServerFrame::error(
@@ -2750,7 +3173,9 @@ fn handle_frame(state: &RelayState, me: &UserId, frame: ClientFrame, conn: &mut 
                 Err((code, message)) => vec![ServerFrame::error(code, message)],
             }
         }
-        ClientFrame::Send { envelope } => vec![state.submit(envelope, &mut conn.sends, Some(me))],
+        ClientFrame::Send { envelope } => {
+            vec![state.submit(envelope, &mut conn.budget.sends, Some(me))]
+        }
         ClientFrame::Ack { id } => {
             if !silver_protocol::envelope::is_valid_message_id(&id) {
                 return Answer::from(ServerFrame::error(
@@ -2758,8 +3183,8 @@ fn handle_frame(state: &RelayState, me: &UserId, frame: ClientFrame, conn: &mut 
                     "envelope id must be 1 to 64 printable ASCII characters",
                 ));
             }
-            if !conn.acks.try_take() {
-                if let Some(quiet) = conn.acks.should_warn() {
+            if !conn.budget.acks.try_take() {
+                if let Some(quiet) = conn.budget.acks.should_warn() {
                     warn!(who = %state.who(me), quiet, "ack rate limit hit");
                 }
                 return Answer::from(ServerFrame::error(
@@ -2775,22 +3200,22 @@ fn handle_frame(state: &RelayState, me: &UserId, frame: ClientFrame, conn: &mut 
             index,
             total,
             data,
-        } => vec![state.put_blob(blob, index, total, &data, &mut conn.blobs, conn.addr)],
-        ClientFrame::BlobGet { blob } => return state.open_blob(&blob, &mut conn.blobs),
+        } => vec![state.put_blob(blob, index, total, &data, &mut conn.budget.blobs, conn.addr)],
+        ClientFrame::BlobGet { blob } => return state.open_blob(&blob, &mut conn.budget.blobs),
         ClientFrame::KeyPackages {
             packages,
             last_resort,
         } => vec![state.deposit_key_packages(me, packages, last_resort, conn)],
         ClientFrame::KeyPackage { user_id } => vec![state.key_package_for(user_id, conn)],
         ClientFrame::GroupCreate { group, epoch, next } => {
-            vec![state.group_create(group, epoch, next, &mut conn.sends, conn.addr)]
+            vec![state.group_create(group, epoch, next, &mut conn.budget.sends, conn.addr)]
         }
         ClientFrame::GroupCommit {
             group,
             epoch,
             token,
             next,
-        } => vec![state.group_commit(group, epoch, token, next, &mut conn.sends)],
+        } => vec![state.group_commit(group, epoch, token, next, &mut conn.budget.sends)],
         ClientFrame::Ping => vec![ServerFrame::Pong],
     };
     Answer::Frames(replies)
@@ -3010,14 +3435,98 @@ mod lifecycle_tests {
             "the mapped form is the same client"
         );
 
-        // And the mapped loopback is loopback, so a front on it is trusted.
+        // Nobody's X-Forwarded-For is believed unless the operator named
+        // the front: loopback used to be by default, and Tor, a stream
+        // proxy or a local user then chose the address they were counted
+        // under.
         let loopback: IpAddr = IpAddr::V6("::ffff:127.0.0.1".parse::<Ipv6Addr>().unwrap());
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", "9.9.9.9".parse().unwrap());
         assert_eq!(
             state.client_address(Some(loopback), &headers),
+            "127.0.0.1".parse::<IpAddr>().unwrap(),
+            "an unnamed front is not believed"
+        );
+
+        // Named, the mapped loopback is the same front, and of several
+        // header lines the last one's last entry is the one it wrote.
+        let trusting = RelayState::with_store_and_policy(
+            Store::in_memory().expect("store"),
+            Limits::default(),
+            Policy {
+                trusted_proxies: vec!["127.0.0.1".parse().unwrap()],
+                ..Policy::default()
+            },
+        );
+        assert_eq!(
+            trusting.client_address(Some(loopback), &headers),
             "9.9.9.9".parse::<IpAddr>().unwrap(),
         );
+        headers.append("x-forwarded-for", "8.8.8.8, 7.7.7.7".parse().unwrap());
+        assert_eq!(
+            trusting.client_address(Some(loopback), &headers),
+            "7.7.7.7".parse::<IpAddr>().unwrap(),
+            "the line a front appends comes last"
+        );
+    }
+
+    /// Per-address limits count an IPv6 client by its /64, which one host
+    /// is normally given whole; bans stay exact.
+    #[test]
+    fn an_ipv6_host_is_one_address_for_the_limits() {
+        let a: IpAddr = "2001:db8:1:2::1".parse().unwrap();
+        let b: IpAddr = "2001:db8:1:2:ffff:ffff:ffff:ffff".parse().unwrap();
+        let other: IpAddr = "2001:db8:1:3::1".parse().unwrap();
+        assert_eq!(limit_key(a), limit_key(b));
+        assert_ne!(limit_key(a), limit_key(other));
+        let four: IpAddr = "1.2.3.4".parse().unwrap();
+        assert_eq!(limit_key(four), four);
+        let state = RelayState::with_store_and_policy(
+            Store::in_memory().expect("store"),
+            Limits::default(),
+            Policy {
+                connections_per_address: 2,
+                ..Policy::default()
+            },
+        );
+        let _one = state.connect(a).expect("first");
+        let _two = state
+            .connect(b)
+            .expect("second, another /128 of the same /64");
+        assert!(state.connect("2001:db8:1:2::99".parse().unwrap()).is_err());
+        assert!(
+            state.connect(other).is_ok(),
+            "the next /64 is somebody else"
+        );
+    }
+
+    /// The rate limits a connection works under go back to its address
+    /// when it ends, so reconnecting does not start them full again.
+    #[test]
+    fn reconnecting_does_not_refill_the_rate_limits() {
+        let state = RelayState::with_store_and_policy(
+            Store::in_memory().expect("store"),
+            Limits::default(),
+            Policy {
+                sends_per_minute: 3,
+                ..Policy::default()
+            },
+        );
+        let addr: IpAddr = "203.0.113.9".parse().unwrap();
+        for _ in 0..3 {
+            let mut lease = state.lease_budget(addr);
+            assert!(lease.sends.try_take());
+        }
+        let mut lease = state.lease_budget(addr);
+        let mut taken = 0;
+        while lease.sends.try_take() {
+            taken += 1;
+            assert!(taken < 3, "a fourth connection started with a full budget");
+        }
+        drop(lease);
+        // Another address is untouched.
+        let mut elsewhere = state.lease_budget("203.0.113.10".parse().unwrap());
+        assert!(elsewhere.sends.try_take());
     }
 
     /// A rate of zero turns the thing off, for hourly limits as well as
@@ -3302,6 +3811,195 @@ mod lifecycle_tests {
             frames += 1;
         }
         assert_eq!(frames, 1);
+    }
+
+    #[test]
+    fn an_invite_only_relay_serves_its_directory_to_registered_keys_only() {
+        let state = RelayState::new();
+        state.set_invite_token(Some("sesame".into())).unwrap();
+        let alice = Identity::generate();
+        let outsider = Identity::generate();
+        state.store.put_bundle(&alice.key_bundle()).unwrap();
+        let first = |answer: Answer| match answer {
+            Answer::Frames(frames) => frames.into_iter().next(),
+            Answer::Blob { .. } => None,
+        };
+        let refused = |frame: Option<ServerFrame>| {
+            matches!(
+                frame,
+                Some(ServerFrame::Error {
+                    code: ErrorCode::InviteRequired,
+                    ..
+                })
+            )
+        };
+        let mut conn = Conn::new(&state, addr(9));
+        let me = outsider.user_id();
+        for frame in [
+            ClientFrame::Lookup {
+                user_id: alice.user_id(),
+            },
+            ClientFrame::LogSince { index: 0 },
+            ClientFrame::KeyPackage {
+                user_id: alice.user_id(),
+            },
+        ] {
+            assert!(refused(first(handle_frame(&state, &me, frame, &mut conn))));
+        }
+        // Wrong invites cost the address its registrations, and run out.
+        let mut limited = false;
+        for _ in 0..1000 {
+            match state.publish(&me, outsider.key_bundle(), Some("guess"), addr(9)) {
+                Err((ErrorCode::InviteRequired, _)) => {}
+                Err((ErrorCode::RateLimited, _)) => {
+                    limited = true;
+                    break;
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        assert!(limited);
+        // With the invite, from elsewhere, the key registers and may read.
+        state
+            .publish(&me, outsider.key_bundle(), Some("sesame"), addr(10))
+            .unwrap();
+        let answer = handle_frame(
+            &state,
+            &me,
+            ClientFrame::Lookup {
+                user_id: alice.user_id(),
+            },
+            &mut conn,
+        );
+        assert!(matches!(
+            first(answer),
+            Some(ServerFrame::LookupResult { .. })
+        ));
+        // A registered key is let read on any connection.
+        let mut alice_conn = Conn::new(&state, addr(11));
+        let answer = handle_frame(
+            &state,
+            &alice.user_id(),
+            ClientFrame::LogSince { index: 0 },
+            &mut alice_conn,
+        );
+        assert!(!refused(first(answer)));
+    }
+
+    #[test]
+    fn lifecycle_statements_sent_again_add_nothing_and_cannot_roll_back() {
+        let state = RelayState::new();
+        let alice = Identity::generate();
+        let bob = Identity::generate();
+        let first = Identity::generate();
+        let second = Identity::generate();
+        state.store.put_bundle(&alice.key_bundle()).unwrap();
+        state.store.put_bundle(&bob.key_bundle()).unwrap();
+        // A succession, then a later one; the earlier one sent again is
+        // refused, and the same one again adds nothing to the log.
+        let earlier = alice.succeed_to(&first, 10);
+        let later = alice.succeed_to(&second, 20);
+        state.apply_succession(earlier.clone(), addr(1)).unwrap();
+        state.apply_succession(later.clone(), addr(2)).unwrap();
+        let head = state.log_head().index;
+        let (code, _) = state.apply_succession(earlier, addr(3)).unwrap_err();
+        assert!(matches!(code, ErrorCode::Stale));
+        state.apply_succession(later.clone(), addr(4)).unwrap();
+        assert_eq!(state.log_head().index, head);
+        assert_eq!(
+            state.store.succession(&alice.user_id()).unwrap(),
+            Some(later)
+        );
+        // A revocation sent again is answered and adds nothing either; the
+        // first one stands.
+        let revocation = bob.revocation(30);
+        state.apply_revocation(revocation.clone(), addr(5)).unwrap();
+        let head = state.log_head().index;
+        state.apply_revocation(revocation.clone(), addr(6)).unwrap();
+        state.apply_revocation(bob.revocation(40), addr(7)).unwrap();
+        assert_eq!(state.log_head().index, head);
+        assert_eq!(
+            state.store.revocation(&bob.user_id()).unwrap(),
+            Some(revocation)
+        );
+    }
+
+    #[test]
+    fn a_stranger_cannot_make_a_device_unrevocable_by_revoking_it_first() {
+        let state = RelayState::new();
+        let alice = Identity::generate();
+        let mallory = Identity::generate();
+        let laptop = Identity::generate();
+        state.store.put_bundle(&alice.key_bundle()).unwrap();
+        state.store.put_bundle(&mallory.key_bundle()).unwrap();
+        let list = |owner: &Identity| {
+            owner
+                .key_bundle()
+                .with_devices(
+                    owner,
+                    vec![
+                        owner
+                            .certify_device(&laptop.user_id(), "laptop", 1)
+                            .unwrap(),
+                    ],
+                )
+                .unwrap()
+        };
+        // Alice lists the laptop before it claims her (section 14.6), and
+        // mallory, reading her list, lists it too and revokes it while it
+        // has published nothing.
+        state
+            .publish(&alice.user_id(), list(&alice), None, addr(1))
+            .unwrap();
+        state
+            .publish(&mallory.user_id(), list(&mallory), None, addr(2))
+            .unwrap();
+        state
+            .apply_device_revocation(
+                &mallory.user_id(),
+                mallory.revoke_device(&laptop.user_id(), 5),
+                addr(2),
+            )
+            .unwrap();
+        // Alice's own cancellation now is refused, and says so, rather
+        // than answered as though it were held.
+        let (code, _) = state
+            .apply_device_revocation(
+                &alice.user_id(),
+                alice.revoke_device(&laptop.user_id(), 6),
+                addr(3),
+            )
+            .unwrap_err();
+        assert!(matches!(code, ErrorCode::Forbidden));
+        // Mallory's statement binds nothing: the laptop claims alice.
+        let certificate = alice
+            .certify_device(&laptop.user_id(), "laptop", 1)
+            .unwrap();
+        state
+            .publish(
+                &laptop.user_id(),
+                laptop
+                    .key_bundle()
+                    .as_device_of(laptop.countersign_device(&certificate).unwrap()),
+                None,
+                addr(4),
+            )
+            .unwrap();
+        assert_eq!(state.login_refusal(&laptop.user_id()), None);
+        // And alice can still revoke it: hers takes the place of mallory's.
+        state
+            .apply_device_revocation(
+                &alice.user_id(),
+                alice.revoke_device(&laptop.user_id(), 7),
+                addr(5),
+            )
+            .unwrap();
+        assert!(state.login_refusal(&laptop.user_id()).is_some());
+        assert_eq!(state.device_revocations(&mallory.user_id()).len(), 0);
+        assert_eq!(
+            state.device_revocations(&laptop.user_id())[0].account,
+            alice.user_id()
+        );
     }
 
     #[test]

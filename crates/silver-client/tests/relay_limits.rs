@@ -150,10 +150,35 @@ async fn connections_per_address_are_capped_and_places_come_back() {
     ));
 }
 
+/// The front these tests stand in for: the test connects from loopback
+/// and writes the header itself, as Caddy on the same host would.
+fn loopback_front() -> Vec<std::net::IpAddr> {
+    vec!["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()]
+}
+
 #[tokio::test]
 async fn a_trusted_front_names_the_client() {
+    // Nobody's header is believed unless the front is named: every
+    // connection counts as the loopback peer it is.
+    let (url, _) = start(Policy {
+        connections_per_address: 1,
+        ..Policy::default()
+    })
+    .await;
+    let mut a = open(&url, Some("203.0.113.5")).await;
+    assert!(matches!(
+        next(&mut a).await,
+        Some(ServerFrame::Challenge { .. })
+    ));
+    let mut b = open(&url, Some("203.0.113.6")).await;
+    assert!(
+        is_refusal(&next(&mut b).await, ErrorCode::RateLimited),
+        "an unnamed front's header was believed"
+    );
+
     let (url, state) = start(Policy {
         connections_per_address: 1,
+        trusted_proxies: loopback_front(),
         ..Policy::default()
     })
     .await;
@@ -266,6 +291,7 @@ async fn idle_connections_are_closed_and_pings_keep_them() {
 async fn registrations_per_address_and_identities_are_capped() {
     let (url, state) = start(Policy {
         registrations_per_hour: 1,
+        trusted_proxies: loopback_front(),
         ..Policy::default()
     })
     .await;
@@ -319,6 +345,7 @@ async fn registrations_per_address_and_identities_are_capped() {
 async fn uploads_per_address_are_limited() {
     let (url, state) = start(Policy {
         blob_mib_per_address_per_hour: 1,
+        trusted_proxies: loopback_front(),
         ..Policy::default()
     })
     .await;

@@ -14,6 +14,9 @@ UMask=0077
 # them off the host, encrypted.
 Environment=SILVER_RELAY_DATA=/var/lib/silver-relay
 StateDirectory=silver-relay
+# As the relay's own unit has it: if this unit is the one that makes the
+# directory, it is made private too.
+StateDirectoryMode=0700
 ExecStartPre=/bin/mkdir -p -m 700 /var/lib/silver-relay/backups
 ExecStart=/bin/sh -c 'exec /usr/local/bin/silver-relay backup "/var/lib/silver-relay/backups/relay-$(date -u +%%Y-%%m-%%dT%%H%%M).backup"'
 ExecStartPost=/usr/bin/find /var/lib/silver-relay/backups -name 'relay-*.backup' -mtime +14 -delete

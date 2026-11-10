@@ -157,7 +157,12 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: pip install pyte==0.8.2 || pip install --break-system-packages pyte==0.8.2
       - run: cargo build --workspace --locked
-      - run: TERM=xterm-256color python3 tests/tui/soak.py --minutes ${{ inputs.soak_minutes || 3 }}
+      # Through the environment, not spliced into the script: an input is
+      # text whoever dispatches the run chose, and in the script it would
+      # be shell.
+      - run: TERM=xterm-256color python3 tests/tui/soak.py --minutes "$SOAK_MINUTES"
+        env:
+          SOAK_MINUTES: ${{ inputs.soak_minutes || 3 }}
 
   packaging:
     # The Debian package, built from the debug binaries and installed in a

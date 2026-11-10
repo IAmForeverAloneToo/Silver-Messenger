@@ -836,16 +836,25 @@ its absence as "not kept here" rather than "none left".
 ### 7.4 Limits and abuse controls
 
 The defaults; an operator can change all of them and can require an
-invite token for first registrations.
+invite token for first registrations. On a relay that requires one, a
+`lookup`, `log_since` or `key_package` from a key that has no bundle
+there is answered `invite_required`: logging in proves only that the
+client holds a key, which anyone can make, and the directory is for the
+people the relay was opened to. A wrong token costs the address one of
+its hourly registrations, so it cannot be guessed at frame speed.
 
 * **Per authenticated connection**: 60 `send`, 30 `lookup`, 600 blob
   chunks (`blob_put` or chunks answered to `blob_get`), 6 `publish` and
   4000 `ack` per minute, as token buckets of that burst size.
 * **Per anonymous connection**: 30 `send` and 600 chunks per minute.
-* **Per connection**: ten seconds to finish the HTTP request before the
-  WebSocket upgrade, and ten seconds to log in after it; a connection
-  that sends nothing for two minutes is closed (clients `ping` every 30
-  seconds).
+* **Per connection**: ten seconds to send its first bytes, ten seconds
+  to finish the HTTP request before the WebSocket upgrade, and ten
+  seconds to log in after it; a connection that sends nothing for two
+  minutes is closed (clients `ping` every 30 seconds), and one that does
+  not read what the relay writes is closed once a few frames' worth is
+  waiting. The per-minute budgets above belong to the address rather
+  than to the socket: a connection that closes hands its budget to the
+  next one from the same address, so reconnecting does not refill it.
 * **Per recipient**: 1000 queued envelopes or 32 MiB, whichever first;
   unacknowledged envelopes expire after 30 days. An envelope to an
   identity the relay holds no bundle for is refused `not_found`:
@@ -858,10 +867,16 @@ invite token for first registrations.
 * **Blobs**: at most 16 MiB of plaintext each (the relay allows 16 MiB
   plus the 256 chunk tags of ciphertext), 1 GiB in total, and each
   expires 30 days after its first chunk arrived, on the same schedule as
-  messages.
-* **Per client address** (the socket's peer, or what a trusted TLS front
-  says in `X-Forwarded-For`): 16 open connections, 20 new identities an
-  hour and 256 MiB of `blob_put` data an hour.
+  messages. A chunk is charged at least 1 KiB against both, whatever it
+  holds, so empty chunks cannot fill the store uncounted.
+* **Per client address** (the socket's peer, or what a TLS front the
+  operator named as trusted says in `X-Forwarded-For`; nobody's header
+  is believed by default): 16 open connections, 20 new identities an
+  hour and 256 MiB of `blob_put` data an hour. An IPv6 address counts
+  by its /64, which is what one host is normally given.
+* **Bundles**: at most 32 capabilities of at most 32 bytes each, and
+  16 KiB stored once the one-time prekeys are taken out (`too_large`
+  beyond either); every bundle that changes is kept in the log for good.
 * **In total**: 4096 connections and 100 000 identities.
 * **Groups** (section 13): one `key_packages` deposit per connection per
   minute, 30 packages plus a last-resort one per identity, 4096 bytes
@@ -1095,6 +1110,11 @@ refused (`forbidden`). Each accepted or refused statement also costs the
 sending address one of its hourly new-identity registrations (section
 7.4), since a self-authenticating frame is otherwise free to send.
 
+The first revocation of an identity stands. A statement is served to
+anyone who looks the identity up, so anyone can send it again: a relay
+answers a second revocation of an identity it holds one for with
+`published` and stores, logs and disconnects nothing more.
+
 ### 10.2 Succession
 
 A **succession** names a successor identity for a planned rotation, while
@@ -1116,7 +1136,10 @@ big-endian bytes):
 `verify()` checks both and that `old` and `new` differ, so nobody can name
 someone else's key as their successor, and a rotation needs both keys'
 consent. A relay keeps it under the old identity and attaches it to a
-`lookup_result` for the old identity. A contact that sees a valid
+`lookup_result` for the old identity. The same succession sent again
+changes nothing, and one whose `created_at_ms` is not later than the one
+held is refused (`stale`): otherwise anyone served an earlier handover
+could send it again and take a later one back. A contact that sees a valid
 succession for its pinned (old) key re-pins the contact to `new`: it moves
 the conversation across, clears the pinned bundle and the verified mark,
 starts message numbering afresh, and looks the new key up. The safety
@@ -2053,6 +2076,20 @@ an identity in its own right and no list makes it otherwise; otherwise
 any account could cut any identity off by calling it a device of its own,
 and the victim would never log in, publish or receive again.
 
+A relay holds one statement per device. Since a key that has published
+nothing can be on more than one account's list, a stranger who read an
+account's list could revoke the account's device-to-be first. That
+statement binds nothing (below), but if it held the device's place, the
+real account's would never be stored and the device could never be
+revoked. So the account whose certificate the device's bundle carries
+may put its statement in the place of another account's, and the
+replacement is logged as any statement is. Any other account's statement
+about a device that already has one is refused (`forbidden`), saying so,
+rather than answered as though it were held; an account that wants to
+cancel a device-to-be that a stranger has revoked first revokes it again
+once the device claims it. A relay keeps at most 256 statements from one
+account (`too_large` past that).
+
 What the statement does is bound to that claim as well. A device is
 refused a login, a publish and delivery only while the bundle it
 published carries the certificate of the account that revoked it, so a
@@ -2087,8 +2124,9 @@ stops; it does not erase itself on the relay's word alone, which a
 hostile relay could give, and its owner erases it (14.9).
 
 An **identity revocation** (10.1) covers every device: the relay closes
-the connections of the account's listed devices when the revocation
-arrives and refuses a device of a revoked account at login, and a
+the connections of the account's listed devices whose bundles claim it
+when the revocation arrives (a list may name any key, and its owner's
+revocation is no reason to close a stranger's connection) and refuses a device of a revoked account at login, and a
 contact that retires the account retires its devices with it. A
 **succession** (10.2) moves nothing but the identity: the new key links
 its devices again.

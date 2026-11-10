@@ -166,6 +166,31 @@ pub(crate) fn migrate(txn: &redb::WriteTransaction, from: u64) -> anyhow::Result
     }
 }
 
+/// What storing a succession came to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SuccessionStored {
+    /// Stored and logged.
+    New,
+    /// The very same statement is held already.
+    Held,
+    /// A statement made at the same time or later is held.
+    Older,
+}
+
+/// What storing a device revocation came to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceRevocationStored {
+    /// Stored and logged.
+    New,
+    /// The account had already revoked the device; nothing was written.
+    Held,
+    /// Another account's statement about the device is held, and this one
+    /// may not take its place; nothing was written.
+    Taken,
+    /// The account has issued as many as it may; nothing was written.
+    Full,
+}
+
 /// Log everything already stored: bundles first, in key order, then
 /// revocations and successions. A database that already has a log (a
 /// backup taken with one but stamped older, say) is left alone: seeding
@@ -465,39 +490,74 @@ impl Store {
     /// file are readable by the relay's user only: the database holds every
     /// mailbox and every key bundle.
     pub fn open(path: &Path) -> anyhow::Result<Self> {
-        if let Some(parent) = path.parent() {
-            // Only a directory the relay makes is made private. A path the
-            // operator pointed at something that already exists is theirs:
-            // `--data-dir .` should not chmod the working directory.
-            let existed = parent.exists();
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
-            if !existed {
-                Self::private(parent, 0o700);
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            // Only a directory the relay makes is made private, and it is
+            // made so as it is made rather than after. A path the operator
+            // pointed at something that already exists is theirs: `--data-dir
+            // .` should not chmod the working directory.
+            Self::private_dir(parent).with_context(|| format!("creating {}", parent.display()))?;
+        }
+        Self::private_db_file(path).with_context(|| format!("opening {}", path.display()))?;
+        let db = Database::create(path).with_context(|| format!("opening {}", path.display()))?;
+        Self::init(db)
+    }
+
+    /// Make `dir` and any parents it lacks, private from the moment they
+    /// exist on Unix.
+    fn private_dir(dir: &Path) -> std::io::Result<()> {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(dir)
+    }
+
+    /// See that the database file at `path` is a regular file only its
+    /// owner can read, making it so if it is new.
+    ///
+    /// A new file is made with `O_EXCL` and mode 0600, rather than made by
+    /// the database engine and narrowed after: in between, anyone could
+    /// have opened it, and an open file stays readable whatever its mode
+    /// becomes. A link where the file should be is refused, so the relay
+    /// never writes its database through one, and an existing file whose
+    /// mode cannot be narrowed is an error, not a warning nobody reads.
+    fn private_db_file(path: &Path) -> anyhow::Result<()> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(path) {
+            Ok(_) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e.into()),
+        }
+        let metadata = std::fs::symlink_metadata(path)?;
+        anyhow::ensure!(
+            metadata.file_type().is_file(),
+            "{} is not a regular file; the relay will not keep its database through a link",
+            path.display()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o077 != 0 {
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                    .context("making the database private to its owner")?;
             }
         }
-        let db = Database::create(path).with_context(|| format!("opening {}", path.display()))?;
-        Self::private(path, 0o600);
-        Self::init(db)
+        Ok(())
     }
 
     /// A database that lives only in memory, for tests and `--ephemeral`.
     pub fn in_memory() -> anyhow::Result<Self> {
         let db = Database::builder().create_with_backend(redb::backends::InMemoryBackend::new())?;
         Self::init(db)
-    }
-
-    /// Keep `path` to its owner on Unix; other systems keep their defaults.
-    fn private(path: &Path, mode: u32) {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = (path, mode);
-        }
     }
 
     /// Create the tables that are missing, bring an older layout up to
@@ -701,12 +761,22 @@ impl Store {
     // --- identity lifecycle ----------------------------------------------------
 
     /// Record a self-signed revocation for its identity, logging it in the
-    /// same transaction.
-    pub fn set_revocation(&self, revocation: &Revocation) -> anyhow::Result<()> {
+    /// same transaction; `false`, and nothing written, when the identity
+    /// is revoked already. The first statement stands.
+    pub fn set_revocation(&self, revocation: &Revocation) -> anyhow::Result<bool> {
         let bytes = serde_json::to_vec(revocation)?;
+        let key = revocation.identity.as_bytes().as_slice();
+        if self.is_revoked(&revocation.identity)? {
+            return Ok(false);
+        }
         let txn = self.db.begin_write()?;
-        txn.open_table(REVOCATIONS)?
-            .insert(revocation.identity.as_bytes().as_slice(), bytes.as_slice())?;
+        {
+            let mut table = txn.open_table(REVOCATIONS)?;
+            if table.get(key)?.is_some() {
+                return Ok(false);
+            }
+            table.insert(key, bytes.as_slice())?;
+        }
         append_log(
             &txn,
             subject(&revocation.identity),
@@ -715,7 +785,7 @@ impl Store {
             now_ms(),
         )?;
         txn.commit()?;
-        Ok(())
+        Ok(true)
     }
 
     pub fn revocation(&self, user: &UserId) -> anyhow::Result<Option<Revocation>> {
@@ -739,12 +809,35 @@ impl Store {
     }
 
     /// Record a cross-signed succession, keyed by the old identity, logging
-    /// it in the same transaction.
-    pub fn set_succession(&self, succession: &Succession) -> anyhow::Result<()> {
+    /// it in the same transaction. The same statement again changes
+    /// nothing, and one made before the one held is refused, so that a
+    /// copy of an earlier handover cannot take a later one back; nothing
+    /// is written or logged in either case.
+    pub fn set_succession(&self, succession: &Succession) -> anyhow::Result<SuccessionStored> {
         let bytes = serde_json::to_vec(succession)?;
+        let key = succession.old.as_bytes().as_slice();
+        let judge = |held: Option<Succession>| match held {
+            Some(held) if held == *succession => Some(SuccessionStored::Held),
+            Some(held) if held.created_at_ms >= succession.created_at_ms => {
+                Some(SuccessionStored::Older)
+            }
+            _ => None,
+        };
+        if let Some(outcome) = judge(self.succession(&succession.old)?) {
+            return Ok(outcome);
+        }
         let txn = self.db.begin_write()?;
-        txn.open_table(SUCCESSIONS)?
-            .insert(succession.old.as_bytes().as_slice(), bytes.as_slice())?;
+        {
+            let mut table = txn.open_table(SUCCESSIONS)?;
+            let held = table
+                .get(key)?
+                .map(|g| serde_json::from_slice(g.value()))
+                .transpose()?;
+            if let Some(outcome) = judge(held) {
+                return Ok(outcome);
+            }
+            table.insert(key, bytes.as_slice())?;
+        }
         append_log(
             &txn,
             subject(&succession.old),
@@ -753,7 +846,7 @@ impl Store {
             now_ms(),
         )?;
         txn.commit()?;
-        Ok(())
+        Ok(SuccessionStored::New)
     }
 
     pub fn succession(&self, user: &UserId) -> anyhow::Result<Option<Succession>> {
@@ -771,26 +864,55 @@ impl Store {
 
     /// Record an account's revocation of one of its devices, keyed by the
     /// device, indexed by the account, and logged in the same transaction
-    /// as a revocation entry whose subject is the device. A device already
-    /// revoked stays as it was, whatever the new statement says: `false`
-    /// then, and nothing is written or logged.
-    pub fn set_device_revocation(&self, revocation: &DeviceRevocation) -> anyhow::Result<bool> {
+    /// as a revocation entry whose subject is the device.
+    ///
+    /// A device holds one statement. One from the same account already
+    /// held stays as it was, whatever the new one says. One from another
+    /// account is replaced only when `replace` says so -- the caller has
+    /// seen that the device claims the new statement's account, so the
+    /// held one binds nothing -- and otherwise stays. An account that has
+    /// issued `max_per_account` statements gets no more. Nothing is
+    /// written or logged unless the outcome is [`DeviceRevocationStored::New`].
+    pub fn set_device_revocation(
+        &self,
+        revocation: &DeviceRevocation,
+        replace: bool,
+        max_per_account: usize,
+    ) -> anyhow::Result<DeviceRevocationStored> {
         let bytes = serde_json::to_vec(revocation)?;
         let device = revocation.device.as_bytes().as_slice();
         let account = revocation.account.as_bytes().as_slice();
         let txn = self.db.begin_write()?;
-        let new = {
+        let outcome = {
             let mut table = txn.open_table(DEVICE_REVOCATIONS)?;
-            if table.get(device)?.is_some() {
-                false
-            } else {
-                table.insert(device, bytes.as_slice())?;
-                txn.open_table(DEVICE_REVOCATIONS_BY_ACCOUNT)?
-                    .insert((account, device), ())?;
-                true
+            let mut index = txn.open_table(DEVICE_REVOCATIONS_BY_ACCOUNT)?;
+            let held: Option<DeviceRevocation> = table
+                .get(device)?
+                .map(|g| serde_json::from_slice(g.value()))
+                .transpose()
+                .context("stored device revocation is unreadable")?;
+            match held {
+                Some(held) if held.account == revocation.account => DeviceRevocationStored::Held,
+                Some(_) if !replace => DeviceRevocationStored::Taken,
+                _ if index
+                    .range((account, REF_LOW)..=(account, REF_HIGH))?
+                    .take(max_per_account)
+                    .count()
+                    >= max_per_account =>
+                {
+                    DeviceRevocationStored::Full
+                }
+                held => {
+                    if let Some(held) = held {
+                        index.remove((held.account.as_bytes().as_slice(), device))?;
+                    }
+                    table.insert(device, bytes.as_slice())?;
+                    index.insert((account, device), ())?;
+                    DeviceRevocationStored::New
+                }
             }
         };
-        if new {
+        if outcome == DeviceRevocationStored::New {
             append_log(
                 &txn,
                 subject(&revocation.device),
@@ -800,10 +922,10 @@ impl Store {
             )?;
         }
         txn.commit()?;
-        Ok(new)
+        Ok(outcome)
     }
 
-    /// The revocation of `device`, if its account issued one.
+    /// The revocation held for `device`, whichever account issued it.
     pub fn device_revocation(&self, device: &UserId) -> anyhow::Result<Option<DeviceRevocation>> {
         let txn = self.db.begin_read()?;
         match txn
@@ -963,6 +1085,10 @@ fn remove_user_data(
     Ok(())
 }
 
+/// What one stored chunk costs at least, whatever it holds: a row of
+/// its own in two tables. Shared with the per-address upload budget.
+pub const CHUNK_OVERHEAD_BYTES: u64 = 1024;
+
 impl Store {
     // --- blobs ---------------------------------------------------------------
 
@@ -976,6 +1102,28 @@ impl Store {
         now_ms: u64,
         limits: BlobLimits,
     ) -> anyhow::Result<BlobPut> {
+        // What the chunk costs the store: its bytes, or the price of a row
+        // for a tiny one. Counted at its payload alone, a zero-byte chunk
+        // added a row that no cap and no metric ever saw.
+        let charge = (data.len() as u64).max(CHUNK_OVERHEAD_BYTES);
+        // A chunk that will be refused is refused on a read: a write
+        // transaction commits durably whether or not it changed anything,
+        // so refused chunks were a cheap way to queue up disk syncs.
+        {
+            let txn = self.db.begin_read()?;
+            let blobs = txn.open_table(BLOBS)?;
+            if let Some(guard) = blobs.get(blob)? {
+                let meta: BlobMeta = serde_json::from_slice(guard.value())?;
+                if meta.total != total || index >= total {
+                    return Ok(BlobPut::Mismatch);
+                }
+                if txn.open_table(BLOB_CHUNKS)?.get((blob, index))?.is_some() {
+                    return Ok(BlobPut::Duplicate);
+                }
+            } else if index >= total {
+                return Ok(BlobPut::Mismatch);
+            }
+        }
         let txn = self.db.begin_write()?;
         let outcome = {
             let mut blobs = txn.open_table(BLOBS)?;
@@ -995,16 +1143,16 @@ impl Store {
                 BlobPut::Mismatch
             } else if chunks.get((blob, index))?.is_some() {
                 BlobPut::Duplicate
-            } else if meta.bytes + data.len() as u64 > limits.max_blob_bytes {
+            } else if meta.bytes.saturating_add(charge) > limits.max_blob_bytes {
                 BlobPut::TooLarge
-            } else if stored + data.len() as u64 > limits.max_total_bytes {
+            } else if stored.saturating_add(charge) > limits.max_total_bytes {
                 BlobPut::StorageFull
             } else {
                 chunks.insert((blob, index), data)?;
                 meta.received += 1;
-                meta.bytes += data.len() as u64;
+                meta.bytes += charge;
                 blobs.insert(blob, serde_json::to_vec(&meta)?.as_slice())?;
-                meta_table.insert(BLOB_BYTES, stored + data.len() as u64)?;
+                meta_table.insert(BLOB_BYTES, stored + charge)?;
                 BlobPut::Stored {
                     complete: meta.is_complete(),
                 }
@@ -1422,6 +1570,26 @@ impl Store {
         Ok(taken)
     }
 
+    /// Whether `user` has anything on deposit at all, read without a write
+    /// transaction: a lookup for an identity with nothing here costs no
+    /// write and no hand-out bucket.
+    pub fn holds_key_packages(&self, user: &UserId) -> anyhow::Result<bool> {
+        let user = user.as_bytes().as_slice();
+        let txn = self.db.begin_read()?;
+        if txn
+            .open_table(KEY_PACKAGE_LAST_RESORT)?
+            .get(user)?
+            .is_some()
+        {
+            return Ok(true);
+        }
+        Ok(txn
+            .open_table(KEY_PACKAGES)?
+            .range((user, 0u64)..=(user, u64::MAX))?
+            .next()
+            .is_some())
+    }
+
     /// The last-resort package alone, for handouts past the rate limit.
     pub fn last_resort_key_package(
         &self,
@@ -1519,6 +1687,17 @@ impl Store {
         now_ms: u64,
     ) -> anyhow::Result<Sequenced> {
         let key = group.as_bytes().as_slice();
+        // Answered from a read where nothing would change, so that asking
+        // over and over for an entry that exists costs no write each time.
+        if let Some(entry) = self.group_entry(key)? {
+            let same = entry.epoch == epoch && bool::from(entry.next.ct_eq(&next));
+            if !same {
+                return Ok(Sequenced::Exists(entry.epoch));
+            }
+            if entry.retired_at_ms.is_none() {
+                return Ok(Sequenced::Stands(epoch));
+            }
+        }
         let txn = self.db.begin_write()?;
         let outcome = {
             let mut table = txn.open_table(GROUPS)?;
@@ -1570,6 +1749,18 @@ impl Store {
         now_ms: u64,
     ) -> anyhow::Result<Sequenced> {
         let key = group.as_bytes().as_slice();
+        // A commit that would be refused is refused from a read: wrong
+        // guesses at a group's token cost no write transaction.
+        match self.group_entry(key)? {
+            None => return Ok(Sequenced::NotFound),
+            Some(entry) if entry.epoch != epoch || entry.epoch == u64::MAX => {
+                return Ok(Sequenced::Stale(entry.epoch));
+            }
+            Some(entry) if !bool::from(token_hash(token).ct_eq(&entry.next)) => {
+                return Ok(Sequenced::Forbidden);
+            }
+            Some(_) => {}
+        }
         let txn = self.db.begin_write()?;
         let outcome = {
             let mut table = txn.open_table(GROUPS)?;
@@ -1606,6 +1797,15 @@ impl Store {
         Ok(outcome)
     }
 
+    /// `group`'s sequencer entry as it stands, read without a write.
+    fn group_entry(&self, key: &[u8]) -> anyhow::Result<Option<GroupEntry>> {
+        let txn = self.db.begin_read()?;
+        txn.open_table(GROUPS)?
+            .get(key)?
+            .map(|g| serde_json::from_slice(g.value()).context("stored group entry is unreadable"))
+            .transpose()
+    }
+
     /// Where `group`'s sequencer entry stands, if it has one.
     pub fn group_epoch(&self, group: &GroupId) -> anyhow::Result<Option<u64>> {
         let txn = self.db.begin_read()?;
@@ -1622,6 +1822,21 @@ impl Store {
     /// How many groups have a live sequencer entry. Retired ones are not
     /// counted: a group that died is not one the relay is still carrying,
     /// and its headstone must not hold a place under the operator's cap.
+    /// Group entries held, live or retired, without reading them: the
+    /// cap is checked on every creation, which any connection may ask
+    /// for, and counting only the live ones meant reading every entry.
+    /// A retired one still takes a row until its grace period is over.
+    pub fn group_rows(&self) -> anyhow::Result<u64> {
+        let txn = self.db.begin_read()?;
+        Ok(txn.open_table(GROUPS)?.len()?)
+    }
+
+    /// Identities with a bundle, without reading them.
+    pub fn bundle_count(&self) -> anyhow::Result<u64> {
+        let txn = self.db.begin_read()?;
+        Ok(txn.open_table(BUNDLES)?.len()?)
+    }
+
     pub fn group_count(&self) -> anyhow::Result<u64> {
         let txn = self.db.begin_read()?;
         let mut live = 0;
@@ -1994,6 +2209,224 @@ fn adjust_count(meta: &mut redb::Table<'_, &str, u64>, key: &str, by: i64) -> an
     Ok(())
 }
 
+/// Check what a restore put in the tables and bring every counter in line
+/// with it, before the restore is committed.
+///
+/// A backup is checked against its own digest, which says it arrived as
+/// it was written, not that a relay wrote it. So the statements the relay
+/// acts on by itself -- revocations, which refuse logins and publishes,
+/// and successions -- must verify and be filed under the identity they
+/// name, or nothing is restored; and the counters the caps are checked
+/// against are counted again from what is actually there, so that a wrong
+/// one can neither let a mailbox or the file store past its cap nor make
+/// a new message take the slot of one already queued. Bundles are checked
+/// for where they are filed and not for their signatures: a client checks
+/// those itself, and rules that have tightened since an old bundle was
+/// published should not make a backup of it unrestorable.
+pub(crate) fn check_restored(txn: &redb::WriteTransaction) -> anyhow::Result<()> {
+    let id_of = |bytes: &[u8], what: &str| -> anyhow::Result<[u8; 32]> {
+        <[u8; 32]>::try_from(bytes)
+            .map_err(|_| anyhow::anyhow!("{what} is filed under a key that is not an identity"))
+    };
+    let mut devices = 0u64;
+    for item in txn.open_table(BUNDLES)?.iter()? {
+        let (key, value) = item?;
+        let bundle: KeyBundle =
+            serde_json::from_slice(value.value()).context("a stored bundle is unreadable")?;
+        anyhow::ensure!(
+            id_of(key.value(), "a bundle")? == *bundle.user_id.as_bytes(),
+            "a bundle is filed under another identity"
+        );
+        if bundle.device_of.is_some() {
+            devices += 1;
+        }
+    }
+    for item in txn.open_table(REVOCATIONS)?.iter()? {
+        let (key, value) = item?;
+        let revocation: Revocation =
+            serde_json::from_slice(value.value()).context("a stored revocation is unreadable")?;
+        anyhow::ensure!(
+            id_of(key.value(), "a revocation")? == *revocation.identity.as_bytes(),
+            "a revocation is filed under another identity"
+        );
+        revocation
+            .verify()
+            .map_err(|e| anyhow::anyhow!("a revocation does not verify: {e}"))?;
+    }
+    for item in txn.open_table(SUCCESSIONS)?.iter()? {
+        let (key, value) = item?;
+        let succession: Succession =
+            serde_json::from_slice(value.value()).context("a stored succession is unreadable")?;
+        anyhow::ensure!(
+            id_of(key.value(), "a succession")? == *succession.old.as_bytes(),
+            "a succession is filed under another identity"
+        );
+        succession
+            .verify()
+            .map_err(|e| anyhow::anyhow!("a succession does not verify: {e}"))?;
+    }
+    // The index of device revocations is built again from the statements
+    // themselves, so that it names no statement that is not there.
+    let mut by_account = Vec::new();
+    for item in txn.open_table(DEVICE_REVOCATIONS)?.iter()? {
+        let (key, value) = item?;
+        let revocation: DeviceRevocation = serde_json::from_slice(value.value())
+            .context("a stored device revocation is unreadable")?;
+        anyhow::ensure!(
+            id_of(key.value(), "a device revocation")? == *revocation.device.as_bytes(),
+            "a device revocation is filed under another device"
+        );
+        revocation
+            .verify()
+            .map_err(|e| anyhow::anyhow!("a device revocation does not verify: {e}"))?;
+        by_account.push((
+            *revocation.account.as_bytes(),
+            *revocation.device.as_bytes(),
+        ));
+    }
+    txn.delete_table(DEVICE_REVOCATIONS_BY_ACCOUNT)?;
+    {
+        let mut index = txn.open_table(DEVICE_REVOCATIONS_BY_ACCOUNT)?;
+        for (account, device) in &by_account {
+            index.insert((account.as_slice(), device.as_slice()), ())?;
+        }
+    }
+
+    // The mailboxes: what each recipient holds, the total, and the next
+    // sequence number past every one in use.
+    let mut usage: std::collections::BTreeMap<[u8; 32], (u64, u64)> = Default::default();
+    let mut total = 0u64;
+    let mut next_seq = 0u64;
+    let mut queued = HashSet::new();
+    for item in txn.open_table(MAILBOX)?.iter()? {
+        let (key, value) = item?;
+        let (user, seq) = key.value();
+        let user = id_of(user, "a queued message")?;
+        let size = value.value().len() as u64;
+        let held = usage.entry(user).or_default();
+        held.0 += 1;
+        held.1 += size;
+        total += size;
+        next_seq = next_seq.max(seq.saturating_add(1));
+        queued.insert((user, seq));
+    }
+    {
+        let mut table = txn.open_table(USAGE)?;
+        let mut wrong = Vec::new();
+        for item in table.iter()? {
+            let (user, held) = item?;
+            let counted = <[u8; 32]>::try_from(user.value())
+                .ok()
+                .and_then(|user| usage.get(&user).copied())
+                .unwrap_or((0, 0));
+            if held.value() != counted {
+                wrong.push(user.value().to_vec());
+            }
+        }
+        for user in &wrong {
+            table.remove(user.as_slice())?;
+        }
+        for (user, held) in &usage {
+            if table.get(user.as_slice())?.map(|g| g.value()) != Some(*held) {
+                table.insert(user.as_slice(), *held)?;
+            }
+        }
+    }
+    // An id that names nothing queued would answer an acknowledgement for
+    // a message that is not there; it goes.
+    let mut dangling = Vec::new();
+    for item in txn.open_table(BY_ID)?.iter()? {
+        let (id, place) = item?;
+        let (user, seq) = place.value();
+        let known = <[u8; 32]>::try_from(user).is_ok_and(|user| queued.contains(&(user, seq)));
+        if !known {
+            dangling.push(id.value().to_owned());
+        }
+    }
+    {
+        let mut by_id = txn.open_table(BY_ID)?;
+        for id in &dangling {
+            by_id.remove(id.as_str())?;
+        }
+    }
+
+    // The files: every blob's bytes and chunks counted again, at what a
+    // chunk is charged; chunks of no blob, or past its end, dropped.
+    let mut metas: std::collections::BTreeMap<String, BlobMeta> = Default::default();
+    for item in txn.open_table(BLOBS)?.iter()? {
+        let (id, value) = item?;
+        let mut meta: BlobMeta = serde_json::from_slice(value.value())
+            .context("a stored file's record is unreadable")?;
+        anyhow::ensure!(
+            meta.total > 0 && meta.total <= silver_protocol::blob::MAX_CHUNKS,
+            "a stored file has {} chunks",
+            meta.total
+        );
+        meta.received = 0;
+        meta.bytes = 0;
+        metas.insert(id.value().to_owned(), meta);
+    }
+    let mut stray = Vec::new();
+    for item in txn.open_table(BLOB_CHUNKS)?.iter()? {
+        let (key, value) = item?;
+        let (id, index) = key.value();
+        match metas.get_mut(id) {
+            Some(meta) if index < meta.total => {
+                meta.received += 1;
+                meta.bytes += (value.value().len() as u64).max(CHUNK_OVERHEAD_BYTES);
+            }
+            _ => stray.push((id.to_owned(), index)),
+        }
+    }
+    let mut blob_bytes = 0u64;
+    {
+        let mut chunks = txn.open_table(BLOB_CHUNKS)?;
+        for (id, index) in &stray {
+            chunks.remove((id.as_str(), *index))?;
+        }
+        let mut blobs = txn.open_table(BLOBS)?;
+        for (id, meta) in &metas {
+            blob_bytes += meta.bytes;
+            let stored: Option<BlobMeta> = blobs
+                .get(id.as_str())?
+                .map(|g| serde_json::from_slice(g.value()))
+                .transpose()?;
+            if stored.as_ref() != Some(meta) {
+                blobs.insert(id.as_str(), serde_json::to_vec(meta)?.as_slice())?;
+            }
+        }
+    }
+
+    let mut next_key_package = 0u64;
+    for item in txn.open_table(KEY_PACKAGES)?.iter()? {
+        let (key, _) = item?;
+        let (user, seq) = key.value();
+        id_of(user, "a key package")?;
+        next_key_package = next_key_package.max(seq.saturating_add(1));
+    }
+
+    // Written only where they are wrong, so that a backup restored as it
+    // was taken is the database it was taken from, byte for byte.
+    let mut meta = txn.open_table(META)?;
+    let held = |meta: &redb::Table<'_, &str, u64>, key: &str| -> anyhow::Result<u64> {
+        Ok(meta.get(key)?.map(|g| g.value()).unwrap_or(0))
+    };
+    for (key, value, floor) in [
+        (NEXT_SEQ, next_seq, true),
+        (NEXT_KEY_PACKAGE, next_key_package, true),
+        (MAILBOX_BYTES, total, false),
+        (BLOB_BYTES, blob_bytes, false),
+        (DEVICES, devices, false),
+    ] {
+        let now = held(&meta, key)?;
+        let right = if floor { now.max(value) } else { value };
+        if now != right {
+            meta.insert(key, right)?;
+        }
+    }
+    Ok(())
+}
+
 /// Subtract from a counter in `META`, never below zero.
 fn take_from(meta: &mut redb::Table<'_, &str, u64>, key: &str, amount: u64) -> anyhow::Result<()> {
     let held = meta.get(key)?.map(|g| g.value()).unwrap_or(0);
@@ -2286,6 +2719,31 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn the_database_is_private_from_the_start_and_never_kept_through_a_link() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let path = data.join("relay.redb");
+        drop(Store::open(&path).unwrap());
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&data), 0o700);
+        assert_eq!(mode(&path), 0o600);
+        // A database left readable by others is narrowed on the way in.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        drop(Store::open(&path).unwrap());
+        assert_eq!(mode(&path), 0o600);
+        // A link where the database should be is refused, and what it
+        // points at is left alone.
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::write(&elsewhere, b"not a database").unwrap();
+        let linked = dir.path().join("linked.redb");
+        std::os::unix::fs::symlink(&elsewhere, &linked).unwrap();
+        assert!(Store::open(&linked).is_err());
+        assert_eq!(std::fs::read(&elsewhere).unwrap(), b"not a database");
+    }
+
     #[test]
     fn a_version_two_database_gains_the_group_tables() {
         let dir = tempfile::tempdir().unwrap();
@@ -2341,7 +2799,10 @@ mod tests {
         );
 
         let first = alice.revoke_device(&laptop.user_id(), 10);
-        assert!(store.set_device_revocation(&first).unwrap());
+        assert_eq!(
+            store.set_device_revocation(&first, false, 8).unwrap(),
+            DeviceRevocationStored::New
+        );
         assert!(store.is_device_revoked(&laptop.user_id()).unwrap());
         assert_eq!(
             store.device_revocation(&laptop.user_id()).unwrap(),
@@ -2357,9 +2818,15 @@ mod tests {
             store.log_latest(&laptop.user_id()).unwrap().unwrap().index,
             2
         );
-        // A second statement about the same device changes nothing.
+        // A second statement about the same device changes nothing, even
+        // one the caller would let replace another account's.
         let again = alice.revoke_device(&laptop.user_id(), 11);
-        assert!(!store.set_device_revocation(&again).unwrap());
+        for replace in [false, true] {
+            assert_eq!(
+                store.set_device_revocation(&again, replace, 8).unwrap(),
+                DeviceRevocationStored::Held
+            );
+        }
         assert_eq!(
             store.device_revocation(&laptop.user_id()).unwrap(),
             Some(first.clone())
@@ -2368,8 +2835,11 @@ mod tests {
         // The account's lookup finds every one it issued, in device order,
         // and another account's finds none of them.
         let second = alice.revoke_device(&phone.user_id(), 12);
-        assert!(store.set_device_revocation(&second).unwrap());
-        let mut expected = vec![first, second];
+        assert_eq!(
+            store.set_device_revocation(&second, false, 8).unwrap(),
+            DeviceRevocationStored::New
+        );
+        let mut expected = vec![first.clone(), second.clone()];
         expected.sort_by_key(|revocation| revocation.device);
         assert_eq!(
             store.device_revocations_by(&alice.user_id()).unwrap(),
@@ -2382,6 +2852,44 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(store.stats().unwrap().device_revocations, 2);
+        // Another account's statement about the same device is kept out,
+        // unless the caller says it may take the place of the one held;
+        // then it does, in the index and the log as well.
+        let carol = Identity::generate();
+        let theirs = carol.revoke_device(&laptop.user_id(), 13);
+        assert_eq!(
+            store.set_device_revocation(&theirs, false, 8).unwrap(),
+            DeviceRevocationStored::Taken
+        );
+        assert_eq!(store.log_head().unwrap().index, 3);
+        assert_eq!(
+            store.set_device_revocation(&theirs, true, 8).unwrap(),
+            DeviceRevocationStored::New
+        );
+        assert_eq!(
+            store.device_revocation(&laptop.user_id()).unwrap(),
+            Some(theirs.clone())
+        );
+        assert_eq!(
+            store.device_revocations_by(&alice.user_id()).unwrap(),
+            vec![second]
+        );
+        assert_eq!(
+            store.device_revocations_by(&carol.user_id()).unwrap(),
+            vec![theirs.clone()]
+        );
+        assert_eq!(
+            store.log_latest(&laptop.user_id()).unwrap().unwrap().index,
+            4
+        );
+        assert_eq!(store.stats().unwrap().device_revocations, 2);
+        // An account that has issued its share gets no more.
+        assert_eq!(
+            store
+                .set_device_revocation(&carol.revoke_device(&phone.user_id(), 14), true, 1)
+                .unwrap(),
+            DeviceRevocationStored::Full
+        );
         // A revocation outlives the device's bundle, as an identity's does.
         store.put_bundle(&laptop.key_bundle()).unwrap();
         store.remove_user(&laptop.user_id()).unwrap();
@@ -2860,10 +3368,14 @@ mod tests {
     #[test]
     fn blob_chunks_are_stored_once_capped_and_expired() {
         let store = Store::in_memory().unwrap();
+        // Every chunk is charged at least the overhead, so the caps are
+        // counted in it here.
+        let c = CHUNK_OVERHEAD_BYTES;
         let limits = BlobLimits {
-            max_blob_bytes: 10,
-            max_total_bytes: 15,
+            max_blob_bytes: 2 * c,
+            max_total_bytes: 3 * c,
         };
+        let over = vec![7u8; c as usize + 1];
         let id = "a".repeat(32);
         assert_eq!(
             store
@@ -2886,9 +3398,7 @@ mod tests {
             BlobPut::Mismatch
         );
         assert_eq!(
-            store
-                .put_blob_chunk(&id, 1, 2, b"123456", 1, limits)
-                .unwrap(),
+            store.put_blob_chunk(&id, 1, 2, &over, 1, limits).unwrap(),
             BlobPut::TooLarge
         );
         assert_eq!(
@@ -2898,14 +3408,14 @@ mod tests {
             BlobPut::Stored { complete: true }
         );
         let meta = store.blob_meta(&id).unwrap().unwrap();
-        assert!(meta.is_complete() && meta.bytes == 10);
+        assert!(meta.is_complete() && meta.bytes == 2 * c);
         assert_eq!(store.blob_chunk(&id, 1).unwrap().unwrap(), b"12345");
         assert!(store.blob_chunk(&id, 2).unwrap().is_none());
         // The relay-wide cap counts every blob.
         let other = "b".repeat(32);
         assert_eq!(
             store
-                .put_blob_chunk(&other, 0, 1, b"123456", 2, limits)
+                .put_blob_chunk(&other, 0, 1, &over, 2, limits)
                 .unwrap(),
             BlobPut::StorageFull
         );
@@ -2916,12 +3426,18 @@ mod tests {
             BlobPut::Stored { complete: true }
         );
         let stats = store.stats().unwrap();
-        assert_eq!((stats.blobs, stats.blob_bytes), (2, 15));
+        assert_eq!((stats.blobs, stats.blob_bytes), (2, 3 * c));
+        // An empty chunk is charged like any other: the cap is full now.
+        let third = "c".repeat(32);
+        assert_eq!(
+            store.put_blob_chunk(&third, 0, 1, b"", 2, limits).unwrap(),
+            BlobPut::StorageFull
+        );
         // Expiry frees the space.
         assert_eq!(store.expire_blobs(2).unwrap(), 1);
         assert!(store.blob_meta(&id).unwrap().is_none());
         assert!(store.blob_chunk(&id, 0).unwrap().is_none());
-        assert_eq!(store.stats().unwrap().blob_bytes, 5);
+        assert_eq!(store.stats().unwrap().blob_bytes, c);
     }
 
     #[test]

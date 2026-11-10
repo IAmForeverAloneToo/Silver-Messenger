@@ -103,8 +103,11 @@ struct Args {
     blob_mib_per_address_per_hour: u32,
 
     /// Addresses of TLS fronts (Caddy, nginx) whose X-Forwarded-For header
-    /// names the real client, comma separated. By default the loopback
-    /// addresses are trusted, which is where the installer puts Caddy.
+    /// names the real client, comma separated. By default nobody's: every
+    /// connection counts under the address it came from. A front on this
+    /// host is `127.0.0.1,::1`, which the installer sets for Caddy; a
+    /// front that passes the client's own header through (Tor, a stream
+    /// proxy) must not be named.
     #[arg(long, env = "SILVER_RELAY_TRUSTED_PROXY", value_delimiter = ',')]
     trusted_proxy: Vec<IpAddr>,
 
@@ -338,7 +341,9 @@ fn run_restore(file: PathBuf, data_dir_flag: Option<PathBuf>, replace: bool) -> 
         restored.summary.blobs,
         restored.summary.records,
         ms_text(restored.header.taken_at_ms),
-        restored.header.relay,
+        // Whatever the file says, escaped: a backup is not trusted to
+        // write control sequences to the operator's terminal.
+        restored.header.relay.escape_debug(),
         restored.header.schema
     );
     if let Some(aside) = restored.replaced {
@@ -837,8 +842,29 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = TcpListener::bind(&args.listen).await?;
     let addr = listener.local_addr()?;
+    // Interrupted at the terminal, or stopped by the service manager:
+    // either way, connections are closed and the database shut cleanly
+    // rather than the process killed in the middle of a write.
     let shutdown = async {
-        let _ = tokio::signal::ctrl_c().await;
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            match signal(SignalKind::terminate()) {
+                Ok(mut term) => {
+                    tokio::select! {
+                        _ = tokio::signal::ctrl_c() => {}
+                        _ = term.recv() => {}
+                    }
+                }
+                Err(_) => {
+                    let _ = tokio::signal::ctrl_c().await;
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+        }
         info!("shutting down");
     };
     let path = silver_protocol::wire::WS_PATH;
