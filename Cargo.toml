@@ -135,7 +135,7 @@ cbc = { version = "0.2", features = ["alloc", "block-padding", "zeroize"] }
 # The security key's PIN protocol (crates/silver-key): ECDH on P-256 with
 # the key. The generation OpenMLS's P-256 ciphersuites already build, with
 # no feature beyond the curve arithmetic, so it adds nothing to the tree.
-p256 = { version = "0.13", default-features = false, features = ["arithmetic"] }
+p256 = { version = "0.14", default-features = false, features = ["arithmetic"] }
 # One constant (O_NONBLOCK) for /dev/hidraw; in the tree through tokio.
 libc = "0.2"
 tauri-winrt-notification = "0.8"
