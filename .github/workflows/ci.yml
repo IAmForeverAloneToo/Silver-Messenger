@@ -77,11 +77,18 @@ jobs:
       # is built and still refuses every advisory. No release of either
       # backend takes the fixed versions yet (openmls_libcrux_crypto
       # 0.4.0 pins the DRBG, hpke-rs 0.7 the KEM): drop these once one
-      # does.
+      # does. libsqlite3-sys 0.35 (RUSTSEC-2026-0459, SQLite's own CVE)
+      # likewise: it comes only through rusqlite with openmls_sqlite_storage,
+      # OpenMLS's optional SQLite store, which this project does not use
+      # (its storage is openmls_memory_storage, kept in the data
+      # directory); `cargo tree -i libsqlite3-sys --all-features --target
+      # all` finds no path. Drop it once OpenMLS moves to rusqlite with
+      # libsqlite3-sys 0.39.
       NOT_BUILT: >-
         --ignore RUSTSEC-2026-0329
         --ignore RUSTSEC-2026-0330
         --ignore RUSTSEC-2026-0331
+        --ignore RUSTSEC-2026-0459
       # One more that is built but never run: crypto-bigint 0.5.5
       # (RUSTSEC-2026-0387), fixed only in 0.7.6, which elliptic-curve
       # 0.13 cannot take. It comes only with the P-256, P-384 and K-256
