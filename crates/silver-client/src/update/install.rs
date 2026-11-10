@@ -302,24 +302,47 @@ fn hide(path: &Path) {
 }
 
 /// Remove what an update left beside this binary: on Windows the old
-/// binary, which could not be deleted while it ran; and the `.old` copy
-/// clients up to 0.22.0 kept there, now that the previous version is kept
-/// in the data directory instead.
-///
-/// Called once at start; a failure is not worth reporting, since the
-/// only cost is a stale file, removed by a later start.
+/// binary, which could not be deleted while it ran. Called once at start;
+/// a failure is not worth reporting, since the only cost is a stale file,
+/// removed by a later start.
 pub fn tidy_after_update() {
     if let Ok(exe) = running_binary() {
-        for path in [
-            aside_path(&exe),
-            incoming_path(&exe),
-            legacy_backup_path(&exe),
-        ] {
+        for path in [aside_path(&exe), incoming_path(&exe)] {
             if path.is_file() {
                 let _ = std::fs::remove_file(path);
             }
         }
     }
+}
+
+/// Move the `.old` copy that clients up to 0.22.0 kept beside the program
+/// into the data directory, where the previous version is kept now, so
+/// that `--rollback` still finds it and nothing is left beside the
+/// program. A copy already in the data directory is newer and stays.
+pub fn adopt_legacy_backup(data_dir: &Path) {
+    let Ok(exe) = running_binary() else { return };
+    adopt_legacy_backup_of(&exe, data_dir);
+}
+
+fn adopt_legacy_backup_of(exe: &Path, data_dir: &Path) {
+    let legacy = legacy_backup_path(exe);
+    if !legacy.is_file() {
+        return;
+    }
+    let kept = kept_path(data_dir, exe);
+    if !kept.exists() {
+        if let Some(dir) = kept.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if std::fs::rename(&legacy, &kept).is_ok() {
+            return;
+        }
+        if std::fs::copy(&legacy, &kept).is_err() {
+            // Keep it where it is rather than lose the only copy.
+            return;
+        }
+    }
+    let _ = std::fs::remove_file(&legacy);
 }
 
 /// Put `exe` back from `backup` after a failed replacement.
@@ -507,6 +530,21 @@ mod tests {
             kept_path(Path::new("C:/data"), Path::new("C:/tools/silver.exe")),
             Path::new("C:/data/update/previous.exe")
         );
+    }
+
+    #[test]
+    fn the_old_copy_an_earlier_update_left_beside_the_program_moves_into_the_data_directory() {
+        let dir = tempdir();
+        let exe = dir.join("silver");
+        let data = dir.join("data");
+        std::fs::write(&exe, b"0.23.0").unwrap();
+        std::fs::write(legacy_backup_path(&exe), b"0.22.0").unwrap();
+        adopt_legacy_backup_of(&exe, &data);
+        assert!(!legacy_backup_path(&exe).exists());
+        let kept = kept_path(&data, &exe);
+        assert_eq!(std::fs::read(&kept).unwrap(), b"0.22.0");
+        rollback(&exe, &kept).unwrap();
+        assert_eq!(std::fs::read(&exe).unwrap(), b"0.22.0");
     }
 
     #[test]

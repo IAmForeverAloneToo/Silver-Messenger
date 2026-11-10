@@ -82,22 +82,23 @@ pub fn apply(staged: &Staged, data_dir: &Path) -> anyhow::Result<()> {
     })
 }
 
-/// Start this program again, from the file now at its path, with the
-/// arguments it was given. On Unix the process becomes the new one; on
-/// Windows, which has no such call, the new one runs in this console and
-/// this one waits for it and leaves with its exit code.
-pub fn relaunch() -> anyhow::Result<std::convert::Infallible> {
-    let exe = install::running_binary()?;
+/// Start the program at `exe` again with the arguments this one was
+/// given. `exe` is where this binary was before the swap, found before it:
+/// afterwards Linux names the running file "… (deleted)" and Windows by
+/// the name it was moved aside to. On Unix the process becomes the new
+/// one; on Windows, which has no such call, the new one runs in this
+/// console and this one waits for it and leaves with its exit code.
+pub fn relaunch(exe: &Path) -> anyhow::Result<std::convert::Infallible> {
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        let e = std::process::Command::new(&exe).args(&args).exec();
+        let e = std::process::Command::new(exe).args(&args).exec();
         Err(e).with_context(|| format!("starting {}", exe.display()))
     }
     #[cfg(not(unix))]
     {
-        let status = std::process::Command::new(&exe)
+        let status = std::process::Command::new(exe)
             .args(&args)
             .status()
             .with_context(|| format!("starting {}", exe.display()))?;

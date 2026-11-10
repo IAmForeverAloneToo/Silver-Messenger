@@ -334,7 +334,7 @@ fn main() -> anyhow::Result<()> {
         securitykey::helper_main();
     }
     // What an update left beside this binary: the old one Windows could
-    // not remove while it ran, and the `.old` copy earlier clients kept.
+    // not remove while it ran.
     silver_client::update::install::tidy_after_update();
     let secrets = EnvSecrets::take();
     harden_process();
@@ -397,6 +397,9 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
         .clone()
         .or_else(Store::default_dir)
         .context("could not determine a data directory; pass --data-dir")?;
+    // The `.old` copy updates up to 0.22.0 kept beside the program goes
+    // into the data directory, where the previous version is kept now.
+    silver_client::update::install::adopt_legacy_backup(&data_dir);
 
     if let Some(Command::Update {
         check,
@@ -822,12 +825,13 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
             Exit::Restart(staged) => {
                 // Everything that held keys is gone with `app`; the new
                 // version asks for the unlock as after /lock.
+                let exe = silver_client::update::install::running_binary()?;
                 update::apply(&staged, &data_dir).context("installing the update")?;
                 println!(
                     "Silver Messenger {} is in place; starting it.",
                     staged.version
                 );
-                update::relaunch()?;
+                update::relaunch(&exe)?;
                 return Ok(());
             }
             Exit::Wiped(word) => {

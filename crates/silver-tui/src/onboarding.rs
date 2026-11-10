@@ -753,13 +753,13 @@ fn apply(
             message: format!("{e:#}"),
         }
     };
-    let config = store
-        .load_config()
-        .and_then(|c| configure(a, c))
-        .map_err(fail(2))?;
-    store.save_config(&config).map_err(fail(2))?;
-    store.load_or_create_identity().map_err(fail(1))?;
+    // The protection first, while the directory is still empty: a key that
+    // is not touched, or a PIN given up on, leaves nothing behind, and the
+    // next start asks again. Everything written after it is written under
+    // it. A second try after a later step failed finds it done.
+    let protect = store.protection() == silver_client::Protection::None;
     match a.guard {
+        _ if !protect => {}
         Guard::SecurityKey => {
             let mut key = auth().map_err(fail(3))?;
             store
@@ -780,6 +780,12 @@ fn apply(
         Guard::Keystore => store.protect_with_keystore().map_err(fail(3))?,
         Guard::Nothing => {}
     }
+    let config = store
+        .load_config()
+        .and_then(|c| configure(a, c))
+        .map_err(fail(2))?;
+    store.save_config(&config).map_err(fail(2))?;
+    store.load_or_create_identity().map_err(fail(1))?;
     if a.backup && !a.link {
         silver_client::export_backup(
             store,
@@ -1723,6 +1729,23 @@ mod tests {
             again.load_config().unwrap().relay_url.as_deref(),
             Some("wss://relay.example/ws")
         );
+    }
+
+    #[test]
+    fn a_security_key_that_is_not_had_leaves_nothing_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path()).unwrap();
+        let mut a = Answers::new(&ctx());
+        a.guard = Guard::SecurityKey;
+        *a.secret = "recovery words".into();
+        let mut auth = || -> anyhow::Result<Box<dyn silver_key::Authenticator>> {
+            Err(silver_key::Error::Cancelled.into())
+        };
+        let failed = apply(&a, &mut store, &mut auth, &mut || {}).err().unwrap();
+        assert_eq!(failed.step, 3);
+        // No identity, so the next start asks again; no settings either.
+        assert!(!store.has_identity(), "no identity left unprotected");
+        assert!(!dir.path().join("config.json").exists());
     }
 
     #[test]
