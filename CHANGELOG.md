@@ -12,6 +12,7 @@ The releases, newest first; each version links to its entry.
 
 | Version | Date | What it was |
 | --- | --- | --- |
+| [0.23.1](#0231---2026-11-10) | 2026-11-10 | The in-app update's restart, the rollback copy kept, and the first start protecting first |
 | [0.23.0](#0230---2026-11-10) | 2026-11-10 | Updating from inside the client; one executable on Windows |
 | [0.22.0](#0220---2026-11-03) | 2026-11-03 | Unlocking with a security key (roadmap item 67), and a first start that sets everything up |
 | [0.21.0](#0210---2026-11-03) | 2026-11-03 | A day of the client in use: drafts per chat, `/mute` and @mentions, history in backups, KWallet tried for real |
@@ -41,6 +42,31 @@ The releases, newest first; each version links to its entry.
 | [0.3.0](#030---2026-09-04) | 2026-09-04 | Phase 3: forward secrecy |
 | [0.2.0](#020---2026-09-04) | 2026-09-04 | Phase 2: the trust model completed |
 | [0.1.0](#010---2026-09-04) | 2026-09-04 | First tagged release |
+
+## 0.23.1 - 2026-11-10
+
+Three fixes found running 0.23.0's update and first start on a real
+system. Nothing on the wire changes.
+
+**Upgrading.** From 0.23.0, `silver update` from a shell: 0.23.0's own
+in-app update installs this one but cannot restart into it, so quit
+and start the client again after `/update` says it is in place. From
+0.23.1 on, the in-app update restarts by itself. The relay is as it was.
+
+### Fixed
+
+- After `/update` put a new version in place, the restart failed with
+  "No such file or directory": the program's path was taken after the
+  swap, when Linux names the running file "silver (deleted)" and
+  Windows by the name it was moved aside to.
+- The `silver.old` a 0.22.0 update left beside the program was deleted
+  at 0.23.0's first start, taking the only copy to roll back to; it is
+  now moved into the data directory, where `silver update --rollback`
+  finds it.
+- The first start wrote the identity and settings before protecting
+  them, so a security key that was not touched (or a PIN given up on)
+  left an unprotected identity behind, and the next start did not ask
+  again. The protection now comes first, and a failure leaves nothing.
 
 ## 0.23.0 - 2026-11-10
 

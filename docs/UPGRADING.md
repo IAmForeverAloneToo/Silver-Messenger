@@ -117,6 +117,7 @@ clients.
 
 | Version | What the relay's upgrade changes |
 | --- | --- |
+| [0.23.1](#0231) | Nothing; the fixes are the client's |
 | [0.23.0](#0230) | Nothing; the changes are the client's |
 | [0.22.0](#0220) | Dependency updates only; the schema stays at 3 and the backup format at 2 |
 | [0.21.0](#0210) | Dependency updates only; the schema stays at 3 and the backup format at 2 |
@@ -130,6 +131,12 @@ clients.
 | [0.9.0](#090) | The schema moves to 3 and the backup format to 2; rolling back to 0.8.0 needs a restore |
 | [0.8.0](#080) | The schema moves to 2, the key transparency log; rolling back to 0.7.0 needs a restore |
 | [0.7.0](#070) | TLS in the relay, the admin socket, the schema version (1), metrics and JSON logs, arm64 and a container image |
+
+### 0.23.1
+
+* **Relay: optional.** Nothing changed in it.
+* **Clients.** Fixes to the in-app update's restart, the rollback copy
+  and the first start; from 0.23.0, `silver update` from a shell.
 
 ### 0.23.0
 
