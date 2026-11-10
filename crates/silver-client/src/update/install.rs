@@ -147,63 +147,131 @@ fn dirs_home() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// Where the binary replaced by an update is kept.
-pub fn backup_path(exe: &Path) -> PathBuf {
+/// Where the version an update replaced is kept, for [`rollback`]: one
+/// copy, inside the data directory rather than beside the program, so
+/// that nothing but the program sits where it was installed.
+pub fn kept_path(data_dir: &Path, exe: &Path) -> PathBuf {
+    let mut name = std::ffi::OsString::from("previous");
+    if let Some(ext) = exe.extension() {
+        name.push(".");
+        name.push(ext);
+    }
+    data_dir.join(UPDATE_DIR).join(name)
+}
+
+/// Where downloads wait inside the data directory until they are put in
+/// place.
+pub fn staging_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join(UPDATE_DIR)
+}
+
+const UPDATE_DIR: &str = "update";
+
+/// `exe`'s directory, with `name` in front of `exe`'s file name and a dot
+/// before it: the files an update makes beside the program for a moment.
+fn beside(exe: &Path, suffix: &str) -> PathBuf {
+    let mut name = std::ffi::OsString::from(".");
+    name.push(exe.file_name().unwrap_or_default());
+    name.push(suffix);
+    exe.with_file_name(name)
+}
+
+/// The new binary on its way in, beside the program so that the last
+/// step is a rename on one filesystem.
+fn incoming_path(exe: &Path) -> PathBuf {
+    beside(exe, ".incoming")
+}
+
+/// Windows: the old binary, renamed out of the way while it still runs,
+/// and removed by the next start ([`tidy_after_update`]).
+fn aside_path(exe: &Path) -> PathBuf {
+    beside(exe, ".replaced")
+}
+
+/// What 0.12.0 to 0.22.0 left beside the program, and what the update
+/// now keeps in the data directory instead.
+fn legacy_backup_path(exe: &Path) -> PathBuf {
     let mut name = exe.file_name().unwrap_or_default().to_os_string();
     name.push(".old");
     exe.with_file_name(name)
 }
 
-/// Put `new` in place of `exe`, keeping the old one for [`rollback`].
+/// Put `new` in place of `exe`, keeping a copy of the old one at `keep`
+/// for [`rollback`]. `new` is consumed.
 ///
-/// Returns where the old binary went. On failure the old one is still in
-/// place: the rename is the only moment `exe` changes.
-pub fn swap(new: &Path, exe: &Path) -> anyhow::Result<PathBuf> {
-    let backup = backup_path(exe);
-    let _ = std::fs::remove_file(&backup);
+/// On failure the old binary is still in place: a rename is the only
+/// moment `exe` changes.
+pub fn swap(new: &Path, exe: &Path, keep: &Path) -> anyhow::Result<()> {
+    if !new.is_file() {
+        bail!(
+            "{} is not there to install; nothing has been changed",
+            new.display()
+        );
+    }
+    if let Some(dir) = keep.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("making {}", dir.display()))?;
+    }
+    let _ = std::fs::remove_file(keep);
+    std::fs::copy(exe, keep).with_context(|| format!("keeping a copy of {}", exe.display()))?;
+    place(new, exe)?;
+    let _ = std::fs::remove_file(new);
+    Ok(())
+}
 
+/// Put back what the last update replaced, from `keep`.
+pub fn rollback(exe: &Path, keep: &Path) -> anyhow::Result<()> {
+    if !keep.is_file() {
+        bail!(
+            "there is nothing to go back to: {} is not a file",
+            keep.display()
+        );
+    }
+    place(keep, exe)?;
+    let _ = std::fs::remove_file(keep);
+    Ok(())
+}
+
+/// Copy `from` in beside `exe` and rename it over `exe`.
+fn place(from: &Path, exe: &Path) -> anyhow::Result<()> {
+    let incoming = incoming_path(exe);
+    let _ = std::fs::remove_file(&incoming);
+    std::fs::copy(from, &incoming).with_context(|| {
+        format!(
+            "writing the new binary beside {} (is the directory writable?)",
+            exe.display()
+        )
+    })?;
     // Keep whatever mode the old binary had: a file installed 0750 in a
     // shared directory should stay that way, so this is not a fixed 755.
-    copy_permissions(exe, new)?;
+    if let Err(e) = copy_permissions(exe, &incoming) {
+        let _ = std::fs::remove_file(&incoming);
+        return Err(e);
+    }
 
     #[cfg(windows)]
     {
         // Windows cannot replace a running image in one step: it can only
         // be renamed out of the way and the replacement given the name it
-        // left. Between those two renames the path holds nothing, and the
-        // program that has just vanished from it is the one running this
-        // code, so it cannot put itself back on a later start.
-        //
-        // The window cannot be closed -- the operating system offers no
-        // atomic replace for a running file -- so make it as small and as
-        // survivable as it can be. Everything that can fail happens
-        // first: the new file is checked here rather than discovered
-        // missing between the renames, and the mode was copied above.
-        if !new.is_file() {
-            bail!(
-                "{} is not there to install; nothing has been changed",
-                new.display()
-            );
+        // left. Between those two renames the path holds nothing, so
+        // everything that can fail has happened above, and the second
+        // rename's failure puts the first back.
+        let aside = aside_path(exe);
+        let _ = std::fs::remove_file(&aside);
+        if let Err(e) = std::fs::rename(exe, &aside) {
+            let _ = std::fs::remove_file(&incoming);
+            return Err(e).with_context(|| format!("moving {} aside", exe.display()));
         }
-        std::fs::rename(exe, &backup).with_context(|| format!("moving {} aside", exe.display()))?;
-        if let Err(e) = std::fs::rename(new, exe) {
-            // Put it back rather than leave the name empty, and if the
-            // rename back will not go either, copy: leaving the user with
-            // no program is worse than leaving them without a rollback.
-            let put_back = restore(&backup, exe);
+        hide(&aside);
+        if let Err(e) = std::fs::rename(&incoming, exe) {
+            let put_back = restore(&aside, exe);
+            let _ = std::fs::remove_file(&incoming);
             let at = exe.display();
             return match put_back {
-                Ok(()) => {
-                    Err(e).with_context(|| format!("putting the new binary at {at}"))
-                }
-                // Both the install and the recovery failed, so the path
-                // may be empty and this process may not run again. Say
-                // exactly what to do by hand, since a later start cannot.
+                Ok(()) => Err(e).with_context(|| format!("putting the new binary at {at}")),
                 Err(recovery) => Err(e).with_context(|| {
                     format!(
-                        "putting the new binary at {at}, and {} could not be put back either ({recovery:#}); the previous version is at {}, so rename that back to {at} by hand",
-                        at,
-                        backup.display()
+                        "putting the new binary at {at}, and {at} could not be put back either ({recovery:#}); the previous version is at {}, so rename that back to {at} by hand",
+                        aside.display()
                     )
                 }),
             };
@@ -211,70 +279,46 @@ pub fn swap(new: &Path, exe: &Path) -> anyhow::Result<PathBuf> {
     }
     #[cfg(not(windows))]
     {
-        // A hard link keeps the old inode reachable without copying it;
-        // a copy when the filesystem will not link.
-        if std::fs::hard_link(exe, &backup).is_err() {
-            std::fs::copy(exe, &backup)
-                .with_context(|| format!("keeping a copy of {}", exe.display()))?;
+        // One rename over the old name: a program running from the old
+        // file keeps its inode, and the next start runs the new one.
+        if let Err(e) = std::fs::rename(&incoming, exe) {
+            let _ = std::fs::remove_file(&incoming);
+            return Err(e).with_context(|| format!("putting the new binary at {}", exe.display()));
         }
-        std::fs::rename(new, exe).with_context(|| {
-            format!(
-                "putting the new binary at {} (is the directory writable?)",
-                exe.display()
-            )
-        })?;
         sync_dir(exe);
     }
-    Ok(backup)
+    Ok(())
 }
 
-/// Put back what the last update replaced.
-pub fn rollback(exe: &Path) -> anyhow::Result<PathBuf> {
-    let backup = backup_path(exe);
-    if !backup.is_file() {
-        bail!(
-            "there is nothing to go back to: {} is not a file",
-            backup.display()
-        );
-    }
-    // Straight back the way it came, keeping the current one in case the
-    // one being restored turns out to be the broken one.
-    let aside = exe.with_extension("rolling-back");
-    let _ = std::fs::remove_file(&aside);
-    std::fs::rename(exe, &aside).with_context(|| format!("moving {} aside", exe.display()))?;
-    // The same two-rename window as the Windows half of `swap`, on every
-    // platform: between these the path holds nothing. If the second will
-    // not go, put the current binary back by whatever means -- see
-    // `restore`.
-    if let Err(e) = std::fs::rename(&backup, exe) {
-        let at = exe.display();
-        return match restore(&aside, exe) {
-            Ok(()) => Err(e).with_context(|| format!("restoring {at}")),
-            Err(recovery) => Err(e).with_context(|| {
-                format!(
-                    "restoring {at}, and the binary that was running could not be put back either ({recovery:#}); it is at {}, so rename that back to {at} by hand",
-                    aside.display()
-                )
-            }),
-        };
-    }
-    let _ = std::fs::remove_file(&aside);
-    #[cfg(not(windows))]
-    sync_dir(exe);
-    Ok(backup)
+/// Windows: mark a file hidden, so that the old binary waiting to be
+/// removed does not sit in the program's folder for all to see. Best
+/// effort.
+#[cfg(windows)]
+fn hide(path: &Path) {
+    let _ = std::process::Command::new("attrib")
+        .arg("+h")
+        .arg(path)
+        .output();
 }
 
-/// Remove a `*.old` left beside this binary by an update on Windows,
-/// where the running image could not be deleted at the time.
+/// Remove what an update left beside this binary: on Windows the old
+/// binary, which could not be deleted while it ran; and the `.old` copy
+/// clients up to 0.22.0 kept there, now that the previous version is kept
+/// in the data directory instead.
 ///
 /// Called once at start; a failure is not worth reporting, since the
-/// only cost is a stale file.
+/// only cost is a stale file, removed by a later start.
 pub fn tidy_after_update() {
-    if !cfg!(windows) {
-        return;
-    }
     if let Ok(exe) = running_binary() {
-        let _ = std::fs::remove_file(backup_path(&exe));
+        for path in [
+            aside_path(&exe),
+            incoming_path(&exe),
+            legacy_backup_path(&exe),
+        ] {
+            if path.is_file() {
+                let _ = std::fs::remove_file(path);
+            }
+        }
     }
 }
 
@@ -285,6 +329,7 @@ pub fn tidy_after_update() {
 /// and the program that would notice is the one that is missing: a
 /// rollback lost is an inconvenience, a program lost is the user having
 /// nothing to run. So the copy is worth the duplicated bytes.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn restore(backup: &Path, exe: &Path) -> anyhow::Result<()> {
     // A file, not merely something at that path: the destination is free
     // by now, so a rename would happily move a *directory* onto it and
@@ -408,42 +453,69 @@ mod tests {
     }
 
     #[test]
-    fn a_swap_replaces_and_rolls_back() {
+    fn a_swap_replaces_and_rolls_back_leaving_nothing_beside_the_binary() {
         let dir = tempdir();
-        let exe = dir.join("silver");
-        let new = dir.join("silver.new");
+        let bin = dir.join("bin");
+        let data = dir.join("data");
+        std::fs::create_dir_all(&bin).unwrap();
+        let exe = bin.join("silver");
+        let staged = dir.join("download");
         std::fs::write(&exe, b"old").unwrap();
-        std::fs::write(&new, b"new").unwrap();
+        std::fs::write(&staged, b"new").unwrap();
+        let keep = kept_path(&data, &exe);
 
-        let backup = swap(&new, &exe).unwrap();
+        swap(&staged, &exe, &keep).unwrap();
         assert_eq!(std::fs::read(&exe).unwrap(), b"new");
-        assert_eq!(std::fs::read(&backup).unwrap(), b"old");
-        assert!(!new.exists(), "the download is consumed by the swap");
+        assert_eq!(std::fs::read(&keep).unwrap(), b"old");
+        assert!(!staged.exists(), "the download is consumed by the swap");
+        if !cfg!(windows) {
+            let beside: Vec<_> = std::fs::read_dir(&bin).unwrap().collect();
+            assert_eq!(
+                beside.len(),
+                1,
+                "only the program is left where it was installed"
+            );
+        }
 
-        rollback(&exe).unwrap();
+        rollback(&exe, &keep).unwrap();
         assert_eq!(std::fs::read(&exe).unwrap(), b"old");
+        assert!(!keep.exists(), "the copy went back into place");
     }
 
     #[test]
-    fn rollback_without_a_backup_says_so() {
+    fn rollback_without_a_kept_copy_says_so() {
         let dir = tempdir();
         let exe = dir.join("silver");
         std::fs::write(&exe, b"only").unwrap();
-        let err = rollback(&exe).unwrap_err().to_string();
+        let err = rollback(&exe, &kept_path(&dir.join("data"), &exe))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("nothing to go back to"), "{err}");
         assert_eq!(std::fs::read(&exe).unwrap(), b"only");
     }
 
     #[test]
-    fn the_backup_sits_beside_the_binary() {
+    fn the_previous_version_is_kept_in_the_data_directory() {
         assert_eq!(
-            backup_path(Path::new("/usr/local/bin/silver")),
-            Path::new("/usr/local/bin/silver.old")
+            kept_path(
+                Path::new("/home/x/.local/share/silver-messenger"),
+                Path::new("/usr/local/bin/silver")
+            ),
+            Path::new("/home/x/.local/share/silver-messenger/update/previous")
         );
         assert_eq!(
-            backup_path(Path::new("C:/tools/silver.exe")),
-            Path::new("C:/tools/silver.exe.old")
+            kept_path(Path::new("C:/data"), Path::new("C:/tools/silver.exe")),
+            Path::new("C:/data/update/previous.exe")
         );
+    }
+
+    #[test]
+    fn a_missing_download_changes_nothing() {
+        let dir = tempdir();
+        let exe = dir.join("silver");
+        std::fs::write(&exe, b"running").unwrap();
+        assert!(swap(&dir.join("nothing"), &exe, &dir.join("keep")).is_err());
+        assert_eq!(std::fs::read(&exe).unwrap(), b"running");
     }
 
     fn tempdir() -> PathBuf {
@@ -500,28 +572,19 @@ mod tests {
 
     /// Something that is not a file is not a binary to go back to, and
     /// is refused before anything is moved.
-    ///
-    /// The check used to be `exists()`. By the time the backup is moved
-    /// into place the path is free, so a rename puts whatever it is
-    /// there and reports success -- leaving the name taken by something
-    /// that cannot be run, which is the failure this whole area exists to
-    /// avoid.
     #[test]
-    fn a_backup_that_is_not_a_file_is_refused_before_anything_moves() {
+    fn a_kept_copy_that_is_not_a_file_is_refused_before_anything_moves() {
         let dir = tempfile::tempdir().unwrap();
         let exe = dir.path().join("silver");
         std::fs::write(&exe, b"running").unwrap();
-        std::fs::create_dir(backup_path(&exe)).unwrap();
+        let keep = kept_path(&dir.path().join("data"), &exe);
+        std::fs::create_dir_all(&keep).unwrap();
 
-        let err = rollback(&exe).unwrap_err();
+        let err = rollback(&exe, &keep).unwrap_err();
         assert!(
             format!("{err:#}").contains("is not a file"),
             "a directory was taken for a binary: {err:#}"
         );
-        assert_eq!(
-            std::fs::read(&exe).unwrap(),
-            b"running",
-            "the running binary was moved for a rollback that could never work"
-        );
+        assert_eq!(std::fs::read(&exe).unwrap(), b"running");
     }
 }

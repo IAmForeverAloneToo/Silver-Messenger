@@ -80,11 +80,9 @@ A silent downgrade is how a stale release is re-served to someone who
 already has the fix, and an older client can meet a newer on-disk
 format. `--to <version>` names one explicitly.
 
-**Restarting.** Never on its own. `silver update` runs without the TUI,
-so nothing is open when the file changes. Inside the TUI, `/update`
-checks and prints what to do; it does not download, because a client
-with an unlocked data directory and live sessions is the wrong place to
-be swapping the file under itself.
+**Restarting.** Never on its own, but from inside the client (section
+6, as corrected in section 11): `/update` with a release ready ends the
+session, puts the file in place and starts it again.
 
 **What is downloaded.** The client alone, not the release archive. The
 archive carries the relay, two SBOMs, the changelog and the licence —
@@ -324,3 +322,22 @@ On Windows, in CI: the rename-aside path, and the deletion of a leftover
 * The daily check's setting is `update_check` in `config.json`; the
   note first called it `update-check` and named a `/set` command that
   was never built.
+* **Updating from inside the client** (sections 1, 5 and 6), as other
+  messengers do, at the owner's request. `/update` asks the releases page
+  and, when there is a newer release, downloads and checks it in the
+  background while the client is in use; the daily check, when it is on,
+  does the same by itself. Once it is ready, `/update` again ends the
+  session the way `/lock` does (every key dropped), puts the file in
+  place and starts the program again with its arguments: `exec` on Unix;
+  on Windows the new process runs in the same console and the old one
+  waits for it. The objection section 6 made, a half-finished update
+  meeting a write, does not arise: the swap happens after the session has
+  ended. The download waits in the data directory (`update/`), the
+  version it replaces is kept there as `update/previous` for `--rollback`,
+  and the swap copies the new file in beside the program as a hidden
+  `.silver.incoming` and renames it over the old one, so nothing but the
+  program is left where it was installed. On Windows the old image is
+  renamed to a hidden `.silver.exe.replaced` until the next start removes
+  it, and the `silver.exe.old` earlier versions kept beside the program is
+  removed at start as well.
+

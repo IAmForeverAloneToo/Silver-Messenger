@@ -325,6 +325,17 @@ impl EnvSecrets {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Windows 10: this same program, started elevated by itself to reach a
+    // security key (docs/design/security-key.md, section 5). Decided
+    // before anything else runs, and nothing else runs in that mode.
+    #[cfg(windows)]
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new(securitykey::HELPER_FLAG))
+    {
+        securitykey::helper_main();
+    }
+    // What an update left beside this binary: the old one Windows could
+    // not remove while it ran, and the `.old` copy earlier clients kept.
+    silver_client::update::install::tidy_after_update();
     let secrets = EnvSecrets::take();
     harden_process();
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -744,7 +755,7 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
     // the terminal is entered, so a slow answer delays a start rather
     // than appearing over a conversation -- and it is capped short,
     // because nobody turned this on to wait for it.
-    let update_line = if config.update_check {
+    let mut newer_release = if config.update_check {
         let options = release_options(cli_proxy, cli_ca_cert, &data_dir, &mut secrets)?;
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         tokio::time::timeout(
@@ -784,8 +795,8 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
             theme::Theme::named(theme),
             at_rest.clone(),
         )?;
-        if let Some(line) = &update_line {
-            app.announce(line.clone());
+        if let Some(release) = newer_release.take() {
+            app.offer_update(release);
         }
 
         // Debug builds only: a panic on request, for the terminal test.
@@ -808,6 +819,17 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
         terminal::leave();
         match result? {
             Exit::Quit => return Ok(()),
+            Exit::Restart(staged) => {
+                // Everything that held keys is gone with `app`; the new
+                // version asks for the unlock as after /lock.
+                update::apply(&staged, &data_dir).context("installing the update")?;
+                println!(
+                    "Silver Messenger {} is in place; starting it.",
+                    staged.version
+                );
+                update::relaunch()?;
+                return Ok(());
+            }
             Exit::Wiped(word) => {
                 println!("{word}");
                 return Ok(());

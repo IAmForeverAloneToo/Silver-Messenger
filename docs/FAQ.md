@@ -211,13 +211,15 @@ it against the checksum the releases page reports, against `SHA256SUMS`,
 against the project's signature, and by running it to see that it reports
 the version expected — and only then puts it in place. If anything
 disagrees, your working client is left alone. The one it replaced is kept
-beside it, so `silver update --rollback` undoes it. If you installed
+in the data directory, so `silver update --rollback` undoes it. If you installed
 through a package manager, `silver update` says so and prints that
 manager's own command instead of fighting it.
 
-Nothing updates on its own. `/update` inside the client tells you where
-you stand and installs nothing; `update_check` in `config.json` will ask
-once a day at start and print a line, and it is off unless you turn it
+Inside the client, `/update` gets the newest release ready in the
+background and, once it is, `/update` again puts it in place and restarts
+the client. Nothing is replaced without that; `update_check` (asked at
+the first start, or in `config.json`) starts the download by itself once
+a day, and it is off unless you turn it
 on, because a check on a timer tells the release host your address and
 when you use the program.
 

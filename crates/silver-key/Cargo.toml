@@ -27,19 +27,13 @@ zeroize = { workspace = true }
 thiserror = { workspace = true }
 unicode-normalization = { workspace = true }
 
-[[bin]]
-name = "silver-key"
-path = "src/bin/silver-key.rs"
-
 # For one constant, O_NONBLOCK, when opening /dev/hidraw.
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { workspace = true }
 
 # Windows' own WebAuthn API, HID, the pipe and the elevated start; the
 # generation of windows-sys already in the tree, with more of its modules.
-# rpassword for the helper's PIN prompt.
 [target.'cfg(windows)'.dependencies]
-rpassword = { workspace = true }
 windows-sys = { version = "0.61", features = [
     "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_Devices_HumanInterfaceDevice",

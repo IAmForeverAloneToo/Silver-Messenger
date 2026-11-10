@@ -2,7 +2,7 @@
 //! ([`webauthn`]), and is used where it does (API version 4 and later);
 //! it asks for the PIN and the touch in its own window. Windows 10's does
 //! not, and hides the key from a process that is not elevated, so there
-//! the client starts the elevated helper, `silver-key.exe`, which talks to
+//! the client starts itself elevated in helper mode, which talks to
 //! the key over HID ([`hid`]) and hands back the answer through a pipe
 //! ([`helper`]); docs/design/security-key.md, section 5.
 
@@ -31,14 +31,8 @@ pub fn platform(prompt: Box<dyn Prompt + Send>) -> Result<Box<dyn Authenticator>
     if webauthn::has_prf() {
         return Ok(Box::new(webauthn::WebAuthn));
     }
-    let exe = std::env::current_exe()
-        .map_err(Error::Io)?
-        .with_file_name("silver-key.exe");
-    if !exe.exists() {
-        return Err(Error::Unavailable(
-            "this Windows is too old for its own API to reach a security key, and \
-             silver-key.exe, which does it instead, is not beside silver.exe",
-        ));
-    }
+    // The program itself, started again elevated in helper mode: one
+    // executable, which an update replaces whole.
+    let exe = std::env::current_exe().map_err(Error::Io)?;
     Ok(Box::new(helper::Helper::new(exe)))
 }

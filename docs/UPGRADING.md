@@ -138,8 +138,7 @@ clients.
 * **Clients.** Nothing to do unless a data directory enrolls a security
   key: its `vault.json` becomes version 2, which 0.21.0 and older refuse
   to read, so every device that opens that directory needs 0.22.0 or
-  later first. On Windows 10 a security key needs `silver-key.exe` from
-  the release beside `silver.exe`.
+  later first.
 
 ### 0.21.0
 

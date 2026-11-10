@@ -44,7 +44,7 @@ The repository is a Cargo workspace with five crates:
 | `silver-relay`    | The relay server binary (`silver-relay`). Authenticates clients, stores key bundles, queues envelopes per recipient. |
 | `silver-client`   | Client core with no UI: relay connection with auto-reconnect, local store (keys, contacts, history). |
 | `silver-tui`      | The terminal client binary (`silver`), built on ratatui.                   |
-| `silver-key`      | Unlocking with a FIDO2 security key: CTAP2 with `hmac-secret`, and `silver-key.exe`, the Windows 10 helper. |
+| `silver-key`      | Unlocking with a FIDO2 security key: CTAP2 with `hmac-secret`, and the Windows 10 helper mode. |
 
 ## Quick start
 
@@ -117,9 +117,15 @@ release is made and signed are in [docs/RELEASES.md](docs/RELEASES.md).
 
 ### Updating
 
-`silver update` replaces this binary with the newest release. It fetches
-the client for your platform, checks it four ways, and only then renames
-it into place:
+Inside the client, `/update` asks the releases page and, when there is a
+newer release, downloads and checks it in the background while you go on
+using the client; when it is ready the System pane says so, and `/update`
+again puts it in place of the program and restarts it, asking for your
+unlock as after `/lock`. With the release check on (the first start asks;
+`update_check` in `config.json`), this starts by itself once a day.
+`silver update` from a shell does the same without the interface. Either
+way the release is fetched for your platform and checked four ways
+before anything is replaced:
 
 * against the SHA-256 the releases page reports for that file, which
   comes from a different host than the bytes do;
@@ -132,8 +138,10 @@ it into place:
   version that was expected.
 
 If any of those disagrees, nothing on disk is touched and the message
-says what disagreed with what. The binary it replaced is kept beside it,
-so `silver update --rollback` puts it back. `silver update --check` says
+says what disagreed with what. The download waits in the data directory,
+and the version it replaced is kept there too, so nothing but the program
+sits where it was installed; `silver update --rollback` puts that version
+back. `silver update --check` says
 what is available and changes nothing, and `silver update --to 0.11.0`
 installs a named version — going backwards needs `--yes` as well, because
 an older client may not read what a newer one has written in your data
@@ -143,12 +151,10 @@ A client your package manager installed is not replaced: `silver update`
 says so and prints that manager's own command, since replacing it there
 would break its verification and be undone by its next upgrade.
 
-Nothing about this happens on its own. `silver update` runs when you run
-it; `/update` inside the client says where you stand and installs
-nothing. If you would like to be told, `update_check` in `config.json`
-asks the releases page once a day at start and prints one line — off
-unless you turn it on, because a check on a timer tells the release host
-your address, that you run Silver Messenger, and when you use it.
+Nothing is replaced without your `/update` (or `silver update`), and the
+release check is off unless you turn it on, because a check on a timer
+tells the release host your address, that you run Silver Messenger, and
+when you use it.
 
 `silver update` arrived in 0.12.0, and a release can only be installed by
 a client that has it: 0.11.0 and earlier have no such command, so moving
@@ -412,11 +418,13 @@ as a YubiKey, its PIN and a touch at every start, so that a stolen
 computer does not open even with the key still in it. Enrolling the
 first key sets a recovery passphrase, to write down and put away, which
 opens the directory when no key can; a second key can be enrolled as a
-spare. On Linux the key's device node must be readable by you, which the
+spare.
+
+On Linux the key's device node must be readable by you, which the
 udev rule libfido2's packages install sees to. On Windows 11 Windows
 asks for the PIN and the touch itself; on Windows 10, whose own API
-cannot do it, `silver-key.exe` from the release, kept beside
-`silver.exe`, does it in a window of its own after a UAC prompt, since
+cannot do it, `silver.exe` starts a copy of itself elevated, after a UAC
+prompt, which does it in a window of its own and nothing else, since
 Windows 10 lets only an elevated program reach the key.
 
 Received files go to `downloads/` inside it; they are ordinary files,

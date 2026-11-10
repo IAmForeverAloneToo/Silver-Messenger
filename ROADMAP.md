@@ -1146,7 +1146,8 @@ identity key (item 64), and not a condition of 1.0.
 - [x] 67.3 Enrolling, unlocking and removing a key; the unlock prompt
   (`--add-security-key`, `--remove-security-key`, at the terminal).
 - [x] 67.4 Windows 11 through its own API (`webauthn.dll`, `prf`).
-- [x] 67.5 The Windows 10 helper (`silver-key.exe`, in the release).
+- [x] 67.5 The Windows 10 helper (`silver.exe` started elevated in helper
+  mode; until the next release, a separate `silver-key.exe`).
 - [x] 67.6 The documents: README, threat model, changelog; the upgrade
   guide's note comes with the release.
 - [ ] 67.7 A real key by hand: enroll, unlock, a spare, remove, on

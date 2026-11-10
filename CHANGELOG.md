@@ -41,6 +41,28 @@ The releases, newest first; each version links to its entry.
 | [0.2.0](#020---2026-09-04) | 2026-09-04 | Phase 2: the trust model completed |
 | [0.1.0](#010---2026-09-04) | 2026-09-04 | First tagged release |
 
+## Unreleased
+
+Updating from inside the client, and one executable on Windows.
+
+**Upgrading.** Nothing to do. The `silver.exe.old` (or `silver.old`)
+earlier updates kept beside the program is removed at start; the
+previous version is kept in the data directory from now on. On Windows
+10, `silver-key.exe` is no longer needed and can be deleted.
+
+### Changed
+
+- `/update` gets the newest release ready in the background, downloaded
+  and checked while the client is in use, and once it is ready `/update`
+  puts it in place and restarts the client, which asks for the unlock as
+  after `/lock`. With the release check on, the download starts by
+  itself once a day. The download waits in the data directory and the
+  version it replaced is kept there for `silver update --rollback`, so
+  nothing but the program is left where it was installed.
+- On Windows 10, the security key is reached by `silver.exe` started
+  elevated in a helper mode of its own, rather than by a second program,
+  `silver-key.exe`, which the release no longer carries.
+
 ## 0.22.0 - 2026-11-03
 
 Unlocking the data directory with a FIDO2 security key (roadmap item

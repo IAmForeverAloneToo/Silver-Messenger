@@ -512,10 +512,12 @@ With the data directory alone:
   to a fresh data key as changing a passphrase does, so an old
   `vault.json` and a removed key open nothing written afterwards; every
   slot that stays is wrapped again under a fresh salt.
-- On Windows 10 the key is reached through an elevated helper,
-  `silver-key.exe`, because Windows 10 hides security keys from every
-  program that is not elevated and its own API does not pass
-  `hmac-secret` through. The client never runs elevated; the helper reads
+- On Windows 10 the key is reached through an elevated helper, a copy
+  of `silver.exe` started in helper mode, because Windows 10 hides
+  security keys from every program that is not elevated and its own API
+  does not pass `hmac-secret` through. The helper mode is chosen before
+  anything else in the program runs, and nothing else runs in it; the
+  client itself never runs elevated. The helper reads
   its request from its command line (credential ids and salts, nothing
   secret), asks for the PIN in its own window, and writes one fixed-size
   answer to a named pipe that admits only this user, and the client
@@ -1056,11 +1058,12 @@ protection above. What is done about that:
   duplicate is more code in the binary and more advisories to track, and
   `cargo deny` warns about them on every run rather than failing, since
   the fix is upstream and not here.
-- **Updates are never automatic.** `silver update` downloads and
-  installs, and it runs only when a person runs it: the interface's
-  `/update` reports and installs nothing, and the `update_check` setting,
-  off unless turned on, asks the releases page once a day and prints a
-  line, never downloading.
+- **Updates are never installed unasked.** `/update` in the client, or
+  `silver update` from a shell, downloads and checks a release; only
+  `/update` with one ready (or `silver update`) puts it in place, and the
+  client then restarts and asks for the unlock again. The `update_check`
+  setting, off unless turned on, asks the releases page once a day and
+  downloads a newer release in the background, installing nothing.
 
   What an update is checked against before the
   running binary is touched: the SHA-256 the release API reports, which

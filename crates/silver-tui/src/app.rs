@@ -485,6 +485,11 @@ impl RecentIds {
 /// Results of background work spawned by the UI.
 #[allow(clippy::large_enum_variant)] // a looked-up bundle carries ML-KEM keys
 enum Internal {
+    /// The releases page answered `/update` or the daily check: a newer
+    /// release, none, or why it could not be asked.
+    UpdateChecked(Result<Option<silver_client::update::Release>, String>),
+    /// A release is downloaded and checked, or could not be.
+    UpdatePrepared(Result<crate::update::Staged, String>),
     LookupDone {
         user_id: UserId,
         alias: Option<String>,
@@ -764,6 +769,11 @@ pub struct App {
     confirm_patience: Duration,
     /// `/lock` was asked for, or the idle time ran out.
     lock_requested: bool,
+    /// Where an update stands (`/update`).
+    update: UpdateState,
+    /// `/update` was asked for with a release ready: put it in place and
+    /// start it.
+    restart_requested: bool,
     /// `/rotate` handed over to a new identity this session. The data
     /// directory already holds the new key while this session still runs
     /// as the old one, so no further identity change is taken until a
@@ -812,10 +822,22 @@ pub enum AtRest {
     Plain(String),
 }
 
+/// Where an update stands.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum UpdateState {
+    Idle,
+    /// Asking the releases page, or downloading and checking.
+    Busy,
+    /// Downloaded and checked; `/update` puts it in place.
+    Ready(crate::update::Staged),
+}
+
 /// Why [`App::run`] returned.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Exit {
     Quit,
+    /// Put this update in place and start it.
+    Restart(crate::update::Staged),
     /// Drop everything that holds keys and ask for the passphrase again.
     Lock,
     /// This device unlinked itself and erased its data directory; what to
@@ -996,6 +1018,8 @@ impl App {
             pending: None,
             confirm_patience: CONFIRM_PATIENCE,
             lock_requested: false,
+            update: UpdateState::Idle,
+            restart_requested: false,
             rotated: false,
             next_expiry: None,
             expiry_dirty: true,
@@ -1139,6 +1163,11 @@ impl App {
             if self.lock_requested {
                 break Exit::Lock;
             }
+            if self.restart_requested
+                && let UpdateState::Ready(staged) = &self.update
+            {
+                break Exit::Restart(staged.clone());
+            }
             if self.should_quit {
                 break Exit::Quit;
             }
@@ -1157,31 +1186,103 @@ impl App {
         matches!(self.at_rest, AtRest::Passphrase | AtRest::SecurityKey)
     }
 
-    /// `/lock`: drop the keys and ask for the passphrase again.
-    /// A line for the System pane from before the interface opened.
-    pub(crate) fn announce(&mut self, text: impl Into<String>) {
-        self.system(Level::Info, text);
-    }
-
-    /// `/update`: say where this client stands, and leave installing to
-    /// the shell.
-    ///
-    /// The interface holds an unlocked data directory, ratchet state in
-    /// memory and open sessions. Replacing the binary under it buys
-    /// nothing -- a running process keeps its inode either way -- and
-    /// adds a way for a half-finished update to land in the middle of a
-    /// write, so this reports and stops (docs/design/updates.md, s. 6).
+    /// `/update`: with a release downloaded and checked, put it in place
+    /// and start it; otherwise ask the releases page and, if there is a
+    /// newer one, get it ready in the background while the client is in
+    /// use (docs/design/updates.md, section 6).
     fn cmd_update(&mut self) {
         let current = env!("CARGO_PKG_VERSION");
-        self.system(Level::Info, format!("This is Silver Messenger {current}."));
+        match &self.update {
+            UpdateState::Ready(staged) => {
+                self.system(
+                    Level::Info,
+                    format!("Restarting into Silver Messenger {}…", staged.version),
+                );
+                self.restart_requested = true;
+            }
+            UpdateState::Busy => {
+                self.system(Level::Info, "An update is already on its way.");
+            }
+            UpdateState::Idle => {
+                if let Some(command) = crate::update::managed_by() {
+                    self.system(
+                        Level::Info,
+                        format!(
+                            "This is Silver Messenger {current}, installed by a package manager; \
+                             update it with: {command}"
+                        ),
+                    );
+                    return;
+                }
+                self.system(
+                    Level::Info,
+                    format!("This is Silver Messenger {current}; asking the releases page…"),
+                );
+                self.update = UpdateState::Busy;
+                let options = self
+                    .store
+                    .load_config()
+                    .map(|c| crate::update::options_from(&c))
+                    .unwrap_or_default();
+                let tx = self.internal_tx.clone();
+                tokio::spawn(async move {
+                    let result = silver_client::update::latest_release(
+                        silver_client::update::RELEASES_API,
+                        &options,
+                    )
+                    .await
+                    .map_err(|e| format!("{e:#}"))
+                    .map(|release| {
+                        matches!(
+                            silver_client::update::compare(release.version(), current),
+                            Some(std::cmp::Ordering::Greater)
+                        )
+                        .then_some(release)
+                    });
+                    let _ = tx.send(Internal::UpdateChecked(result)).await;
+                });
+            }
+        }
+    }
+
+    /// A newer release is out (the daily check found it): get it ready in
+    /// the background.
+    pub fn offer_update(&mut self, release: silver_client::update::Release) {
+        if crate::update::managed_by().is_some() {
+            self.system(
+                Level::Info,
+                format!(
+                    "Silver Messenger {} is available; this one is updated by its package manager.",
+                    release.version()
+                ),
+            );
+            return;
+        }
+        self.update = UpdateState::Busy;
+        self.prepare_update(release);
+    }
+
+    fn prepare_update(&mut self, release: silver_client::update::Release) {
         self.system(
             Level::Info,
-            "Quit and run `silver update` to fetch, check and install the newest release.",
+            format!(
+                "Silver Messenger {} is available; downloading and checking it in the background.",
+                release.version()
+            ),
         );
-        self.system(
-            Level::Info,
-            "`silver update --check` says what is available without changing anything.",
-        );
+        let options = self
+            .store
+            .load_config()
+            .map(|c| crate::update::options_from(&c))
+            .unwrap_or_default();
+        let data_dir = self.store.root().to_path_buf();
+        let tx = self.internal_tx.clone();
+        tokio::spawn(async move {
+            let result = crate::update::prepare(&release, &options, &data_dir)
+                .await
+                .map_err(|e| format!("{e:#}"));
+            let _ = tx.send(Internal::UpdatePrepared(result)).await;
+        });
     }
 
     fn cmd_lock(&mut self) {
@@ -4090,6 +4191,24 @@ impl App {
 
     fn handle_internal(&mut self, ev: Internal) {
         match ev {
+            Internal::UpdateChecked(Ok(Some(release))) => self.prepare_update(release),
+            Internal::UpdateChecked(Ok(None)) => {
+                self.update = UpdateState::Idle;
+                self.system(Level::Info, "This is the newest release.");
+            }
+            Internal::UpdateChecked(Err(e)) | Internal::UpdatePrepared(Err(e)) => {
+                self.update = UpdateState::Idle;
+                self.system(Level::Warn, format!("Could not update: {e}"));
+            }
+            Internal::UpdatePrepared(Ok(staged)) => {
+                let text = format!(
+                    "Silver Messenger {} is downloaded and checked. /update restarts into it.",
+                    staged.version
+                );
+                self.toast(text.clone());
+                self.system(Level::Info, text);
+                self.update = UpdateState::Ready(staged);
+            }
             Internal::LookupDone {
                 user_id,
                 alias,
@@ -6165,6 +6284,35 @@ mod tests {
         )
         .unwrap();
         (app, dir)
+    }
+
+    /// An update made ready in the background waits for `/update`, which
+    /// ends the session with it to put in place; a failure says why and
+    /// leaves the next `/update` free to try again.
+    #[tokio::test]
+    async fn an_update_ready_in_the_background_is_put_in_place_by_update() {
+        let (mut app, dir) = app();
+        let staged = crate::update::Staged {
+            version: "9.9.9".into(),
+            path: dir.path().join("update/download"),
+        };
+        app.update = UpdateState::Busy;
+        app.handle_internal(Internal::UpdatePrepared(Ok(staged.clone())));
+        assert_eq!(app.update, UpdateState::Ready(staged));
+        assert!(
+            !app.restart_requested,
+            "nothing restarts until it is asked for"
+        );
+        app.cmd_update();
+        assert!(app.restart_requested);
+
+        let (mut failed, _dir) = super::tests::app();
+        failed.update = UpdateState::Busy;
+        failed.handle_internal(Internal::UpdatePrepared(Err("no network".into())));
+        assert_eq!(failed.update, UpdateState::Idle);
+        failed.handle_internal(Internal::UpdateChecked(Ok(None)));
+        assert_eq!(failed.update, UpdateState::Idle);
+        assert!(!failed.restart_requested);
     }
 
     fn message_from(

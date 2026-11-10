@@ -268,9 +268,10 @@ fn swap_until_killed(dir: &str) -> ! {
         // target alternates and both are always a possible outcome.
         let here = std::fs::read(&exe).expect("the binary is there");
         let next: &[u8] = if here == OLD { NEW } else { OLD };
-        let staged = dir.join(".silver.new");
+        let staged = dir.join("staged");
         std::fs::write(&staged, next).expect("stage");
-        silver_client::update::install::swap(&staged, &exe).expect("swap");
+        silver_client::update::install::swap(&staged, &exe, &dir.join("kept/previous"))
+            .expect("swap");
         writeln!(out, "{n}").expect("report");
         out.flush().expect("flush");
         n += 1;
@@ -283,7 +284,7 @@ fn swap_until_killed(dir: &str) -> ! {
 /// `docs/design/updates.md` claimed this was tested and it was not, which
 /// the September 2026 review found (I-1). Writing it also fixes what the
 /// claim said: the guarantee is Unix's. There the old binary is
-/// hard-linked aside and the new one renamed over it, and a rename is
+/// copied aside and the new one renamed over it, and a rename is
 /// atomic, so the name always resolves to a whole file. Windows cannot
 /// replace a running image, so its swap renames the target away and
 /// renames the replacement in, and between those two the name is
@@ -386,7 +387,7 @@ fn the_update_swap_survives_a_kill() {
 /// swap that unlinks the target first. This watches the path instead:
 /// while swaps run back to back, another thread asks whether the name
 /// exists, as fast as it can. On Unix the answer is always yes, because
-/// the old binary is hard-linked aside and the new one renamed over it,
+/// the old binary is copied aside and the new one renamed over it,
 /// and rename is atomic. A swap that renamed the target away first would
 /// be caught here within a few hundred swaps.
 #[test]
@@ -419,12 +420,13 @@ fn the_update_swap_never_leaves_the_name_empty() {
         })
     };
 
-    let staged = dir.path().join(".silver.new");
+    let staged = dir.path().join("staged");
+    let kept = dir.path().join("kept/previous");
     for _ in 0..400 {
         let here = std::fs::read(&exe).expect("the binary is there");
         let next: &[u8] = if here == OLD { NEW } else { OLD };
         std::fs::write(&staged, next).expect("stage");
-        silver_client::update::install::swap(&staged, &exe).expect("swap");
+        silver_client::update::install::swap(&staged, &exe, &kept).expect("swap");
     }
     stop.store(true, Ordering::Relaxed);
     watcher.join().expect("the watcher");

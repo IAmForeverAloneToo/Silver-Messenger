@@ -203,10 +203,10 @@ V6 and the threat model.
 | Control | Verdict | Evidence |
 | --- | --- | --- |
 | 10.1.1 Code analysis | Partly | clippy, `cargo audit`, `cargo deny`, fuzzing, the OpenSSF Scorecard; no dedicated malicious-code analysis. |
-| 10.2.1 No unauthorised phone-home | Met | The client contacts its relay and, only on `silver update` (or its older name `--check-release`), GitHub's releases API; nothing else, ever. The `update_check` setting (0.12.0) makes that request once a day at start, and it is off unless turned on, for the reason the threat model gives: a check on a timer reveals an address, a program and the times it is used. Verified in tests that the client makes no other connections. |
+| 10.2.1 No unauthorised phone-home | Met | The client contacts its relay and, only on `/update` or `silver update` (or its older name `--check-release`), GitHub's releases API; nothing else, ever. The `update_check` setting (0.12.0) makes that request once a day at start, and it is off unless turned on, for the reason the threat model gives: a check on a timer reveals an address, a program and the times it is used. Verified in tests that the client makes no other connections. |
 | 10.2.2 No data collection | Met | None. |
 | 10.2.3 No backdoors, undocumented modes | Met | Every flag is documented (`--help`, README); `--log-ids` and `--submit-authenticated` are the only "less private" modes and say so. |
-| 10.3.1 Auto-update with signature checks | Met | Nothing updates by itself. `silver update` (0.12.0), run by the user, checks the download against the release API's digest, against `SHA256SUMS`, against the project's signature over it with the key compiled in from `minisign.pub`, and against the binary's own `--version` before the swap; a build without the key refuses to update (`docs/design/updates.md`). |
+| 10.3.1 Auto-update with signature checks | Met | Nothing is installed unasked. `/update` in the client, or `silver update` (0.12.0) from a shell, checks the download against the release API's digest, against `SHA256SUMS`, against the project's signature over it with the key compiled in from `minisign.pub`, and against the binary's own `--version` before the swap; a build without the key refuses to update (`docs/design/updates.md`). |
 | 10.3.2 Integrity of third-party code | Met | `Cargo.lock`, `cargo deny` sources allowlist (crates.io only), `cargo auditable` embeds the tree, SBOM per binary. |
 | 10.3.3 Subdomain takeover | N/A | |
 

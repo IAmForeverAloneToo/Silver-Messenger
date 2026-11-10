@@ -347,7 +347,7 @@ pub const COMMANDS: &[CommandInfo] = &[
         "update",
         &[],
         "",
-        "whether a newer release exists (asks the releases page; installing is `silver update` from a shell)",
+        "get the newest release ready in the background (asks the releases page); once it is, /update restarts into it",
     ),
     cmd("quit", &["q", "exit"], "", "exit"),
 ];

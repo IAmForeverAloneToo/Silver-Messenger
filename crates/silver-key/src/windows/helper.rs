@@ -2,7 +2,7 @@
 //! section 5).
 //!
 //! The client makes a named pipe only its own user may open, with one
-//! instance, starts `silver-key.exe` elevated with the request on its
+//! instance, starts the program itself elevated in helper mode, the request on its
 //! command line (nothing on it is secret), checks that the process at the
 //! other end of the pipe is the one it started, and reads one fixed-size
 //! answer. The helper asks for the PIN in its own window, talks to the key
@@ -39,6 +39,10 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(300);
 const SW_SHOWNORMAL: i32 = 1;
 
+/// The first argument of the elevated copy of the program, which puts it
+/// in helper mode before anything else runs.
+pub const HELPER_FLAG: &str = "--security-key-helper";
+
 /// The route through the helper.
 pub struct Helper {
     exe: PathBuf,
@@ -52,7 +56,9 @@ impl Helper {
     fn run(&self, request: &Request) -> Result<Answer, Error> {
         let name = fresh_pipe_name();
         let pipe = Pipe::create(&name)?;
-        let process = start_elevated(&self.exe, &request.to_args(&name))?;
+        let mut args = vec![HELPER_FLAG.to_owned()];
+        args.extend(request.to_args(&name));
+        let process = start_elevated(&self.exe, &args)?;
         pipe.connect(&process)?;
         // Before a byte is read: the other end is the helper this started,
         // and not something else of this user's that got there first.
@@ -343,12 +349,12 @@ fn start_elevated(exe: &std::path::Path, args: &[String]) -> Result<Owned, Error
         // SAFETY: reads the thread's last error.
         return Err(match unsafe { GetLastError() } {
             ERROR_CANCELLED => Error::Cancelled,
-            _ => last_error("starting silver-key.exe"),
+            _ => last_error("starting the security key helper"),
         });
     }
     if info.hProcess.is_null() {
         return Err(Error::Windows(
-            "silver-key.exe started with no process".into(),
+            "the security key helper started with no process".into(),
         ));
     }
     Ok(Owned(info.hProcess))

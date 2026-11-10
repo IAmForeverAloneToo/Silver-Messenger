@@ -1,5 +1,5 @@
 //! What passes between the client and the Windows 10 helper,
-//! `silver-key.exe` (docs/design/security-key.md, section 5): the request
+//! `silver.exe` started elevated in helper mode (docs/design/security-key.md, section 5): the request
 //! on the helper's command line, nothing secret in it, and one fixed-size
 //! answer back over the pipe. Here rather than in the Windows code so that
 //! it is tested everywhere.

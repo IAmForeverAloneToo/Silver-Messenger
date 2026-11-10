@@ -323,9 +323,6 @@ Where the code, once written, differs from what is above:
   write; the answer is 1,063 bytes (a status, the index, the secret, and
   for an enrollment the credential id). Windows 10's route is chosen by
   `webauthn.dll`'s API version: below 4, the helper.
-* **`silver update`** replaces `silver.exe` only; the helper is not yet
-  among what it fetches. A release that changes the helper says so, and
-  it is replaced by hand meanwhile.
 * **macOS** has no route yet (section 7 named it with Linux): it needs an
   IOKit HID transport, which waits for a Mac to try it on, as section 9
   said of macOS before. `--add-security-key` says so there.
@@ -334,3 +331,12 @@ Where the code, once written, differs from what is above:
   `r` at "no key found" goes to the recovery passphrase. With
   `SILVER_PASSPHRASE` set, the recovery passphrase is used and the key is
   not asked for, since a run nobody sits at has nobody to touch it.
+* **One executable.** The Windows 10 helper is not a second program
+  (`silver-key.exe`, as section 5 had it and 0.22.0 shipped) but
+  `silver.exe` itself, started elevated with `--security-key-helper` as
+  its first argument, which it checks before anything else runs and in
+  which nothing else runs. A download is one file, `silver update`
+  replaces all of it, and the UAC prompt names the program the person
+  knows. What the elevated process holds is the whole binary rather than
+  a small one, though only the helper's code runs in it.
+
