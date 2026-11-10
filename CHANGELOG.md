@@ -12,6 +12,7 @@ The releases, newest first; each version links to its entry.
 
 | Version | Date | What it was |
 | --- | --- | --- |
+| [0.23.0](#0230---2026-11-10) | 2026-11-10 | Updating from inside the client; one executable on Windows |
 | [0.22.0](#0220---2026-11-03) | 2026-11-03 | Unlocking with a security key (roadmap item 67), and a first start that sets everything up |
 | [0.21.0](#0210---2026-11-03) | 2026-11-03 | A day of the client in use: drafts per chat, `/mute` and @mentions, history in backups, KWallet tried for real |
 | [0.20.0](#0200---2026-10-30) | 2026-10-30 | TLS and runtime advisories fixed; the key store on Linux speaks to the Secret Service itself, over zbus 6 |
@@ -41,11 +42,15 @@ The releases, newest first; each version links to its entry.
 | [0.2.0](#020---2026-09-04) | 2026-09-04 | Phase 2: the trust model completed |
 | [0.1.0](#010---2026-09-04) | 2026-09-04 | First tagged release |
 
-## Unreleased
+## 0.23.0 - 2026-11-10
 
-Updating from inside the client, and one executable on Windows.
+Updating from inside the client, as other messengers do, and one
+executable on Windows. Nothing on the wire changes.
 
-**Upgrading.** Nothing to do. The `silver.exe.old` (or `silver.old`)
+**Upgrading.** From 0.22.0 or earlier, run `silver update` from a shell
+once: those versions do not have the in-app update yet. From this
+version on, `/update` inside the client does it. The relay's changes
+are none; its schema stays at 3 and its backup format at 2. The `silver.exe.old` (or `silver.old`)
 earlier updates kept beside the program is removed at start; the
 previous version is kept in the data directory from now on. On Windows
 10, `silver-key.exe` is no longer needed and can be deleted.

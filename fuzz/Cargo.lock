@@ -2708,7 +2708,7 @@ dependencies = [
 
 [[package]]
 name = "silver-client"
-version = "0.22.0"
+version = "0.23.0"
 dependencies = [
  "aes 0.9.4",
  "anyhow",
@@ -2766,7 +2766,7 @@ dependencies = [
 
 [[package]]
 name = "silver-key"
-version = "0.22.0"
+version = "0.23.0"
 dependencies = [
  "aes 0.9.4",
  "cbc",
@@ -2784,7 +2784,7 @@ dependencies = [
 
 [[package]]
 name = "silver-protocol"
-version = "0.22.0"
+version = "0.23.0"
 dependencies = [
  "base64",
  "bs58",
