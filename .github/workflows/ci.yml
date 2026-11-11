@@ -55,7 +55,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: pip install cmarkgfm==2025.10.22
+      - run: pip install --require-hashes -r tests/docs/requirements.txt
       - run: python3 tests/docs/check_links.py
       - run: python3 tests/docs/check_render.py
 
@@ -94,7 +94,8 @@ jobs:
       # 0.13 cannot take. It comes only with the P-256, P-384 and K-256
       # code of openmls_rust_crypto and hpke-rs-rust-crypto, and groups
       # run on the one X-Wing/Ed25519 ciphersuite, refusing any other
-      # before use. deny.toml skips it for cargo deny with the same
+      # before use. The P-256 that does run, silver-key's PIN protocol,
+      # is on p256 0.14 and crypto-bigint 0.7. deny.toml skips it for cargo deny with the same
       # reason; drop both once those crates move to crypto-bigint 0.7.
       NOT_RUN: >-
         --ignore RUSTSEC-2026-0387
@@ -144,7 +145,7 @@ jobs:
       - uses: ./.github/actions/rust
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: sudo apt-get update && sudo apt-get install -y tmux
-      - run: pip install pyte==0.8.2 || pip install --break-system-packages pyte==0.8.2
+      - run: pip install --require-hashes -r tests/tui/requirements.txt || pip install --break-system-packages --require-hashes -r tests/tui/requirements.txt
       - run: TERMS=${{ matrix.term }} tests/tui/run.sh
 
   soak:
@@ -155,7 +156,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/rust
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: pip install pyte==0.8.2 || pip install --break-system-packages pyte==0.8.2
+      - run: pip install --require-hashes -r tests/tui/requirements.txt || pip install --break-system-packages --require-hashes -r tests/tui/requirements.txt
       - run: cargo build --workspace --locked
       # Through the environment, not spliced into the script: an input is
       # text whoever dispatches the run chose, and in the script it would

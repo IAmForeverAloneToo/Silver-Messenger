@@ -6,12 +6,12 @@
 #   TERMS="xterm-256color linux" tests/tui/run.sh
 #   tests/tui/run.sh test_help.py           # one test
 #
-# Needs python3 with pyte (pip install pyte); the tmux test skips itself
+# Needs python3 with pyte (pip install --require-hashes -r tests/tui/requirements.txt); the tmux test skips itself
 # when tmux is not installed.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-python3 -c 'import pyte' 2>/dev/null || { echo "pyte is missing: pip install pyte" >&2; exit 1; }
+python3 -c 'import pyte' 2>/dev/null || { echo "pyte is missing: pip install --require-hashes -r tests/tui/requirements.txt" >&2; exit 1; }
 cargo build --workspace --quiet
 
 export SILVER_BIN_DIR="${SILVER_BIN_DIR:-$PWD/target/debug}"

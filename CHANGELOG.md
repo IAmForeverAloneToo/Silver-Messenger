@@ -44,6 +44,26 @@ The releases, newest first; each version links to its entry.
 | [0.2.0](#020---2026-09-04) | 2026-09-04 | Phase 2: the trust model completed |
 | [0.1.0](#010---2026-09-04) | 2026-09-04 | First tagged release |
 
+## Unreleased
+
+### Security
+
+- The security key's PIN protocol, which runs at every unlock with a
+  key, moves to p256 0.14 and with it to crypto-bigint 0.7, out of
+  reach of the timing advisory RUSTSEC-2026-0387. The advisory had been
+  set aside as touching only P-curve code that is built and never run;
+  that stopped being true when unlocking with a security key arrived in
+  0.22.0. OpenMLS's own P-curve code stays on the older generation and
+  is still never run.
+- A proxy password is no longer shown: the first start's proxy field
+  shows it as dots, in the full-screen form and in the line-by-line one
+  a screen reader reads, and a proxy URL that does not parse is reported
+  without repeating it.
+- ml-kem 0.3.4, which hardens zeroization.
+- The Windows WebAuthn answers are read through `NonNull`, and an
+  assertion with an empty credential id is refused like a missing one.
+- CI installs its Python test dependencies pinned by hash.
+
 ## 0.24.0 - 2026-11-11
 
 A security review of the relay on its own, with every finding that the

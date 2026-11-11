@@ -44,7 +44,7 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 cargo deny check                                     # advisories, licences, duplicate crates
-pip install pyte && TERMS="xterm-256color linux" tests/tui/run.sh   # the client in a pseudo-terminal
+pip install --require-hashes -r tests/tui/requirements.txt && TERMS="xterm-256color linux" tests/tui/run.sh   # the client in a pseudo-terminal
 cd fuzz && RUSTUP_TOOLCHAIN=nightly cargo fuzz build  # the fuzz targets still build
 ```
 

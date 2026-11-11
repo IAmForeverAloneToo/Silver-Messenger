@@ -1095,7 +1095,7 @@ mod screen {
                     help = Some(means);
                 }
                 Kind::Text(value, means) => {
-                    spans.push(Span::styled(value.clone(), theme.text));
+                    spans.push(Span::styled(shown(&value), theme.text));
                     if focused {
                         cursor = Some((lines.len(), 26 + value.chars().count()));
                     }
@@ -1398,6 +1398,24 @@ mod screen {
     }
 }
 
+/// A text answer as it is shown: a password in a URL's user part (the
+/// proxy's `http://user:password@host:port`) as dots, one per character,
+/// so that it is neither left on the screen nor read aloud, and the cursor
+/// still stands where the text ends.
+fn shown(value: &str) -> String {
+    let Some((scheme, rest)) = value.split_once("://") else {
+        return value.to_owned();
+    };
+    let Some((user_part, host)) = rest.rsplit_once('@') else {
+        return value.to_owned();
+    };
+    let Some((user, password)) = user_part.split_once(':') else {
+        return value.to_owned();
+    };
+    let dots = "•".repeat(password.chars().count());
+    format!("{scheme}://{user}:{dots}@{host}")
+}
+
 // --- line by line, for a screen reader ---------------------------------------------
 
 mod lines {
@@ -1450,7 +1468,7 @@ mod lines {
             }
             Kind::Text(value, means) => {
                 println!("{label}: {means}");
-                let Some(answer) = read_line(&format!("{label} [{value}]: "))? else {
+                let Some(answer) = read_line(&format!("{label} [{}]: ", shown(&value)))? else {
                     return Ok(false);
                 };
                 if !answer.trim().is_empty()
@@ -1534,6 +1552,27 @@ mod lines {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_password_in_a_url_is_shown_as_dots() {
+        assert_eq!(
+            super::shown("http://me:hunter2@proxy.example:8080"),
+            "http://me:•••••••@proxy.example:8080"
+        );
+        // The same width, so the cursor stands where the text ends.
+        assert_eq!(
+            super::shown("http://me:pässwörd@p:1").chars().count(),
+            "http://me:pässwörd@p:1".chars().count()
+        );
+        for plain in [
+            "socks5h://proxy:1080",
+            "http://user@proxy:8080",
+            "laptop",
+            "a:b@c",
+        ] {
+            assert_eq!(super::shown(plain), plain);
+        }
+    }
+
     use super::screen::{Action, Wizard};
     use super::*;
 

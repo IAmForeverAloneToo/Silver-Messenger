@@ -10,7 +10,7 @@ use aes::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit};
 use hkdf::Hkdf;
 use hmac::{Hmac, KeyInit, Mac};
 use p256::elliptic_curve::point::AffineCoordinates;
-use p256::elliptic_curve::sec1::ToEncodedPoint;
+use p256::elliptic_curve::sec1::ToSec1Point;
 use p256::{PublicKey, SecretKey};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
@@ -184,7 +184,7 @@ pub fn cose_key(key: &PublicKey) -> Value {
 }
 
 pub(crate) fn cose_key_with_alg(key: &PublicKey, alg: i64) -> Value {
-    let point = key.to_encoded_point(false);
+    let point = key.to_sec1_point(false);
     Value::map([
         (1, Value::Int(2)),
         (3, Value::Int(alg)),

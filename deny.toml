@@ -25,7 +25,9 @@ ignore = [
     # hpke-rs-rust-crypto. Groups run on one ciphersuite, X-Wing with
     # Ed25519, and a key package or group of any other is refused before
     # use (silver-client groups/mod.rs), so no secret of ours goes through
-    # it. Drop once both move to an elliptic-curve on crypto-bigint 0.7.
+    # it. silver-key's own P-256 (the security key's PIN protocol, which
+    # does run) is on p256 0.14 and crypto-bigint 0.7, out of its reach.
+    # Drop once both move to an elliptic-curve on crypto-bigint 0.7.
     { id = "RUSTSEC-2026-0387", reason = "P-curve code linked through OpenMLS, never run: one X25519/ML-KEM/Ed25519 ciphersuite" },
 ]
 
@@ -60,11 +62,17 @@ allow = [
 # ed25519, ed25519-dalek, inout, poly1305, universal-hash) are the older
 # generation openmls_rust_crypto 0.6 and hpke-rs 0.7 still build on, the
 # newest there is; this repository's own code moved to the next one.
+# The P-256 names (base16ct, crypto-bigint, elliptic-curve, ff, group,
+# p256, primeorder, sec1) likewise: OpenMLS's P-curve ciphersuites hold
+# the 0.13 generation, and silver-key's PIN protocol, which runs at every
+# security-key unlock, is on 0.14, whose crypto-bigint 0.7 is the one
+# RUSTSEC-2026-0387 is fixed in.
 multiple-versions = "deny"
 wildcards = "allow"
 skip = [
 { name = "aead" },
 { name = "aes" },
+{ name = "base16ct" },
 { name = "base64" },
 { name = "block-buffer" },
 { name = "chacha20" },
@@ -72,24 +80,31 @@ skip = [
 { name = "cipher" },
 { name = "const-oid" },
 { name = "cpufeatures" },
+{ name = "crypto-bigint" },
 { name = "crypto-common" },
 { name = "curve25519-dalek" },
 { name = "der" },
 { name = "digest" },
 { name = "ed25519" },
 { name = "ed25519-dalek" },
+{ name = "elliptic-curve" },
+{ name = "ff" },
 { name = "foldhash" },
 { name = "getrandom" },
+{ name = "group" },
 { name = "hashbrown" },
 { name = "hkdf" },
 { name = "hmac" },
 { name = "inout" },
 { name = "nom" },
+{ name = "p256" },
 { name = "pkcs8" },
 { name = "poly1305" },
+{ name = "primeorder" },
 { name = "rand" },
 { name = "rand_chacha" },
 { name = "rand_core" },
+{ name = "sec1" },
 { name = "sha1" },
 { name = "sha2" },
 { name = "signature" },

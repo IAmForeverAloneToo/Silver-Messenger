@@ -6,7 +6,7 @@
 //! round. Windows asks for the PIN and the touch itself.
 
 use core::ffi::c_void;
-use core::ptr::{null, null_mut};
+use core::ptr::{NonNull, null, null_mut};
 
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::Networking::WindowsWebServices::*;
@@ -163,12 +163,12 @@ impl WebAuthn {
             )
         };
         check(hr)?;
-        if attestation.is_null() {
+        let Some(attestation) = NonNull::new(attestation) else {
             return Err(Error::Malformed("Windows gave no credential"));
-        }
-        // SAFETY: Windows' answer, read and then freed once.
+        };
+        // SAFETY: Windows' answer, not null, read and then freed once.
         let id = unsafe {
-            let a = &*attestation;
+            let a = attestation.as_ref();
             let id = if a.pbCredentialId.is_null() || a.cbCredentialId == 0 {
                 None
             } else {
@@ -177,7 +177,7 @@ impl WebAuthn {
                         .to_vec(),
                 )
             };
-            WebAuthNFreeCredentialAttestation(attestation);
+            WebAuthNFreeCredentialAttestation(attestation.as_ptr());
             id
         };
         id.ok_or(Error::Malformed("Windows gave a credential with no id"))
@@ -271,13 +271,13 @@ impl WebAuthn {
             )
         };
         check(hr)?;
-        if assertion.is_null() {
+        let Some(assertion) = NonNull::new(assertion) else {
             return Err(Error::Malformed("Windows gave no assertion"));
-        }
-        // SAFETY: Windows' answer, read and then freed once.
+        };
+        // SAFETY: Windows' answer, not null, read and then freed once.
         let answer = unsafe {
-            let a = &*assertion;
-            let id = if a.Credential.pbId.is_null() {
+            let a = assertion.as_ref();
+            let id = if a.Credential.pbId.is_null() || a.Credential.cbId == 0 {
                 None
             } else {
                 Some(
@@ -296,7 +296,7 @@ impl WebAuthn {
             } else {
                 None
             };
-            WebAuthNFreeAssertion(assertion);
+            WebAuthNFreeAssertion(assertion.as_ptr());
             (id, secret)
         };
         let (id, secret) = answer;

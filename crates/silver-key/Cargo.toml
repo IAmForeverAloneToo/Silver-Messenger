@@ -14,8 +14,9 @@ rust-version = "1.89"
 soft = []
 
 [dependencies]
-# Every one of these was in the tree already: p256 through OpenMLS's
-# P-256 ciphersuites, the rest through the client.
+# p256 is a newer generation than the one OpenMLS's P-256 ciphersuites
+# hold (see the workspace Cargo.toml); the rest were in the tree already,
+# through the client.
 p256 = { workspace = true }
 aes = { workspace = true }
 cbc = { workspace = true }

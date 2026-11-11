@@ -133,9 +133,10 @@ num-bigint = "0.4"
 aes = { version = "0.9", features = ["zeroize"] }
 cbc = { version = "0.2", features = ["alloc", "block-padding", "zeroize"] }
 # The security key's PIN protocol (crates/silver-key): ECDH on P-256 with
-# the key. The generation OpenMLS's P-256 ciphersuites already build, with
-# no feature beyond the curve arithmetic, so it adds nothing to the tree.
-p256 = { version = "0.13", default-features = false, features = ["arithmetic"] }
+# the key, at every unlock. 0.14, not the 0.13 OpenMLS's ciphersuites
+# hold: 0.13's crypto-bigint 0.5 has a timing advisory (RUSTSEC-2026-0387)
+# that only 0.7 fixes, and this code runs on a secret.
+p256 = { version = "0.14", default-features = false, features = ["arithmetic"] }
 # One constant (O_NONBLOCK) for /dev/hidraw; in the tree through tokio.
 libc = "0.2"
 tauri-winrt-notification = "0.8"

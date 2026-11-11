@@ -8,9 +8,10 @@ reports are taken seriously and handled quietly until a fix is out.
 
 **Please do not open a public issue for a security problem.**
 
-Report it privately through GitHub's vulnerability reporting: on the
-repository page, *Security* → *Report a vulnerability*. That opens a draft
-advisory only you and the maintainer can see. If that page is not available
+Report it privately through GitHub's vulnerability reporting:
+<https://github.com/IAmForeverAloneToo/Silver-Messenger/security/advisories/new>
+(on the repository page, *Security* → *Report a vulnerability*). That
+opens a draft advisory only you and the maintainer can see. If that page is not available
 to you, open an ordinary issue that says only "security contact requested"
 with no details, and you will be given a private channel.
 

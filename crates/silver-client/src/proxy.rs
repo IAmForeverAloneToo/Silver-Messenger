@@ -62,8 +62,10 @@ impl Proxy {
             .or_else(|| rest.strip_prefix("socks5://"))
         {
             (Kind::Socks5, rest, 1080)
-        } else if rest.contains("://") {
-            bail!("only http:// CONNECT and socks5:// proxies are supported, got {url}");
+        } else if let Some((scheme, _)) = rest.split_once("://") {
+            // The scheme alone: the rest may carry a password, and an
+            // error is shown and logged.
+            bail!("only http:// CONNECT and socks5:// proxies are supported, got {scheme}://");
         } else {
             (Kind::Http, rest, 80)
         };
@@ -91,7 +93,7 @@ impl Proxy {
         };
         let host = host.trim_matches(|c| c == '[' || c == ']');
         if host.is_empty() {
-            bail!("proxy URL has no host: {url}");
+            bail!("the proxy URL has no host");
         }
         Ok(Self {
             kind,
@@ -348,6 +350,11 @@ mod tests {
         assert!(Proxy::parse("socks4://x:1").is_err());
         assert!(Proxy::parse("https://x:1").is_err());
         assert!(Proxy::parse("http://:8080").is_err());
+        // An error never repeats a password the URL carried.
+        for bad in ["https://me:hunter2@x:1", "http://me:hunter2@:8080"] {
+            let e = Proxy::parse(bad).unwrap_err().to_string();
+            assert!(!e.contains("hunter2"), "{e}");
+        }
         assert!(Proxy::parse(&format!("socks5://{}:x@h", "u".repeat(256))).is_err());
     }
 

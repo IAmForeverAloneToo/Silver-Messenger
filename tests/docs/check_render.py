@@ -19,7 +19,7 @@ what a reader would see wrong:
   reference (`FOR_PEOPLE` below), a table cell over `CELL_MAX`
   characters or a paragraph over `PARA_MAX` words.
 
-    pip install cmarkgfm            # GitHub's renderer; CI does this
+    pip install --require-hashes -r tests/docs/requirements.txt   # GitHub's renderer, as CI installs it
     python3 tests/docs/check_render.py
 
 Without `cmarkgfm` the source-level checks still run and the rendered
