@@ -16,6 +16,11 @@ updates:
     ignore:
       - dependency-name: num-bigint
         versions: [">=0.5"]
+      # p256 stays at 0.13 while OpenMLS's P-256 ciphersuites keep it in the
+      # tree: 0.14 would add a second copy of the curve code, which
+      # deny.toml refuses.
+      - dependency-name: p256
+        versions: [">=0.14"]
     groups:
       cargo:
         patterns: ["*"]
