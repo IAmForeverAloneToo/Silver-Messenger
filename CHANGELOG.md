@@ -12,6 +12,7 @@ The releases, newest first; each version links to its entry.
 
 | Version | Date | What it was |
 | --- | --- | --- |
+| [0.24.0](#0240---2026-11-11) | 2026-11-11 | The relay hardened: everything a security review of it found that code can fix |
 | [0.23.1](#0231---2026-11-10) | 2026-11-10 | The in-app update's restart, the rollback copy kept, and the first start protecting first |
 | [0.23.0](#0230---2026-11-10) | 2026-11-10 | Updating from inside the client; one executable on Windows |
 | [0.22.0](#0220---2026-11-03) | 2026-11-03 | Unlocking with a security key (roadmap item 67), and a first start that sets everything up |
@@ -43,7 +44,7 @@ The releases, newest first; each version links to its entry.
 | [0.2.0](#020---2026-09-04) | 2026-09-04 | Phase 2: the trust model completed |
 | [0.1.0](#010---2026-09-04) | 2026-09-04 | First tagged release |
 
-## Unreleased
+## 0.24.0 - 2026-11-11
 
 A security review of the relay on its own, with every finding that the
 code could fix fixed.

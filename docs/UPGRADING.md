@@ -117,7 +117,7 @@ clients.
 
 | Version | What the relay's upgrade changes |
 | --- | --- |
-| [Unreleased](#unreleased) | `X-Forwarded-For` is believed only from `--trusted-proxy`; the schema stays at 3 and the backup format at 2 |
+| [0.24.0](#0240) | `X-Forwarded-For` is believed only from `--trusted-proxy`; the schema stays at 3 and the backup format at 2 |
 | [0.23.1](#0231) | Nothing; the fixes are the client's |
 | [0.23.0](#0230) | Nothing; the changes are the client's |
 | [0.22.0](#0220) | Dependency updates only; the schema stays at 3 and the backup format at 2 |
@@ -133,7 +133,7 @@ clients.
 | [0.8.0](#080) | The schema moves to 2, the key transparency log; rolling back to 0.7.0 needs a restore |
 | [0.7.0](#070) | TLS in the relay, the admin socket, the schema version (1), metrics and JSON logs, arm64 and a container image |
 
-### Unreleased
+### 0.24.0
 
 * **Relay: recommended.** The fixes from a security review of the
   relay (see the changelog's `Security` entries).

@@ -4415,7 +4415,7 @@ dependencies = [
 
 [[package]]
 name = "silver-client"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "aes 0.9.4",
  "anyhow",
@@ -4470,7 +4470,7 @@ dependencies = [
 
 [[package]]
 name = "silver-key"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "aes 0.9.4",
  "cbc",
@@ -4488,7 +4488,7 @@ dependencies = [
 
 [[package]]
 name = "silver-protocol"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "base64 0.23.1",
  "bs58",
@@ -4510,7 +4510,7 @@ dependencies = [
 
 [[package]]
 name = "silver-relay"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -4540,7 +4540,7 @@ dependencies = [
 
 [[package]]
 name = "silver-tui"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "arboard",
