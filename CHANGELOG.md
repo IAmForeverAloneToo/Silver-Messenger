@@ -12,6 +12,7 @@ The releases, newest first; each version links to its entry.
 
 | Version | Date | What it was |
 | --- | --- | --- |
+| [0.24.1](#0241---2026-11-11) | 2026-11-11 | The security key off a timing advisory, a proxy password kept off the screen |
 | [0.24.0](#0240---2026-11-11) | 2026-11-11 | The relay hardened: everything a security review of it found that code can fix |
 | [0.23.1](#0231---2026-11-10) | 2026-11-10 | The in-app update's restart, the rollback copy kept, and the first start protecting first |
 | [0.23.0](#0230---2026-11-10) | 2026-11-10 | Updating from inside the client; one executable on Windows |
@@ -44,7 +45,15 @@ The releases, newest first; each version links to its entry.
 | [0.2.0](#020---2026-09-04) | 2026-09-04 | Phase 2: the trust model completed |
 | [0.1.0](#010---2026-09-04) | 2026-09-04 | First tagged release |
 
-## Unreleased
+## 0.24.1 - 2026-11-11
+
+The security key's PIN protocol off a crypto library with a timing
+advisory, a proxy password kept off the screen, and the week's
+dependency updates. Nothing on the wire or on disk changes.
+
+**Upgrading.** `/update` in the client, or `silver update`. The relay
+takes axum-server 0.9 and redb 4.5 and nothing else; the schema stays at
+3 and the backup format at 2.
 
 ### Security
 
@@ -63,6 +72,10 @@ The releases, newest first; each version links to its entry.
 - The Windows WebAuthn answers are read through `NonNull`, and an
   assertion with an empty credential id is refused like a missing one.
 - CI installs its Python test dependencies pinned by hash.
+
+### Changed
+
+- axum-server 0.9, redb 4.5, uuid 1.29.2 and secmem-proc 0.3.9.
 
 ## 0.24.0 - 2026-11-11
 
