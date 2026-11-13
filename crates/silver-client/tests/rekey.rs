@@ -101,8 +101,9 @@ async fn a_rekeyed_peer_is_taken_when_the_relay_confirms_it() {
     connected(&mut alice_ev, "alice").await;
     connected(&mut bob_ev, "bob").await;
 
-    // A session on the pinned key: delivered at once, reported with no
-    // published check (`docs/design/dh-rotation.md` section 4.2, step 1).
+    // A session on the pinned key: still checked against the key the
+    // relay publishes, which may have replaced the pinned one since
+    // (`docs/design/dh-rotation.md` section 4.2).
     let before = alice_c
         .send_message(
             bob.user_id(),
@@ -120,8 +121,8 @@ async fn a_rekeyed_peer_is_taken_when_the_relay_confirms_it() {
     )
     .await;
     assert!(
-        matches!(established, ClientEvent::SessionEstablished { published: None, identity_dh: Some(dh), .. } if dh == alice.dh_public()),
-        "a session on the pinned key is delivered without a lookup"
+        matches!(established, ClientEvent::SessionEstablished { published: Some(ref published), identity_dh: Some(dh), .. } if dh == alice.dh_public() && published.dh_public == dh),
+        "a session on the pinned key is checked against the published key too"
     );
     let got = wait_for(&mut bob_ev, "before message", |e| text_of(e).is_some()).await;
     assert_eq!(text_of(&got).unwrap(), "before the rekey");

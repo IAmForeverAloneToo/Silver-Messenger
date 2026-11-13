@@ -5,8 +5,10 @@
 //! instance, starts the program itself elevated in helper mode, the request on its
 //! command line (nothing on it is secret), checks that the process at the
 //! other end of the pipe is the one it started, and reads one fixed-size
-//! answer. The helper asks for the PIN in its own window, talks to the key
-//! over HID, writes the answer and exits; it reads nothing else.
+//! answer. It does so only when nothing running as the user could have
+//! changed the program, or put a DLL beside it, first ([`place`]). The
+//! helper asks for the PIN in its own window, talks to the key over HID,
+//! writes the answer and exits; it reads nothing else.
 
 use core::ptr::{null, null_mut};
 use std::path::PathBuf;
@@ -29,8 +31,10 @@ use windows_sys::Win32::UI::Shell::{
 };
 use zeroize::Zeroizing;
 
-use super::{last_error, wide};
-use crate::helper_wire::{ANSWER_LEN, Answer, Request, decode_answer, fresh_pipe_name};
+use super::{Owned, last_error, place, wide};
+use crate::helper_wire::{
+    ANSWER_LEN, Answer, Request, command_line, decode_answer, fresh_pipe_name,
+};
 use crate::{Authenticator, Enrolled, Error};
 
 /// How long the person has to answer the UAC prompt.
@@ -49,16 +53,24 @@ pub struct Helper {
 }
 
 impl Helper {
-    pub fn new(exe: PathBuf) -> Helper {
-        Helper { exe }
+    /// The helper started from `exe`, refused unless [`place::check`]
+    /// finds that nothing running as this user could change what runs
+    /// there.
+    pub fn new(exe: PathBuf) -> Result<Helper, Error> {
+        place::check(&exe)?;
+        Ok(Helper { exe })
     }
 
     fn run(&self, request: &Request) -> Result<Answer, Error> {
         let name = fresh_pipe_name();
-        let pipe = Pipe::create(&name)?;
         let mut args = vec![HELPER_FLAG.to_owned()];
-        args.extend(request.to_args(&name));
-        let process = start_elevated(&self.exe, &args)?;
+        args.extend(request.to_args(&name)?);
+        let params = command_line(&args)?;
+        // Again, right before the UAC prompt: the place is what it was
+        // when the route was chosen.
+        place::check(&self.exe)?;
+        let pipe = Pipe::create(&name)?;
+        let process = start_elevated(&self.exe, &params)?;
         pipe.connect(&process)?;
         // Before a byte is read: the other end is the helper this started,
         // and not something else of this user's that got there first.
@@ -109,18 +121,6 @@ impl Authenticator for Helper {
             return Err(Error::Malformed("the helper answered for no candidate"));
         }
         Ok((answer.index, answer.secret))
-    }
-}
-
-/// A handle closed when it goes.
-struct Owned(HANDLE);
-
-impl Drop for Owned {
-    fn drop(&mut self) {
-        if !self.0.is_null() && self.0 != INVALID_HANDLE_VALUE {
-            // SAFETY: owned, closed once.
-            unsafe { CloseHandle(self.0) };
-        }
     }
 }
 
@@ -330,13 +330,13 @@ impl Pipe {
     }
 }
 
-/// Starts `exe` elevated: one UAC prompt. The person saying no there is a
-/// cancellation.
-fn start_elevated(exe: &std::path::Path, args: &[String]) -> Result<Owned, Error> {
+/// Starts `exe` elevated with the command line `params`: one UAC prompt.
+/// The person saying no there is a cancellation.
+fn start_elevated(exe: &std::path::Path, params: &str) -> Result<Owned, Error> {
     let file = wide(&exe.to_string_lossy());
     let verb = wide("runas");
-    // Nothing on the command line has a space or a quote in it.
-    let params = wide(&args.join(" "));
+    // Quoted argument by argument by `command_line`.
+    let params = wide(params);
     let mut info: SHELLEXECUTEINFOW = unsafe { core::mem::zeroed() };
     info.cbSize = size_of::<SHELLEXECUTEINFOW>() as u32;
     info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
@@ -366,6 +366,10 @@ fn start_elevated(exe: &std::path::Path, args: &[String]) -> Result<Owned, Error
 /// command line asks with the key plugged in, write the answer. Returns
 /// the error to show in the helper's window, if any.
 pub fn serve(args: &[String], prompt: impl crate::Prompt) -> Result<(), Error> {
+    // Elevated, this process loads no DLL from anywhere but System32 from
+    // here on, whatever `main` did first.
+    super::harden_dll_search()
+        .map_err(|e| Error::Windows(format!("restricting where DLLs are loaded from: {e}")))?;
     let (pipe, request) = Request::from_args(args)?;
     let name = wide(&pipe);
     // SAFETY: the name is NUL-terminated; the handle is closed by `Owned`.

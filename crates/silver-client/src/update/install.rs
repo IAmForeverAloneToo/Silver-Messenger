@@ -11,6 +11,8 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Whose binary this is.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -165,6 +167,76 @@ pub fn staging_dir(data_dir: &Path) -> PathBuf {
     data_dir.join(UPDATE_DIR)
 }
 
+/// [`staging_dir`], made owner-only, and the data directory with it if
+/// this is the first thing ever to make it.
+///
+/// `silver update` can run before the client has ever started, and the
+/// data directory it made then was at the umask's mercy, which the first
+/// start then left as it found it.
+pub fn make_staging_dir(data_dir: &Path) -> anyhow::Result<PathBuf> {
+    crate::store::create_private_dir(data_dir, Some(UPDATE_DIR))?;
+    let dir = staging_dir(data_dir);
+    crate::store::create_private_dir(&dir, None)?;
+    Ok(dir)
+}
+
+/// What an update wrote down about the version it kept for [`rollback`].
+///
+/// Beside the copy and in the clear, so it proves nothing by itself: what
+/// it is for is to say which release to check the copy against. A
+/// rollback hashes the copy, finds that hash listed for this platform in
+/// that release's `SHA256SUMS`, and checks the project's signature over
+/// the list, before the copy is run or put in place. A copy somebody put
+/// in the data directory, or a record somebody edited to match it, then
+/// fails at the signature unless what is there is a release the project
+/// signed, and the version it is is shown before anything changes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Kept {
+    /// The version the kept copy is, as the client that kept it knew
+    /// itself.
+    pub version: String,
+    /// Its SHA-256, lower-case hex, taken as it was copied.
+    pub sha256: String,
+}
+
+/// Where [`Kept`] is written for the copy at `keep`.
+fn kept_record_path(keep: &Path) -> PathBuf {
+    keep.with_file_name("previous.json")
+}
+
+/// The record of the copy at `keep`.
+pub fn kept_record(keep: &Path) -> anyhow::Result<Kept> {
+    let path = kept_record_path(keep);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!(
+            "there is no record of which release {} is (it was kept by a client older than \
+             0.25.0), so it cannot be checked against the project's signature and is not run \
+             or put back. `silver update --to <version>` installs a release afresh, checked.",
+            keep.display()
+        ),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+}
+
+/// The SHA-256 of the file at `path`, lower-case hex.
+pub fn sha256_of(path: &Path) -> anyhow::Result<String> {
+    let mut file =
+        std::fs::File::open(path).with_context(|| format!("reading {}", path.display()))?;
+    let mut hash = Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let read = std::io::Read::read(&mut file, &mut buf)
+            .with_context(|| format!("reading {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hash.update(&buf[..read]);
+    }
+    Ok(hash.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
 const UPDATE_DIR: &str = "update";
 
 /// `exe`'s directory, with `name` in front of `exe`'s file name and a dot
@@ -197,11 +269,21 @@ fn legacy_backup_path(exe: &Path) -> PathBuf {
 }
 
 /// Put `new` in place of `exe`, keeping a copy of the old one at `keep`
-/// for [`rollback`]. `new` is consumed.
+/// for [`rollback`], with a record that it is `version`. `new` is
+/// consumed, and is installed only if it is still what hashed to `sha256`
+/// when it was checked: it waits in the data directory, possibly for the
+/// whole of a session, and somebody who can write there could have
+/// replaced it since.
 ///
 /// On failure the old binary is still in place: a rename is the only
 /// moment `exe` changes.
-pub fn swap(new: &Path, exe: &Path, keep: &Path) -> anyhow::Result<()> {
+pub fn swap_checked(
+    new: &Path,
+    sha256: &str,
+    exe: &Path,
+    keep: &Path,
+    version: &str,
+) -> anyhow::Result<()> {
     if !new.is_file() {
         bail!(
             "{} is not there to install; nothing has been changed",
@@ -209,30 +291,57 @@ pub fn swap(new: &Path, exe: &Path, keep: &Path) -> anyhow::Result<()> {
         );
     }
     if let Some(dir) = keep.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("making {}", dir.display()))?;
+        crate::store::create_private_dir(dir, None)?;
     }
+    let record = kept_record_path(keep);
+    let _ = std::fs::remove_file(&record);
     let _ = std::fs::remove_file(keep);
     std::fs::copy(exe, keep).with_context(|| format!("keeping a copy of {}", exe.display()))?;
-    place(new, exe)?;
+    let kept = Kept {
+        version: version.to_owned(),
+        sha256: sha256_of(keep)?,
+    };
+    let mut out = crate::store::create_private(&record)?;
+    std::io::Write::write_all(&mut out, serde_json::to_string(&kept)?.as_bytes())
+        .with_context(|| format!("writing {}", record.display()))?;
+    drop(out);
+    place(new, exe, sha256)?;
     let _ = std::fs::remove_file(new);
     Ok(())
 }
 
-/// Put back what the last update replaced, from `keep`.
-pub fn rollback(exe: &Path, keep: &Path) -> anyhow::Result<()> {
+/// [`swap_checked`] for a file the caller has only just made and holds no
+/// earlier hash of, so it is hashed here. Not for an update, whose
+/// download has waited in the data directory since it was checked: that
+/// goes through [`swap_checked`] with the hash taken when it was.
+#[doc(hidden)]
+pub fn swap(new: &Path, exe: &Path, keep: &Path) -> anyhow::Result<()> {
+    let sha256 = sha256_of(new)?;
+    swap_checked(new, &sha256, exe, keep, env!("CARGO_PKG_VERSION"))
+}
+
+/// Put back what the last update replaced, from `keep`, if it is still
+/// what hashed to `sha256` when it was checked ([`kept_record`]).
+pub fn rollback(exe: &Path, keep: &Path, sha256: &str) -> anyhow::Result<()> {
     if !keep.is_file() {
         bail!(
             "there is nothing to go back to: {} is not a file",
             keep.display()
         );
     }
-    place(keep, exe)?;
+    place(keep, exe, sha256)?;
     let _ = std::fs::remove_file(keep);
+    let _ = std::fs::remove_file(kept_record_path(keep));
     Ok(())
 }
 
-/// Copy `from` in beside `exe` and rename it over `exe`.
-fn place(from: &Path, exe: &Path) -> anyhow::Result<()> {
+/// Copy `from` in beside `exe` and rename it over `exe`, if the copy
+/// hashes to `sha256`.
+///
+/// The copy is what is hashed, not `from`: it is outside the data
+/// directory and nothing else writes it between the hash and the rename,
+/// so what was checked is what is installed.
+fn place(from: &Path, exe: &Path, sha256: &str) -> anyhow::Result<()> {
     let incoming = incoming_path(exe);
     let _ = std::fs::remove_file(&incoming);
     std::fs::copy(from, &incoming).with_context(|| {
@@ -241,6 +350,21 @@ fn place(from: &Path, exe: &Path) -> anyhow::Result<()> {
             exe.display()
         )
     })?;
+    match sha256_of(&incoming) {
+        Ok(got) if got.eq_ignore_ascii_case(sha256) => {}
+        Ok(got) => {
+            let _ = std::fs::remove_file(&incoming);
+            bail!(
+                "{} is not the file that was checked (it hashes to {got}, where {sha256} was \
+                 checked); it has been changed since, and nothing has been installed",
+                from.display()
+            );
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&incoming);
+            return Err(e);
+        }
+    }
     // Keep whatever mode the old binary had: a file installed 0750 in a
     // shared directory should stay that way, so this is not a fixed 755.
     if let Err(e) = copy_permissions(exe, &incoming) {
@@ -487,9 +611,12 @@ mod tests {
         std::fs::write(&staged, b"new").unwrap();
         let keep = kept_path(&data, &exe);
 
-        swap(&staged, &exe, &keep).unwrap();
+        swap_checked(&staged, &sha256_of(&staged).unwrap(), &exe, &keep, "0.1.0").unwrap();
         assert_eq!(std::fs::read(&exe).unwrap(), b"new");
         assert_eq!(std::fs::read(&keep).unwrap(), b"old");
+        let kept = kept_record(&keep).unwrap();
+        assert_eq!(kept.version, "0.1.0");
+        assert_eq!(kept.sha256, sha256_of(&keep).unwrap());
         assert!(!staged.exists(), "the download is consumed by the swap");
         if !cfg!(windows) {
             let beside: Vec<_> = std::fs::read_dir(&bin).unwrap().collect();
@@ -500,9 +627,43 @@ mod tests {
             );
         }
 
-        rollback(&exe, &keep).unwrap();
+        rollback(&exe, &keep, &kept.sha256).unwrap();
         assert_eq!(std::fs::read(&exe).unwrap(), b"old");
         assert!(!keep.exists(), "the copy went back into place");
+        assert!(kept_record(&keep).is_err(), "and its record with it");
+    }
+
+    /// The download waits in the data directory until `/update` puts it
+    /// in place, and the version an update replaced waits there for
+    /// `--rollback`. Either may have been replaced by then; neither is
+    /// installed unless it is still what was checked, and nothing beside
+    /// the program is left by the refusal.
+    #[test]
+    fn a_file_changed_since_it_was_checked_is_not_installed() {
+        let dir = tempdir();
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let exe = bin.join("silver");
+        let staged = dir.join("download");
+        std::fs::write(&exe, b"old").unwrap();
+        std::fs::write(&staged, b"new").unwrap();
+        let checked = sha256_of(&staged).unwrap();
+        std::fs::write(&staged, b"somebody else's").unwrap();
+        let keep = kept_path(&dir.join("data"), &exe);
+        let err = swap_checked(&staged, &checked, &exe, &keep, "0.1.0").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not the file that was checked"),
+            "{err:#}"
+        );
+        assert_eq!(std::fs::read(&exe).unwrap(), b"old");
+        assert!(!incoming_path(&exe).exists());
+
+        std::fs::write(&staged, b"new").unwrap();
+        swap_checked(&staged, &checked, &exe, &keep, "0.1.0").unwrap();
+        let kept = kept_record(&keep).unwrap();
+        std::fs::write(&keep, b"somebody else's").unwrap();
+        assert!(rollback(&exe, &keep, &kept.sha256).is_err());
+        assert_eq!(std::fs::read(&exe).unwrap(), b"new");
     }
 
     #[test]
@@ -510,7 +671,7 @@ mod tests {
         let dir = tempdir();
         let exe = dir.join("silver");
         std::fs::write(&exe, b"only").unwrap();
-        let err = rollback(&exe, &kept_path(&dir.join("data"), &exe))
+        let err = rollback(&exe, &kept_path(&dir.join("data"), &exe), "")
             .unwrap_err()
             .to_string();
         assert!(err.contains("nothing to go back to"), "{err}");
@@ -543,7 +704,14 @@ mod tests {
         assert!(!legacy_backup_path(&exe).exists());
         let kept = kept_path(&data, &exe);
         assert_eq!(std::fs::read(&kept).unwrap(), b"0.22.0");
-        rollback(&exe, &kept).unwrap();
+        // Kept by a client that wrote down nothing about it, so there is
+        // no release to check it against, and it is not put back on its
+        // own say-so.
+        assert!(
+            format!("{:#}", kept_record(&kept).unwrap_err()).contains("update --to"),
+            "the way to a checked copy should be named"
+        );
+        rollback(&exe, &kept, &sha256_of(&kept).unwrap()).unwrap();
         assert_eq!(std::fs::read(&exe).unwrap(), b"0.22.0");
     }
 
@@ -618,7 +786,7 @@ mod tests {
         let keep = kept_path(&dir.path().join("data"), &exe);
         std::fs::create_dir_all(&keep).unwrap();
 
-        let err = rollback(&exe, &keep).unwrap_err();
+        let err = rollback(&exe, &keep, "").unwrap_err();
         assert!(
             format!("{err:#}").contains("is not a file"),
             "a directory was taken for a binary: {err:#}"

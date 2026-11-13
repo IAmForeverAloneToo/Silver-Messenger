@@ -117,6 +117,7 @@ clients.
 
 | Version | What the relay's upgrade changes |
 | --- | --- |
+| [Unreleased](#unreleased) | Nothing; the changes are the client's |
 | [0.24.1](#0241) | Dependency updates only (axum-server 0.9, redb 4.5); the schema stays at 3 and the backup format at 2 |
 | [0.24.0](#0240) | `X-Forwarded-For` is believed only from `--trusted-proxy`; the schema stays at 3 and the backup format at 2 |
 | [0.23.1](#0231) | Nothing; the fixes are the client's |
@@ -133,6 +134,23 @@ clients.
 | [0.9.0](#090) | The schema moves to 3 and the backup format to 2; rolling back to 0.8.0 needs a restore |
 | [0.8.0](#080) | The schema moves to 2, the key transparency log; rolling back to 0.7.0 needs a restore |
 | [0.7.0](#070) | TLS in the relay, the admin socket, the schema version (1), metrics and JSON logs, arm64 and a container image |
+
+### Unreleased
+
+* **Relay: optional.** Nothing changed in it.
+* **Clients.**
+  * A protected data directory moves to a version 3 vault at its first
+    unlock. An older client cannot open it afterwards; roll back with
+    `silver update --rollback`, which keeps the copy that can.
+  * Group invite links made before this version stop working; an admin
+    makes a new one with `/group invite`.
+  * On Windows 10 without the newer WebAuthn, unlocking with a security
+    key refuses to elevate a `silver.exe` kept in a folder its user can
+    write to, and asks for the recovery passphrase instead. Move the
+    program somewhere only administrators can write (under
+    `C:\Program Files`), or have an administrator set
+    `AllowSecurityKeyHelperAnywhere` to 1 under
+    `HKLM\SOFTWARE\Silver Messenger`. Windows 11 is not affected.
 
 ### 0.24.1
 

@@ -13,7 +13,8 @@
 //! in docs/design/notifications.md.
 
 use std::io::{Write, stdout};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, TryLockError};
 use std::time::{Duration, Instant};
 
 /// Announcements closer together than this are folded into the first.
@@ -279,9 +280,16 @@ fn tmux_passthrough(sequence: &str) -> String {
 
 /// The operating system's path. A failure is remembered, so the path is
 /// left alone for a while rather than tried for every message.
+///
+/// The worker holds `state` across the call to the operating system, and
+/// a notification daemon that never answers holds it for good; so the
+/// interface's thread never waits for it. `busy` says a worker is out,
+/// and while one is, another notification is simply not raised — they
+/// all say the same thing, and replace each other anyway.
 #[derive(Clone, Default)]
 struct Desktop {
     state: Arc<Mutex<DesktopState>>,
+    busy: Arc<AtomicBool>,
 }
 
 #[derive(Default)]
@@ -297,13 +305,24 @@ impl Desktop {
     /// Ask the operating system, off the interface's thread; the outcome is
     /// not waited for.
     fn raise(&self) {
+        if self.busy.load(Ordering::Acquire) {
+            return;
+        }
         {
-            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let state = match self.state.try_lock() {
+                Ok(state) => state,
+                Err(TryLockError::Poisoned(e)) => e.into_inner(),
+                Err(TryLockError::WouldBlock) => return,
+            };
             if state.retry_at.is_some_and(|at| Instant::now() < at) {
                 return;
             }
         }
+        if self.busy.swap(true, Ordering::AcqRel) {
+            return;
+        }
         let shared = self.state.clone();
+        let busy = self.busy.clone();
         std::thread::spawn(move || {
             let mut state = shared.lock().unwrap_or_else(|e| e.into_inner());
             match desktop::raise(&mut state.platform) {
@@ -315,6 +334,8 @@ impl Desktop {
                     state.retry_at = Some(Instant::now() + RETRY_AFTER);
                 }
             }
+            drop(state);
+            busy.store(false, Ordering::Release);
         });
     }
 }
@@ -462,6 +483,30 @@ fn write_raw(bytes: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A worker stuck in a call to a notification daemon that never
+    /// answers holds the state; the next message must not wait for it.
+    #[test]
+    fn a_hung_notification_service_does_not_hold_up_the_interface() {
+        let desktop = Desktop::default();
+        let held = desktop.state.lock().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let raising = desktop.clone();
+        std::thread::spawn(move || {
+            raising.raise();
+            let _ = tx.send(());
+        });
+        assert!(
+            rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "raise returned while the state was held"
+        );
+        drop(held);
+        // And while a worker is out, no second one is started to queue
+        // up behind it.
+        desktop.busy.store(true, Ordering::Release);
+        desktop.raise();
+        assert!(desktop.busy.load(Ordering::Acquire));
+    }
 
     #[test]
     fn modes_parse_and_print() {

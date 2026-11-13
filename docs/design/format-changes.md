@@ -425,6 +425,74 @@ pass as everything else; a record without `covers`, as 0.18.1 writes
 it, brings them in again; and two threads writing different files
 through one store leave a directory that opens.
 
+### 5.8 What says a directory is bound (0.25.0)
+
+Section 5.2 made the anchor "the one number `vault.json` carries in the
+clear", and 5.6 recognised a directory from before the record by its
+absence. Anybody who can write the directory can delete it, and the next
+unlock then adopted every file at whatever generation it carried --
+older copies put back included -- after sealing any file it found in the
+clear: a plaintext `config.json` or `blocked.json` became one the client
+vouched for. Four format changes close that.
+
+**Vault version 3.** Version 1 with the data key (and, during a
+rotation, the previous key) wrapped under associated data of its own,
+`silver-messenger/v3/vault`. The version says which associated data to
+use and cannot be edited to say otherwise: a version 3 vault called
+version 1 does not open, and a version 2 one has no `kdf` to open as
+either. So "this directory keeps a record" is in the wrap, which only
+the key can make, and versions 2 and 3 without an anchor are refused,
+with `--reset-rollback-protection` as the way out. Every vault this
+client writes is version 2 or 3; a version 1 vault is rewritten as
+version 3 at its first unlock, once its record has been read (the
+key-encryption key is to hand at that moment: the passphrase was just
+stretched, or the key store answered). Version 2 vaults are left as
+they are: every one was written by a client that kept a record.
+
+**An unfinished record.** `state` gains `unfinished`, written only when
+true. A protection writes a record at generation 0 that says so, under
+the new key, *before* its vault, and the vault points at it; the files
+follow, and the unlock that finds the record unfinished seals what is
+plain, stamps what is name-only, and writes the finished record. The
+adoption of a version 1 directory with no anchor writes the same record
+before it starts. Plaintext in a protected directory is accepted there
+and nowhere else, and a file at a generation past 1 is refused there,
+so a copy of such a record put back later, with its vault, finds a
+directory that has moved on. A version 1 vault with no anchor is
+adopted only if nothing in the directory says otherwise: no `state` or
+`state.prev`, no file at a generation, no conversation log under a
+MACed name, and nothing in the clear. A directory a client older than
+0.25.0 was protecting when it crashed has files in the clear and is
+refused, with the reset named; the reset takes plaintext.
+
+**Reads.** A line in the clear in a history file is not read when the
+directory is protected (it used to be read as itself), and a whole file
+the record names that is not on disk is refused rather than read as
+never written. The client records its own removals; `clear_sessions`
+writes the two files empty through the bound write instead of removing
+them.
+
+**Two smaller shapes.** A received file written under the data key is
+`SMD1 || seal(data key, "silver-messenger/v1/download\0" || name)`,
+where it was `SMV1` and the bare name, the shape of a store file: one
+could be read as the other. `SMV1` downloads still open under any name
+that is not one of the store's own, and are moved to `SMD1` by the next
+change of protection. `vault.pending` holds `{"name", "tag"}` objects,
+the tag an HMAC-SHA256 under the key-store key the note names, over the
+directory's path and the name; a bare name, as before, is dropped
+without deleting anything. And an update writes `update/previous.json`
+(`{"version", "sha256"}`) beside the copy it keeps (`docs/design/updates.md`
+section 11).
+
+What a rollback of the client leaves: 0.24.1 and earlier refuse a
+version 3 vault ("unsupported vault format"), as 0.21.0 refused version
+2, so going back to one from a passphrase or key-store directory means
+taking the protection off with this client first, or a backup; a
+security-key directory keeps its version 2 vault and is opened by 0.22.0
+and later as before. The `unfinished` field is dropped by an older writer
+only in the window a protection is being finished, which an older
+client cannot reach without opening the version 3 vault.
+
 ## 6. How the wire pair becomes required
 
 Section 2 said the two fields go in optional and become required a
@@ -544,3 +612,8 @@ what section 4 required of it.
 * The two bullets above describe 0.18.1. Section 5.7 brings the two
   files into the record, and the note's "every file" holds again from
   0.19.0.
+* Sections 5.2 and 5.6 left whether a directory is bound to the anchor,
+  which is plaintext and can be deleted, and took a missing anchor for a
+  directory from before the record, adopting what it held and sealing
+  what was in the clear. Section 5.8 (0.25.0) moves that fact into the
+  wrap of the data key and records an unfinished protection in `state`.

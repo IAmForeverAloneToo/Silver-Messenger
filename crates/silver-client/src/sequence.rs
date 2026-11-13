@@ -13,16 +13,21 @@
 //! its neighbours — the relay may reorder, and a mailbox drains in
 //! whatever order it was filled — is not lost: before 0.11.0 anything
 //! below the highest was a replay, so a message reported missing and then
-//! delivered was dropped rather than shown. The previous epoch is why a
+//! delivered was dropped rather than shown. The previous epochs are why a
 //! relay cannot replay a whole old conversation by claiming the sender
 //! reinstalled: numbering that goes back to where it has been before is a
-//! replay, and only numbering past it is a fresh start.
+//! replay, and only numbering past it is a fresh start. A few of them are
+//! kept, not just the last: with one, a relay holding the mail of two
+//! earlier installations could hand the older one back, which no longer
+//! matched the single epoch remembered and so passed as a fresh start.
 
 use serde::{Deserialize, Serialize};
 use silver_protocol::Sequence;
 
 /// Messages below the highest accepted whose arrival is still remembered.
 const WINDOW: u64 = 64;
+/// Epochs before the previous one whose end is still remembered.
+const EARLIER_EPOCHS: usize = 3;
 
 /// What has been accepted from one sender.
 ///
@@ -41,10 +46,30 @@ pub struct Seen {
     /// Where the sender's previous epoch had got to when they moved on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous: Option<Sequence>,
+    /// Where the epochs before `previous` had got to, newest first. A
+    /// fixed array so that `Seen` stays a plain value; absent from what
+    /// was written before it existed, and from what has nothing in it.
+    #[serde(default, skip_serializing_if = "no_earlier")]
+    pub earlier: [Option<Sequence>; EARLIER_EPOCHS],
 }
 
 fn is_zero(window: &u64) -> bool {
     *window == 0
+}
+
+fn no_earlier(earlier: &[Option<Sequence>; EARLIER_EPOCHS]) -> bool {
+    earlier.iter().all(Option::is_none)
+}
+
+impl Seen {
+    /// Whether `incoming` falls inside an epoch the sender has already
+    /// left, at or below where that epoch ended.
+    fn left_behind(&self, incoming: Sequence) -> bool {
+        self.previous
+            .iter()
+            .chain(self.earlier.iter().flatten())
+            .any(|ended| ended.epoch == incoming.epoch && incoming.seq <= ended.seq)
+    }
 }
 
 /// What an incoming message's sequence number says about it.
@@ -86,16 +111,18 @@ pub fn check(seen: Option<Seen>, incoming: Sequence) -> SequenceCheck {
         // goes back to an epoch we have already seen the end of is not
         // reinstalling: that is the shape of a relay handing an old
         // conversation back under new envelope ids.
-        return match seen.previous {
-            Some(previous) if previous.epoch == incoming.epoch && incoming.seq <= previous.seq => {
-                SequenceCheck::Replay
-            }
-            _ => SequenceCheck::NewEpoch,
+        return if seen.left_behind(incoming) {
+            SequenceCheck::Replay
+        } else {
+            SequenceCheck::NewEpoch
         };
     }
+    // Compared by difference, not by `last + 1`: the number is the
+    // sender's to choose, and one who sends the largest there is would
+    // otherwise overflow the addition on every message after it.
     match incoming.seq {
         seq if seq == seen.last.seq => SequenceCheck::Replay,
-        seq if seq > seen.last.seq + 1 => SequenceCheck::Gap {
+        seq if seq > seen.last.seq && seq - seen.last.seq > 1 => SequenceCheck::Gap {
             missing: seq - seen.last.seq - 1,
         },
         seq if seq > seen.last.seq => SequenceCheck::Fresh,
@@ -116,18 +143,23 @@ pub fn note(seen: &mut Option<Seen>, incoming: Sequence) {
     let Some(state) = seen else {
         *seen = Some(Seen {
             last: incoming,
-            window: 0,
-            previous: None,
+            ..Seen::default()
         });
         return;
     };
     if state.last.epoch != incoming.epoch {
+        // The one before moves down among the earlier ones, the oldest
+        // of which is forgotten.
+        let mut earlier = [None; EARLIER_EPOCHS];
+        earlier[0] = state.previous;
+        earlier[1..].copy_from_slice(&state.earlier[..EARLIER_EPOCHS - 1]);
         *seen = Some(Seen {
             last: incoming,
             window: 0,
             // Where the epoch just left behind had got to, so that
             // numbering cannot come back to it.
             previous: Some(state.last),
+            earlier,
         });
         return;
     }
@@ -219,6 +251,60 @@ mod tests {
         assert_eq!(check(state, s(7, 1)), SequenceCheck::Replay);
         // ...and a third epoch is still a fresh start.
         assert_eq!(check(state, s(9, 1)), SequenceCheck::NewEpoch);
+    }
+
+    /// A sender's number is theirs to choose, the largest there is
+    /// included; what follows it in the same epoch is a replay, not an
+    /// overflow.
+    #[test]
+    fn the_largest_sequence_number_does_not_overflow() {
+        let mut state = None;
+        assert_eq!(check(state, s(7, u64::MAX)), SequenceCheck::Fresh);
+        note(&mut state, s(7, u64::MAX));
+        assert_eq!(check(state, s(7, 5)), SequenceCheck::Replay);
+        assert_eq!(check(state, s(7, u64::MAX)), SequenceCheck::Replay);
+        assert_eq!(check(state, s(7, u64::MAX - 1)), SequenceCheck::Late);
+        note(&mut state, s(7, u64::MAX - 1));
+        assert_eq!(check(state, s(8, 1)), SequenceCheck::NewEpoch);
+
+        let mut state = None;
+        note(&mut state, s(7, u64::MAX - 1));
+        assert_eq!(check(state, s(7, u64::MAX)), SequenceCheck::Fresh);
+        note(&mut state, s(7, 1));
+        note(&mut state, s(7, u64::MAX));
+        assert_eq!(state.unwrap().last, s(7, u64::MAX));
+    }
+
+    /// Going back to an epoch two or three installations ago is no more a
+    /// fresh start than going back to the last one.
+    #[test]
+    fn several_earlier_epochs_stay_closed() {
+        let mut state = None;
+        for epoch in 1..=5 {
+            note(&mut state, s(epoch, 1));
+            note(&mut state, s(epoch, 10));
+        }
+        // Epoch 5 is current; 4 is `previous`, and 3, 2 and 1 earlier.
+        for epoch in 1..=4 {
+            assert_eq!(check(state, s(epoch, 10)), SequenceCheck::Replay);
+            assert_eq!(check(state, s(epoch, 1)), SequenceCheck::Replay);
+            // Past where it ended is past anything that can be replayed.
+            assert_eq!(check(state, s(epoch, 11)), SequenceCheck::NewEpoch);
+        }
+        // One more and the oldest is forgotten, as a bound has to.
+        note(&mut state, s(6, 1));
+        assert_eq!(check(state, s(1, 10)), SequenceCheck::NewEpoch);
+        assert_eq!(check(state, s(2, 10)), SequenceCheck::Replay);
+
+        // What is kept round-trips, and is absent when there is nothing.
+        let json = serde_json::to_string(&state.unwrap()).unwrap();
+        let back: Seen = serde_json::from_str(&json).unwrap();
+        assert_eq!(Some(back), state);
+        assert!(
+            !serde_json::to_string(&seen(7, 1).unwrap())
+                .unwrap()
+                .contains("earlier")
+        );
     }
 
     /// A `contacts.json` written before the window existed reads as the

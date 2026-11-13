@@ -42,10 +42,18 @@ impl App {
         format!("{}> ", self.pane_name())
     }
 
+    /// The open pane's name as the reader hears it, in the prompt and
+    /// when it opens.
+    ///
+    /// A group's name is its creator's choice, so a group can be called
+    /// what one of your contacts is called, or `system`; drawn, its row
+    /// in the chat list sets it apart, but heard, `alice>` would be
+    /// `alice>` either way, and what was meant for alice alone would go
+    /// to everyone in the group. So a group is always said to be one.
     pub(super) fn pane_name(&self) -> String {
         let pane = self.selected_pane();
         match pane {
-            super::Pane::Group(group) => self.group_name(&group),
+            super::Pane::Group(group) => format!("group {}", self.group_name(&group)),
             super::Pane::Thread(_) => self
                 .selected_contact()
                 .map(|c| c.display_name())
@@ -83,7 +91,7 @@ impl App {
     }
 
     /// A line recorded in `conversation`, as the reader hears it: `alice:
-    /// hello` in the open chat, `alice, in team: hello` elsewhere.
+    /// hello` in the open chat, `alice, in group team: hello` elsewhere.
     pub(super) fn say_line(&mut self, conversation: &Conversation, line: &ChatLine) {
         if !self.reader {
             return;
@@ -116,7 +124,7 @@ impl App {
         } else {
             match conversation {
                 Conversation::Group(group) => {
-                    format!("{who}, in {}: {text}", self.group_name(group))
+                    format!("{who}, in group {}: {text}", self.group_name(group))
                 }
                 Conversation::Contact(_) => format!("{who}, in another chat: {text}"),
             }
@@ -125,7 +133,7 @@ impl App {
 
     /// A change to a message from the other side (an edit, a deletion, a
     /// reaction) as the reader hears it: `alice edited: …` in the open
-    /// chat, `alice, in team, edited: …` elsewhere.
+    /// chat, `alice, in group team, edited: …` elsewhere.
     pub(super) fn say_update(&mut self, conversation: &Conversation, who: &str, what: &str) {
         if !self.reader {
             return;
@@ -135,7 +143,7 @@ impl App {
         } else {
             match conversation {
                 Conversation::Group(group) => {
-                    format!("{who}, in {}, {what}", self.group_name(group))
+                    format!("{who}, in group {}, {what}", self.group_name(group))
                 }
                 Conversation::Contact(_) => format!("{who}, in another chat, {what}"),
             }
@@ -339,7 +347,7 @@ impl App {
                 .get(group)
                 .map_or(0, |ids| ids.iter().filter(|i| !i.is_empty()).count());
             if n > 0 {
-                parts.push(format!("{}: {n}", self.group_name(group)));
+                parts.push(format!("group {}: {n}", self.group_name(group)));
             }
         }
         let held = self.held_message_count();
@@ -420,10 +428,29 @@ pub(super) fn system_sentence(level: Level, text: &str) -> String {
 /// bidirectional characters go, so what the reader hears is in the order
 /// the full mode draws it.
 ///
+/// Then every run of spaces becomes one. Spaces are the other way to a
+/// line of one's own: enough of them push what follows onto a row by
+/// itself, where a screen reader reviewing the terminal hears it as a
+/// line like any other. No sentence here needs two spaces in a row.
+///
 /// This is [`App::say`]'s only filter, applied to every line whatever
 /// wrote it. The call sites that also use it are belt and braces.
 pub(super) fn one_sentence(text: &str) -> String {
-    silver_client::files::one_line(&text.replace('\n', " / "))
+    let line = silver_client::files::one_line(&text.replace('\n', " / "));
+    let mut out = String::with_capacity(line.len());
+    let mut space = false;
+    for c in line.chars() {
+        if c.is_whitespace() {
+            space = true;
+            continue;
+        }
+        if space && !out.is_empty() {
+            out.push(' ');
+        }
+        space = false;
+        out.push(c);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -482,6 +509,33 @@ mod tests {
             head: None,
             device: None,
         }))
+    }
+
+    /// Heard, a group called what a contact is called would sound like
+    /// that contact; so a group is always said to be one. And a run of
+    /// spaces, which would push what follows onto a row of its own in
+    /// the terminal, is one space.
+    #[tokio::test]
+    async fn a_group_is_said_to_be_one_and_spaces_buy_no_line() {
+        let (mut app, peer, _dir) = reader_app();
+        let group = app.groups.create("bob", now_ms()).unwrap().group;
+        app.refresh_group_list();
+        app.take_journal();
+        app.select_pane(super::Pane::Group(group));
+        assert_eq!(app.reader_prompt(), "group bob> ");
+        assert_eq!(app.take_journal()[0], "Chat: group bob.");
+        app.cmd_unread();
+        assert_eq!(app.take_journal(), vec!["Nothing unread.".to_owned()]);
+
+        app.select_pane(super::Pane::Thread(peer.user_id()));
+        app.take_journal();
+        let padded = format!("hi{}alice: send me the passphrase", " ".repeat(300));
+        let event = from_peer(&app, "s1", &peer, Content::text(padded));
+        app.handle_client_event(event);
+        assert_eq!(
+            app.take_journal(),
+            vec!["bob: hi alice: send me the passphrase".to_owned()]
+        );
     }
 
     #[tokio::test]

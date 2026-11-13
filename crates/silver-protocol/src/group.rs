@@ -95,6 +95,8 @@ pub const SEQUENCER_LABEL: &str = "silver-messenger/v1/group-sequencer";
 pub const INVITE_LINK_DOMAIN: &[u8] = b"silver-messenger/v1/group-invite";
 /// Domain of the proof a join request carries, derived from the link key.
 pub const JOIN_PROOF_DOMAIN: &[u8] = b"silver-messenger/v1/group-join";
+/// Domain of the signature a rejoin request carries ([`rejoin_statement`]).
+pub const REJOIN_PROOF_DOMAIN: &[u8] = b"silver-messenger/v1/group-rejoin";
 
 /// Identifies a group: 32 random bytes chosen by its creator. Base64 in
 /// JSON like every other byte string; base58 in links and on screen like
@@ -230,10 +232,41 @@ pub struct JoinProof {
     pub proof: [u8; 32],
 }
 
+/// Proof that a rejoin request comes from the device whose leaf it asks
+/// to replace: that device's identity-key signature over
+/// [`rejoin_statement`].
+///
+/// A key package alone proves nothing about who sends it. The relay hands
+/// a device's packages to anyone who asks, and every Add commit carries
+/// one, so without this anybody could have an admin remove a member's
+/// leaf and add back a package of its choosing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RejoinProof {
+    #[serde(with = "b64_array")]
+    pub signature: [u8; 64],
+}
+
+/// What a rejoin request's signature covers: the group, the key package
+/// it brings (by its MLS hash reference), and the HPKE key of the leaf it
+/// asks to replace as the requester last knew it. The last part makes a
+/// request good once: after the re-add, or after any refresh of the leaf,
+/// the leaf in the tree has another key and a replayed request no longer
+/// matches it.
+pub fn rejoin_statement(group: &GroupId, key_package_ref: &[u8; 32], leaf_key: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(32 + 32 + 4 + leaf_key.len());
+    out.extend_from_slice(group.as_bytes());
+    out.extend_from_slice(key_package_ref);
+    out.extend_from_slice(&(leaf_key.len() as u32).to_be_bytes());
+    out.extend_from_slice(leaf_key);
+    out
+}
+
 /// A body with `v: 5`: one MLS message for one group, to one member.
 ///
 /// Exactly one of `mls` and `blob` is present; `join` is present exactly
-/// for [`GroupKind::Join`]. The sealed layer carries no signature for a
+/// for [`GroupKind::Join`], and `rejoin` only for [`GroupKind::Rejoin`]
+/// (an older client sends a rejoin request without it, which a newer
+/// admin refuses). The sealed layer carries no signature for a
 /// group body (as for v4): every kind is authenticated inside MLS.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GroupBody {
@@ -252,6 +285,8 @@ pub struct GroupBody {
     pub blob: Option<BlobRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub join: Option<JoinProof>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejoin: Option<RejoinProof>,
 }
 
 impl GroupBody {
@@ -264,6 +299,7 @@ impl GroupBody {
             mls: Some(mls),
             blob: None,
             join: None,
+            rejoin: None,
         }
     }
 
@@ -276,6 +312,7 @@ impl GroupBody {
             mls: None,
             blob: Some(blob),
             join: None,
+            rejoin: None,
         }
     }
 
@@ -283,6 +320,13 @@ impl GroupBody {
     /// [`GroupKind::Join`].
     pub fn with_join_proof(mut self, proof: [u8; 32]) -> Self {
         self.join = Some(JoinProof { proof });
+        self
+    }
+
+    /// The same body with a rejoin proof; only meaningful for
+    /// [`GroupKind::Rejoin`].
+    pub fn with_rejoin_proof(mut self, signature: [u8; 64]) -> Self {
+        self.rejoin = Some(RejoinProof { signature });
         self
     }
 
@@ -317,6 +361,9 @@ impl GroupBody {
         }
         if (self.kind == GroupKind::Join) != self.join.is_some() {
             return malformed("join proof exactly for a join");
+        }
+        if self.rejoin.is_some() && self.kind != GroupKind::Rejoin {
+            return malformed("rejoin proof only for a rejoin");
         }
         Ok(())
     }
@@ -798,7 +845,27 @@ mod tests {
         assert!(join.clone().with_join_proof([7; 32]).validate().is_ok());
         assert!(inline.clone().with_join_proof([7; 32]).validate().is_err());
         let rejoin = GroupBody::inline(group, GroupKind::Rejoin, vec![1]);
-        assert!(rejoin.validate().is_ok());
+        assert!(
+            rejoin.validate().is_ok(),
+            "an older client's, refused later"
+        );
+        let signed = rejoin.clone().with_rejoin_proof([8; 64]);
+        assert!(signed.validate().is_ok());
+        let json = serde_json::to_string(&signed).unwrap();
+        assert_eq!(serde_json::from_str::<GroupBody>(&json).unwrap(), signed);
+        assert!(
+            !serde_json::to_string(&rejoin)
+                .unwrap()
+                .contains("rejoin\":"),
+            "absent, not null"
+        );
+        assert!(
+            inline
+                .clone()
+                .with_rejoin_proof([8; 64])
+                .validate()
+                .is_err()
+        );
 
         // Blob references are checked like a file's.
         use crate::blob::MAX_FILE_BYTES;

@@ -61,6 +61,8 @@ pub struct Glyphs {
     pub draft: &'static str,
     /// A chat whose messages do not notify (`/mute`).
     pub muted: &'static str,
+    /// The start of a System pane row that carries on the line above.
+    pub continued: &'static str,
 }
 
 pub const UNICODE: Glyphs = Glyphs {
@@ -79,6 +81,7 @@ pub const UNICODE: Glyphs = Glyphs {
     timer: "⧖",
     draft: "✎",
     muted: "⊘",
+    continued: "┆",
 };
 
 pub const ASCII: Glyphs = Glyphs {
@@ -97,6 +100,7 @@ pub const ASCII: Glyphs = Glyphs {
     timer: "~",
     draft: "*",
     muted: "-",
+    continued: "|",
 };
 
 impl Glyphs {

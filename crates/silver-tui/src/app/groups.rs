@@ -31,7 +31,6 @@ pub(super) enum Purpose {
         user: UserId,
         admin: bool,
     },
-    LinkReset,
     Refresh,
     Rejoin(UserId),
     /// A device of this identity's added to, or taken out of, the group:
@@ -525,12 +524,24 @@ impl App {
         }
     }
 
+    /// `/group link reset`: a new link secret on this device. No commit:
+    /// a link works only with the admin device that made it, so the
+    /// links this device handed out stop working and nobody else's
+    /// change.
     fn group_link_reset(&mut self) {
         let Some(group) = self.group_here() else {
             return;
         };
-        match self.groups.stage_link_reset(&group) {
-            Ok(staged) => self.run_staged(staged, Purpose::LinkReset),
+        match self.groups.reset_link(&group, Some(self.relay_url.clone())) {
+            Ok(link) => {
+                self.note_in_group(
+                    group,
+                    "you reset the invite link; links made before are void",
+                );
+                self.system(Level::Info, format!("The new invite link: {link}"));
+                self.select(0);
+            }
+            Err(GroupError::NotAdmin) => self.toast("Only an admin can reset the invite link."),
             Err(e) => self.toast(format!("Could not reset the link: {e}")),
         }
     }
@@ -972,18 +983,12 @@ impl App {
                         Purpose::Admin { user, admin: false } => {
                             format!("{} is no longer an admin", self.member_name(user))
                         }
-                        Purpose::LinkReset => {
-                            "you reset the invite link; old links are void".into()
-                        }
                         Purpose::Refresh | Purpose::Device(_) => String::new(),
                         Purpose::Rejoin(user) => format!("you re-added {}", self.member_name(user)),
                         Purpose::Create => unreachable!("handled above"),
                     };
                     if !note.is_empty() {
                         self.note_in_group(group, &note);
-                    }
-                    if let Purpose::LinkReset = purpose {
-                        self.group_invite_after_reset(group);
                     }
                     self.fan_out(group, outgoing, None, None, None);
                     if matches!(
@@ -1051,6 +1056,16 @@ impl App {
             }
             (purpose, answer) => {
                 let _ = self.groups.discard_staged(&group);
+                // The sequencer's word on where the group stands is how a
+                // group falls out of sync: a handshake from a later epoch
+                // is anyone's to write, and only prompts a self-update
+                // whose answer this is.
+                if let Ok(SequencerAnswer::Stale(theirs)) = &answer {
+                    match self.groups.sequencer_ahead(&group, *theirs, now_ms()) {
+                        Ok(events) => self.apply_group_events(events),
+                        Err(e) => tracing::warn!("noting where the sequencer stands: {e}"),
+                    }
+                }
                 let what = match &purpose {
                     // Quiet: a self-update is tried again later, and a
                     // leaver is taken out by whichever admin's commit won.
@@ -1097,15 +1112,6 @@ impl App {
             Err(e) => self.toast(format!(
                 "The group's timer could not be sent to the new member: {e}"
             )),
-        }
-    }
-
-    fn group_invite_after_reset(&mut self, group: GroupId) {
-        if let Ok(link) = self
-            .groups
-            .invite_link(&group, Some(self.relay_url.clone()))
-        {
-            self.system(Level::Info, format!("The new invite link: {link}"));
         }
     }
 
@@ -1453,6 +1459,13 @@ impl App {
             return; // re-delivered
         }
         self.known_ids.insert(id);
+        // A blocked sender's Welcome is declined unread, so a parked one
+        // is not fetched either: the download is a cost they could
+        // otherwise keep imposing. Their commits in a group already shared
+        // are still read, or the group would fall out of step.
+        if body.kind == GroupKind::Welcome && self.blocked.contains(&from) {
+            return;
+        }
         match (&body.mls, &body.blob) {
             (Some(mls), _) => {
                 let mls = mls.clone();
@@ -1696,8 +1709,23 @@ impl App {
                     group,
                     joiner,
                     key_package,
+                    removed_before,
                 } => {
                     if self.blocked.contains(&joiner) {
+                        continue;
+                    }
+                    // Someone removed them from this group; a link they
+                    // kept from before is not the group changing its mind.
+                    if removed_before {
+                        self.system(
+                            Level::Warn,
+                            format!(
+                                "{}, who was removed from {}, asked to join again by its invite link. They are not added on the link's word: /group add {} if you want them back.",
+                                self.member_name(&joiner),
+                                self.group_name(&group),
+                                joiner.short()
+                            ),
+                        );
                         continue;
                     }
                     if self.groups.has_staged(&group) {
@@ -1925,6 +1953,31 @@ impl App {
             return;
         }
         self.last_group_maintenance = Instant::now();
+        // The account's unlinked devices: the engine refuses their
+        // Welcomes and requests, and their leaves are taken out of every
+        // group this client may take them out of, one per pass, until none
+        // is left — a removal that lost a commit race, or was skipped
+        // because another change was staged, is tried again here.
+        let revoked: Vec<UserId> = self
+            .with_devices(|d| d.revoked().iter().map(|r| r.device).collect())
+            .unwrap_or_default();
+        if let Err(e) = self.groups.note_revoked_devices(revoked) {
+            tracing::warn!("noting unlinked devices for the groups: {e}");
+        }
+        if let Some((group, device)) = self
+            .groups
+            .revoked_leaves()
+            .into_iter()
+            .find(|(g, _)| !self.groups.has_staged(g))
+        {
+            match self.groups.stage_remove_device(&group, &device) {
+                Ok(staged) => {
+                    self.run_staged(staged, Purpose::Device(device));
+                    return;
+                }
+                Err(e) => tracing::warn!("taking an unlinked device out of a group: {e}"),
+            }
+        }
         let due = self.groups.self_updates_due(now_ms());
         if let Some(group) = due.into_iter().find(|g| !self.groups.has_staged(g))
             && let Ok(staged) = self.groups.stage_self_update(&group)

@@ -803,3 +803,54 @@ Made when the code landed (0.9.0) and by later releases:
 * Invitations from strangers wait as entries of the chat list rather
   than in a Requests pane (0.14.0, section 7.2;
   [requests.md](requests.md)).
+* Invite links no longer come from the `invite_key` of this note's section 4.3
+  (0.25.0, section 7.3). The group context is every member's to read, so
+  any member — and a member removed later — could make a valid link and
+  have the admin's client add whoever presented it. Each admin device
+  now keeps a random link secret of its own in `groups.json`; a link
+  works only with the device that made it, which is the device it names
+  anyway, and `/group link reset` replaces that secret without a commit.
+  Rotating `invite_key` in the commit that removes a member would not
+  have done: the removed member reads that commit. Links made before
+  stop working, and an admin prints a new one. An identity the admin's
+  client saw removed is not re-added by a link it kept; the admin is
+  told and decides with `/group add`. `invite_key` stays in the
+  extension's encoding, unused.
+* Going out of sync (sections 5.2, 5.3 and 7.5) takes authenticated
+  evidence (0.25.0). The epoch and content type of a handshake are
+  plaintext anyone can write, and one forged envelope used to put a
+  member out of sync — no sending, a rejoin, and room for a stranger's
+  Welcome to take the group's place, or for an unaccepted invitation to
+  come "back" into sync as a group the user never said yes to. A
+  handshake beyond the hold queue is now dropped and only prompts a
+  self-update (at most hourly) whose sequencer answer is the evidence: a
+  `stale` past our epoch, twice, two minutes apart. A commit at our own
+  epoch that OpenMLS decrypted and verified but cannot stage still puts
+  the group out of sync, since that is a member's signed word. An
+  invitation never goes out of sync. A Welcome replacing a group the
+  client knows is accepted only from an admin the old record knew (or
+  the account's own device), and is read beside the old state rather
+  than after deleting it; one for an epoch not newer than the last the
+  client knew is refused, since the last-resort key package (which now
+  declares its own extension in the leaf capabilities, without which it
+  failed every adder's validation) is not spent by the Welcome that uses
+  it. Held messages keep the time they arrived, so the ten minutes of
+  section 5.3 are ten minutes.
+* The sender of an application message from a past epoch is the
+  credential OpenMLS verified it against in that epoch, not the leaf at
+  the same index today, which may be a newcomer in a removed member's
+  slot (0.25.0).
+* A rejoin request (section 7.5) is signed by the requesting device's
+  identity key over the group, the new key package and its current
+  leaf's HPKE key (0.25.0). A key package is public, so on its own it let
+  anyone have an admin remove a member's leaf and add one back; the leaf
+  key makes each request good once.
+* An admin who leaves is dropped from `admins` by the admin commit that
+  carries the leave, and readers accept a departed admin still named
+  until an admin's commit drops it (0.25.0, section 7.6): before, the next
+  commit by anyone after an admin's leave broke the group.
+* The engine is told of device revocations (section 11) and refuses
+  Welcomes from, and join or rejoin requests by, an unlinked device; the
+  front end takes such leaves out of the groups it may, retrying each
+  maintenance pass. A join request is answered by a Welcome taken
+  without asking for seven days, not for ever.

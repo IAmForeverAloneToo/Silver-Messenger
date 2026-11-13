@@ -348,6 +348,20 @@ A message from a certified device of an account that is not a contact
 is a contact request from that account, as it is today. A body from the
 primary carries no `device`.
 
+A certificate does not expire, so it is not enough on its own (0.25.0):
+a device revocation the recipient has seen is remembered beside its
+sessions, across restarts, and a body from that device in the account's
+name is refused. "Without a lookup" holds for a device the recipient
+keeps a bundle for, which it does only while the device is on the
+account's list as last looked up; a body from any other device of the
+account waits, with whatever follows it from the same sender, while the
+account is looked up, and is refused if the device is revoked or not on
+the fresh list. That fresh list is what lets the first message of a
+newly linked device through. When the relay does not answer, the body
+is taken on its certificate unless a revocation is remembered. One of
+the recipient's own account's devices is judged by its own device list,
+the primary's word needing nobody's.
+
 The capability `devices` in the body says the sender addressed every
 device it knew of the recipient's; it is what the primary uses to decide
 whether to forward (5.3).

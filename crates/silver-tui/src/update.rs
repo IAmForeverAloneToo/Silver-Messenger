@@ -10,7 +10,9 @@
 //! program. `silver update` from a shell does the same without the
 //! interface.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{Context, bail};
 use silver_client::update::{
@@ -28,6 +30,20 @@ pub struct Staged {
     pub path: PathBuf,
 }
 
+/// What each download this process checked hashed to, by where it waits.
+///
+/// Kept in this process and not beside the file: the file sits in the
+/// data directory until `/update` puts it in place, which can be the
+/// whole of a session, and anybody who can write there could replace it
+/// and a hash written next to it alike. [`apply`] installs only a file
+/// that still hashes to what was checked, and only one this process
+/// checked.
+static CHECKED: Mutex<Option<HashMap<PathBuf, String>>> = Mutex::new(None);
+
+fn checked() -> MutexGuard<'static, Option<HashMap<PathBuf, String>>> {
+    CHECKED.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Download the client in `release`, check it every way there is (the
 /// releases page's digest, SHA256SUMS and its signature, and the file
 /// itself reporting the version it should), and leave it in the data
@@ -37,11 +53,15 @@ pub async fn prepare(
     options: &ConnectOptions,
     data_dir: &Path,
 ) -> anyhow::Result<Staged> {
-    let dir = install::staging_dir(data_dir);
-    std::fs::create_dir_all(&dir).with_context(|| format!("making {}", dir.display()))?;
+    let dir = install::make_staging_dir(data_dir)?;
     let downloaded = update::download_client(release, options, &dir).await?;
     // The real test: a file that cannot say its own name does not replace
-    // one that can.
+    // one that can. Hashed again first, since it is run, and it has been
+    // in the data directory since it was checked.
+    if install::sha256_of(&downloaded.path)? != downloaded.sha256 {
+        let _ = std::fs::remove_file(&downloaded.path);
+        bail!("the download changed after it was checked; nothing was run or installed");
+    }
     let reported = install::reported_version(&downloaded.path).map_err(|e| {
         let _ = std::fs::remove_file(&downloaded.path);
         e.context("the download does not run on this computer, so it was not installed")
@@ -53,6 +73,9 @@ pub async fn prepare(
             release.version()
         );
     }
+    checked()
+        .get_or_insert_with(HashMap::new)
+        .insert(downloaded.path.clone(), downloaded.sha256);
     Ok(Staged {
         version: release.version().to_owned(),
         path: downloaded.path,
@@ -77,7 +100,23 @@ pub fn apply(staged: &Staged, data_dir: &Path) -> anyhow::Result<()> {
         let _ = std::fs::remove_file(&staged.path);
         bail!("this binary is managed by a package manager; update it with: {command}");
     }
-    install::swap(&staged.path, &exe, &install::kept_path(data_dir, &exe)).inspect_err(|_| {
+    let Some(sha256) = checked()
+        .as_ref()
+        .and_then(|hashes| hashes.get(&staged.path).cloned())
+    else {
+        bail!(
+            "{} was not downloaded and checked by this run, so it is not installed",
+            staged.path.display()
+        );
+    };
+    install::swap_checked(
+        &staged.path,
+        &sha256,
+        &exe,
+        &install::kept_path(data_dir, &exe),
+        env!("CARGO_PKG_VERSION"),
+    )
+    .inspect_err(|_| {
         let _ = std::fs::remove_file(&staged.path);
     })
 }
@@ -89,7 +128,23 @@ pub fn apply(staged: &Staged, data_dir: &Path) -> anyhow::Result<()> {
 /// one; on Windows, which has no such call, the new one runs in this
 /// console and this one waits for it and leaves with its exit code.
 pub fn relaunch(exe: &Path) -> anyhow::Result<std::convert::Infallible> {
-    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    // A proxy password or an invite token on the command line can be read
+    // by any process on the machine, so neither is handed on: `run`
+    // saved both to the settings when they were given, and the new
+    // process reads them there.
+    let mut args: Vec<std::ffi::OsString> = Vec::new();
+    let mut given = std::env::args_os().skip(1);
+    while let Some(arg) = given.next() {
+        let text = arg.to_string_lossy();
+        if text == "--proxy" || text == "--invite" {
+            given.next();
+            continue;
+        }
+        if text.starts_with("--proxy=") || text.starts_with("--invite=") {
+            continue;
+        }
+        args.push(arg);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -134,7 +189,11 @@ pub async fn run(
     let exe = install::running_binary()?;
 
     if rollback {
-        return go_back(&exe, data_dir);
+        // The kept copy is checked against the release it was kept as,
+        // which is a request to the releases page, made the way every
+        // other one is.
+        let options = release_options(args.proxy.clone(), args.ca_cert.clone(), data_dir, secrets)?;
+        return go_back(&exe, data_dir, &options, yes).await;
     }
 
     // Whose binary this is decides everything else, so it is asked before
@@ -241,18 +300,68 @@ async fn install_release(
     Ok(())
 }
 
-fn go_back(exe: &Path, data_dir: &Path) -> anyhow::Result<()> {
+/// Put back the version the last update replaced.
+///
+/// It has been in the data directory since, where whoever can write the
+/// directory could have replaced it, so nothing is taken on its word or
+/// run to ask it: the copy is hashed, and the hash must be the one the
+/// project signed for this platform in the release the update recorded
+/// it as. Only then is it put in place, and the copy that goes in is
+/// hashed again beside the program. Until 0.25.0 the copy was run to
+/// ask its version and then installed, with nothing checked at all.
+async fn go_back(
+    exe: &Path,
+    data_dir: &Path,
+    options: &ConnectOptions,
+    yes: bool,
+) -> anyhow::Result<()> {
     let kept = install::kept_path(data_dir, exe);
-    let version = install::reported_version(&kept)
-        .with_context(|| format!("{} is not a working client", kept.display()))?;
+    if !kept.is_file() {
+        bail!(
+            "there is nothing to go back to: {} is not a file",
+            kept.display()
+        );
+    }
+    let record = install::kept_record(&kept)?;
+    let version = silver_client::files::one_line(&record.version);
     let current = env!("CARGO_PKG_VERSION");
+    if parse_version(&version).is_none() {
+        bail!("the record of the kept version names no version; nothing was changed");
+    }
     if parse_version(&version) == parse_version(current) {
         bail!(
             "{} is also {current}; there is nothing to go back to",
             kept.display()
         );
     }
-    install::rollback(exe, &kept)?;
+    let sha256 = install::sha256_of(&kept)?;
+    if sha256 != record.sha256 {
+        bail!(
+            "{} has changed since it was kept; nothing was run or changed",
+            kept.display()
+        );
+    }
+    let tag = format!("v{}", version.trim_start_matches('v'));
+    let release = update::release_by_tag(RELEASE_BY_TAG_API, &tag, options)
+        .await
+        .with_context(|| format!("asking the releases page for {tag}"))?;
+    update::check_signed(&release, options, &sha256)
+        .await
+        .with_context(|| {
+            format!(
+                "{} is not the client the project signed as {version}; nothing was run or changed",
+                kept.display()
+            )
+        })?;
+    if !yes
+        && !crate::yes_no(&format!(
+            "Go back from Silver Messenger {current} to {version}? [y/N]"
+        ))?
+    {
+        println!("Nothing was changed.");
+        return Ok(());
+    }
+    install::rollback(exe, &kept, &sha256)?;
     println!(
         "Silver Messenger {current} → {version}\n  {}",
         exe.display()

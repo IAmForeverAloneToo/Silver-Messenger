@@ -266,3 +266,24 @@ Made when the code landed (0.10.0):
   unlock alone takes longer than that, and checks reads and reactions
   only for the rounds the child reported, since a kill between an
   entry and its read leaves the entry without one for good.
+
+Made in 0.25.0:
+
+* A protection cut short by a kill was recognised by what it left: no
+  anchor in `vault.json`, and files in the clear, which the next unlock
+  sealed. Both are things somebody who can write the directory can
+  arrange, so a fresh protection now writes its record first (`state`,
+  under the new key, saying it is unfinished), then the vault pointing at
+  it, then the files; a kill anywhere in that leaves a directory the next
+  unlock finishes on the record's word, and plaintext is accepted on that
+  word alone. The same order holds for the adoption of a directory from
+  before the record, so a kill part-way through no longer leaves a shape
+  that has to be guessed at, and for `--reset-rollback-protection`, which
+  no longer takes the anchor out before it has a record to replace it.
+* A `.tmp` file left beside a store file still does not stop the file
+  loading, and a wipe now takes those leftovers with it: a write a kill
+  interrupted leaves a whole copy of the file it was writing, which for
+  `identity.json` is the keys. `create_private` makes every file afresh
+  (whatever was at its path removed first, then created exclusively), so
+  a leftover, or a link put where a temporary file is about to go, is
+  never opened and written through.

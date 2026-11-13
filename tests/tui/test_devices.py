@@ -40,6 +40,16 @@ def main():
     a.key(b"/devices link confirm\r")
     assert wait_flat(a, "arrived faster than anyone types"), "a pasted confirmation is refused"
     assert not a.has('Linking "laptop"'), "and still nothing is signed"
+    # Padding does not buy a paste time: spaces either side once cost the
+    # client a frame each, and counted for nothing once trimmed, but they
+    # are keys like any other, all of them in the paste's one read. (Kept
+    # under the kilobyte the terminal library reads at a time.)
+    a.key(b" " * 450 + b"/devices link confirm" + b" " * 450 + b"\r", settle=1)
+    assert a.wait_for(
+        lambda: flat(a).count("arrived faster than anyone types") >= 2, timeout=60,
+        what="the padded paste refused too",
+    )
+    assert not a.has('Linking "laptop"'), "and still nothing is signed"
     # Typed out, it goes ahead: refusing a paste must not lose the answer
     # to the question, or the advice would be to start over.
     a.type("/devices link confirm\r")

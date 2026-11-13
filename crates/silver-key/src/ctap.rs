@@ -99,8 +99,10 @@ impl Info {
         self.extensions.iter().any(|e| e == name)
     }
 
-    /// The PIN protocol to use: 2 if the key has it, else 1, which every
-    /// CTAP 2.0 key has whether it lists it or not.
+    /// The PIN protocol to use: 2 if the key lists it, wherever in its
+    /// list, else 1, which every CTAP 2.0 key has whether it lists it or
+    /// not. The key's own order of preference is not followed: protocol 1
+    /// has no IV and a MAC cut to 16 bytes.
     pub fn protocol(&self) -> Option<Protocol> {
         if self.pin_protocols.contains(&2) {
             Some(Protocol::Two)
@@ -499,5 +501,25 @@ impl AuthData {
             credential_id,
             extensions,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn protocol_two_is_used_whenever_the_key_lists_it() {
+        let info = |protocols: &[i64]| Info {
+            pin_protocols: protocols.to_vec(),
+            ..Info::default()
+        };
+        assert_eq!(info(&[2]).protocol(), Some(Protocol::Two));
+        assert_eq!(info(&[1, 2]).protocol(), Some(Protocol::Two));
+        assert_eq!(info(&[2, 1]).protocol(), Some(Protocol::Two));
+        assert_eq!(info(&[3, 2, 1]).protocol(), Some(Protocol::Two));
+        assert_eq!(info(&[1]).protocol(), Some(Protocol::One));
+        assert_eq!(info(&[]).protocol(), Some(Protocol::One));
+        assert_eq!(info(&[3]).protocol(), None);
     }
 }

@@ -12,7 +12,7 @@
 //! One thing at a time: while a page is awaited, further answers and
 //! contacts' heads queue up and are dealt with when the log is caught up.
 
-use silver_protocol::transparency::{LogEntry, LogHead, LogPosition, ReplayError};
+use silver_protocol::transparency::{EntryKind, LogEntry, LogHead, LogPosition, ReplayError};
 use silver_protocol::wire::ClientFrame;
 use silver_protocol::{DeviceRevocation, KeyBundle, Revocation, Succession, UserId, now_ms};
 use tokio::sync::oneshot;
@@ -78,6 +78,12 @@ enum Deferred {
     },
 }
 
+/// Answers and heads waiting for the log at once. Each lookup is one
+/// frame from the relay, and each head one message from somebody, so
+/// without a bound a relay that never finishes a page, or a sender who
+/// never stops writing, holds this client's memory hostage.
+pub(crate) const MAX_DEFERRED: usize = 256;
+
 pub(crate) struct Tail {
     /// `None`: transparency is off for this connection (no store, or a
     /// relay without a log); everything passes through unchecked.
@@ -85,6 +91,10 @@ pub(crate) struct Tail {
     mode: Option<Mode>,
     deferred: Vec<Deferred>,
     last_synced: Option<LogHead>,
+    /// This client's own id, whose entries it audits as they are
+    /// replayed, and whether it is a linked device (whose account may
+    /// revoke it, a statement it did not make itself).
+    own: Option<(UserId, bool)>,
 }
 
 impl Tail {
@@ -100,6 +110,36 @@ impl Tail {
             mode: None,
             deferred: Vec::new(),
             last_synced,
+            own: None,
+        }
+    }
+
+    /// Audit the entries under `me`, this client's own id, as they are
+    /// replayed: any it did not publish itself is reported
+    /// ([`crate::transparency::LogStore::note_own`]).
+    pub fn watching(mut self, me: UserId, linked: bool) -> Self {
+        self.own = Some((me, linked));
+        self
+    }
+
+    /// Hold `deferred` for when the log has caught up, if there is room.
+    /// An answer there is no room for is refused rather than dropped, so
+    /// its callers hear of it; a head is let go, as the next message
+    /// from the same sender carries another.
+    fn defer(&mut self, deferred: Deferred, step: &mut Step) {
+        if self.deferred.len() < MAX_DEFERRED {
+            self.deferred.push(deferred);
+            return;
+        }
+        match deferred {
+            Deferred::Answer(answer) => refuse(
+                *answer,
+                "too many lookups are waiting for the relay's log to be replayed",
+                step,
+            ),
+            Deferred::PeerHead { peer, .. } => {
+                tracing::debug!("too many heads waiting for the log; one from {peer} let go");
+            }
         }
     }
 
@@ -169,7 +209,7 @@ impl Tail {
         };
         let mut step = self.on_relay_head(head);
         if self.mode.is_some() || head.index > lock(&log).head().index {
-            self.deferred.push(Deferred::Answer(Box::new(answer)));
+            self.defer(Deferred::Answer(Box::new(answer)), &mut step);
             if self.mode.is_none() {
                 self.start_advance(head, None, &mut step);
             }
@@ -198,6 +238,7 @@ impl Tail {
                     }
                     Ok(ours) => ours,
                 };
+                self.audit_own(&log, &entries, &mut step);
                 if ours.index < head.index {
                     if entries.is_empty() {
                         // It says there is more but hands out nothing.
@@ -333,7 +374,7 @@ impl Tail {
             return step;
         };
         if self.mode.is_some() {
-            self.deferred.push(Deferred::PeerHead { peer, head });
+            self.defer(Deferred::PeerHead { peer, head }, &mut step);
             return step;
         }
         self.check_head(&log, peer, head, &mut step);
@@ -399,6 +440,36 @@ impl Tail {
                     self.check_head(log, peer, head, step);
                 }
             }
+        }
+    }
+
+    /// Report every entry just replayed under this client's own id that
+    /// it did not publish. Nobody else can tell: a reader checks that the
+    /// key it was shown is the one logged, and a key logged by somebody
+    /// holding a copy of the identity key, or by the relay on nobody's
+    /// say, is logged all the same.
+    fn audit_own(&self, log: &SharedLog, entries: &[LogEntry], step: &mut Step) {
+        let Some((me, linked)) = self.own else {
+            return;
+        };
+        for (index, kind) in lock(log).not_our_own(&me, entries) {
+            let what = match kind {
+                EntryKind::Bundle => "a key",
+                // The account revokes its linked devices, under the
+                // device's id; that is not this device's doing and is
+                // not a forgery.
+                EntryKind::Revocation if linked => continue,
+                EntryKind::Revocation => "a revocation",
+                EntryKind::Succession => "a handover to another identity",
+            };
+            step.events.push(transparency(TransparencyEvent::Lookup {
+                who: me,
+                problem: format!(
+                    "the relay's log holds {what} for your own identity (entry {index}) that this \
+                     device never published: somebody else may hold your identity key, or the relay \
+                     logged something it was never given"
+                ),
+            }));
         }
     }
 
@@ -483,40 +554,77 @@ fn resolve(log: &SharedLog, mut answer: Answer, step: &mut Step) {
 /// Hand the answer to the callers, and raise the lifecycle statements it
 /// carried (validly signed ones only; the front end matches them against
 /// the contact it has pinned).
-fn settle(answer: Answer, step: &mut Step) {
+///
+/// Every caller gets the answer as checked here, whatever it does with
+/// it: the bundle must be the one asked for and verify, or the answer is
+/// no answer; a device revocation must be the account's word about its
+/// own device; a device's bundle must verify, claim the account, be on
+/// its list and not be revoked. Checking in one caller and not another
+/// let a relay hand an altered bundle to the one that did not check.
+///
+/// A device revocation is not raised from here: whether the device is
+/// one this client knows as the account's is the connection's to say,
+/// which keeps what it has learned of devices (`connection.rs`).
+fn settle(mut answer: Answer, step: &mut Step) {
+    let user_id = answer.user_id;
+    if let Some(bundle) = &answer.bundle {
+        let problem = if bundle.user_id != user_id {
+            Some("a key for somebody else")
+        } else if bundle.verify().is_err() {
+            Some("a key whose signatures do not verify")
+        } else {
+            None
+        };
+        if let Some(problem) = problem {
+            step.events.push(ClientEvent::Error(format!(
+                "the relay answered a lookup of {}… with {problem}; the answer was ignored",
+                user_id.short()
+            )));
+            raise_statements(&answer, step);
+            for reply in answer.replies {
+                let _ = reply.send(Err(ClientError::Relay(format!(
+                    "the relay answered with {problem}"
+                ))));
+            }
+            return;
+        }
+    }
+    // The account's word about its own devices, and, when a device is
+    // what was looked up, its account's word about it: a statement from
+    // anyone but the account the device's bundle claims is somebody
+    // else's and binds nothing here.
+    let claims = answer.bundle.as_ref().and_then(|b| b.account().copied());
+    answer.device_revocations.retain(|r| {
+        r.verify().is_ok()
+            && (r.account == user_id || (r.device == user_id && claims == Some(r.account)))
+    });
+    let listed: Vec<UserId> = answer
+        .bundle
+        .as_ref()
+        .map(|b| b.devices.iter().map(|d| d.device).collect())
+        .unwrap_or_default();
+    let revoked: Vec<UserId> = answer.device_revocations.iter().map(|r| r.device).collect();
+    answer.device_bundles.retain(|b| {
+        b.verify().is_ok()
+            && b.account() == Some(&user_id)
+            && listed.contains(&b.user_id)
+            && !revoked.contains(&b.user_id)
+    });
+    raise_statements(&answer, step);
     let lookup = Lookup {
         bundle: answer.bundle,
         device_bundles: answer.device_bundles,
-        device_revocations: answer
-            .device_revocations
-            .into_iter()
-            .filter(|r| r.verify().is_ok())
-            .collect(),
+        device_revocations: answer.device_revocations,
     };
     for reply in answer.replies {
         let _ = reply.send(Ok(lookup.clone()));
     }
-    if let Some(revocation) = answer.revocation
-        && revocation.verify().is_ok()
-    {
-        step.events.push(ClientEvent::PeerRevoked { revocation });
-    }
-    if let Some(succession) = answer.succession
-        && succession.verify().is_ok()
-    {
-        step.events.push(ClientEvent::PeerSucceeded { succession });
-    }
-    for revocation in lookup.device_revocations {
-        step.events.push(ClientEvent::DeviceRevoked { revocation });
-    }
 }
 
-fn refuse(answer: Answer, reason: &str, step: &mut Step) {
-    // A lifecycle statement carried by a refused answer is still the
-    // owner's own signature, and it is the one thing in the answer a
-    // hostile relay would rather the reader did not see: a revocation
-    // says stop writing to this key. It is raised whatever became of the
-    // rest of the answer.
+/// Raise an answer's identity revocation and succession, when they
+/// verify: each is its owner's own signature, worth hearing whatever
+/// became of the rest of the answer.
+fn raise_statements(answer: &Answer, step: &mut Step) {
     if let Some(revocation) = &answer.revocation
         && revocation.verify().is_ok()
     {
@@ -531,6 +639,15 @@ fn refuse(answer: Answer, reason: &str, step: &mut Step) {
             succession: succession.clone(),
         });
     }
+}
+
+fn refuse(answer: Answer, reason: &str, step: &mut Step) {
+    // A lifecycle statement carried by a refused answer is still the
+    // owner's own signature, and it is the one thing in the answer a
+    // hostile relay would rather the reader did not see: a revocation
+    // says stop writing to this key. It is raised whatever became of the
+    // rest of the answer.
+    raise_statements(&answer, step);
     for reply in answer.replies {
         let _ = reply.send(Err(ClientError::Transparency(reason.to_owned())));
     }
@@ -667,6 +784,118 @@ mod tests {
         )
     }
 
+    /// An answer whose bundle is not the one asked for, or does not
+    /// verify, reaches no caller as a bundle: the relay changing a byte
+    /// of what a contact signed (their device list, say) is not a key to
+    /// hand on, whether or not a log is kept.
+    #[test]
+    fn a_bundle_that_does_not_verify_is_no_answer() {
+        let relay = Relay::new();
+        let alice = Identity::generate();
+        let bob = Identity::generate();
+        let stranger = Identity::generate();
+        let genuine = bundle_of(&alice, 1);
+        let mut altered = genuine.clone();
+        let certificate = stranger.certify_device(&bob.user_id(), "", 1).unwrap();
+        altered.devices = vec![certificate];
+        altered.devices_signature = Some([0; 64]);
+        assert!(altered.verify().is_err());
+
+        let mut tail = Tail::new(None);
+        let (answer, rx) = answer_for(&relay, &altered);
+        let step = tail.on_answer(answer);
+        assert!(matches!(
+            rx.blocking_recv().unwrap(),
+            Err(ClientError::Relay(_))
+        ));
+        assert!(
+            step.events
+                .iter()
+                .any(|e| matches!(e, ClientEvent::Error(_)))
+        );
+
+        // Somebody else's bundle, however good, is not alice's.
+        let (mut answer, rx) = answer_for(&relay, &bundle_of(&bob, 1));
+        answer.user_id = alice.user_id();
+        let _ = tail.on_answer(answer);
+        assert!(rx.blocking_recv().unwrap().is_err());
+
+        // The genuine one goes through.
+        let (answer, rx) = answer_for(&relay, &genuine);
+        let _ = tail.on_answer(answer);
+        assert_eq!(rx.blocking_recv().unwrap().unwrap().bundle, Some(genuine));
+    }
+
+    /// What waits for the log is bounded: past the bound an answer is
+    /// refused, so its caller hears, and a head is let go.
+    #[test]
+    fn what_waits_for_the_log_is_bounded() {
+        let mut relay = Relay::new();
+        let alice = Identity::generate();
+        let bundle = bundle_of(&alice, 1);
+        relay.log_bundle(&bundle);
+        let log = LogStore::ephemeral().shared();
+        let mut tail = Tail::new(Some(log));
+        // The first answer starts a fetch the relay never completes.
+        let (answer, _first) = answer_for(&relay, &bundle);
+        let step = tail.on_answer(answer);
+        assert!(!step.send.is_empty());
+        let mut waiting = Vec::new();
+        for _ in 1..MAX_DEFERRED {
+            let (answer, rx) = answer_for(&relay, &bundle);
+            let _ = tail.on_answer(answer);
+            waiting.push(rx);
+        }
+        for i in 0..10 {
+            let _ = tail.on_peer_head(
+                alice.user_id(),
+                LogHead {
+                    index: i,
+                    hash: [0; 32],
+                },
+            );
+        }
+        assert_eq!(tail.deferred.len(), MAX_DEFERRED);
+        let (answer, mut rx) = answer_for(&relay, &bundle);
+        let step = tail.on_answer(answer);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Err(ClientError::Transparency(_)))
+        ));
+        assert!(!events(&step).is_empty());
+        assert_eq!(tail.deferred.len(), MAX_DEFERRED);
+        drop(waiting);
+    }
+
+    /// The key owner audits its own entries as it replays the log: one
+    /// it did not publish is reported, the ones it did are not.
+    #[test]
+    fn an_entry_under_our_own_id_that_we_did_not_publish_is_reported() {
+        let mut relay = Relay::new();
+        let me = Identity::generate();
+        let log = LogStore::ephemeral().shared();
+        let published = bundle_of(&me, 1);
+        lock(&log).note_own(me.user_id(), published.transparency_leaf(), 0);
+        relay.log_bundle(&published);
+        let mut tail = Tail::new(Some(log.clone())).watching(me.user_id(), false);
+        let step = tail.on_relay_head(relay.head());
+        let got = drive(&mut tail, &relay, step, 10);
+        assert!(!got.iter().any(|e| matches!(
+            e,
+            ClientEvent::Transparency(TransparencyEvent::Lookup { .. })
+        )));
+
+        // A bundle under our id that we never published.
+        let planted = bundle_of(&me, 2);
+        relay.log_bundle(&planted);
+        let step = tail.on_relay_head(relay.head());
+        let got = drive(&mut tail, &relay, step, 10);
+        assert!(got.iter().any(|e| matches!(
+            e,
+            ClientEvent::Transparency(TransparencyEvent::Lookup { who, .. }) if *who == me.user_id()
+        )));
+    }
+
     #[test]
     fn a_login_catches_up_in_pages_and_reports_one_sync() {
         let mut relay = Relay::new();
@@ -758,7 +987,11 @@ mod tests {
         let certify = |device: &Identity| alice.certify_device(&device.user_id(), "", 1).unwrap();
         // The laptop's bundle is logged; the phone's is not. A revocation
         // of the phone is logged.
-        let laptop_bundle = laptop.key_bundle().as_device_of(certify(&laptop));
+        // Presented by the laptop itself, so countersigned: a bundle
+        // whose certificate the device never signed does not verify.
+        let laptop_bundle = laptop
+            .key_bundle()
+            .as_device_of(laptop.countersign_device(&certify(&laptop)).unwrap());
         relay.log_bundle(&laptop_bundle);
         let phone_bundle = phone.key_bundle().as_device_of(certify(&phone));
         let revocation = alice.revoke_device(&phone.user_id(), 2);
@@ -813,9 +1046,13 @@ mod tests {
         let mut complaints_sorted = complaints;
         complaints_sorted.sort();
         assert_eq!(complaints_sorted, expected);
-        assert!(got.iter().any(
-            |e| matches!(e, ClientEvent::DeviceRevoked { revocation: r } if *r == revocation)
-        ));
+        // Whether the phone is a device this client knows as alice's is
+        // for the connection to say; the log only vouches for the
+        // statement.
+        assert!(
+            !got.iter()
+                .any(|e| matches!(e, ClientEvent::DeviceRevoked { .. }))
+        );
     }
 
     #[test]

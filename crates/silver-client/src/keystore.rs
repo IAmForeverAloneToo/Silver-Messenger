@@ -157,15 +157,31 @@ pub fn load(name: &str) -> anyhow::Result<Option<Zeroizing<[u8; 32]>>> {
 
 /// Make a fresh wrapping key and keep it under `name`.
 pub fn create(name: &str) -> anyhow::Result<Zeroizing<[u8; 32]>> {
+    let key = fresh_key();
+    put(name, &key)?;
+    Ok(key)
+}
+
+/// A fresh wrapping key, not kept anywhere yet.
+///
+/// Made before it is stored so that the note saying it may need taking
+/// out again (`vault.pending`) can be authenticated under the key itself
+/// and written first: a note nobody but the holder of the key could have
+/// written is the only kind the store acts on.
+pub fn fresh_key() -> Zeroizing<[u8; 32]> {
     let mut key = Zeroizing::new([0u8; 32]);
     OsRng.fill_bytes(key.as_mut_slice());
+    key
+}
+
+/// Keep `key` under `name`.
+pub fn put(name: &str, key: &[u8; 32]) -> anyhow::Result<()> {
     let text = Zeroizing::new(to_base64(key.as_slice()));
     if let Some(map) = test_store().as_mut() {
         map.insert(name.to_owned(), text.to_string());
-        return Ok(key);
+        return Ok(());
     }
-    platform::set(name, &text)?;
-    Ok(key)
+    platform::set(name, &text)
 }
 
 /// Forget the key under `name`; a missing one is fine.

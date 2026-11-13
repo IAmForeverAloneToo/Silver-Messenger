@@ -107,6 +107,7 @@ where
     P: Prompt,
 {
     fn enroll(&mut self, rp_id: &str, input: &[u8]) -> Result<Enrolled, Error> {
+        crate::rp::check(rp_id)?;
         let mut key = self.open()?;
         key.info().check()?;
         if key.info().client_pin == Some(false) {
@@ -128,6 +129,7 @@ where
         rp_id: &str,
         candidates: &[(&[u8], &[u8])],
     ) -> Result<(usize, Zeroizing<[u8; 32]>), Error> {
+        crate::rp::check(rp_id)?;
         let mut key = self.open()?;
         key.info().check()?;
         if key.info().client_pin == Some(false) {
@@ -138,18 +140,35 @@ where
     }
 }
 
-/// The first FIDO key plugged in, on Linux.
+/// The one FIDO key plugged in, of `found`; refused if there are more.
+/// Nothing tells a genuine key from another device that answers CTAP2
+/// (docs/design/security-key.md, section 6), so with two plugged in the
+/// program does not pick one for the person: the PIN goes only to the
+/// device they meant, the one left in.
+pub(crate) fn only_one<T>(found: Vec<T>) -> Result<Option<T>, Error> {
+    let mut found = found.into_iter();
+    let first = found.next();
+    if found.next().is_some() {
+        return Err(Error::Unavailable(
+            "more than one security key is plugged in: unplug all but the one to use, so that \
+             the PIN goes to the key you mean",
+        ));
+    }
+    Ok(first)
+}
+
+/// The FIDO key plugged in, on Linux.
 #[cfg(target_os = "linux")]
 pub fn find_hidraw() -> Result<Option<crate::hidraw::Hidraw>, Error> {
-    match crate::hidraw::list()?.first() {
-        Some(path) => Ok(Some(crate::hidraw::Hidraw::open(path)?)),
+    match only_one(crate::hidraw::list()?)? {
+        Some(path) => Ok(Some(crate::hidraw::Hidraw::open(&path)?)),
         None => Ok(None),
     }
 }
 
 /// Whether this system has a way to a security key at all: Linux and
-/// Windows; on Windows 10 that needs the helper beside the program too,
-/// which [`platform`] checks.
+/// Windows; on Windows 10 that needs the program in a folder only
+/// administrators can change, for the helper, which [`platform`] checks.
 pub fn supported() -> bool {
     cfg!(any(target_os = "linux", windows))
 }
@@ -185,5 +204,38 @@ impl<P: Prompt + ?Sized> Prompt for Box<P> {
     }
     fn touch(&mut self) -> Box<dyn FnMut() + Send> {
         (**self).touch()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_key_is_taken_and_two_are_refused() {
+        assert_eq!(only_one(Vec::<u8>::new()).unwrap(), None);
+        assert_eq!(only_one(vec![7]).unwrap(), Some(7));
+        assert!(matches!(
+            only_one(vec![7, 8]),
+            Err(Error::Unavailable(m)) if m.contains("more than one")
+        ));
+    }
+
+    #[test]
+    fn a_relying_party_id_that_is_not_a_host_name_reaches_no_key() {
+        let key = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::soft::SoftKey::new([3; 32]).with_pin("4831"),
+        ));
+        let mut auth = crate::soft::authenticator(key, "4831");
+        assert!(matches!(
+            auth.enroll("a\" b", &[1; 32]),
+            Err(Error::InvalidRpId)
+        ));
+        let candidate: (&[u8], &[u8]) = (&[1], &[2; 32]);
+        assert!(matches!(
+            auth.secret("", &[candidate]),
+            Err(Error::InvalidRpId)
+        ));
+        assert!(auth.enroll("silver-messenger.local", &[1; 32]).is_ok());
     }
 }

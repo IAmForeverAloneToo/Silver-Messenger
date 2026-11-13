@@ -17,12 +17,14 @@
 
 pub mod cbor;
 mod ctap;
+pub mod helper_place;
 pub mod helper_wire;
 pub mod hid;
 #[cfg(target_os = "linux")]
 pub mod hidraw;
 pub mod pin;
 mod route;
+pub mod rp;
 #[cfg(any(test, feature = "soft"))]
 pub mod soft;
 #[cfg(test)]
@@ -37,6 +39,26 @@ pub use ctap::{Info, Key};
 #[cfg(target_os = "linux")]
 pub use route::find_hidraw;
 pub use route::{Authenticator, Direct, Enrolled, Prompt, platform, supported};
+
+/// Narrows where Windows looks for the DLLs this process loads from now
+/// on to System32 alone: not the program's own folder, not the current
+/// directory, not the folders on `PATH`, any of which a program running
+/// as the user may be able to write to. The first line of `main`, before
+/// anything has had a reason to load a library; the elevated helper does
+/// it again itself. The DLLs the executable imports are found before
+/// `main` runs, so this cannot reach them: the linker's
+/// `/DEPENDENTLOADFLAG:0x800` does that (docs/design/security-key.md,
+/// section 10). Elsewhere than Windows, nothing to do.
+pub fn harden_dll_search() -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        windows::harden_dll_search()
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(())
+    }
+}
 
 /// The salt the key is given for the WebAuthn `prf` input `input`:
 /// SHA-256 of "WebAuthn PRF", a zero byte, and the input.
@@ -82,6 +104,17 @@ pub enum Error {
     Unavailable(&'static str),
     #[error("the security key helper failed; its window said why")]
     Helper,
+    /// The Windows 10 helper would be started elevated from a place a
+    /// program running as this user could change first.
+    #[error(
+        "the security key helper would run {path} as administrator, but {why}, so a program \
+         running as you could change what runs before you approve the UAC prompt; move \
+         silver.exe into a folder only administrators can change, such as \
+         C:\\Program Files\\Silver Messenger (docs/design/security-key.md, section 10)"
+    )]
+    HelperPlace { path: String, why: &'static str },
+    #[error("the relying party id is not a host name")]
+    InvalidRpId,
     #[error("Windows: {0}")]
     Windows(String),
     #[error("the key did not answer in time")]

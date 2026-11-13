@@ -21,6 +21,14 @@ use tokio::sync::mpsc;
 
 use crate::qr;
 
+/// Text from the relay, or that the relay had a hand in, as one line fit
+/// to print. The relay's own error frames carry a message it wrote, and
+/// this is a plain terminal, not a cell buffer that would filter it: an
+/// escape sequence in one would act on the screen the link is read from.
+fn relay_text(text: impl std::fmt::Display) -> String {
+    silver_client::files::one_line(&text.to_string())
+}
+
 /// How long the relay gets to take this device's bundle before the link
 /// can be printed.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -146,10 +154,16 @@ pub async fn run(
     match groups.deposit(silver_protocol::now_ms()) {
         Ok((packages, last_resort)) => {
             if let Err(e) = client.deposit_key_packages(packages, last_resort).await {
-                eprintln!("Could not put key packages on the relay ({e}); groups follow later.");
+                eprintln!(
+                    "Could not put key packages on the relay ({}); groups follow later.",
+                    relay_text(e)
+                );
             }
         }
-        Err(e) => eprintln!("Could not make key packages ({e}); groups follow later."),
+        Err(e) => eprintln!(
+            "Could not make key packages ({}); groups follow later.",
+            relay_text(e)
+        ),
     }
     match taken.snapshot {
         Some(info) => match fetch_snapshot(&client, &info).await {
@@ -175,8 +189,9 @@ pub async fn run(
             }
             Err(e) => {
                 eprintln!(
-                    "The contacts and history could not be fetched ({e}). The device is linked \
-                     all the same; add contacts with /add, or link again from an empty directory."
+                    "The contacts and history could not be fetched ({}). The device is linked \
+                     all the same; add contacts with /add, or link again from an empty directory.",
+                    relay_text(e)
                 );
             }
         },
@@ -200,11 +215,29 @@ async fn connected(events: &mut mpsc::Receiver<ClientEvent>) -> anyhow::Result<(
             ClientEvent::Connected { .. } => return Ok(()),
             ClientEvent::Disconnected { reason, retry_in } => {
                 eprintln!(
-                    "Not connected ({reason}); trying again in {}s.",
+                    "Not connected ({}); trying again in {}s.",
+                    relay_text(reason),
                     retry_in.as_secs()
                 );
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A relay's error frame, as `Disconnected` carries it to `connected`:
+    /// whatever it holds, what is printed is one line with nothing in it
+    /// for the terminal to act on.
+    #[test]
+    fn what_the_relay_says_is_printed_as_one_harmless_line() {
+        let said = "rate limited\x1b[2J\x1b]52;c;Y3VybCB8IHNo\x07\nLinked: this is the device";
+        let shown = relay_text(said);
+        assert!(!shown.chars().any(|c| c.is_control()), "{shown:?}");
+        assert!(!shown.contains('\n'));
+        assert!(shown.starts_with("rate limited"));
     }
 }

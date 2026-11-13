@@ -685,24 +685,62 @@ async fn verify(
         ),
     }
 
+    check_sums(release, options, &asset.name, sha256, key).await
+}
+
+/// Check that the project signed `sha256` as this platform's client in
+/// `release`: SHA256SUMS lists it, the releases page agrees, and the
+/// signature over SHA256SUMS is the project's.
+///
+/// For the version an update kept, before `silver update --rollback` runs
+/// it or puts it back: it has sat in the data directory since, and the
+/// only thing that says it is still that release is the signature.
+pub async fn check_signed(
+    release: &Release,
+    options: &ConnectOptions,
+    sha256: &str,
+) -> anyhow::Result<()> {
+    if MINISIGN_PUB.is_empty() {
+        bail!("this client has no signing key compiled in, so it cannot check a release");
+    }
+    let name = client_asset_name(release.version());
+    let asset = release.asset(&name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "release {} carries no {name}, so there is nothing to check the kept copy against",
+            release.tag
+        )
+    })?;
+    verify(release, options, asset, sha256, MINISIGN_PUB).await
+}
+
+/// Steps 2 and 3 of [`verify`]: SHA256SUMS lists `sha256` for `name`, and
+/// the signature over it is the project's.
+async fn check_sums(
+    release: &Release,
+    options: &ConnectOptions,
+    name: &str,
+    sha256: &str,
+    key: &str,
+) -> anyhow::Result<()> {
     // 2. Against SHA256SUMS, which is what a person checks by hand.
     let sums_asset = release
         .asset("SHA256SUMS")
         .ok_or_else(|| anyhow::anyhow!("release {} publishes no SHA256SUMS", release.tag))?;
-    let sums = get(&sums_asset.url, options, MAX_SUMS, None)
+    // Within the same bound as every other request to the release host:
+    // one that answers and then says nothing would otherwise hold the
+    // update, and with it the interface waiting on it, for good.
+    let sums = tokio::time::timeout(TIMEOUT, get(&sums_asset.url, options, MAX_SUMS, None))
         .await
+        .map_err(|_| anyhow::anyhow!("SHA256SUMS did not arrive within {TIMEOUT:?}"))?
         .context("fetching SHA256SUMS")?;
-    let listed = sums_line(&sums, &asset.name).ok_or_else(|| {
-        anyhow::anyhow!(
-            "SHA256SUMS does not list {}",
-            crate::files::one_line(&asset.name)
-        )
+    let listed = sums_line(&sums, name).ok_or_else(|| {
+        anyhow::anyhow!("SHA256SUMS does not list {}", crate::files::one_line(name))
     })?;
-    if listed != sha256 {
+    if !listed.eq_ignore_ascii_case(sha256) {
         bail!(
             "SHA256SUMS and the releases page disagree about {}\n  \
              SHA256SUMS says {listed}\n  the page says   {sha256}",
-            asset.name
+            crate::files::one_line(name)
         );
     }
 
@@ -719,8 +757,9 @@ async fn verify(
             release.tag
         )
     })?;
-    let sig = get(&sig_asset.url, options, MAX_SUMS, None)
+    let sig = tokio::time::timeout(TIMEOUT, get(&sig_asset.url, options, MAX_SUMS, None))
         .await
+        .map_err(|_| anyhow::anyhow!("SHA256SUMS.minisig did not arrive within {TIMEOUT:?}"))?
         .context("fetching SHA256SUMS.minisig")?;
     verify_minisign(&sums, &sig, key).context("checking the signature over SHA256SUMS")?;
     Ok(())
@@ -765,7 +804,10 @@ async fn download_to(
     path: &Path,
     limit: u64,
 ) -> anyhow::Result<String> {
-    let file = std::fs::File::create(path)
+    // A new file whatever was at the path: it is in the data directory,
+    // and opening what is there would follow a link somebody put in its
+    // place and write a program wherever it pointed.
+    let file = crate::store::create_private(path)
         .with_context(|| format!("making room for the download at {}", path.display()))?;
     let mut sink = HashingFile {
         file: std::io::BufWriter::new(file),

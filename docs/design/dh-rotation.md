@@ -123,6 +123,20 @@ new session is derived from it:
    is a stranger whose first message becomes a request; the user's
    decision to answer it looks the peer up anyway, which is where an
    old-key impersonation of a rekeyed identity is caught for a stranger.
+
+   *Superseded in 0.25.0: every session a peer starts is now checked,
+   and this step is gone.* A key that matches the pin can still be one
+   the peer has since replaced — the pin is only as fresh as the last
+   key change this client heard of, and whoever holds a copy of the old
+   key can start a session on it — and the pins are kept per account, so
+   a linked device's key matched nothing and was never checked at all.
+   The connection now looks up the sender (the device itself, for a
+   linked device) for every peer-started session, holds the message and
+   anything after it from the same sender until the answer, and reports
+   `published` for every one; the table below applies with "equal" also
+   covering a claimed key that matches the pin, which is then simply a
+   session on the key they publish. The round trip is the cost, once per
+   new session.
 2. **The claimed key contradicts the pin.** This is the one case worth a
    round trip: either the peer legitimately rekeyed, or somebody is
    starting a session with a key its owner has retired. The connection

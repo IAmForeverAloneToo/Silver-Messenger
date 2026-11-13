@@ -52,7 +52,9 @@ struct Args {
 
     /// Proxy to reach the relay through: http://proxy.corp:3128 (HTTP
     /// CONNECT) or socks5://127.0.0.1:9050 (SOCKS5, e.g. Tor). Remembered.
-    /// Defaults to $HTTPS_PROXY, else $ALL_PROXY.
+    /// Defaults to $HTTPS_PROXY, else $ALL_PROXY. A proxy with a password
+    /// is better given as SILVER_PROXY: a command line is visible to
+    /// every user of the computer.
     #[arg(long, env = "SILVER_PROXY")]
     proxy: Option<String>,
 
@@ -68,7 +70,8 @@ struct Args {
     print_pin: bool,
 
     /// Invite token, for relays that only register invited identities.
-    /// Remembered for later runs.
+    /// Remembered for later runs. SILVER_INVITE keeps it out of the list
+    /// of processes other users can read.
     #[arg(long, env = "SILVER_INVITE")]
     invite: Option<String>,
 
@@ -325,6 +328,10 @@ impl EnvSecrets {
 }
 
 fn main() -> anyhow::Result<()> {
+    // DLLs from System32 only, before anything loads one: a DLL dropped
+    // beside this program, in a folder its user can write to, is never
+    // picked up in its place (docs/design/security-key.md, section 10).
+    let _ = silver_key::harden_dll_search();
     // Windows 10: this same program, started elevated by itself to reach a
     // security key (docs/design/security-key.md, section 5). Decided
     // before anything else runs, and nothing else runs in that mode.
@@ -341,7 +348,14 @@ fn main() -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(run(secrets))
+    // What goes wrong is printed here rather than by the runtime's own
+    // `Error: …`, which writes the chain as it is. Parts of it can be the
+    // relay's words (an error frame during `--link`, a refused
+    // registration) or a certificate's names, and this is a plain
+    // terminal: nothing in them may act on it.
+    runtime
+        .block_on(run(secrets))
+        .map_err(|e| anyhow::anyhow!(silver_client::files::safe_text(&format!("{e:?}"))))
 }
 
 /// Keep the keys in memory out of core dumps and away from other
@@ -669,7 +683,12 @@ async fn run(secrets: EnvSecrets) -> anyhow::Result<()> {
         println!("{relay_url} presents the key {}", observed.pins[0]);
         match &observed.trusted {
             Ok(()) => println!("Its certificate is trusted by this computer."),
-            Err(e) => println!("Its certificate is NOT trusted by this computer: {e}"),
+            // The reason can quote the names the certificate presents,
+            // which whoever runs the relay chose.
+            Err(e) => println!(
+                "Its certificate is NOT trusted by this computer: {}",
+                silver_client::files::one_line(&e.to_string())
+            ),
         }
         for pin in &observed.pins[1..] {
             println!("(Also in its chain, and not a key to pin: {pin})");
@@ -909,20 +928,24 @@ async fn check_release(
     let release = latest_release(RELEASES_API, &options)
         .await
         .context("asking the releases page")?;
+    // The release's name and address are the releases page's words,
+    // printed to a plain terminal.
+    let shown = silver_client::files::one_line;
     match compare(release.version(), current) {
         Some(Ordering::Greater) => println!(
             "Silver Messenger {} is available; this is {current}.\n{}",
-            release.version(),
-            release.url
+            shown(release.version()),
+            shown(&release.url)
         ),
         Some(Ordering::Equal) => println!("Silver Messenger {current} is the newest release."),
         Some(Ordering::Less) => println!(
             "This is Silver Messenger {current}; the newest release is {}.",
-            release.version()
+            shown(release.version())
         ),
         None => println!(
             "The newest release is called {}; this is {current}.\n{}",
-            release.tag, release.url
+            shown(&release.tag),
+            shown(&release.url)
         ),
     }
     Ok(())

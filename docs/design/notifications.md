@@ -81,7 +81,10 @@ notification is asked for from a blocking task; whether it succeeds is
 not waited for; a failure is logged once at debug level and that path is
 not tried again for ten minutes, so a machine without a notification
 service does not spawn a process, or open a bus connection, for every
-message. The bell, the terminal sequences and the window title do not
+message. The worker holds the path's state across the call, so the
+interface's thread only ever tries for it: while a worker is out — a
+notification daemon that never answers keeps it out for good — further
+notifications are not raised rather than waited on. The bell, the terminal sequences and the window title do not
 depend on it.
 
 **Bursts.** The existing rule holds: announcements within a second of

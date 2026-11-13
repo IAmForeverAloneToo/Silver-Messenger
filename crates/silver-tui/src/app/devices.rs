@@ -552,6 +552,11 @@ impl App {
             self.toast("Usage: /devices remove <n> (as /devices numbers them)");
             return;
         };
+        // Revoking a device cannot be undone, and its groups are left at
+        // once; a pasted line is not the owner choosing that.
+        if !self.typed_it_themselves("unlinking a device") {
+            return;
+        }
         let name = self.device_name_of(&device.device);
         self.toast(format!("Unlinking {name}…"));
         self.revoke_device(device.device, name);
@@ -590,6 +595,9 @@ impl App {
                 return;
             }
         };
+        if let Err(e) = self.groups.note_revoked_devices([device]) {
+            tracing::warn!("noting a revoked device for the groups: {e}");
+        }
         self.system(
             Level::Info,
             format!(
@@ -959,7 +967,20 @@ impl App {
     /// `by` is the device that made it. A bundle it pins and a verified
     /// mark it sets are trust it asserted, so they are remembered as its
     /// and undone if it is ever unlinked.
+    ///
+    /// The open pane stays open. The selection is a place in the chat
+    /// list, and a contact added or removed over there moves everything
+    /// after it, so without this the chat being typed into here would
+    /// quietly become another one.
     fn apply_contact_action(&mut self, by: UserId, action: ContactAction) {
+        let open = self.selected_pane();
+        self.change_contacts(by, action);
+        if self.selected_pane() != open {
+            self.keep_open(open);
+        }
+    }
+
+    fn change_contacts(&mut self, by: UserId, action: ContactAction) {
         match action {
             ContactAction::Add {
                 user,
@@ -1010,9 +1031,6 @@ impl App {
                     self.threads.remove(&user);
                     self.unread.remove(&user);
                     self.persist_contacts();
-                    if self.selected >= self.pane_count() {
-                        self.select(0);
-                    }
                     self.system(
                         Level::Info,
                         format!(
@@ -1060,9 +1078,6 @@ impl App {
                 }
                 self.client.forget_sessions(&user);
                 self.refresh_group_list();
-                if self.selected >= self.pane_count() {
-                    self.select(0);
-                }
             }
             ContactAction::Unblock { user } => {
                 self.blocked.retain(|b| *b != user);
@@ -1108,5 +1123,81 @@ fn line_text(content: &Content) -> Option<String> {
             FileInfo::from_content(content).map(|i| format!("[file] {}", i.label()))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use silver_client::{Client, ConnectOptions, Store};
+    use silver_protocol::Identity;
+    use std::sync::Arc;
+
+    fn app() -> (App, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let (identity, _) = store.load_or_create_identity().unwrap();
+        let url = "ws://127.0.0.1:1/ws".to_owned();
+        let (client, _events) =
+            Client::spawn(url.clone(), Arc::new(identity), ConnectOptions::default()).unwrap();
+        let app = App::new(
+            store,
+            client,
+            url,
+            false,
+            1,
+            crate::glyphs::UNICODE,
+            crate::theme::Theme::dark(),
+            AtRest::Passphrase,
+        )
+        .unwrap();
+        (app, dir)
+    }
+
+    /// The selection is a place in the chat list. A contact added or
+    /// removed on another device moves everything after it, and the chat
+    /// open here — perhaps being typed into — must not quietly become
+    /// another.
+    #[tokio::test]
+    async fn a_contact_changed_on_another_device_leaves_the_open_chat_open() {
+        let (mut app, _dir) = app();
+        let team = app.groups.create("team", now_ms()).unwrap().group;
+        app.refresh_group_list();
+        let bob = Identity::generate();
+        app.contacts.push(Contact::new(bob.user_id()));
+        app.select_pane(Pane::Group(team));
+        let laptop = Identity::generate().user_id();
+
+        let carol = Identity::generate();
+        app.apply_contact_action(
+            laptop,
+            ContactAction::Add {
+                user: carol.user_id(),
+                alias: Some("carol".into()),
+                bundle: None,
+            },
+        );
+        assert_eq!(app.selected_pane(), Pane::Group(team));
+
+        app.select_pane(Pane::Thread(carol.user_id()));
+        app.apply_contact_action(
+            laptop,
+            ContactAction::Remove {
+                user: bob.user_id(),
+            },
+        );
+        assert_eq!(app.selected_pane(), Pane::Thread(carol.user_id()));
+
+        app.apply_contact_action(
+            laptop,
+            ContactAction::Block {
+                user: carol.user_id(),
+            },
+        );
+        assert_eq!(
+            app.selected_pane(),
+            Pane::System,
+            "a chat that is gone gives way to System"
+        );
     }
 }

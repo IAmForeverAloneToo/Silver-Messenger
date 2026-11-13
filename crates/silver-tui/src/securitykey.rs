@@ -86,6 +86,23 @@ fn cancelled(e: &anyhow::Error) -> bool {
     )
 }
 
+/// A key's name as printed. The names are read from the data directory
+/// before it is unlocked, so nothing has vouched for them yet: whoever
+/// could write to the directory could have put an escape sequence in
+/// one, and this is a plain terminal.
+fn label(name: &str) -> String {
+    silver_client::files::printable(name, 64)
+}
+
+/// The enrolled keys' names, as printed.
+fn labels(names: &[String]) -> String {
+    names
+        .iter()
+        .map(|n| label(n))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Unlock a directory a security key protects: the key, or the recovery
 /// passphrase if no key can.
 pub(crate) fn unlock(store: &mut Store, secrets: &mut EnvSecrets) -> anyhow::Result<()> {
@@ -103,7 +120,7 @@ pub(crate) fn unlock(store: &mut Store, secrets: &mut EnvSecrets) -> anyhow::Res
     let keys = store.security_keys()?;
     eprintln!(
         "This data directory opens with its security key ({}), or the recovery passphrase.",
-        keys.join(", ")
+        labels(&keys)
     );
     match authenticator("the recovery passphrase") {
         Ok(mut auth) => match store.unlock_with_security_key(auth.as_mut()) {
@@ -198,14 +215,15 @@ pub(crate) fn remove(
     }
     if !keys.iter().any(|k| k == name) {
         bail!(
-            "no security key named {name:?} is enrolled (enrolled: {})",
-            keys.join(", ")
+            "no security key named {:?} is enrolled (enrolled: {})",
+            label(name),
+            labels(&keys)
         );
     }
     let recovery = recovery_passphrase(secrets)?;
     let others: Vec<&String> = keys.iter().filter(|k| *k != name).collect();
     if !others.is_empty() {
-        let names: Vec<&str> = others.iter().map(|s| s.as_str()).collect();
+        let names: Vec<String> = others.iter().map(|s| label(s)).collect();
         println!(
             "The directory moves to a fresh key, which each key that stays has to wrap: plug in \
              {} when asked.",
@@ -214,6 +232,7 @@ pub(crate) fn remove(
     }
     let mut auth = authenticator("cancelling")?;
     let left = store.remove_security_key(name, auth.as_mut(), &recovery, &mut missing)?;
+    let name = label(name);
     match left {
         Protection::Passphrase => println!(
             "{name:?} removed. No security key is left: the recovery passphrase is now the \
@@ -245,7 +264,7 @@ fn recovery_passphrase(secrets: &mut EnvSecrets) -> anyhow::Result<Zeroizing<Str
 /// A key that did not answer while the directory moves to a fresh data
 /// key: try again, drop it, or give up.
 fn missing(name: &str, e: &anyhow::Error) -> Missing {
-    eprintln!("The key named {name:?} did not answer: {e:#}.");
+    eprintln!("The key named {:?} did not answer: {e:#}.", label(name));
     if !std::io::stdin().is_terminal() {
         return Missing::Cancel;
     }
@@ -343,5 +362,22 @@ pub(crate) fn helper_main() -> ! {
             std::thread::sleep(std::time::Duration::from_secs(10));
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_key_name_from_the_directory_prints_nothing_a_terminal_acts_on() {
+        let planted = vec![
+            "office\x1b]0;owned\x07".to_owned(),
+            "spare\u{202e}yek".to_owned(),
+        ];
+        let shown = labels(&planted);
+        assert!(!shown.chars().any(|c| c.is_control()), "{shown:?}");
+        assert!(!shown.contains('\u{202e}'), "{shown:?}");
+        assert!(shown.starts_with("office"));
     }
 }

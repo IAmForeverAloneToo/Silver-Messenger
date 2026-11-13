@@ -525,14 +525,28 @@ pub fn one_line(text: &str) -> String {
 
 /// Names Windows keeps for devices, judged on the part before the first
 /// dot: `CON`, `con.txt` and `COM1.tar.gz` all are.
+///
+/// Windows drops the spaces at the end of that part before it compares,
+/// so `CON .a.txt` and `NUL .a.txt` are devices too, and it counts the
+/// superscript digits `¹`, `²` and `³` as port numbers alongside 0 to 9
+/// (`COM¹`, `LPT³`).
 fn is_reserved_device_name(name: &str) -> bool {
-    let head = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+    let head = name
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end_matches(' ')
+        .to_ascii_uppercase();
     match head.as_str() {
         "CON" | "PRN" | "AUX" | "NUL" => true,
         _ => {
-            head.len() == 4
-                && (head.starts_with("COM") || head.starts_with("LPT"))
-                && matches!(head.as_bytes()[3], b'1'..=b'9')
+            let (Some(port), Some(number)) = (head.get(..3), head.get(3..)) else {
+                return false;
+            };
+            let mut digits = number.chars();
+            matches!(port, "COM" | "LPT")
+                && matches!(digits.next(), Some('0'..='9' | '¹' | '²' | '³'))
+                && digits.next().is_none()
         }
     }
 }
@@ -585,8 +599,12 @@ fn sanitize_pass(name: &str) -> String {
     let stem = if stem.is_empty() { "file" } else { stem };
     let name = format!("{stem}{ext}");
     // Windows device names get a mark so the file is a file; judged on the
-    // finished name, since trimming the stem can be what makes it one.
-    if is_reserved_device_name(&name) {
+    // finished name, since trimming the stem can be what makes it one. So
+    // do the names of the data directory's own files: a received file is
+    // kept apart from those by how it is encrypted, and is not given one
+    // of their names either, so that nothing reading a name can confuse
+    // the two.
+    if is_reserved_device_name(&name) || crate::store::is_store_file_name(&name) {
         format!("_{name}")
     } else {
         name
@@ -735,6 +753,28 @@ mod tests {
         // Found by the fuzzer: the trailing space hid the device name once.
         assert_eq!(sanitize_name("CON . `"), "_CON. `");
         assert_eq!(sanitize_name("_CON. `"), "_CON. `");
+        // Windows drops the spaces before the first dot, and counts the
+        // superscript digits as port numbers.
+        assert_eq!(sanitize_name("CON .a.txt"), "_CON .a.txt");
+        assert_eq!(sanitize_name("NUL .a.txt"), "_NUL .a.txt");
+        assert_eq!(sanitize_name("COM1 .a.txt"), "_COM1 .a.txt");
+        assert_eq!(sanitize_name("COM\u{b9}.txt"), "_COM\u{b9}.txt");
+        assert_eq!(sanitize_name("lpt\u{b3}"), "_lpt\u{b3}");
+        assert_eq!(sanitize_name("com0.txt"), "_com0.txt");
+        assert_eq!(sanitize_name("COM\u{b9}\u{b2}.txt"), "COM\u{b9}\u{b2}.txt");
+        assert_eq!(sanitize_name("CONSOLE .a.txt"), "CONSOLE .a.txt");
+        // Nor is a received file given the name of one of the data
+        // directory's own, which once shared its encryption with them.
+        for own in [
+            "state",
+            "identity.json",
+            "Transparency.json",
+            "outbox.json",
+            "vault.json",
+        ] {
+            assert_eq!(sanitize_name(own), format!("_{own}"));
+        }
+        assert_eq!(sanitize_name("state.txt"), "state.txt");
         let long = format!("{}.jpeg", "a".repeat(300));
         let got = sanitize_name(&long);
         assert!(

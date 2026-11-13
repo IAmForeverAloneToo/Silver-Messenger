@@ -245,10 +245,11 @@ impl Drop for WinHid {
     }
 }
 
-/// The first FIDO key plugged in.
+/// The FIDO key plugged in; refused if there are more
+/// ([`crate::route::only_one`]).
 pub fn find() -> Result<Option<WinHid>, Error> {
-    match list()?.first() {
-        Some(path) => Ok(Some(WinHid::open(path)?)),
+    match crate::route::only_one(list()?)? {
+        Some(path) => Ok(Some(WinHid::open(&path)?)),
         None => Ok(None),
     }
 }

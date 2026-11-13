@@ -29,6 +29,22 @@ use silver_protocol::rng::OsRng;
 use zeroize::Zeroizing;
 
 const VAULT_AAD: &[u8] = b"silver-messenger/v1/vault";
+/// Associated data for the data key in a version 3 vault: the version 1
+/// shape, wrapped so that it opens only as a directory that keeps a
+/// record of what it wrote (`state`, [`crate::rollback`]).
+///
+/// The anchor in `vault.json` is plaintext, and so is any flag beside
+/// it, so somebody who can write the directory can delete either and
+/// make a bound directory look like one from before the record existed
+/// -- which the client used to adopt, files put back and all. The wrap
+/// cannot be edited that way: under these associated data the data key
+/// does not open as version 1, and under version 1's it does not open
+/// as this. So "this directory is bound" is something only the key can
+/// say, and a bound vault without its anchor is refused rather than
+/// adopted.
+const BOUND_VAULT_AAD: &[u8] = b"silver-messenger/v3/vault";
+/// The vault version whose data key is wrapped under [`BOUND_VAULT_AAD`].
+pub const BOUND_VAULT_VERSION: u32 = 3;
 /// Associated data for the naming key, so that it and the data key cannot
 /// be swapped for one another inside the vault.
 const NAMING_AAD: &[u8] = b"silver-messenger/v1/vault/naming";
@@ -40,6 +56,18 @@ pub(crate) const FILE_MAGIC: &[u8; 4] = b"SMV1";
 /// bytes after this. Its own magic rather than a flag inside the first,
 /// so a reader knows the shape before it has decrypted anything.
 pub(crate) const GENERATION_MAGIC: &[u8; 4] = b"SMV2";
+/// A received file written under the data key (`/files encrypt`).
+///
+/// Its own magic and its own associated data, so that a received file
+/// and one of the store's files can never be read as each other. Until
+/// 0.25.0 a download was sealed exactly as a name-only store file is,
+/// `SMV1` and the bare name, so a sender who named a file `state` made
+/// something the store's own reader would take for its record, and a
+/// copy of the store's `state` dropped into `downloads/` was something
+/// the decrypter would hand back in the clear.
+pub(crate) const DOWNLOAD_MAGIC: &[u8; 4] = b"SMD1";
+/// In front of a received file's name in its associated data.
+const DOWNLOAD_DOMAIN: &[u8] = b"silver-messenger/v1/download\0";
 /// Prefix of an encrypted line in a line-oriented file.
 pub const LINE_PREFIX: &str = "enc:";
 /// `Kdf::algorithm` when the data key is wrapped under a random key kept
@@ -131,8 +159,12 @@ impl Kdf {
 /// Contents of `vault.json`.
 ///
 /// Version 1 wraps the data key once, under the key `kdf` describes.
-/// Version 2 has `slots` instead of `kdf`, `wrapped_key` and
-/// `wrapped_naming_key`; the rest is common to both.
+/// Version 3 is version 1 with the data key wrapped under associated data
+/// of its own ([`BOUND_VAULT_AAD`]), which says the directory keeps a
+/// record of what it wrote; every version 1 vault is rewritten as one at
+/// its first unlock by 0.25.0 or later. Version 2 has `slots` instead of
+/// `kdf`, `wrapped_key` and `wrapped_naming_key`, and has kept a record
+/// from the release that introduced it; the rest is common to all three.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VaultFile {
     pub version: u32,
@@ -185,7 +217,24 @@ pub struct VaultFile {
 impl VaultFile {
     /// Whether the key-encryption key is kept in the key store.
     pub fn is_keystore(&self) -> bool {
-        self.version == 1 && self.kdf.as_ref().is_some_and(Kdf::is_keystore)
+        self.is_single() && self.kdf.as_ref().is_some_and(Kdf::is_keystore)
+    }
+
+    /// Version 1 or 3: one wrapping, under the key `kdf` describes.
+    pub fn is_single(&self) -> bool {
+        self.version == 1 || self.version == BOUND_VAULT_VERSION
+    }
+
+    /// Whether the vault itself says the directory keeps a record of what
+    /// it wrote, so that an anchor missing from it is tampering rather
+    /// than a directory from before the record existed.
+    ///
+    /// The version is in the clear, but it cannot be changed to say
+    /// otherwise: a version 3 vault read as version 1 does not open (the
+    /// wrap's associated data differ), and a version 2 one read as either
+    /// has no `kdf` to open with.
+    pub fn is_bound(&self) -> bool {
+        self.version == 2 || self.version == BOUND_VAULT_VERSION
     }
 
     /// The name the key store keeps the key-encryption key under, for a
@@ -325,6 +374,10 @@ pub struct FileCipher {
     key: Zeroizing<[u8; 32]>,
     previous: Option<Zeroizing<[u8; 32]>>,
     naming_key: Zeroizing<[u8; 32]>,
+    /// The key-encryption key of a version 1 vault this was opened from,
+    /// kept only until the vault has been rewritten as version 3
+    /// ([`FileCipher::rebound`]). `None` for every other vault.
+    rebind: Option<Zeroizing<[u8; 32]>>,
 }
 
 impl fmt::Debug for FileCipher {
@@ -339,16 +392,17 @@ impl FileCipher {
         let mut key = Zeroizing::new([0u8; 32]);
         OsRng.fill_bytes(key.as_mut_slice());
         let kek = derive(&kdf, passphrase)?;
-        let wrapped_key = seal(&kek, VAULT_AAD, key.as_slice());
+        let wrapped_key = seal(&kek, BOUND_VAULT_AAD, key.as_slice());
         let naming_key = fresh_naming_key();
         Ok((
             VaultFile {
-                version: 1,
+                version: BOUND_VAULT_VERSION,
                 kdf: Some(kdf),
                 wrapped_key,
                 previous_key: None,
-                // A fresh directory has no `state` yet; the store writes
-                // one and stamps this on the first write.
+                // A fresh directory has no `state` yet. The store writes
+                // its first record before it writes this vault, and the
+                // vault it writes carries that record's generation.
                 state_generation: None,
                 wrapped_naming_key: Some(seal(&kek, NAMING_AAD, naming_key.as_slice())),
                 slots: Vec::new(),
@@ -357,6 +411,7 @@ impl FileCipher {
                 key,
                 previous: None,
                 naming_key,
+                rebind: None,
             },
         ))
     }
@@ -369,6 +424,7 @@ impl FileCipher {
             key,
             previous: None,
             naming_key: fresh_naming_key(),
+            rebind: None,
         }
     }
 
@@ -390,7 +446,7 @@ impl FileCipher {
             });
         }
         let kdf = match &vault.kdf {
-            Some(kdf) if vault.version == 1 && kdf.algorithm == PASSPHRASE_ALGORITHM => kdf,
+            Some(kdf) if vault.is_single() && kdf.algorithm == PASSPHRASE_ALGORITHM => kdf,
             _ => return Err(anyhow::anyhow!("unsupported vault format").into()),
         };
         let kek = derive(kdf, passphrase)?;
@@ -439,6 +495,7 @@ impl FileCipher {
             key,
             previous,
             naming_key,
+            rebind: None,
         })
     }
 
@@ -492,6 +549,7 @@ impl FileCipher {
             key,
             previous: None,
             naming_key: fresh_naming_key(),
+            rebind: None,
         };
         // A fresh directory, so no `state` to point at yet.
         let vault = cipher.wrap_under_kek(kek, Kdf::keystore(), None);
@@ -507,8 +565,15 @@ impl FileCipher {
     }
 
     fn unwrap(vault: &VaultFile, kek: &[u8; 32]) -> Result<Self, VaultError> {
+        // The version says which associated data the wrap is under, and
+        // cannot lie about it: the other one does not open.
+        let (aad, rebind) = match vault.version {
+            1 => (VAULT_AAD, Some(Zeroizing::new(*kek))),
+            BOUND_VAULT_VERSION => (BOUND_VAULT_AAD, None),
+            _ => return Err(anyhow::anyhow!("unsupported vault format").into()),
+        };
         let unwrap_one = |wrapped: &[u8]| -> Result<Zeroizing<[u8; 32]>, VaultError> {
-            let key = open(kek, VAULT_AAD, wrapped).ok_or(VaultError::WrongPassphrase)?;
+            let key = open(kek, aad, wrapped).ok_or(VaultError::WrongPassphrase)?;
             let key: [u8; 32] = key
                 .as_slice()
                 .try_into()
@@ -534,7 +599,57 @@ impl FileCipher {
             key: unwrap_one(&vault.wrapped_key)?,
             previous: vault.previous_key.as_deref().map(unwrap_one).transpose()?,
             naming_key,
+            rebind,
         })
+    }
+
+    /// `vault`, a version 1 vault this cipher was opened from, rewritten
+    /// as version 3: the same keys under the same key-encryption key, the
+    /// same anchor, and the wrap now saying the directory is bound.
+    /// `None` when there is nothing to rewrite.
+    ///
+    /// Done once the directory's record is in place, at the first unlock
+    /// by 0.25.0 or later; from then on the anchor cannot be taken out of
+    /// `vault.json` without the directory refusing to open.
+    pub fn rebound(&self, vault: &VaultFile) -> Option<VaultFile> {
+        let kek = self.rebind.as_ref()?;
+        if vault.version != 1 {
+            return None;
+        }
+        let kdf = vault.kdf.clone()?;
+        Some(self.wrapped(kdf, kek, vault.state_generation))
+    }
+
+    /// The same keys without the key-encryption key [`FileCipher::rebound`]
+    /// needed, once it has been used.
+    pub fn without_rebind(&self) -> Self {
+        Self {
+            key: self.key.clone(),
+            previous: self.previous.clone(),
+            naming_key: self.naming_key.clone(),
+            rebind: None,
+        }
+    }
+
+    /// Whether this was opened from a version 1 vault, which still has to
+    /// be rewritten as version 3.
+    pub fn needs_rebind(&self) -> bool {
+        self.rebind.is_some()
+    }
+
+    /// The version 1 shape the client wrote before 0.25.0, for the tests
+    /// that need a directory from then.
+    #[cfg(test)]
+    pub(crate) fn wrap_unbound(&self, kek: &[u8; 32], kdf: Kdf) -> VaultFile {
+        VaultFile {
+            version: 1,
+            kdf: Some(kdf),
+            wrapped_key: seal(kek, VAULT_AAD, self.key.as_slice()),
+            previous_key: None,
+            state_generation: None,
+            wrapped_naming_key: Some(seal(kek, NAMING_AAD, self.naming_key.as_slice())),
+            slots: Vec::new(),
+        }
     }
 
     /// A fresh data key to move the directory onto, with the current one
@@ -549,6 +664,8 @@ impl FileCipher {
             // Unchanged by a rotation, which is the point of keeping it
             // apart from the data key: the files keep their names.
             naming_key: self.naming_key.clone(),
+            // A rotation writes a new vault, which is version 3 already.
+            rebind: None,
         }
     }
 
@@ -559,6 +676,7 @@ impl FileCipher {
             key: self.key.clone(),
             previous: None,
             naming_key: self.naming_key.clone(),
+            rebind: self.rebind.clone(),
         }
     }
 
@@ -593,13 +711,13 @@ impl FileCipher {
     /// still readable: whichever key a file is under is in the vault.
     fn wrapped(&self, kdf: Kdf, kek: &[u8; 32], state_generation: Option<u64>) -> VaultFile {
         VaultFile {
-            version: 1,
+            version: BOUND_VAULT_VERSION,
             kdf: Some(kdf),
-            wrapped_key: seal(kek, VAULT_AAD, self.key.as_slice()),
+            wrapped_key: seal(kek, BOUND_VAULT_AAD, self.key.as_slice()),
             previous_key: self
                 .previous
                 .as_ref()
-                .map(|old| seal(kek, VAULT_AAD, old.as_slice())),
+                .map(|old| seal(kek, BOUND_VAULT_AAD, old.as_slice())),
             state_generation,
             wrapped_naming_key: Some(seal(kek, NAMING_AAD, self.naming_key.as_slice())),
             slots: Vec::new(),
@@ -722,6 +840,48 @@ impl FileCipher {
             .with_context(|| format!("could not decrypt {name}: wrong key or damaged file"))
     }
 
+    /// Encrypt a received file, bound to the name it is saved under.
+    ///
+    /// Never the shape of a store file: its own magic, and the name in
+    /// associated data no store file uses, so neither can be read as the
+    /// other whatever the sender called it.
+    pub fn encrypt_download(&self, name: &str, plaintext: &[u8]) -> Vec<u8> {
+        let mut out = DOWNLOAD_MAGIC.to_vec();
+        out.extend(seal(&self.key, &download_aad(name), plaintext));
+        out
+    }
+
+    /// Decrypt a received file saved as `name`.
+    ///
+    /// A file received before 0.25.0 is in the store's name-only shape,
+    /// and is still read -- except under a name the store uses for one of
+    /// its own files, because that is exactly what a copy of the store's
+    /// `state` (or of anything else of its own) dropped into `downloads/`
+    /// looks like, and reading it would hand the store's file back in the
+    /// clear. Received files have been saved under such names with a `_`
+    /// in front since then too ([`crate::files::sanitize_name`]).
+    pub fn decrypt_download(&self, name: &str, bytes: &[u8]) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+        if let Some(body) = bytes.strip_prefix(DOWNLOAD_MAGIC) {
+            let aad = download_aad(name);
+            return open(&self.key, &aad, body)
+                .or_else(|| self.previous(&aad, body))
+                .with_context(|| format!("could not decrypt {name}: wrong key or damaged file"));
+        }
+        if bytes.starts_with(FILE_MAGIC) && crate::store::is_store_file_name(name) {
+            bail!(
+                "{name} has the name of one of the data directory's own files and is in their \
+                 shape, so it is not opened as a received file"
+            );
+        }
+        self.decrypt(name, bytes)
+    }
+
+    /// Whether `bytes` is a received file written under the data key, in
+    /// either shape.
+    pub fn is_encrypted_download(bytes: &[u8]) -> bool {
+        bytes.starts_with(DOWNLOAD_MAGIC) || bytes.starts_with(FILE_MAGIC)
+    }
+
     /// The same bytes under the key a rotation is moving off, if there is
     /// one. A file not yet rewritten is under it and is not damaged.
     fn previous(&self, aad: &[u8], body: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
@@ -769,6 +929,14 @@ impl FileCipher {
             })?;
         String::from_utf8(plain.to_vec()).context("decrypted line is not UTF-8")
     }
+}
+
+/// What a received file is bound to: the name it is saved under, behind
+/// a domain no store file's associated data starts with.
+fn download_aad(name: &str) -> Vec<u8> {
+    let mut aad = DOWNLOAD_DOMAIN.to_vec();
+    aad.extend_from_slice(name.as_bytes());
+    aad
 }
 
 /// What a file's contents are bound to: its name, and where it stands.
@@ -910,6 +1078,89 @@ pub fn decrypt_with_passphrase(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The wrap is what says a directory keeps a record, because it is
+    /// the one thing in `vault.json` that cannot be edited: a version 3
+    /// vault relabelled as version 1 does not open, so the anchor cannot
+    /// be dropped and the directory passed off as one from before the
+    /// record existed. A version 1 vault opens and is rewritten as 3.
+    #[test]
+    fn a_bound_vault_cannot_be_passed_off_as_an_older_one() {
+        let kek = [7u8; 32];
+        let (bound, cipher) = FileCipher::create_with_kek(&kek);
+        assert_eq!(bound.version, BOUND_VAULT_VERSION);
+        assert!(bound.is_bound() && bound.is_keystore());
+        assert!(
+            !FileCipher::unlock_with_kek(&bound, &kek)
+                .unwrap()
+                .needs_rebind()
+        );
+
+        let mut relabelled = bound.clone();
+        relabelled.version = 1;
+        relabelled.state_generation = None;
+        assert!(!relabelled.is_bound());
+        assert!(FileCipher::unlock_with_kek(&relabelled, &kek).is_err());
+
+        let older = cipher.wrap_unbound(&kek, Kdf::keystore());
+        let opened = FileCipher::unlock_with_kek(&older, &kek).unwrap();
+        assert!(opened.needs_rebind());
+        let mut anchored = older.clone();
+        anchored.state_generation = Some(9);
+        let rewritten = opened.rebound(&anchored).unwrap();
+        assert_eq!(rewritten.version, BOUND_VAULT_VERSION);
+        assert_eq!(rewritten.state_generation, Some(9));
+        let again = FileCipher::unlock_with_kek(&rewritten, &kek).unwrap();
+        assert_eq!(again.encrypt("x", b"y")[..4], *FILE_MAGIC);
+        assert_eq!(
+            again
+                .decrypt("x", &cipher.encrypt("x", b"y"))
+                .unwrap()
+                .as_slice(),
+            b"y"
+        );
+        assert!(opened.without_rebind().rebound(&anchored).is_none());
+    }
+
+    /// A received file and a store file are never one another, whatever
+    /// the sender calls the file: a download named `state` does not open
+    /// as the record, and a copy of the record dropped into `downloads/`
+    /// does not open as a download.
+    #[test]
+    fn a_received_file_and_a_store_file_cannot_be_read_as_each_other() {
+        let cipher = FileCipher::fresh();
+        let download = cipher.encrypt_download("state", b"from a sender");
+        assert!(FileCipher::is_encrypted_download(&download));
+        assert!(!FileCipher::is_encrypted(&download));
+        assert!(cipher.decrypt("state", &download).is_err());
+        assert!(cipher.open_file("state", &download).is_err());
+        assert_eq!(
+            cipher
+                .decrypt_download("state", &download)
+                .unwrap()
+                .as_slice(),
+            b"from a sender"
+        );
+        assert!(cipher.decrypt_download("other", &download).is_err());
+
+        let record = cipher.encrypt("state", b"the store's own");
+        assert!(cipher.decrypt_download("state", &record).is_err());
+        assert!(
+            cipher
+                .decrypt_download("identity.json", &cipher.encrypt("identity.json", b"k"))
+                .is_err()
+        );
+        // A file received before downloads had a shape of their own still
+        // opens under an ordinary name.
+        let older = cipher.encrypt("photo.jpg", b"pixels");
+        assert_eq!(
+            cipher
+                .decrypt_download("photo.jpg", &older)
+                .unwrap()
+                .as_slice(),
+            b"pixels"
+        );
+    }
 
     /// The work the parameters ask for is what makes the key to check the
     /// AEAD, so they cannot be authenticated and a file can name any cost

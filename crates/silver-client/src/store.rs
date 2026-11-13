@@ -81,6 +81,13 @@ const BLOCKED_FILE: &str = "blocked.json";
 const DECLINED_FILE: &str = "declined.json";
 const DEVICES_FILE: &str = "devices.json";
 const HISTORY_DIR: &str = "history";
+/// Where an update waits, and the version it replaced is kept
+/// ([`crate::update::install::staging_dir`]).
+const UPDATE_DIR: &str = "update";
+/// In front of the directory and the name in the tag of a note in
+/// `vault.pending`, so that the key-store key it is made with is used for
+/// nothing else.
+const PENDING_DOMAIN: &[u8] = b"silver-messenger/v1/vault-pending\0";
 
 /// Every whole file the store keeps for the identity, and whether it is
 /// written 0600 as key material.
@@ -116,6 +123,29 @@ fn recrypted_files() -> impl Iterator<Item = &'static str> {
         .iter()
         .copied()
         .chain(std::iter::once(CONFIG_FILE))
+}
+
+/// Whether `name` is one the data directory uses for a file of its own.
+///
+/// A received file is never saved under one ([`crate::files::sanitize_name`]
+/// puts a `_` in front), and a file in `downloads/` under one is not
+/// decrypted as a received file: before 0.25.0 a received file was sealed
+/// exactly as a store file is, so a copy of `state` or `identity.json`
+/// dropped there would have opened. Compared without regard to case,
+/// which is how Windows and macOS compare names.
+pub(crate) fn is_store_file_name(name: &str) -> bool {
+    recrypted_files()
+        .chain([
+            VAULT_FILE,
+            PENDING_FILE,
+            STATE_FILE,
+            STATE_PREVIOUS_FILE,
+            LOG_FILE,
+            ROLLED_LOG_FILE,
+            HISTORY_DIR,
+            UPDATE_DIR,
+        ])
+        .any(|own| own.eq_ignore_ascii_case(name))
 }
 
 /// Client-side configuration.
@@ -866,27 +896,44 @@ fn ask_security_key(
     vault: &VaultFile,
     auth: &mut dyn Authenticator,
 ) -> anyhow::Result<(usize, Zeroizing<[u8; 32]>)> {
-    let slots: Vec<(usize, &[u8], &[u8; 32], &str)> = vault
+    let slots: Vec<(usize, &[u8], &[u8; 32])> = vault
         .security_key_slots()
         .filter_map(|(index, slot)| match &slot.kind {
             SlotKind::Fido2 {
                 credential_id,
                 salt,
                 rp_id,
-            } => Some((index, credential_id.as_slice(), salt, rp_id.as_str())),
+            } => Some(check_rp(rp_id).map(|()| (index, credential_id.as_slice(), salt))),
             SlotKind::Passphrase { .. } => None,
         })
-        .collect();
-    let rp_id = slots.first().context("no security key is enrolled")?.3;
-    if slots.iter().any(|slot| slot.3 != rp_id) {
-        bail!("the enrolled security keys are under different relying parties");
+        .collect::<anyhow::Result<_>>()?;
+    if slots.is_empty() {
+        bail!("no security key is enrolled");
     }
     let candidates: Vec<(&[u8], &[u8])> = slots.iter().map(|s| (s.1, &s.2[..])).collect();
     let (which, output) = auth
-        .secret(rp_id, &candidates)
+        .secret(SECURITY_KEY_RP, &candidates)
         .map_err(security_key_error)?;
     let index = slots.get(which).context("the key answered for no slot")?.0;
     Ok((index, output))
+}
+
+/// Refuse a slot made under any relying party but this program's.
+///
+/// `vault.json` is read before anything can be decrypted, so a slot's
+/// relying party is whatever somebody who can write the file says it is.
+/// Every slot this client enrols is under [`SECURITY_KEY_RP`], and the
+/// key is only ever asked under that: a slot naming another would have
+/// the plugged-in key answer for some other site's credential.
+fn check_rp(rp_id: &str) -> anyhow::Result<()> {
+    if rp_id != SECURITY_KEY_RP {
+        bail!(
+            "a security key slot in vault.json is for {:?}, not this program's {SECURITY_KEY_RP:?}; \
+             vault.json has been edited, and no key is asked anything for it",
+            crate::files::one_line(rp_id)
+        );
+    }
+    Ok(())
 }
 
 /// A security key's error as the rest of the client carries errors; the
@@ -897,6 +944,29 @@ fn security_key_error(e: silver_key::Error) -> anyhow::Error {
             .context("the security key plugged in is not one enrolled for this data directory"),
         e => anyhow::Error::new(e),
     }
+}
+
+/// Why the generations are being adopted, which decides what is taken.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Adoption {
+    /// The authenticated record says a protection, or the adoption of a
+    /// directory from before the record, has not finished. Plaintext and
+    /// name-only files are what that leaves; a file further on than
+    /// generation 1 is not, and is refused.
+    Unfinished,
+    /// The person asked for the record to start again from what is on
+    /// disk (`--reset-rollback-protection`). Everything is taken as it is.
+    Reset,
+}
+
+/// One entry in `vault.pending`: a key store entry that may need taking
+/// out, and a tag only the holder of that key could have made
+/// ([`Store::pending_mac`]).
+#[derive(Serialize, Deserialize)]
+struct PendingNote {
+    name: String,
+    #[serde(with = "silver_protocol::encoding::b64")]
+    tag: Vec<u8>,
 }
 
 /// Handle to the data directory.
@@ -953,7 +1023,15 @@ impl Store {
     /// starts locked; call [`Store::unlock`] before reading anything.
     pub fn open(root: impl Into<PathBuf>) -> anyhow::Result<Self> {
         let root = root.into();
-        create_private_dir(&root, Some(HISTORY_DIR))?;
+        // Tightened when something only this program puts there is
+        // already in it: `history/` from an earlier start, or `update/`
+        // from a `silver update` run before the first start, which used
+        // to leave the directory at the umask's mercy for good.
+        let guard = [HISTORY_DIR, UPDATE_DIR, VAULT_FILE]
+            .into_iter()
+            .find(|name| root.join(name).exists())
+            .unwrap_or(HISTORY_DIR);
+        create_private_dir(&root, Some(guard))?;
         create_private_dir(&root.join(HISTORY_DIR), None)?;
         let store = Self {
             root,
@@ -1005,17 +1083,65 @@ impl Store {
 
     // --- keys the store may still be holding --------------------------------
 
-    /// The names in `vault.pending`, or none when it is absent or
+    /// The notes in `vault.pending`, or none when it is absent or
     /// unreadable.
     ///
     /// Plaintext and read before any unlock, since the whole point is to
-    /// reach it on a start that cannot open anything else.
-    fn read_pending(&self) -> Vec<String> {
+    /// reach it on a start that cannot open anything else. So it is
+    /// somebody else's to write too, and a note is acted on only once it
+    /// has been checked against the key it names ([`Store::settle_pending`]).
+    /// A bare name, the shape written before 0.25.0, is kept for that
+    /// check to drop.
+    fn read_pending(&self) -> Vec<PendingNote> {
         let path = self.root.join(PENDING_FILE);
-        fs::read_to_string(&path)
+        let Some(entries) = fs::read_to_string(&path)
             .ok()
-            .and_then(|text| serde_json::from_str::<Vec<String>>(&text).ok())
-            .unwrap_or_default()
+            .and_then(|text| serde_json::from_str::<Vec<serde_json::Value>>(&text).ok())
+        else {
+            return Vec::new();
+        };
+        entries
+            .into_iter()
+            .filter_map(|entry| match entry {
+                serde_json::Value::String(name) => Some(PendingNote {
+                    name,
+                    tag: Vec::new(),
+                }),
+                other => serde_json::from_value(other).ok(),
+            })
+            .collect()
+    }
+
+    fn write_pending(&self, notes: &[PendingNote]) -> anyhow::Result<()> {
+        let path = self.root.join(PENDING_FILE);
+        if notes.is_empty() {
+            return match fs::remove_file(&path) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e).with_context(|| format!("removing {}", path.display())),
+            };
+        }
+        write_atomic(&path, serde_json::to_string(notes)?.as_bytes())
+    }
+
+    /// The MAC a note for `name` in this directory is tagged with, under
+    /// `kek`, the key the key store keeps under that name.
+    ///
+    /// Only somebody holding the key can make it, and the key is in this
+    /// installation's key store, so a note that checks out was written by
+    /// this installation. The directory is in it so that a note copied
+    /// from another data directory of the same account, naming that
+    /// directory's key, does not check out here.
+    fn pending_mac(&self, name: &str, kek: &[u8; 32]) -> hmac::Hmac<sha2::Sha256> {
+        use hmac::{KeyInit, Mac};
+        let root = fs::canonicalize(&self.root).unwrap_or_else(|_| self.root.clone());
+        let mut mac = <hmac::Hmac<sha2::Sha256> as KeyInit>::new_from_slice(kek)
+            .expect("HMAC takes a key of any length");
+        mac.update(PENDING_DOMAIN);
+        mac.update(root.to_string_lossy().as_bytes());
+        mac.update(b"\0");
+        mac.update(name.as_bytes());
+        mac
     }
 
     /// Write down that the key store may end up holding a key under `name`
@@ -1027,56 +1153,91 @@ impl Store {
     /// key needed, so a crash in the window between leaves a key nobody
     /// reads and nobody remembers to remove. The note is written and synced
     /// first, so the next [`Store::open`] finishes what the crash
-    /// interrupted.
+    /// interrupted. `kek` is the key itself, which the note is tagged
+    /// under.
     ///
     /// A failure here fails the change. The alternative is making a key
     /// with no record that it exists, which is the situation this exists to
     /// prevent.
-    fn add_pending(&self, name: &str) -> anyhow::Result<()> {
-        let mut names = self.read_pending();
-        if !names.iter().any(|n| n == name) {
-            names.push(name.to_owned());
-        }
-        write_atomic(
-            &self.root.join(PENDING_FILE),
-            serde_json::to_string(&names)?.as_bytes(),
-        )
-        .context("noting the key store entry that may need removing")
+    fn add_pending(&self, name: &str, kek: &[u8; 32]) -> anyhow::Result<()> {
+        let mut notes = self.read_pending();
+        notes.retain(|note| note.name != name);
+        notes.push(PendingNote {
+            name: name.to_owned(),
+            tag: {
+                use hmac::Mac;
+                self.pending_mac(name, kek).finalize().into_bytes().to_vec()
+            },
+        });
+        self.write_pending(&notes)
+            .context("noting the key store entry that may need removing")
+    }
+
+    /// [`Store::add_pending`] for the key the directory runs on now, which
+    /// the key store already holds and which is about to be superseded.
+    fn note_existing(&self, name: &str) -> anyhow::Result<()> {
+        let kek = crate::keystore::load(name)?.with_context(|| {
+            format!("the key store no longer holds {name}, the key this directory runs on")
+        })?;
+        self.add_pending(name, &kek)
     }
 
     /// Take `name` off the list: its fate is settled, either way.
     fn clear_pending(&self, name: &str) {
-        let names: Vec<String> = self
+        let notes: Vec<PendingNote> = self
             .read_pending()
             .into_iter()
-            .filter(|n| n != name)
+            .filter(|note| note.name != name)
             .collect();
-        let path = self.root.join(PENDING_FILE);
-        let _ = if names.is_empty() {
-            fs::remove_file(&path).or_else(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    Ok(())
-                } else {
-                    Err(e)
-                }
-            })
-        } else {
-            serde_json::to_string(&names)
-                .map_err(std::io::Error::other)
-                .and_then(|text| {
-                    write_atomic(&path, text.as_bytes()).map_err(std::io::Error::other)
-                })
-        };
+        let _ = self.write_pending(&notes);
     }
 
-    /// Settle every name a interrupted change left behind. Called from
+    /// Settle every note an interrupted change left behind. Called from
     /// [`Store::open`], before anything else reads the directory.
     ///
     /// Costs nothing on a normal start: with no `vault.pending` there is
-    /// no name to settle and the key store is never asked anything.
+    /// no note to settle and the key store is never asked anything.
+    ///
+    /// The file is plaintext and read before any unlock, so a note in it
+    /// is only a claim. Until 0.25.0 the claim was enough: somebody who
+    /// could write the directory could name any entry in the key store --
+    /// another data directory's key, or this one's after moving
+    /// `vault.json` aside -- and the next start deleted it, taking every
+    /// file that key opened with it. A note is acted on now only when its
+    /// tag checks out under the key it names, which only this
+    /// installation holds. One that does not is dropped and nothing is
+    /// deleted: a key left behind is a bounded exposure, and a key
+    /// deleted on somebody else's word is a directory lost.
     fn settle_pending(&self) {
-        for name in self.read_pending() {
-            self.drop_unused_kek(&name);
+        for note in self.read_pending() {
+            let kek = match crate::keystore::load(&note.name) {
+                Ok(Some(kek)) => kek,
+                // Nothing under that name: nothing to take out.
+                Ok(None) => {
+                    self.clear_pending(&note.name);
+                    continue;
+                }
+                // Asked again at the next start.
+                Err(e) => {
+                    tracing::warn!("cannot reach the key store to settle a note: {e:#}");
+                    continue;
+                }
+            };
+            let genuine = {
+                use hmac::Mac;
+                self.pending_mac(&note.name, &kek)
+                    .verify_slice(&note.tag)
+                    .is_ok()
+            };
+            if !genuine {
+                tracing::warn!(
+                    "vault.pending names a key store entry this installation did not note for \
+                     this directory; it is left as it is"
+                );
+                self.clear_pending(&note.name);
+                continue;
+            }
+            self.drop_unused_kek(&note.name);
         }
     }
 
@@ -1119,7 +1280,6 @@ impl Store {
             .map_err(VaultError::Other)?
             .ok_or_else(|| VaultError::Other(anyhow::anyhow!("no passphrase is set")))?;
         self.cipher = Some(Arc::new(FileCipher::unlock(&vault, passphrase)?));
-        self.seal_stragglers().map_err(VaultError::Other)?;
         self.finish_rotation(&vault).map_err(VaultError::Other)?;
         self.load_generations().map_err(VaultError::Other)?;
         Ok(())
@@ -1127,36 +1287,173 @@ impl Store {
 
     // --- rollback binding ----------------------------------------------------
 
-    /// Read `state` and check it against the anchor in `vault.json`,
-    /// adopting generations if this directory has none yet.
+    /// Read `state` and check it against the anchor in `vault.json`;
+    /// finish a protection or an adoption the record itself says is
+    /// unfinished; adopt generations in a directory from before the record
+    /// existed; and refuse one whose vault says it keeps a record that is
+    /// not there to be found.
     ///
-    /// Called once the cipher is in place, and after the two repairs that
-    /// run first: sealing files a protection left plain, and finishing a
-    /// half-done key rotation. Both rewrite files, and they do it in the
-    /// unbound shape, so they must happen before anything is stamped.
-    fn load_generations(&self) -> anyhow::Result<()> {
+    /// Called once the cipher is in place, and after a half-done key
+    /// rotation has been finished, which rewrites files keeping whatever
+    /// generation each carries.
+    ///
+    /// Nothing that goes wrong with the record fails the unlock: the
+    /// person still has to be able to run the reset that gets out of it,
+    /// and that needs the key. Every read and write refuses with the
+    /// reason until then (`docs/design/format-changes.md` section 5.5).
+    fn load_generations(&mut self) -> anyhow::Result<()> {
         let Some(cipher) = self.cipher.clone() else {
             return Ok(());
         };
         let Some(vault) = self.read_vault()? else {
             return Ok(());
         };
-        let Some(anchor) = vault.state_generation else {
-            return self.adopt_generations(&cipher);
-        };
-        // A record that cannot be read is not a reason to fail the
-        // unlock: the person still has to be able to run the reset that
-        // gets out of it, and that needs the key. Every read and write
-        // refuses with the reason until then.
-        *self.generations.lock().unwrap_or_else(|e| e.into_inner()) =
-            match self.read_generations(&cipher, anchor) {
-                Ok(state) => Generations::Bound(state),
-                Err(e) => {
-                    tracing::error!("{e}");
-                    Generations::Unreadable(e.to_string())
+        let outcome = match vault.state_generation {
+            Some(anchor) => match self.read_generations(&cipher, anchor) {
+                Ok(state) if state.unfinished => {
+                    self.adopt_generations(&cipher, Adoption::Unfinished)
                 }
-            };
-        self.bind_uncovered(&cipher)
+                Ok(state) => {
+                    *self.generations.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Generations::Bound(state);
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            },
+            // The wrap says this directory keeps a record, and the number
+            // that points at it is gone. The anchor is plaintext, and
+            // deleting it is how a directory used to be made to adopt
+            // whatever was put in it.
+            None if vault.is_bound() => Err(anyhow::anyhow!(
+                "vault.json says this directory keeps a record of what it last wrote, but the \
+                 number that points at that record has been taken out of it, so an older or \
+                 substituted copy of a file could not be told from the current one. Nothing has \
+                 been opened. `silver --reset-rollback-protection` starts the record again from \
+                 what is on disk, which gives up being able to prove anything about what \
+                 happened to this directory before now."
+            )),
+            None => self.adopt_legacy(&cipher),
+        };
+        if let Err(e) = outcome {
+            tracing::error!("{e:#}");
+            *self.generations.lock().unwrap_or_else(|e| e.into_inner()) =
+                Generations::Unreadable(format!("{e:#}"));
+            return Ok(());
+        }
+        self.bind_uncovered(&cipher)?;
+        if self.rebind_vault()? {
+            self.cipher = Some(Arc::new(cipher.without_rebind()));
+        }
+        Ok(())
+    }
+
+    /// Rewrite a version 1 vault as version 3, once the record it anchors
+    /// is in place, so that from now on the anchor cannot be taken out
+    /// without the directory refusing to open. Says whether it did.
+    ///
+    /// Left alone while the record cannot be read: the reset that gets out
+    /// of that ends here too.
+    fn rebind_vault(&self) -> anyhow::Result<bool> {
+        let Some(cipher) = self.cipher.as_deref() else {
+            return Ok(false);
+        };
+        if !cipher.needs_rebind() || self.generations().state().is_none() {
+            return Ok(false);
+        }
+        let vault = self.read_vault()?.context("reading the vault")?;
+        if let Some(rebound) = cipher.rebound(&vault) {
+            self.write_vault(&rebound)?;
+            tracing::info!(
+                "vault.json now says this directory keeps a record of what it wrote, so the \
+                 record cannot be detached from it"
+            );
+        }
+        Ok(true)
+    }
+
+    /// A version 1 vault with no anchor: a directory from before the record
+    /// existed, which is adopted -- or a bound one that a version 1 vault
+    /// has been put back over or had its anchor taken out, which is not.
+    ///
+    /// Told apart by what the directory holds. One from before the record
+    /// has no `state`, and every file in it is sealed under its name
+    /// alone; a record, a file at a generation, a conversation log filed
+    /// under a name only a bound directory uses, or anything in the clear
+    /// says otherwise. Plaintext is refused because nothing authenticated
+    /// says a protection was cut short here: since 0.25.0 a protection
+    /// writes that into its record first, and a cut-short one from an
+    /// older client is the rare case the reset is for.
+    fn adopt_legacy(&self, cipher: &FileCipher) -> anyhow::Result<()> {
+        if let Some(trace) = self.binding_trace(cipher)? {
+            bail!(
+                "vault.json has no record of what this directory last wrote, but {trace}: either \
+                 the record was taken away from a directory that kept one, or a protection by a \
+                 client older than 0.25.0 was cut short. Nothing has been opened. If it was the \
+                 latter, `silver --reset-rollback-protection` takes the files as they are and \
+                 starts the record from them."
+            );
+        }
+        // The record goes first, saying the adoption is unfinished, so a
+        // crash part-way leaves a directory the next unlock finishes on
+        // the record's word rather than on what the files look like.
+        let unfinished = State {
+            unfinished: true,
+            ..State::default()
+        };
+        self.persist_generations(&unfinished, cipher)?;
+        self.adopt_generations(cipher, Adoption::Unfinished)
+    }
+
+    /// Something in the directory that only a bound one holds, or that
+    /// nothing but a cut-short protection leaves; `None` for a directory
+    /// that is exactly what a client from before the record wrote.
+    fn binding_trace(&self, cipher: &FileCipher) -> anyhow::Result<Option<String>> {
+        for name in [STATE_FILE, STATE_PREVIOUS_FILE] {
+            if self.root.join(name).exists() {
+                return Ok(Some(format!("{name} is there")));
+            }
+        }
+        for name in recrypted_files() {
+            let path = self.root.join(name);
+            if !path.exists() {
+                continue;
+            }
+            let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+            if !FileCipher::is_encrypted(&bytes) {
+                return Ok(Some(format!("{name} is in the clear")));
+            }
+            if cipher.open_file(name, &bytes)?.generation.is_some() {
+                return Ok(Some(format!("{name} was written at a generation")));
+            }
+        }
+        let dir = self.root.join(HISTORY_DIR);
+        if dir.exists() {
+            for entry in fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))? {
+                let path = entry?.path();
+                let Some(stem) = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .and_then(|n| n.strip_suffix(".jsonl"))
+                else {
+                    continue;
+                };
+                if Conversation::parse_id(stem).is_none() {
+                    return Ok(Some(
+                        "a conversation log is filed under a name only a directory that keeps a \
+                         record uses"
+                            .to_owned(),
+                    ));
+                }
+                let text = fs::read_to_string(&path)
+                    .with_context(|| format!("reading {}", path.display()))?;
+                if lines_with_offsets(&text).any(|(_, line)| !line.starts_with(LINE_PREFIX)) {
+                    return Ok(Some(
+                        "a conversation log has a line in the clear".to_owned(),
+                    ));
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// Bring in the files the record did not cover when it was made.
@@ -1189,9 +1486,8 @@ impl Store {
             }
             let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
             if !FileCipher::is_encrypted(&bytes) {
-                // Left plain by a protection a crash cut short, which
-                // `seal_stragglers` has already had its turn at; the next
-                // write binds it.
+                // Nothing this client wrote: a bound directory holds no
+                // plaintext. Left for the read to refuse, with the reason.
                 continue;
             }
             let opened = cipher.open_file(name, &bytes).with_context(|| {
@@ -1254,13 +1550,20 @@ impl Store {
         )
     }
 
-    /// Give a directory written before generations existed its first one.
+    /// Give a directory its first record of generations: one a protection
+    /// has just been put on, one from before the record existed, or one the
+    /// person has asked to start again.
     ///
-    /// Every file is rewritten at generation 1 and recorded, and the
-    /// anchor follows. A crash part-way leaves some files rewritten and
-    /// some not, and no anchor, so the next unlock runs this again --
-    /// which is why it reads each file both ways round.
-    fn adopt_generations(&self, cipher: &FileCipher) -> anyhow::Result<()> {
+    /// Every file is rewritten at generation 1 unless it already carries
+    /// one, and recorded, and the anchor follows. What is accepted depends
+    /// on why this is running ([`Adoption`]): a plaintext file is sealed in
+    /// both cases, because each is one the authenticated record or the
+    /// person has vouched for; a file already at a generation past 1 is
+    /// accepted only at a reset. A crash part-way leaves the record saying
+    /// it is unfinished, or (at a reset) no record that opens, and the next
+    /// unlock or reset runs this again -- which is why each file is read
+    /// whichever shape it is in.
+    fn adopt_generations(&self, cipher: &FileCipher, mode: Adoption) -> anyhow::Result<()> {
         const FIRST: u64 = 1;
         let mut state = State {
             generation: FIRST,
@@ -1276,21 +1579,35 @@ impl Store {
                 continue;
             }
             let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-            if !FileCipher::is_encrypted(&bytes) {
-                // Still plain; `seal_stragglers` has already had its turn,
-                // so leave it and let the next write bind it.
-                continue;
-            }
-            // Either shape: name-only for a file this has not reached
-            // yet, generation-bearing for one a run that did not finish
-            // already converted.
-            let opened = cipher.open_file(name, &bytes)?;
-            let at = opened.generation.unwrap_or(FIRST);
-            if opened.generation.is_none() {
-                write_atomic(&path, &cipher.encrypt_at(name, at, &opened.plain))?;
-            }
-            state.wrote(name, at);
-            state.generation = state.generation.max(at);
+            let plain = if FileCipher::is_encrypted(&bytes) {
+                // Either shape: name-only for a file this has not reached
+                // yet, generation-bearing for one a run that did not
+                // finish already converted.
+                let opened = cipher.open_file(name, &bytes)?;
+                match opened.generation {
+                    // Further on than anything an unfinished protection or
+                    // adoption writes: this is a directory that has been
+                    // in use since, with an older record put back that
+                    // says it is still being set up.
+                    Some(at) if mode == Adoption::Unfinished && at > FIRST => bail!(
+                        "{name} was written at generation {at}, further on than a protection or \
+                         adoption that has not finished could have left it, so the record saying \
+                         it is unfinished is an older copy put back. Nothing has been opened."
+                    ),
+                    Some(at) => {
+                        state.wrote(name, at);
+                        state.generation = state.generation.max(at);
+                        continue;
+                    }
+                    None => opened.plain,
+                }
+            } else {
+                // Left in the clear by the protection the record says is
+                // unfinished, or taken as it stands at a reset.
+                Zeroizing::new(bytes)
+            };
+            write_atomic(&path, &cipher.encrypt_at(name, FIRST, &plain))?;
+            state.wrote(name, FIRST);
         }
         self.adopt_history(cipher, &mut state)?;
         self.persist_generations(&state, cipher)?;
@@ -1358,7 +1675,14 @@ impl Store {
             // as it was, so the offsets do not move.
             let mut out = String::new();
             for (at, line) in lines_with_offsets(&text) {
-                let plain = decode_line(Some(cipher), &old_name, at, line)?;
+                // A line in the clear is one the protection being finished
+                // here had not reached; nothing else gets this far with
+                // one (see `binding_trace`).
+                let plain = if line.starts_with(LINE_PREFIX) {
+                    decode_line(Some(cipher), &old_name, at, line)?
+                } else {
+                    line.to_owned()
+                };
                 out.push_str(&encode_line(
                     Some(cipher),
                     &new_name,
@@ -1393,21 +1717,25 @@ impl Store {
         let Some(cipher) = self.cipher.clone() else {
             bail!("the data directory is not unlocked");
         };
+        // The anchor in `vault.json` stays where it is until the new
+        // record replaces it: taking it out first, as this did until
+        // 0.25.0, left a crash here looking like a directory from before
+        // the record existed. Now a crash leaves a record that does not
+        // open, and the reset is run again.
         for name in [STATE_FILE, STATE_PREVIOUS_FILE] {
             let path = self.root.join(name);
             if path.exists() {
                 fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
             }
         }
-        let mut vault = self.read_vault()?.context("reading the vault")?;
-        vault.state_generation = None;
-        self.write_vault(&vault)?;
         *self.generations.lock().unwrap_or_else(|e| e.into_inner()) = Generations::Unbound;
         tracing::warn!(
             "the record of what this directory last wrote was started again; whether any of its \
              files was replaced with an older copy before now can no longer be told"
         );
-        self.adopt_generations(&cipher)
+        self.adopt_generations(&cipher, Adoption::Reset)?;
+        self.rebind_vault()?;
+        Ok(())
     }
 
     /// Unlock a directory whose wrapping key lives in this computer's key
@@ -1428,7 +1756,6 @@ impl Store {
             anyhow::anyhow!("the key in the key store does not open this vault: {e}")
         })?;
         self.cipher = Some(Arc::new(cipher));
-        self.seal_stragglers()?;
         self.finish_rotation(&vault)?;
         self.load_generations()?;
         Ok(())
@@ -1459,51 +1786,6 @@ impl Store {
         Ok(())
     }
 
-    /// Encrypt anything a cut-short protection left in the clear.
-    ///
-    /// Protecting a directory writes the vault first and then rewrites the
-    /// files, so a crash in between leaves a directory that opens with
-    /// some files still plain (a reader takes a plain file as itself).
-    /// This finishes the job on the next unlock. It reads a few bytes of
-    /// each file to decide, and does nothing at all in the ordinary case.
-    fn seal_stragglers(&self) -> anyhow::Result<()> {
-        let Some(cipher) = self.cipher.clone() else {
-            return Ok(());
-        };
-        if !self.any_plain()? {
-            return Ok(());
-        }
-        tracing::info!("sealing files an interrupted protection left in the clear");
-        self.recrypt_all(Some(&cipher), Some(&cipher))
-    }
-
-    /// Whether any file the data key covers is lying in the clear.
-    fn any_plain(&self) -> anyhow::Result<bool> {
-        for name in recrypted_files() {
-            let path = self.root.join(name);
-            if !path.exists() {
-                continue;
-            }
-            if !FileCipher::is_encrypted(&head_of(&path)?) {
-                return Ok(true);
-            }
-        }
-        let history = self.root.join(HISTORY_DIR);
-        if history.exists() {
-            for entry in fs::read_dir(&history)? {
-                let path = entry?.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                    continue;
-                }
-                let head = head_of(&path)?;
-                if !head.is_empty() && !head.starts_with(LINE_PREFIX.as_bytes()) {
-                    return Ok(true);
-                }
-            }
-        }
-        Ok(false)
-    }
-
     /// Encrypt everything under a key kept in the operating system's key
     /// store. For a directory that is not protected yet.
     pub fn protect_with_keystore(&mut self) -> anyhow::Result<()> {
@@ -1512,8 +1794,9 @@ impl Store {
         }
         let kdf = Kdf::keystore();
         let name = kdf.keystore_name();
-        self.add_pending(&name)?;
-        let kek = crate::keystore::create(&name)?;
+        let kek = crate::keystore::fresh_key();
+        self.add_pending(&name, &kek)?;
+        crate::keystore::put(&name, &kek)?;
         let sealed = self.seal_under_kek(&kek, kdf);
         // Either way the key's fate is decided: the vault names it, or it
         // goes. The note only outlives a crash.
@@ -1523,25 +1806,60 @@ impl Store {
 
     fn seal_under_kek(&mut self, kek: &[u8; 32], kdf: Kdf) -> anyhow::Result<()> {
         let (_, cipher) = FileCipher::create_with_kek(kek);
-        // A directory that was unprotected has no generations yet; the
-        // rewrite below gives it its first.
-        let vault = cipher.wrap_under_kek(kek, kdf, None);
-        let cipher = Arc::new(cipher);
-        // The vault first. It holds the only copy of the data key, and a
-        // reader takes a plain file as itself, so a crash between the two
-        // steps leaves a directory that still opens and that the next
-        // unlock finishes sealing. Written last, as it was before 0.10.1,
-        // the same crash left files encrypted under a key that had never
-        // been written down: every message, contact and key lost.
-        self.write_vault(&vault)?;
-        self.cipher = Some(cipher.clone());
-        self.recrypt_all(None, Some(&cipher)).context(
+        self.protect_fresh(
+            Arc::new(cipher),
+            |cipher, anchor| Ok(cipher.wrap_under_kek(kek, kdf, anchor)),
             "the data directory is now protected, but not every file could be encrypted; \
              the rest are sealed the next time it is unlocked",
+        )
+    }
+
+    /// Protect a directory that had no protection, under `cipher`, with
+    /// the vault `vault` makes for a given anchor.
+    ///
+    /// Three writes, in an order chosen so that a crash between any two
+    /// leaves a directory that opens. First the record, saying the
+    /// protection is unfinished: under the new key, and naming no file,
+    /// so a crash before the vault leaves an unprotected directory with a
+    /// record nothing reads, which the next protection replaces. Then the
+    /// vault, pointing at that record. It holds the only copy of the data
+    /// key; written last, as it was before 0.10.1, a crash left files
+    /// encrypted under a key that had never been written down -- every
+    /// message, contact and key lost. Then the files. A crash among them
+    /// leaves some plain and some sealed, which the next unlock finishes
+    /// because the record says it is to: plaintext in a protected
+    /// directory is accepted on that word and on nothing else. Until
+    /// 0.25.0 a cut-short protection was recognised by the anchor being
+    /// absent, which anybody who can write `vault.json` can arrange.
+    fn protect_fresh(
+        &mut self,
+        cipher: Arc<FileCipher>,
+        vault: impl FnOnce(&FileCipher, Option<u64>) -> anyhow::Result<VaultFile>,
+        cut_short: &'static str,
+    ) -> anyhow::Result<()> {
+        for name in [STATE_FILE, STATE_PREVIOUS_FILE] {
+            let path = self.root.join(name);
+            if path.exists() {
+                fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+            }
+        }
+        let unfinished = State {
+            unfinished: true,
+            ..State::default()
+        };
+        let record = serde_json::to_vec(&unfinished).context("encoding the file generations")?;
+        write_atomic(
+            &self.root.join(STATE_FILE),
+            &cipher.encrypt(STATE_FILE, &record),
         )?;
-        // Now that there is an AEAD to bind them into, the directory gets
-        // its generations; until this it had nowhere to keep them.
-        self.load_generations()
+        self.write_vault(&vault(&cipher, Some(unfinished.generation))?)?;
+        self.cipher = Some(cipher.clone());
+        self.recrypt_all(None, Some(&cipher)).context(cut_short)?;
+        self.load_generations()?;
+        if let Some(why) = self.generations().refusal() {
+            bail!("{why}");
+        }
+        Ok(())
     }
 
     /// Drop a key-encryption key made for a change that then failed.
@@ -1605,7 +1923,7 @@ impl Store {
                 let old_name = old
                     .keystore_name()
                     .context("the vault names no key store key")?;
-                self.add_pending(&old_name)?;
+                self.note_existing(&old_name)?;
                 let anchor = self.anchor();
                 self.rotate_key(&cipher, |c| {
                     c.wrap_under_passphrase(passphrase, kdf.clone(), anchor)
@@ -1622,16 +1940,16 @@ impl Store {
                 Ok(())
             }
             Protection::None => {
-                let (vault, cipher) = FileCipher::create(passphrase, kdf)?;
-                let cipher = Arc::new(cipher);
-                // The vault first; see `protect_with_keystore`.
-                self.write_vault(&vault)?;
-                self.cipher = Some(cipher.clone());
-                self.recrypt_all(None, Some(&cipher)).context(
+                let (mut vault, cipher) = FileCipher::create(passphrase, kdf)?;
+                self.protect_fresh(
+                    Arc::new(cipher),
+                    move |_, anchor| {
+                        vault.state_generation = anchor;
+                        Ok(vault)
+                    },
                     "the passphrase is set, but not every file could be encrypted; the rest \
                      are sealed the next time the directory is unlocked",
-                )?;
-                self.load_generations()
+                )
             }
         }
     }
@@ -1657,8 +1975,9 @@ impl Store {
         if crate::keystore::available() {
             let kdf = Kdf::keystore();
             let name = kdf.keystore_name();
-            self.add_pending(&name)?;
-            let kek = crate::keystore::create(&name)?;
+            let kek = crate::keystore::fresh_key();
+            self.add_pending(&name, &kek)?;
+            crate::keystore::put(&name, &kek)?;
             let anchor = self.anchor();
             let rotated =
                 self.rotate_key(&cipher, |c| Ok(c.wrap_under_kek(&kek, kdf.clone(), anchor)));
@@ -1715,7 +2034,7 @@ impl Store {
         // opening a copy of the directory taken while it was encrypted.
         let keystore_name = vault.keystore_name();
         if let Some(name) = &keystore_name {
-            self.add_pending(name)?;
+            self.note_existing(name)?;
         }
         fs::remove_file(self.root.join(VAULT_FILE)).context("removing vault.json")?;
         if let Some(name) = &keystore_name {
@@ -1756,7 +2075,6 @@ impl Store {
         let (index, output) = ask_security_key(&vault, auth)?;
         let cipher = FileCipher::unlock_with_security_key(&vault, index, &output)?;
         self.cipher = Some(Arc::new(cipher));
-        self.seal_stragglers()?;
         self.finish_rotation(&vault)?;
         self.load_generations()?;
         Ok(())
@@ -1830,17 +2148,12 @@ impl Store {
                 cipher.add_slot(&mut vault, &key);
                 self.write_vault(&vault)
             }
-            (Protection::None, Some(recovery)) => {
-                let cipher = Arc::new(FileCipher::fresh());
-                // The vault first; see `protect_with_keystore`.
-                self.write_vault(&cipher.wrap_slots(&[key, recovery], None))?;
-                self.cipher = Some(cipher.clone());
-                self.recrypt_all(None, Some(&cipher)).context(
-                    "the security key is enrolled, but not every file could be encrypted; the \
-                     rest are sealed the next time the directory is unlocked",
-                )?;
-                self.load_generations()
-            }
+            (Protection::None, Some(recovery)) => self.protect_fresh(
+                Arc::new(FileCipher::fresh()),
+                |cipher, anchor| Ok(cipher.wrap_slots(&[key, recovery], anchor)),
+                "the security key is enrolled, but not every file could be encrypted; the rest \
+                 are sealed the next time the directory is unlocked",
+            ),
             (_, Some(recovery)) => {
                 let cipher = self
                     .cipher
@@ -1850,7 +2163,7 @@ impl Store {
                 // taken out after it.
                 let old_name = vault.as_ref().and_then(VaultFile::keystore_name);
                 if let Some(name) = &old_name {
-                    self.add_pending(name)?;
+                    self.note_existing(name)?;
                 }
                 let anchor = self.anchor();
                 let slots = [key, recovery];
@@ -1952,15 +2265,16 @@ impl Store {
             else {
                 unreachable!("a security key slot");
             };
+            check_rp(rp_id)?;
             // A fresh salt: an output seen before opens nothing new.
             let salt = fresh_slot_salt();
             loop {
-                match auth.secret(rp_id, &[(credential_id, &salt)]) {
+                match auth.secret(SECURITY_KEY_RP, &[(credential_id, &salt)]) {
                     Ok((_, output)) => {
                         slots.push(SlotKey::security_key(
                             credential_id.clone(),
                             salt,
-                            rp_id,
+                            SECURITY_KEY_RP,
                             &slot.label,
                             &output,
                         ));
@@ -2002,10 +2316,12 @@ impl Store {
     /// Rewrite every file from one cipher to another (`None` = plaintext).
     ///
     /// A file already in the state it should be in is rewritten all the
-    /// same, so this is also how a directory is tidied after a protection
-    /// that a crash cut short: `from` reads a plain file as itself, so
-    /// running it with the same cipher on both sides seals whatever was
-    /// left in the clear.
+    /// same, so this is also how a rotation a crash cut short is finished,
+    /// with the same cipher on both sides. From a cipher, a file in the
+    /// clear is refused: in a protected directory it is not one this
+    /// client wrote, and sealing it would make it so. Until 0.25.0 it was
+    /// sealed, which is how a plaintext `config.json` or `blocked.json`
+    /// dropped into the directory became one the client vouched for.
     fn recrypt_all(
         &self,
         from: Option<&FileCipher>,
@@ -2033,11 +2349,15 @@ impl Store {
             // Keeps whichever generation the file already carries: a
             // rotation changes the key, not what was written.
             let (generation, plain) = match from {
-                Some(c) if FileCipher::is_encrypted(&bytes) => {
+                Some(_) if !FileCipher::is_encrypted(&bytes) => bail!(
+                    "{name} is in the clear in a directory protected at rest, so it is not \
+                     something this client wrote; nothing has been changed"
+                ),
+                Some(c) => {
                     let opened = c.open_file(name, &bytes)?;
-                    (opened.generation, opened.plain.to_vec())
+                    (opened.generation, opened.plain)
                 }
-                _ => (None, decode_file(from, name, &bytes)?),
+                None => (None, Zeroizing::new(decode_file(None, name, &bytes)?)),
             };
             let out = match (to, generation) {
                 (Some(c), Some(at)) => c.encrypt_at(name, at, &plain),
@@ -2048,26 +2368,37 @@ impl Store {
         // The record of those generations moves with them, or the new key
         // would open every file and not the one that says which version of
         // each is the right one. Bound to its name alone, so it needs no
-        // generation of its own here.
-        let state_path = self.root.join(STATE_FILE);
-        if state_path.exists() {
-            let bytes = fs::read(&state_path)?;
-            let plain = decode_file(from, STATE_FILE, &bytes)?;
-            match to {
-                Some(c) => write_atomic(&state_path, &c.encrypt(STATE_FILE, &plain))?,
-                // Going back to plaintext: there is nothing to bind a
-                // generation into any more, so the record goes with the
-                // encryption rather than being left readable.
-                None => {
-                    for name in [STATE_FILE, STATE_PREVIOUS_FILE] {
-                        let path = self.root.join(name);
-                        if path.exists() {
-                            fs::remove_file(&path)?;
+        // generation of its own here. Its previous version moves too: it
+        // is what an interrupted write falls back to, and under the old
+        // key it would open for nobody once that key is dropped. A fresh
+        // protection (`from` is `None`) wrote its record under the new key
+        // just before, and there is nothing to move.
+        if let Some(from) = from {
+            for name in [STATE_FILE, STATE_PREVIOUS_FILE] {
+                let path = self.root.join(name);
+                if !path.exists() {
+                    continue;
+                }
+                match to {
+                    Some(c) => {
+                        let bytes = fs::read(&path)?;
+                        match from.decrypt(STATE_FILE, &bytes) {
+                            Ok(plain) => write_atomic(&path, &c.encrypt(STATE_FILE, &plain))?,
+                            Err(e) if name == STATE_FILE => return Err(e),
+                            // Only ever a fallback, and one that would
+                            // never open again: dropped rather than let it
+                            // stop the move.
+                            Err(_) => fs::remove_file(&path)?,
                         }
                     }
-                    *self.generations.lock().unwrap_or_else(|e| e.into_inner()) =
-                        Generations::Unbound;
+                    // Going back to plaintext: there is nothing to bind a
+                    // generation into any more, so the record goes with
+                    // the encryption rather than being left readable.
+                    None => fs::remove_file(&path)?,
                 }
+            }
+            if to.is_none() {
+                *self.generations.lock().unwrap_or_else(|e| e.into_inner()) = Generations::Unbound;
             }
         }
         // Files received while `encrypted_downloads` was on are bound to
@@ -2075,9 +2406,18 @@ impl Store {
         // beside plain ones, which stay as they are. On the way out they
         // are decrypted, since the key is about to be gone; on a rotation
         // they move onto the new key with everything else, or they would
-        // be the one thing left behind when the old key is dropped.
+        // be the one thing left behind when the old key is dropped. One
+        // received before downloads had a shape of their own is moved into
+        // it on the way.
+        //
+        // What a received file begins with is the sender's to choose, so
+        // one that looks encrypted and does not open is a plain file that
+        // happens to, and is left alone. It used to stop the whole pass,
+        // and with it every change of protection, for good.
         let downloads = self.downloads_dir();
-        if (from.is_some() || to.is_some()) && downloads.exists() {
+        if let Some(from) = from
+            && downloads.exists()
+        {
             for entry in fs::read_dir(&downloads)? {
                 let path = entry?.path();
                 if !path.is_file() {
@@ -2087,11 +2427,23 @@ impl Store {
                     continue;
                 };
                 let bytes = fs::read(&path)?;
-                if !FileCipher::is_encrypted(&bytes) {
+                if !FileCipher::is_encrypted_download(&bytes) {
                     continue;
                 }
-                let plain = decode_file(from, name, &bytes)?;
-                write_atomic(&path, &encode_file(to, name, &plain))?;
+                let plain = match from.decrypt_download(name, &bytes) {
+                    Ok(plain) => plain,
+                    Err(e) => {
+                        tracing::warn!(
+                            "a received file begins like one written under the data key and does \
+                             not open as one; it is left as it is: {e:#}"
+                        );
+                        continue;
+                    }
+                };
+                match to {
+                    Some(c) => write_atomic(&path, &c.encrypt_download(name, &plain))?,
+                    None => write_atomic(&path, &plain)?,
+                }
             }
         }
         for entry in fs::read_dir(self.root.join(HISTORY_DIR))? {
@@ -2133,24 +2485,49 @@ impl Store {
 
     // --- files ---------------------------------------------------------------
 
-    fn read_file(&self, name: &str) -> anyhow::Result<Option<Vec<u8>>> {
+    /// One of the store's files whole, decrypted, in memory that is
+    /// wiped when it goes: `identity.json` and the session state pass
+    /// through here.
+    ///
+    /// `None` for a file that was never written. In a bound directory a
+    /// file the record names and that is not there was not "never
+    /// written" but deleted by somebody else, since this client records
+    /// every removal it makes, and it is refused: read as absent, a
+    /// deleted `blocked.json` unblocked everybody, a deleted
+    /// `transparency.json` started the relay's key log over, and a
+    /// deleted `identity.json` had a new identity made in its place.
+    fn read_file(&self, name: &str) -> anyhow::Result<Option<Zeroizing<Vec<u8>>>> {
         self.ensure_unlocked()?;
         let path = self.root.join(name);
+        let generations = self.generations();
+        if self.cipher.is_some()
+            && let Some(why) = generations.refusal()
+        {
+            bail!("{why}");
+        }
         if !path.exists() {
+            if self.cipher.is_some() && generations.state().is_some_and(|s| s.records(name)) {
+                bail!(
+                    "{name} is missing, but this directory wrote it and never removed it: it has \
+                     been deleted, and is not read as though it had never existed. Nothing has \
+                     been read in its place. If it is gone for good, `silver \
+                     --reset-rollback-protection` starts the record again from what is on disk."
+                );
+            }
             return Ok(None);
         }
         let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
         let Some(cipher) = self.cipher.as_deref() else {
-            return Ok(Some(decode_file(None, name, &bytes)?));
+            return Ok(Some(Zeroizing::new(decode_file(None, name, &bytes)?)));
         };
         if !FileCipher::is_encrypted(&bytes) {
-            // Left plain by a protection a crash cut short; `seal_stragglers`
-            // takes care of it, and until then it reads as itself.
-            return Ok(Some(bytes));
-        }
-        let generations = self.generations();
-        if let Some(why) = generations.refusal() {
-            bail!("{why}");
+            // A protection a crash cut short is finished at the unlock,
+            // on the record's word, before anything is read; there is no
+            // plaintext left by this client after that.
+            bail!(
+                "{name} is in the clear in a directory protected at rest, so it is not something \
+                 this client wrote. Nothing has been read from it."
+            );
         }
         let opened = cipher.open_file(name, &bytes)?;
         // The generation the file carries is its own -- it is bound into
@@ -2174,7 +2551,7 @@ impl Store {
                 );
             }
         }
-        Ok(Some(opened.plain.to_vec()))
+        Ok(Some(opened.plain))
     }
 
     /// Write one of the store's files whole. Every one of them is
@@ -2275,9 +2652,12 @@ impl Store {
         self.write_file(name, &bytes)
     }
 
-    /// A private file's bytes, if it exists.
+    /// A private file's bytes, if it exists. Moved out of the wiped
+    /// buffer rather than copied, so there is never a second copy.
     pub(crate) fn read_private_file(&self, name: &str) -> anyhow::Result<Option<Vec<u8>>> {
-        self.read_file(name)
+        Ok(self
+            .read_file(name)?
+            .map(|mut bytes| std::mem::take(&mut *bytes)))
     }
 
     pub(crate) fn write_private_file(&self, name: &str, bytes: &[u8]) -> anyhow::Result<()> {
@@ -2295,7 +2675,7 @@ impl Store {
             return Ok((Identity::from_secrets(&secrets), false));
         }
         let identity = Identity::generate();
-        let text = serde_json::to_string_pretty(&identity.to_secrets())?;
+        let text = Zeroizing::new(serde_json::to_string_pretty(&identity.to_secrets())?);
         self.write_file(IDENTITY_FILE, text.as_bytes())?;
         Ok((identity, true))
     }
@@ -2364,7 +2744,7 @@ impl Store {
                 object.remove("linked");
             }
         }
-        let text = serde_json::to_string_pretty(&file)?;
+        let text = Zeroizing::new(serde_json::to_string_pretty(&file)?);
         self.write_file(IDENTITY_FILE, text.as_bytes())
     }
 
@@ -2382,7 +2762,7 @@ impl Store {
 
     /// Overwrite the identity, e.g. when restoring a backup.
     pub fn save_identity(&self, identity: &Identity) -> anyhow::Result<()> {
-        let text = serde_json::to_string_pretty(&identity.to_secrets())?;
+        let text = Zeroizing::new(serde_json::to_string_pretty(&identity.to_secrets())?);
         self.write_file(IDENTITY_FILE, text.as_bytes())
     }
 
@@ -2442,7 +2822,16 @@ impl Store {
     }
 
     /// Delete prekeys and sessions, e.g. when the identity is replaced.
+    ///
+    /// In a bound directory they are written empty instead, through the
+    /// same write as everything else. Removing a file the record names
+    /// would be read as somebody deleting it, and the old contents go all
+    /// the same: the empty file is renamed over them.
     pub fn clear_sessions(&self) -> anyhow::Result<()> {
+        if self.cipher.is_some() && self.generations().state().is_some() {
+            self.save_prekeys(&PrekeyFile::default())?;
+            return self.save_sessions(&SessionsFile::default());
+        }
         for name in [PREKEYS_FILE, SESSIONS_FILE] {
             let path = self.root.join(name);
             if path.exists() {
@@ -2469,7 +2858,7 @@ impl Store {
         // through still has the key taken out on the next start rather than
         // leaving it beside whatever copy was made first.
         if let Some(name) = &keystore_entry {
-            let _ = self.add_pending(name);
+            let _ = self.note_existing(name);
         }
         // `silver.log` goes with the rest. It is written only when
         // SILVER_LOG asks for it, it is outside the data key, and at
@@ -2508,14 +2897,46 @@ impl Store {
                 }
             }
         }
+        // What a write a crash interrupted leaves beside its file
+        // (`<name>.<pid>.tmp`): a whole copy of whichever file it was,
+        // `identity.json` included.
+        for dir in [self.root.clone(), history] {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries {
+                let path = entry?.path();
+                if path.is_file() && is_write_leftover(&path) {
+                    fs::remove_file(&path)
+                        .with_context(|| format!("removing {}", path.display()))?;
+                }
+            }
+        }
+        // The update waiting to be put in place and the version an update
+        // replaced: neither is the identity's, but a device that has just
+        // been erased should not be left holding a program somebody else
+        // could have put there for it to run.
+        let update = self.root.join(UPDATE_DIR);
+        if update.exists() {
+            fs::remove_dir_all(&update)
+                .with_context(|| format!("removing {}", update.display()))?;
+        }
+        *self.generations.lock().unwrap_or_else(|e| e.into_inner()) = Generations::Unbound;
         // Last, so that a failure earlier leaves a directory whose key is
         // still where its vault says. A key store that cannot be reached
-        // is not worth failing the wipe over: the files are already gone.
-        if let Some(name) = keystore_entry
-            && crate::keystore::delete(&name).is_ok()
-        {
-            self.clear_pending(&name);
-        }
+        // is not worth failing the wipe over: the files are already gone,
+        // and the note naming the key is then the one thing kept, so the
+        // next start tries again rather than forget the key exists.
+        let kept = match keystore_entry {
+            Some(name) => crate::keystore::delete(&name).is_err().then_some(name),
+            None => None,
+        };
+        let notes: Vec<PendingNote> = self
+            .read_pending()
+            .into_iter()
+            .filter(|note| Some(&note.name) == kept.as_ref())
+            .collect();
+        self.write_pending(&notes)?;
         Ok(())
     }
 
@@ -2759,8 +3180,12 @@ impl Store {
         }
         out.flush()?;
         drop(out);
-        fs::remove_file(&old_path).with_context(|| format!("removing {}", old_path.display()))?;
+        // Forgotten before it goes: a file the record holds and the disk
+        // does not is read as deleted by somebody else, so a crash between
+        // the two must leave the file without its record, not the record
+        // without its file.
         self.forget_history_file(&old_name)?;
+        fs::remove_file(&old_path).with_context(|| format!("removing {}", old_path.display()))?;
         self.note_history_write(&new_name, &Conversation::Contact(*new))
     }
 
@@ -2783,12 +3208,23 @@ impl Store {
     fn read_history_lines(&self, name: &str) -> anyhow::Result<Vec<Result<HistoryLine, String>>> {
         self.ensure_unlocked()?;
         let path = self.root.join(name);
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
         let generations = self.generations();
-        if let Some(why) = generations.refusal() {
+        if self.cipher.is_some()
+            && let Some(why) = generations.refusal()
+        {
             bail!("{why}");
+        }
+        if !path.exists() {
+            // As for a whole file in `read_file`: a conversation the
+            // record holds and the disk does not was deleted by somebody
+            // else, not never started.
+            if self.cipher.is_some() && generations.state().is_some_and(|s| s.records(name)) {
+                bail!(
+                    "a conversation log this directory wrote and never removed is missing: it \
+                     has been deleted, and is not read as an empty conversation."
+                );
+            }
+            return Ok(Vec::new());
         }
         let text =
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
@@ -3269,24 +3705,32 @@ fn encode_file(cipher: Option<&FileCipher>, name: &str, plain: &[u8]) -> Vec<u8>
 /// line after a change of length is at an offset it was not written at.
 /// A line's own offset is what an append knows without reading the file,
 /// which is why it is the offset and not the line's ordinal.
+///
+/// With a cipher, a line in the clear is refused. It is not one this
+/// client wrote: a protection a crash cut short is finished at the unlock
+/// on the record's word (`Store::adopt_history`), before anything reads a
+/// conversation. Until 0.25.0 such a line was read as itself, so somebody
+/// who could write the directory could add messages to an encrypted
+/// conversation, with the record intact, by writing them in plain JSON.
 fn decode_line(
     cipher: Option<&FileCipher>,
     name: &str,
     at: u64,
     line: &str,
 ) -> anyhow::Result<String> {
-    if line.starts_with(LINE_PREFIX) {
-        match cipher {
-            Some(c) => c.decrypt_line_at(name, Some(at), line).or_else(|e| {
-                // Written before offsets were bound in. A directory that
-                // still holds such lines is one this version has not
-                // rewritten yet.
-                c.decrypt_line(name, line).map_err(|_| e)
-            }),
-            None => bail!("{name} is encrypted but the data directory is not unlocked"),
-        }
-    } else {
-        Ok(line.to_owned())
+    match (cipher, line.starts_with(LINE_PREFIX)) {
+        (Some(c), true) => c.decrypt_line_at(name, Some(at), line).or_else(|e| {
+            // Written before offsets were bound in. A directory that
+            // still holds such lines is one this version has not
+            // rewritten yet.
+            c.decrypt_line(name, line).map_err(|_| e)
+        }),
+        (Some(_), false) => bail!(
+            "a line of {name} is in the clear in a directory protected at rest, so it is not one \
+             this client wrote"
+        ),
+        (None, true) => bail!("{name} is encrypted but the data directory is not unlocked"),
+        (None, false) => Ok(line.to_owned()),
     }
 }
 
@@ -3311,16 +3755,6 @@ fn lines_with_offsets(text: &str) -> impl Iterator<Item = (u64, &str)> {
     })
 }
 
-/// The first few bytes of a file, for telling an encrypted one from a
-/// plain one without reading it all.
-fn head_of(path: &Path) -> std::io::Result<Vec<u8>> {
-    use std::io::Read as _;
-    let mut file = File::open(path)?;
-    let mut head = [0u8; 8];
-    let read = file.read(&mut head)?;
-    Ok(head[..read].to_vec())
-}
-
 /// Whether `file` is empty or ends with a newline. Reads the last byte;
 /// an append goes to the end whatever the position after.
 fn ends_with_newline(file: &mut File) -> std::io::Result<bool> {
@@ -3338,9 +3772,21 @@ fn ends_with_newline(file: &mut File) -> std::io::Result<bool> {
 /// writes goes through here: what is in the data directory is nobody
 /// else's business even when it is encrypted, and on a machine with no
 /// key store and no passphrase it is not encrypted at all.
+///
+/// Always a new file. Whatever is at `path` is removed first and the file
+/// is created exclusively, so the mode asked for is the mode it gets.
+/// Opening an existing file to truncate it, as this did until 0.25.0,
+/// kept that file's owner and mode -- a backup written over a file
+/// somebody else had made readable was readable to them -- and followed
+/// a symbolic link put where a temporary file was about to go.
 pub(crate) fn create_private(path: &Path) -> anyhow::Result<File> {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("replacing {}", path.display())),
+    }
     let mut opts = OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
+    opts.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -3348,6 +3794,19 @@ pub(crate) fn create_private(path: &Path) -> anyhow::Result<File> {
     }
     opts.open(path)
         .with_context(|| format!("creating {}", path.display()))
+}
+
+/// Whether `path` is what [`write_atomic`] writes before its rename:
+/// `<name>.<digits>.tmp`.
+fn is_write_leftover(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let Some(rest) = name.strip_suffix(".tmp") else {
+        return false;
+    };
+    rest.rsplit_once('.')
+        .is_some_and(|(_, pid)| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Open a file to append to, readable, owner-only on Unix, created if it
@@ -3502,6 +3961,14 @@ mod tests {
         fs::set_permissions(&theirs, fs::Permissions::from_mode(0o755)).unwrap();
         create_private_dir(&theirs, Some("identity.json")).unwrap();
         assert_eq!(mode(&theirs), 0o755);
+
+        // One `silver update` made before the first start, holding only
+        // the update it downloaded, is ours all the same.
+        let early = dir.path().join("early");
+        fs::create_dir_all(early.join(UPDATE_DIR)).unwrap();
+        fs::set_permissions(&early, fs::Permissions::from_mode(0o755)).unwrap();
+        Store::open(&early).unwrap();
+        assert_eq!(mode(&early), 0o700, "a directory an update made first");
     }
 
     /// A crash in the middle of a key rotation leaves both keys in the
@@ -3520,7 +3987,7 @@ mod tests {
         let old = store.cipher().unwrap();
         let rotating = Arc::new(old.rotating());
         let vault = rotating
-            .wrap_under_passphrase("first", Kdf::fast(), None)
+            .wrap_under_passphrase("first", Kdf::fast(), store.anchor())
             .unwrap();
         store.write_vault(&vault).unwrap();
         assert!(store.read_vault().unwrap().unwrap().previous_key.is_some());
@@ -3809,32 +4276,50 @@ mod tests {
         );
     }
 
-    /// A directory written by a version before any of this still opens,
-    /// and comes out the other side bound.
-    #[test]
-    fn a_directory_without_generations_adopts_them_on_the_next_unlock() {
-        let (store, dir) = bound_store();
-        let peer = Identity::generate();
-        store
-            .save_contacts(&[Contact::new(peer.user_id())])
-            .unwrap();
-
-        // Put the directory back into the shape an older version wrote:
-        // files bound to their names alone, and no anchor.
+    /// Put a bound, key-store-protected directory back into the shape a
+    /// client from before the record wrote: every file bound to its name
+    /// alone, no `state`, and a version 1 vault with no anchor.
+    fn make_unbound(store: &Store, dir: &Path) {
         let cipher = store.cipher.clone().unwrap();
         for name in recrypted_files() {
-            let path = dir.path().join(name);
+            let path = dir.join(name);
             if !path.exists() {
                 continue;
             }
             let opened = cipher.open_file(name, &fs::read(&path).unwrap()).unwrap();
             fs::write(&path, cipher.encrypt(name, &opened.plain)).unwrap();
         }
-        let mut vault = store.read_vault().unwrap().unwrap();
-        vault.state_generation = None;
-        store.write_vault(&vault).unwrap();
-        fs::remove_file(dir.path().join(STATE_FILE)).unwrap();
-        let _ = fs::remove_file(dir.path().join(STATE_PREVIOUS_FILE));
+        fs::remove_file(dir.join(STATE_FILE)).unwrap();
+        let _ = fs::remove_file(dir.join(STATE_PREVIOUS_FILE));
+        fs::write(dir.join(VAULT_FILE), unbound_vault(store)).unwrap();
+    }
+
+    /// The version 1 vault, with no anchor, that a client from before
+    /// 0.25.0 wrote for the directory `store` is.
+    fn unbound_vault(store: &Store) -> String {
+        let vault = store.read_vault().unwrap().unwrap();
+        let name = vault.keystore_name().unwrap();
+        let kek = crate::keystore::load(&name).unwrap().unwrap();
+        let unbound = store
+            .cipher
+            .clone()
+            .unwrap()
+            .wrap_unbound(&kek, vault.kdf.clone().unwrap());
+        serde_json::to_string(&unbound).unwrap()
+    }
+
+    /// A directory written by a version before any of this still opens,
+    /// comes out the other side bound, and has its vault rewritten so
+    /// that it says so.
+    #[test]
+    fn a_directory_from_before_the_record_adopts_it_on_the_next_unlock() {
+        let (store, dir) = bound_store();
+        let peer = Identity::generate();
+        store
+            .save_contacts(&[Contact::new(peer.user_id())])
+            .unwrap();
+        make_unbound(&store, dir.path());
+        assert_eq!(store.read_vault().unwrap().unwrap().version, 1);
 
         let mut again = Store::open(dir.path()).unwrap();
         again.unlock_with_keystore().unwrap();
@@ -3843,14 +4328,15 @@ mod tests {
             1,
             "an older directory should still be readable"
         );
+        let vault = again.read_vault().unwrap().unwrap();
         assert!(
-            again
-                .read_vault()
-                .unwrap()
-                .unwrap()
-                .state_generation
-                .is_some(),
+            vault.state_generation.is_some(),
             "it should be bound afterwards"
+        );
+        assert_eq!(
+            vault.version,
+            crate::vault::BOUND_VAULT_VERSION,
+            "the vault should say so, where the anchor cannot be taken from it"
         );
         // And bound means bound: the same rollback is refused now.
         let path = dir.path().join(CONTACTS_FILE);
@@ -3861,6 +4347,226 @@ mod tests {
             again.load_contacts().is_err(),
             "adoption should leave the directory actually protected"
         );
+        // A second unlock finds nothing left to do.
+        let mut third = Store::open(dir.path()).unwrap();
+        third.unlock_with_keystore().unwrap();
+        assert!(third.generations().state().is_some());
+    }
+
+    /// H7: the anchor is plaintext, and taking it out of `vault.json` used
+    /// to make the next unlock adopt every file as it stood -- an older
+    /// copy put back, or one overwritten with plaintext JSON, which was
+    /// sealed first. The vault's own wrap says the directory keeps a
+    /// record, so a missing anchor is refused, and relabelling the vault
+    /// as one from before the record makes it not open at all.
+    #[test]
+    fn taking_the_anchor_out_is_refused_rather_than_adopted() {
+        let (store, dir) = bound_store();
+        let peer = Identity::generate();
+        store
+            .save_contacts(&[Contact::new(peer.user_id())])
+            .unwrap();
+        let contacts = dir.path().join(CONTACTS_FILE);
+        let older = fs::read(&contacts).unwrap();
+        store.save_contacts(&[]).unwrap();
+
+        fs::write(&contacts, &older).unwrap();
+        let config = dir.path().join(CONFIG_FILE);
+        fs::write(&config, br#"{"relay":"wss://somebody-else.example"}"#).unwrap();
+        fs::write(dir.path().join(BLOCKED_FILE), b"[]").unwrap();
+        let mut vault = store.read_vault().unwrap().unwrap();
+        vault.state_generation = None;
+        store.write_vault(&vault).unwrap();
+
+        let mut again = Store::open(dir.path()).unwrap();
+        again.unlock_with_keystore().unwrap();
+        for err in [
+            again.load_contacts().unwrap_err(),
+            again.load_config().unwrap_err(),
+            again.load_blocked().unwrap_err(),
+        ] {
+            assert!(
+                err.to_string().contains("taken out"),
+                "a directory with its anchor taken out was opened: {err}"
+            );
+        }
+        assert!(again.save_contacts(&[]).is_err());
+        assert!(
+            !FileCipher::is_encrypted(&fs::read(&config).unwrap()),
+            "the plaintext dropped in was sealed as though this client had written it"
+        );
+
+        // The anchor alone, nothing else changed: still refused.
+        vault.version = 1;
+        store.write_vault(&vault).unwrap();
+        let mut relabelled = Store::open(dir.path()).unwrap();
+        assert!(
+            relabelled.unlock_with_keystore().is_err(),
+            "a version 3 vault called version 1 must not open"
+        );
+    }
+
+    /// The other way to make a bound directory look like one from before
+    /// the record: put back a version 1 vault from before it was rewritten
+    /// (the data key has not changed since). The record and the files say
+    /// otherwise, and nothing is adopted.
+    #[test]
+    fn an_older_vault_put_back_over_a_bound_directory_is_not_adopted() {
+        let (store, dir) = bound_store();
+        store.save_contacts(&[]).unwrap();
+        fs::write(dir.path().join(VAULT_FILE), unbound_vault(&store)).unwrap();
+
+        let mut again = Store::open(dir.path()).unwrap();
+        again.unlock_with_keystore().unwrap();
+        let err = again.load_contacts().unwrap_err().to_string();
+        assert!(err.contains("state is there"), "{err}");
+
+        // Without `state` either: the files are at generations.
+        fs::remove_file(dir.path().join(STATE_FILE)).unwrap();
+        let _ = fs::remove_file(dir.path().join(STATE_PREVIOUS_FILE));
+        let mut third = Store::open(dir.path()).unwrap();
+        third.unlock_with_keystore().unwrap();
+        let err = third.load_contacts().unwrap_err().to_string();
+        assert!(err.contains("written at a generation"), "{err}");
+        assert!(
+            third
+                .read_vault()
+                .unwrap()
+                .unwrap()
+                .state_generation
+                .is_none(),
+            "nothing was adopted"
+        );
+    }
+
+    /// A record that says a protection is unfinished lets plaintext in, so
+    /// it must not be one that can be put back later: it is at generation
+    /// 0, and a directory that has been written since holds files further
+    /// on than an unfinished protection leaves.
+    #[test]
+    fn an_unfinished_record_put_back_later_is_refused() {
+        let (store, dir) = bound_store();
+        for _ in 0..3 {
+            store.save_contacts(&[]).unwrap();
+        }
+        let cipher = store.cipher.clone().unwrap();
+        let unfinished = State {
+            unfinished: true,
+            ..State::default()
+        };
+        fs::write(
+            dir.path().join(STATE_FILE),
+            cipher.encrypt(STATE_FILE, &serde_json::to_vec(&unfinished).unwrap()),
+        )
+        .unwrap();
+        let _ = fs::remove_file(dir.path().join(STATE_PREVIOUS_FILE));
+        let mut vault = store.read_vault().unwrap().unwrap();
+        vault.state_generation = Some(0);
+        store.write_vault(&vault).unwrap();
+        fs::write(dir.path().join(BLOCKED_FILE), b"[]").unwrap();
+
+        let mut again = Store::open(dir.path()).unwrap();
+        again.unlock_with_keystore().unwrap();
+        let err = again.load_contacts().unwrap_err().to_string();
+        assert!(err.contains("older copy put back"), "{err}");
+        assert!(
+            !FileCipher::is_encrypted(&fs::read(dir.path().join(BLOCKED_FILE)).unwrap()),
+            "the plaintext was sealed on the word of a record put back"
+        );
+    }
+
+    /// M3: a line in the clear in an encrypted conversation, with the
+    /// record intact, is not a message. It was read as one.
+    #[test]
+    fn a_plaintext_line_in_an_encrypted_conversation_is_not_read() {
+        let (store, dir) = bound_store();
+        let peer = Identity::generate().user_id();
+        store.append_history(&peer, &entry(0)).unwrap();
+        let path = dir
+            .path()
+            .join(store.history_file(&Conversation::Contact(peer)));
+        let forged = serde_json::to_string(&entry(1)).unwrap();
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(format!("{forged}\n").as_bytes()).unwrap();
+        drop(file);
+
+        let ids: Vec<String> = store
+            .load_history(&peer)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec![entry(0).id],
+            "a plaintext line was read as a message"
+        );
+        // At the head of a file, where the old check looked, too.
+        let other = Identity::generate().user_id();
+        store.append_history(&other, &entry(2)).unwrap();
+        let path = dir
+            .path()
+            .join(store.history_file(&Conversation::Contact(other)));
+        let text = fs::read_to_string(&path).unwrap();
+        fs::write(&path, format!("{forged}\n{text}")).unwrap();
+        let mut again = Store::open(dir.path()).unwrap();
+        again.unlock_with_keystore().unwrap();
+        assert!(
+            again
+                .load_history(&other)
+                .map(|h| h.iter().all(|e| e.id != entry(1).id))
+                .unwrap_or(true),
+            "a plaintext line at the head of a file was read as a message"
+        );
+        assert!(
+            fs::read_to_string(&path).unwrap().starts_with(&forged),
+            "the unlock sealed a line nobody had vouched for"
+        );
+    }
+
+    /// A file the record names that is not on disk was deleted by
+    /// somebody else, and is refused rather than read as never written:
+    /// `blocked.json` gone unblocked everybody, `transparency.json` gone
+    /// started the relay's key log over, `identity.json` gone minted a new
+    /// identity. A file that was never written still reads as absent, and
+    /// what the client removes itself it records.
+    #[test]
+    fn a_recorded_file_deleted_is_refused_and_a_new_one_is_not() {
+        let (store, dir) = bound_store();
+        assert!(store.load_blocked().unwrap().is_empty(), "never written");
+        let peer = Identity::generate().user_id();
+        store.save_blocked(&[peer]).unwrap();
+        store.append_history(&peer, &entry(0)).unwrap();
+        crate::transparency::LogStore::load(&store)
+            .unwrap()
+            .confirm(7);
+        store.save_sessions(&SessionsFile::default()).unwrap();
+        store.clear_sessions().unwrap();
+        assert!(store.load_sessions().is_ok(), "the client's own removal");
+
+        let history = dir
+            .path()
+            .join(store.history_file(&Conversation::Contact(peer)));
+        for name in [BLOCKED_FILE, TRANSPARENCY_FILE, IDENTITY_FILE] {
+            fs::remove_file(dir.path().join(name)).unwrap();
+        }
+        fs::remove_file(&history).unwrap();
+        let mut again = Store::open(dir.path()).unwrap();
+        again.unlock_with_keystore().unwrap();
+        assert!(
+            again
+                .load_blocked()
+                .unwrap_err()
+                .to_string()
+                .contains("deleted")
+        );
+        assert!(crate::transparency::LogStore::load(&again).is_err());
+        assert!(again.load_or_create_identity().is_err());
+        assert!(
+            !dir.path().join(IDENTITY_FILE).exists(),
+            "a new identity was made in place of a deleted one"
+        );
+        assert!(again.load_history(&peer).is_err());
     }
 
     /// Two files are written by code of their own, bound to their names
@@ -3872,7 +4578,6 @@ mod tests {
     #[test]
     fn the_replayed_log_and_the_outbox_survive_adoption() {
         let (store, dir) = bound_store();
-        let cipher = store.cipher.clone().unwrap();
         let log_path = dir.path().join(TRANSPARENCY_FILE);
         let outbox_path = dir.path().join(OUTBOX_FILE);
         crate::transparency::LogStore::load(&store)
@@ -3882,19 +4587,7 @@ mod tests {
         store.write_private_file(OUTBOX_FILE, b"[]").unwrap();
 
         // Back to the shape an older version wrote, as above.
-        for name in recrypted_files() {
-            let path = dir.path().join(name);
-            if !path.exists() {
-                continue;
-            }
-            let opened = cipher.open_file(name, &fs::read(&path).unwrap()).unwrap();
-            fs::write(&path, cipher.encrypt(name, &opened.plain)).unwrap();
-        }
-        let mut vault = store.read_vault().unwrap().unwrap();
-        vault.state_generation = None;
-        store.write_vault(&vault).unwrap();
-        fs::remove_file(dir.path().join(STATE_FILE)).unwrap();
-        let _ = fs::remove_file(dir.path().join(STATE_PREVIOUS_FILE));
+        make_unbound(&store, dir.path());
 
         let mut again = Store::open(dir.path()).unwrap();
         again.unlock_with_keystore().unwrap();
@@ -4327,8 +5020,9 @@ mod tests {
         let kdf = Kdf::keystore();
         let name = kdf.keystore_name();
         let store = Store::open(dir.path()).unwrap();
-        store.add_pending(&name).unwrap();
-        crate::keystore::create(&name).unwrap();
+        let kek = crate::keystore::fresh_key();
+        store.add_pending(&name, &kek).unwrap();
+        crate::keystore::put(&name, &kek).unwrap();
         drop(store);
         assert!(dir.path().join(PENDING_FILE).exists());
 
@@ -4352,7 +5046,7 @@ mod tests {
             .unwrap()
             .keystore_name()
             .unwrap();
-        store.add_pending(&live).unwrap();
+        store.note_existing(&live).unwrap();
         drop(store);
         let store = Store::open(dir.path()).unwrap();
         assert!(
@@ -4380,7 +5074,7 @@ mod tests {
             .unwrap()
             .keystore_name()
             .unwrap();
-        store.add_pending(&name).unwrap();
+        store.note_existing(&name).unwrap();
         drop(store);
 
         // Not absent -- unreadable. Absent means "no protection", which is
@@ -4417,7 +5111,7 @@ mod tests {
             .unwrap();
 
         // Stop after the vault is gone but before the key is.
-        store.add_pending(&name).unwrap();
+        store.note_existing(&name).unwrap();
         fs::remove_file(dir.path().join(VAULT_FILE)).unwrap();
         drop(store);
         assert!(crate::keystore::load(&name).unwrap().is_some());
@@ -4429,6 +5123,187 @@ mod tests {
         );
         drop(store);
         drop(dir);
+    }
+
+    /// `vault.pending` is plaintext and read before any unlock, so a note
+    /// in it is only a claim. A bare name, as written before 0.25.0, and a
+    /// note genuine in another data directory both name a key that is not
+    /// this installation's to delete on their word, and neither is
+    /// deleted; the same note in the directory that wrote it is acted on.
+    #[test]
+    fn a_note_nobody_here_wrote_never_costs_a_key() {
+        crate::keystore::use_mock_store();
+        let dir = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let name = Kdf::keystore().keystore_name();
+        let kek = crate::keystore::create(&name).unwrap();
+
+        fs::write(
+            dir.path().join(PENDING_FILE),
+            serde_json::to_string(&[&name]).unwrap(),
+        )
+        .unwrap();
+        drop(Store::open(dir.path()).unwrap());
+        assert!(
+            crate::keystore::load(&name).unwrap().is_some(),
+            "a bare name in vault.pending took a key out of the key store"
+        );
+        assert!(!dir.path().join(PENDING_FILE).exists());
+
+        let elsewhere = Store::open(other.path()).unwrap();
+        elsewhere.add_pending(&name, &kek).unwrap();
+        fs::copy(
+            other.path().join(PENDING_FILE),
+            dir.path().join(PENDING_FILE),
+        )
+        .unwrap();
+        drop(Store::open(dir.path()).unwrap());
+        assert!(
+            crate::keystore::load(&name).unwrap().is_some(),
+            "a note copied from another directory took its key out"
+        );
+
+        drop(elsewhere);
+        drop(Store::open(other.path()).unwrap());
+        assert!(
+            crate::keystore::load(&name).unwrap().is_none(),
+            "the directory that wrote the note settles it"
+        );
+    }
+
+    /// What a received file begins with is the sender's to choose. One
+    /// that begins like ciphertext used to stop every change of
+    /// protection; it is left alone now, and the files that are encrypted
+    /// move with the key, the ones received in the old shape into the
+    /// new one.
+    #[test]
+    fn a_received_file_that_looks_encrypted_does_not_stop_a_change_of_protection() {
+        crate::keystore::use_mock_store();
+        let (mut store, dir) = temp_store();
+        store.load_or_create_identity().unwrap();
+        let downloads = store.downloads_dir();
+        fs::create_dir_all(&downloads).unwrap();
+        let mut lookalike = crate::vault::FILE_MAGIC.to_vec();
+        lookalike.extend_from_slice(b" is how this file starts");
+        fs::write(downloads.join("odd.bin"), &lookalike).unwrap();
+
+        store.protect_with_keystore().unwrap();
+        let cipher = store.cipher().unwrap();
+        fs::write(
+            downloads.join("new.txt"),
+            cipher.encrypt_download("new.txt", b"received now"),
+        )
+        .unwrap();
+        fs::write(
+            downloads.join("old.txt"),
+            cipher.encrypt("old.txt", b"received before"),
+        )
+        .unwrap();
+
+        store.set_passphrase_with("hunter2", Kdf::fast()).unwrap();
+        let cipher = store.cipher().unwrap();
+        assert_eq!(fs::read(downloads.join("odd.bin")).unwrap(), lookalike);
+        for (name, plain) in [("new.txt", "received now"), ("old.txt", "received before")] {
+            let bytes = fs::read(downloads.join(name)).unwrap();
+            assert!(bytes.starts_with(crate::vault::DOWNLOAD_MAGIC), "{name}");
+            assert_eq!(
+                cipher.decrypt_download(name, &bytes).unwrap().as_slice(),
+                plain.as_bytes()
+            );
+        }
+        assert_eq!(store.remove_protection().unwrap(), Protection::None);
+        assert_eq!(
+            fs::read(downloads.join("new.txt")).unwrap(),
+            b"received now"
+        );
+        assert_eq!(fs::read(downloads.join("odd.bin")).unwrap(), lookalike);
+        drop(dir);
+    }
+
+    /// A wipe leaves nothing of the identity behind, including what a
+    /// write a crash interrupted left beside its file, the notes about key
+    /// store entries, and the update waiting in the directory.
+    #[test]
+    fn a_wipe_leaves_no_half_written_copy_note_or_update_behind() {
+        crate::keystore::use_mock_store();
+        let (mut store, dir) = temp_store();
+        store.load_or_create_identity().unwrap();
+        store.protect_with_keystore().unwrap();
+        let leftover = dir.path().join("identity.4242.tmp");
+        fs::write(&leftover, b"a whole copy of the keys").unwrap();
+        let history_leftover = dir.path().join(HISTORY_DIR).join("abc.4242.tmp");
+        fs::write(&history_leftover, b"a conversation").unwrap();
+        let other = Kdf::keystore().keystore_name();
+        let kek = crate::keystore::create(&other).unwrap();
+        store.add_pending(&other, &kek).unwrap();
+        fs::create_dir_all(dir.path().join(UPDATE_DIR)).unwrap();
+        fs::write(dir.path().join(UPDATE_DIR).join("previous"), b"a program").unwrap();
+        let keep = dir.path().join("notes.tmp");
+        fs::write(&keep, b"not ours").unwrap();
+
+        store.wipe().unwrap();
+        assert!(!leftover.exists() && !history_leftover.exists());
+        assert!(!dir.path().join(PENDING_FILE).exists());
+        assert!(!dir.path().join(UPDATE_DIR).exists());
+        assert!(
+            keep.exists(),
+            "only what the store's own writes leave is taken"
+        );
+    }
+
+    /// A file is created afresh, at the mode asked for, whatever was at
+    /// its path: an existing file kept its own mode when it was opened to
+    /// be truncated, and a link put where a temporary file was going was
+    /// followed.
+    #[cfg(unix)]
+    #[test]
+    fn a_private_file_is_new_whatever_was_in_its_place() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("backup.json");
+        fs::write(&path, b"old").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let mut file = create_private(&path).unwrap();
+        file.write_all(b"new").unwrap();
+        drop(file);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        let elsewhere = dir.path().join("elsewhere");
+        fs::write(&elsewhere, b"untouched").unwrap();
+        let link = dir.path().join("identity.4242.tmp");
+        std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+        write_atomic(&dir.path().join("identity.json"), b"keys").unwrap();
+        assert_eq!(fs::read(&elsewhere).unwrap(), b"untouched");
+    }
+
+    /// `vault.json` is read before anything is decrypted, so a slot's
+    /// relying party is whatever somebody who can write it says. A slot
+    /// under any but this program's is refused, and the key is asked
+    /// nothing for it.
+    #[test]
+    fn a_security_key_slot_for_another_relying_party_is_refused() {
+        let (mut store, dir) = bound_store();
+        let key = std::sync::Arc::new(std::sync::Mutex::new(
+            silver_key::soft::SoftKey::new([5; 32]).with_pin("4831"),
+        ));
+        let mut auth = silver_key::soft::authenticator(key.clone(), "4831");
+        store
+            .add_security_key_with(&mut auth, "YubiKey", Some("recovery"), Kdf::fast())
+            .unwrap();
+        let mut vault = store.read_vault().unwrap().unwrap();
+        for slot in &mut vault.slots {
+            if let SlotKind::Fido2 { rp_id, .. } = &mut slot.kind {
+                *rp_id = "bank.example".into();
+            }
+        }
+        store.write_vault(&vault).unwrap();
+        let mut again = Store::open(dir.path()).unwrap();
+        let err = again.unlock_with_security_key(&mut auth).unwrap_err();
+        assert!(format!("{err:#}").contains("bank.example"), "{err:#}");
+        assert!(again.is_locked());
     }
 
     fn entry(i: u64) -> HistoryEntry {
@@ -4945,7 +5820,17 @@ mod tests {
         // And the unlock sealed anything the failure had left plain.
         reopened.save_blocked(&[peer]).unwrap();
         reopened.unlock_with_keystore().unwrap();
-        assert!(!reopened.any_plain().unwrap());
+        for name in recrypted_files() {
+            let path = reopened.root.join(name);
+            if path.exists() {
+                assert!(
+                    fs::read(&path)
+                        .unwrap()
+                        .starts_with(crate::vault::GENERATION_MAGIC),
+                    "{name} was left as the failure left it"
+                );
+            }
+        }
     }
 
     #[test]

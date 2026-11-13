@@ -71,15 +71,11 @@ fn check(hr: HRESULT) -> Result<(), Error> {
 
 /// `clientDataJSON` for a ceremony: nothing checks it but the key's
 /// signature, which nothing here checks either; a fresh challenge all the
-/// same.
+/// same. The relying party id has been checked on the way in.
 fn client_data(kind: &str, rp_id: &str) -> Vec<u8> {
     let mut challenge = [0u8; 32];
     random(&mut challenge);
-    let challenge: String = challenge.iter().map(|b| format!("{b:02x}")).collect();
-    format!(
-        r#"{{"type":"{kind}","challenge":"{challenge}","origin":"https://{rp_id}","crossOrigin":false}}"#
-    )
-    .into_bytes()
+    crate::rp::client_data_json(kind, &challenge, rp_id)
 }
 
 impl WebAuthn {
@@ -317,6 +313,7 @@ impl WebAuthn {
 
 impl Authenticator for WebAuthn {
     fn enroll(&mut self, rp_id: &str, input: &[u8]) -> Result<Enrolled, Error> {
+        crate::rp::check(rp_id)?;
         let credential_id = self.make_credential(rp_id)?;
         let (_, secret) = self.assertion(rp_id, &[(&credential_id, input)])?;
         Ok(Enrolled {
@@ -330,6 +327,7 @@ impl Authenticator for WebAuthn {
         rp_id: &str,
         candidates: &[(&[u8], &[u8])],
     ) -> Result<(usize, Zeroizing<[u8; 32]>), Error> {
+        crate::rp::check(rp_id)?;
         self.assertion(rp_id, candidates)
     }
 }

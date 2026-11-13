@@ -234,7 +234,17 @@ owner's machine works today, and goes when Windows 10 does.
   ask the key on its own, because nobody touches it. On Windows 10 it
   could start the helper itself and hope the owner approves a UAC prompt
   that came from nowhere, and then touches the key and types the PIN in
-  a window nobody asked for; each of those is a warning.
+  a window nobody asked for; each of those is a warning. The prompt the
+  owner does expect is the larger risk, if it can change what that
+  prompt starts: section 10, "Where the helper starts from".
+* **A counterfeit or interposed key:** not protected. Nothing asks the
+  device for attestation, so whatever answers CTAP2 is believed: it
+  learns the first 16 bytes of the PIN's SHA-256 (enough to find a
+  short PIN), chooses the secret at enrollment, and can refuse at an
+  unlock. The client uses PIN protocol 2 whenever the device lists it,
+  and refuses when more than one FIDO device is plugged in rather than
+  picking one, so a second device cannot take the PIN meant for the
+  first.
 * **The recovery passphrase:** as strong as the passphrase is, which is
   why it is stretched with today's Argon2id parameters and is not meant
   for daily use.
@@ -339,4 +349,43 @@ Where the code, once written, differs from what is above:
   replaces all of it, and the UAC prompt names the program the person
   knows. What the elevated process holds is the whole binary rather than
   a small one, though only the helper's code runs in it.
-
+* **Where the helper starts from.** The elevated helper is whatever is
+  at `silver.exe`'s path when the owner approves the UAC prompt they
+  expect at every unlock, so the client starts it only from a place
+  nothing running as the owner could change: before choosing the route,
+  and again right before the prompt, it asks `AccessCheck`, with its own
+  unelevated token, what it may do to the executable and to each folder
+  above it, and refuses (`crates/silver-key/src/helper_place.rs` decides,
+  `windows/place.rs` asks) if it could write or take over the
+  executable, add a file or a folder to the executable's folder (a DLL
+  the program imports is looked for there first), take over a folder
+  above, or move a folder on the path aside and make another in its
+  place. The path is resolved first (links, junctions) and must be on a
+  local drive; the integrity label is not read, which can only make the
+  check refuse more. Refused, the unlock says why and asks for the
+  recovery passphrase. In practice the helper runs from
+  `C:\Program Files\Silver Messenger` or another folder only
+  administrators can write, which `silver update`, running as the owner,
+  cannot write either. An administrator can allow it from anywhere with
+  the DWORD value `AllowSecurityKeyHelperAnywhere` = 1 under
+  `HKEY_LOCAL_MACHINE\SOFTWARE\Silver Messenger`, accepting the risk;
+  an environment variable would not do, since the program the check
+  guards against runs as the owner and could set one. A client started
+  as administrator already reaches the key itself and starts no helper.
+* **DLLs.** `silver_key::harden_dll_search` restricts the DLLs a process
+  loads at run time to System32 (`SetDefaultDllDirectories`): the first
+  thing `main` does, and the helper does it again when it starts
+  serving. The DLLs the executable imports (`hid.dll`, `webauthn.dll`
+  and the rest, imported directly through `windows-sys`) are found by
+  the loader before `main`, from the program's own folder first; only
+  the linker's `/DEPENDENTLOADFLAG:0x800` (`LOAD_LIBRARY_SEARCH_SYSTEM32`
+  for the imports) changes that, which the MSVC linker, used for the
+  Windows release, takes from `crates/silver-tui/build.rs`. The GNU
+  toolchain's linker has no such flag; there the folder check above is
+  what keeps a DLL from being put beside the program.
+* **The relying party id** comes from `vault.json` and is checked as a
+  host name by every route before it reaches the key, Windows' API or
+  the helper's command line (`crates/silver-key/src/rp.rs`); the command
+  line is quoted argument by argument as `CommandLineToArgvW` reads it,
+  and `clientDataJSON` escapes it, though neither has anything to quote
+  once it is checked.

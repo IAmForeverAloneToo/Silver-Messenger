@@ -41,7 +41,8 @@ use silver_protocol::encoding::b64_array;
 use silver_protocol::group::{
     self, BlobRef, EXTENSION_DEVICE, EXTENSION_EVERYDAY, EXTENSION_GROUP, EXTENSION_SEAL,
     GroupBody, GroupId, GroupKind, GroupPlaintext, MAX_KEY_PACKAGES, MAX_MEMBERS, MAX_PARKED_BYTES,
-    MAX_PARKED_HANDSHAKE_BYTES, SEQUENCER_LABEL, SilverGroup, decode_seal_key, encode_seal_key,
+    MAX_PARKED_HANDSHAKE_BYTES, REJOIN_PROOF_DOMAIN, SEQUENCER_LABEL, SilverGroup, decode_seal_key,
+    encode_seal_key, rejoin_statement,
 };
 use silver_protocol::wire::KeyPackageDeposit;
 use silver_protocol::{
@@ -90,6 +91,30 @@ pub const HOLD_LIMIT: usize = 16;
 /// of the largest message that fits an envelope is a little under this.
 pub const HOLD_BYTES: usize = 384 * 1024;
 pub const HOLD_FOR_MS: u64 = 10 * 60 * 1000;
+/// How long the commits the relay's sequencer says we are missing have to
+/// arrive before the group counts as out of sync; also how long a
+/// handshake from a later epoch waits before this client asks the
+/// sequencer where the group stands.
+///
+/// A commit race lost honestly leaves the loser one epoch behind for as
+/// long as the winner's commit takes to arrive, which is seconds; a
+/// commit missed for good leaves it there. Only the sequencer's word,
+/// given twice this far apart, tells the two apart without trusting a
+/// header anyone can write.
+pub const BEHIND_GRACE_MS: u64 = 2 * 60 * 1000;
+/// At most one self-update this often on the strength of a handshake
+/// from a later epoch: that is an unauthenticated hint, and the
+/// self-update that asks the sequencer is a commit to every member.
+pub const PROBE_EVERY_MS: u64 = 60 * 60 * 1000;
+/// How long a join request this client sent stays answerable by a
+/// Welcome taken without asking the user again.
+pub const JOIN_ANSWER_FOR_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+/// Identities remembered per group as removed from it.
+const REMOVED_KEPT: usize = MAX_MEMBERS;
+/// Revoked devices remembered.
+const REVOKED_KEPT: usize = 4096;
+/// Groups forgotten or declined whose last epoch is remembered.
+const FORGOTTEN_KEPT: usize = 256;
 /// Message ids remembered per group, against duplicates.
 const SEEN_IDS: usize = 256;
 /// Application messages from this many past epochs still decrypt.
@@ -225,6 +250,57 @@ pub struct GroupRecord {
     /// which link that was; see [`LinkUses`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link_uses: Option<LinkUses>,
+    /// This admin device's own secret for the group's invite links.
+    ///
+    /// Links used to be derived from an invite key in the group context,
+    /// which every member reads — so any member, and a member removed
+    /// later, could make a valid link and have the admin's client add
+    /// whoever presented it. The secret now lives here only, on
+    /// the admin device that made the link, which is the device the link
+    /// names; `/group link reset` replaces it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    link_secret: Option<LinkSecret>,
+    /// Identities this client saw removed from the group, most recent
+    /// last. A link presented by one of them is shown to the admin rather
+    /// than answered: whoever removed them meant them out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed: Vec<UserId>,
+    /// The relay's sequencer said the group stands past our epoch; see
+    /// [`Groups::sequencer_ahead`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    behind: Option<Behind>,
+    /// When a handshake from beyond our epoch was last refused or held: a
+    /// reason to ask the sequencer, never one to change state by itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ahead_seen_ms: Option<u64>,
+}
+
+/// An invite-link secret. Kept out of `Debug`, which reaches logs.
+#[derive(Clone, Serialize, Deserialize)]
+struct LinkSecret {
+    #[serde(with = "b64_array")]
+    key: [u8; 32],
+}
+
+impl std::fmt::Debug for LinkSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LinkSecret(..)")
+    }
+}
+
+/// The sequencer's word that the group is ahead of us, and since when.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+struct Behind {
+    epoch: u64,
+    since_ms: u64,
+}
+
+/// A group forgotten or declined, and the newest epoch this client knew
+/// of it, so that an old Welcome replayed for it is not taken again.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Forgotten {
+    group: GroupId,
+    epoch: u64,
 }
 
 /// What one invite link has cost this admin so far.
@@ -281,6 +357,40 @@ impl GroupRecord {
 
     pub fn is_admin(&self, user: &UserId) -> bool {
         self.members.iter().any(|m| m.user == *user && m.admin)
+    }
+
+    /// The group reached `epoch`: what said it was behind is settled as
+    /// far as that goes.
+    fn caught_up(&mut self, epoch: u64) {
+        if self.behind.is_some_and(|b| epoch >= b.epoch) {
+            self.behind = None;
+        }
+        if self.held.is_empty() {
+            self.ahead_seen_ms = None;
+        }
+    }
+
+    /// The newest epoch this record knew.
+    fn last_epoch(&self) -> Option<u64> {
+        self.tokens.iter().map(|t| t.epoch).max()
+    }
+
+    /// Note what a commit did to who is in: identities removed are
+    /// remembered, and one added again is no longer held against them.
+    fn note_change(&mut self, change: &Change) {
+        match change {
+            Change::Removed(users) => {
+                for user in users {
+                    self.removed.retain(|u| u != user);
+                    self.removed.push(*user);
+                }
+                while self.removed.len() > REMOVED_KEPT {
+                    self.removed.remove(0);
+                }
+            }
+            Change::Added(users) => self.removed.retain(|u| !users.contains(u)),
+            _ => {}
+        }
     }
 
     pub fn admins(&self) -> Vec<UserId> {
@@ -350,9 +460,23 @@ pub(crate) struct GroupsFile {
     #[serde(default)]
     last_resort: Option<KeyPackageRecord>,
     /// Groups we asked to join by link, and the admin asked: their Welcome
-    /// is taken without asking the user again.
+    /// is taken without asking the user again, for
+    /// [`JOIN_ANSWER_FOR_MS`] after the request.
     #[serde(default)]
     joins: BTreeMap<GroupId, UserId>,
+    /// When each request in `joins` went out. A request from a version
+    /// that did not record it counts as expired: its Welcome is an
+    /// ordinary invitation.
+    #[serde(default)]
+    joins_at: BTreeMap<GroupId, u64>,
+    /// Devices whose revocation this client was told of
+    /// ([`Groups::note_revoked_devices`]): no Welcome from one is taken,
+    /// and no request from one is answered.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    revoked: Vec<UserId>,
+    /// Groups forgotten or declined, with the last epoch known of each.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    forgotten: Vec<Forgotten>,
     /// Groups this account is in, as the primary named them when this
     /// device was linked (`docs/design/devices.md` section 7.4): the
     /// Welcome the primary sends for each is taken without asking, and
@@ -427,11 +551,14 @@ pub enum GroupEvent {
         reason: String,
     },
     /// Someone presented a valid invite link; an admin's client adds them
-    /// with [`Groups::stage_add`].
+    /// with [`Groups::stage_add`] — unless `removed_before`: this client
+    /// saw the joiner removed from the group, and letting them back in is
+    /// the user's decision (`/group add`), not the link's.
     JoinRequest {
         group: GroupId,
         joiner: UserId,
         key_package: Vec<u8>,
+        removed_before: bool,
     },
     /// A member proposed its own removal (it left); an admin's next commit
     /// takes it out of the tree, and an admin's client makes one at once
@@ -777,9 +904,112 @@ impl Groups {
         if record.state == GroupState::Active {
             return Err(GroupError::NotActive("still active; leave it first".into()));
         }
+        self.remember_forgotten(group);
         self.drop_state(group);
         self.file.groups.remove(group);
         self.persist()
+    }
+
+    /// Keep the last epoch known of a group about to be dropped from the
+    /// list, so that a Welcome made before then is not taken again.
+    ///
+    /// The last-resort key package is not spent by the Welcome that uses
+    /// it, so whoever can deliver an old Welcome — the relay, at the
+    /// least — could otherwise bring a group back after the user left it,
+    /// was removed or declined, at an epoch long gone.
+    fn remember_forgotten(&mut self, group: &GroupId) {
+        let Some(epoch) = self
+            .file
+            .groups
+            .get(group)
+            .and_then(GroupRecord::last_epoch)
+        else {
+            return;
+        };
+        self.file.forgotten.retain(|f| f.group != *group);
+        self.file.forgotten.push(Forgotten {
+            group: *group,
+            epoch,
+        });
+        while self.file.forgotten.len() > FORGOTTEN_KEPT {
+            self.file.forgotten.remove(0);
+        }
+    }
+
+    /// The newest epoch this client knew of `group`, in its record or
+    /// after it forgot it.
+    fn last_known_epoch(&self, group: &GroupId) -> Option<u64> {
+        let kept = self
+            .file
+            .groups
+            .get(group)
+            .and_then(GroupRecord::last_epoch);
+        let forgotten = self
+            .file
+            .forgotten
+            .iter()
+            .filter(|f| f.group == *group)
+            .map(|f| f.epoch)
+            .max();
+        kept.max(forgotten)
+    }
+
+    /// Note devices whose revocation this client has seen (an account's
+    /// signed word, checked by the caller): a Welcome from one is not
+    /// taken, a join or rejoin request from one is not answered, and
+    /// their leaves are listed by [`Groups::revoked_leaves`] until a
+    /// commit takes them out.
+    ///
+    /// A revoked device keeps its keys, and its certificate still
+    /// verifies; only the revocation says it is no longer the account's.
+    pub fn note_revoked_devices(
+        &mut self,
+        devices: impl IntoIterator<Item = UserId>,
+    ) -> Result<()> {
+        let mut changed = false;
+        for device in devices {
+            if !self.file.revoked.contains(&device) {
+                self.file.revoked.push(device);
+                changed = true;
+            }
+        }
+        if !changed {
+            return Ok(());
+        }
+        while self.file.revoked.len() > REVOKED_KEPT {
+            self.file.revoked.remove(0);
+        }
+        self.persist()
+    }
+
+    pub fn is_revoked_device(&self, device: &UserId) -> bool {
+        self.file.revoked.contains(device)
+    }
+
+    /// Leaves of revoked devices still in an active group, which this
+    /// account may take out ([`Groups::stage_remove_device`]): any as an
+    /// admin, its own devices' otherwise. A front end tries one per pass
+    /// until none is left, so a removal that lost a commit race, or was
+    /// not tried because another commit was staged, is not forgotten.
+    pub fn revoked_leaves(&self) -> Vec<(GroupId, UserId)> {
+        let me = self.account();
+        let device = self.device();
+        let mut out = Vec::new();
+        for (id, record) in &self.file.groups {
+            if record.state != GroupState::Active {
+                continue;
+            }
+            let admin = record.is_admin(&me);
+            for member in &record.members {
+                if member.device != device
+                    && self.file.revoked.contains(&member.device)
+                    && (admin || member.user == me)
+                {
+                    out.push((*id, member.device));
+                }
+            }
+        }
+        out
     }
 
     fn record(&self, group: &GroupId) -> Result<&GroupRecord> {
@@ -870,8 +1100,19 @@ impl Groups {
     }
 
     fn new_key_package(&self, last_resort: bool, now_ms: u64) -> Result<KeyPackageRecord> {
+        let mut capabilities = self.capabilities();
+        if last_resort {
+            // A key package may only carry an extension its own leaf says
+            // it supports. Without this the last-resort package failed
+            // every adder's validation, and the relay's fallback for a
+            // drained deposit could never be used.
+            let mut extensions = capabilities.extensions().to_vec();
+            extensions.push(ExtensionType::LastResort);
+            capabilities =
+                Capabilities::new(None, Some(&[CIPHERSUITE]), Some(&extensions), None, None);
+        }
         let mut builder = KeyPackage::builder()
-            .leaf_node_capabilities(self.capabilities())
+            .leaf_node_capabilities(capabilities)
             .leaf_node_extensions(self.leaf_extensions())
             .key_package_lifetime(Lifetime::new(KEY_PACKAGE_LIFETIME_MS / 1000));
         if last_resort {
@@ -1059,10 +1300,15 @@ impl Groups {
     /// Make a group with ourselves as the only member and admin. The caller
     /// registers the returned entry with the relay's sequencer.
     pub fn create(&mut self, name: &str, now_ms: u64) -> Result<Created> {
+        self.create_with_id(GroupId::generate(), name, now_ms)
+    }
+
+    /// [`Groups::create`] under a chosen id: a group id is no secret, and
+    /// the tests stand in for whoever reuses one.
+    fn create_with_id(&mut self, id: GroupId, name: &str, now_ms: u64) -> Result<Created> {
         group::check_new_name(name)?;
         let me = self.account();
         let extension = SilverGroup::new(name, me, now_ms)?;
-        let id = GroupId::generate();
         let config = self.group_config(&extension)?;
         let group = MlsGroup::new_with_group_id(
             &self.provider,
@@ -1096,6 +1342,10 @@ impl Groups {
                 // The creator's own group: admin because it made it.
                 conferred_admin: false,
                 link_uses: None,
+                link_secret: None,
+                removed: Vec::new(),
+                behind: None,
+                ahead_seen_ms: None,
             },
         );
         self.persist()?;
@@ -1161,6 +1411,12 @@ impl Groups {
         for data in packages {
             let kp = parse_key_package(data, self.provider.crypto())?;
             let leaf = verify_leaf(kp.leaf_node(), None)?;
+            if self.is_revoked_device(&leaf.device) {
+                return Err(GroupError::KeyPackage(format!(
+                    "the device {}… was unlinked from its account",
+                    leaf.device.short()
+                )));
+            }
             if record.members.iter().any(|m| m.device == leaf.device)
                 || added.iter().any(|m| m.device == leaf.device)
             {
@@ -1239,11 +1495,14 @@ impl Groups {
                 indices.extend(theirs);
             }
         }
-        // Admins removed from the group leave the admin list with it.
+        // Admins removed from the group leave the admin list with it, and
+        // so do admins whose own leave this commit carries.
         let mut extension = self.extension(group)?;
         for user in users {
             extension = extension.without_admin(user);
         }
+        let staying = self.members_after(group, &indices, true)?;
+        let extension = without_departed_admins(extension, &staying);
         let change = Change::Removed(users.to_vec());
         let context = context_extensions(&extension)?;
         self.stage(
@@ -1299,7 +1558,9 @@ impl Groups {
         if last {
             // Its identity goes with its last device; an admin leaves the
             // admin list too.
+            let staying = self.members_after(group, &[index], record.is_admin(&me))?;
             let extension = self.extension(group)?.without_admin(&account);
+            let extension = without_departed_admins(extension, &staying);
             let context = context_extensions(&extension)?;
             self.stage(
                 group,
@@ -1340,7 +1601,10 @@ impl Groups {
     /// Stage a commit that makes `user` an admin, or stops them being one.
     pub fn stage_admin(&mut self, group: &GroupId, user: UserId, admin: bool) -> Result<Staged> {
         let record = self.active(group)?.clone();
-        if !record.is_member(&user) {
+        // An admin who left may still be named until an admin's commit
+        // drops them; taking them off the list is always allowed.
+        let named = self.extension(group)?.admins.contains(&user);
+        if !record.is_member(&user) && (admin || !named) {
             return Err(GroupError::NotAMember(user));
         }
         self.stage_extension_change(
@@ -1360,13 +1624,27 @@ impl Groups {
         )
     }
 
-    /// Stage a commit with a fresh invite key, voiding every link.
-    pub fn stage_link_reset(&mut self, group: &GroupId) -> Result<Staged> {
-        self.stage_extension_change(
-            group,
-            |extension| Ok(extension.with_new_invite_key()),
-            Change::LinkReset,
-        )
+    /// A fresh invite-link secret for this device, voiding every link it
+    /// made for `group` before; returns the new link. No commit: the
+    /// secret is this device's own (see [`GroupRecord`]'s
+    /// `link_secret`), so another admin's links are theirs to reset.
+    pub fn reset_link(&mut self, group: &GroupId, relay: Option<String>) -> Result<GroupLink> {
+        if !self.active(group)?.is_admin(&self.account()) {
+            return Err(GroupError::NotAdmin);
+        }
+        let key = self.random_32()?;
+        let record = self.record_mut(group)?;
+        record.link_secret = Some(LinkSecret { key });
+        record.link_uses = None;
+        self.persist()?;
+        self.invite_link(group, relay)
+    }
+
+    fn random_32(&self) -> Result<[u8; 32]> {
+        self.provider
+            .rand()
+            .random_array::<32>()
+            .map_err(|e| GroupError::Mls(format!("no randomness: {e:?}")))
     }
 
     fn stage_extension_change(
@@ -1381,6 +1659,11 @@ impl Groups {
             return Err(GroupError::NotAdmin);
         }
         let extension = change(self.extension(group)?)?;
+        // The commit consumes the stored proposals, a leaver's Remove
+        // among them, and anyone it leaves outside the group leaves the
+        // admin list with it.
+        let staying = self.members_after(group, &[], true)?;
+        let extension = without_departed_admins(extension, &staying);
         let what = match what {
             Change::Admins(_) => Change::Admins(extension.admins.clone()),
             other => other,
@@ -1401,6 +1684,23 @@ impl Groups {
     /// Stage a commit that only refreshes our own leaf.
     pub fn stage_self_update(&mut self, group: &GroupId) -> Result<Staged> {
         let admin = self.active(group)?.is_admin(&self.account());
+        // An admin's refresh is what commits a leave, so it also takes the
+        // leavers — and any admin who left before and is still named —
+        // off the admin list. Left named, a leaver became "an admin who is
+        // not a member" in every later commit, and every reader marked the
+        // group broken at the next one.
+        let context = if admin {
+            let extension = self.extension(group)?;
+            let staying = self.members_after(group, &[], true)?;
+            let pruned = without_departed_admins(extension.clone(), &staying);
+            if pruned == extension {
+                None
+            } else {
+                Some(context_extensions(&pruned)?)
+            }
+        } else {
+            None
+        };
         self.stage(
             group,
             // A non-admin's refresh leaves the stored proposal queue
@@ -1411,9 +1711,15 @@ impl Groups {
             // named the honest refresher (SM-G-03). Committing a leave is
             // an admin's job, which is where the queue is consumed.
             move |builder| {
-                Ok(builder
+                let builder = builder
                     .force_self_update(true)
-                    .consume_proposal_store(admin))
+                    .consume_proposal_store(admin);
+                match context {
+                    Some(context) => builder
+                        .propose_group_context_extensions(context)
+                        .map_err(mls_err),
+                    None => Ok(builder),
+                }
             },
             Vec::new(),
             Change::Updated,
@@ -1423,7 +1729,9 @@ impl Groups {
     /// Groups whose leaf is due for a refresh: by age, or because the
     /// leaf in the tree does not declare what this client reads (it was
     /// made by an earlier version), which peers would take as a reason
-    /// to withhold an edit or a reaction.
+    /// to withhold an edit or a reaction — or because the group may have
+    /// moved on without us, and a self-update is how this client asks
+    /// the relay's sequencer where it stands ([`Groups::sequencer_ahead`]).
     pub fn self_updates_due(&mut self, now_ms: u64) -> Vec<GroupId> {
         let active: Vec<GroupId> = self
             .file
@@ -1434,13 +1742,26 @@ impl Groups {
             .collect();
         let mut due = Vec::new();
         for id in active {
-            let by_age = self.file.groups[&id].leaf_updated_ms + SELF_UPDATE_AFTER_MS <= now_ms;
+            let record = &self.file.groups[&id];
+            let by_age = record.leaf_updated_ms.saturating_add(SELF_UPDATE_AFTER_MS) <= now_ms;
+            // The sequencer said we are behind: ask again once the commits
+            // between have had time to arrive.
+            let confirm = record
+                .behind
+                .is_some_and(|b| b.since_ms.saturating_add(BEHIND_GRACE_MS) <= now_ms);
+            // A handshake from a later epoch is anyone's to write, so it
+            // only prompts the question, and not more often than
+            // `PROBE_EVERY_MS`.
+            let probe = record.ahead_seen_ms.is_some_and(|seen| {
+                seen.saturating_add(BEHIND_GRACE_MS) <= now_ms
+                    && record.leaf_updated_ms.saturating_add(PROBE_EVERY_MS) <= now_ms
+            });
             let behind = self.declare_everyday
                 && load_handle(&mut self.handles, &self.provider, &id)
                     .ok()
                     .and_then(|h| h.own_leaf_node().map(declares_everyday))
                     .is_some_and(|declares| !declares);
-            if by_age || behind {
+            if by_age || behind || confirm || probe {
                 due.push(id);
             }
         }
@@ -1563,13 +1884,23 @@ impl Groups {
         let token = token_of(handle, group, self.provider.crypto())?;
         let extension = extension_of(handle.extensions())?;
         let members = members_of(handle, &extension)?;
+        let account = self.account();
         let record = self.record_mut(group)?;
         record.members = members;
         push_token(record, epoch, token);
+        // The sequencer took a commit at our epoch, so nothing had moved
+        // past it: whatever said otherwise is answered.
+        record.behind = None;
+        record.ahead_seen_ms = None;
         // Every commit of ours carries an update path.
         record.leaf_updated_ms = now_ms;
         if let Change::Renamed(name) = &data.change {
             record.name = name.clone();
+        }
+        record.note_change(&data.change);
+        if !record.is_admin(&account) {
+            record.link_secret = None;
+            record.link_uses = None;
         }
         self.persist()?;
         Ok(data.outgoing)
@@ -1707,7 +2038,14 @@ impl Groups {
         let package = self.new_key_package(false, now_ms)?;
         // Kept like a deposited one, so the Welcome made from it can be read.
         self.file.key_packages.push(package.clone());
+        // Requests no Welcome answered in time are no use kept.
+        let joins_at = &mut self.file.joins_at;
+        joins_at.retain(|_, at| at.saturating_add(JOIN_ANSWER_FOR_MS) > now_ms);
+        self.file
+            .joins
+            .retain(|group, _| joins_at.contains_key(group));
         self.file.joins.insert(link.group, link.via);
+        self.file.joins_at.insert(link.group, now_ms);
         let proof = group::join_proof(&link.key, &link.group, &self.account());
         let body =
             GroupBody::inline(link.group, GroupKind::Join, package.data).with_join_proof(proof);
@@ -1727,8 +2065,27 @@ impl Groups {
 
     /// A rejoin request from a fresh key package to every admin we know
     /// of, and to this identity's other devices, which may answer it too.
+    ///
+    /// The request is signed with this device's identity key over the
+    /// group, the new key package and the HPKE key of the leaf it asks to
+    /// replace (`silver_protocol::group::rejoin_statement`): the key
+    /// package alone is public, and anyone could have sent it.
     pub fn rejoin_request(&mut self, group: &GroupId, now_ms: u64) -> Result<Outgoing> {
         let record = self.record(group)?.clone();
+        match record.state {
+            GroupState::Active | GroupState::OutOfSync { .. } => {}
+            GroupState::Invited { .. } => {
+                return Err(GroupError::NotActive("not accepted yet".into()));
+            }
+            _ => return Err(GroupError::NotActive("not one we are in".into())),
+        }
+        let leaf_key = {
+            let handle = load_handle(&mut self.handles, &self.provider, group)?;
+            handle
+                .member_at(handle.own_leaf_index())
+                .ok_or_else(|| GroupError::Mls("no leaf of our own in the group".into()))?
+                .encryption_key
+        };
         let me = self.account();
         let device = self.device();
         let admins: Vec<MemberInfo> = record
@@ -1739,7 +2096,10 @@ impl Groups {
             .collect();
         let package = self.new_key_package(false, now_ms)?;
         self.file.key_packages.push(package.clone());
-        let body = GroupBody::inline(*group, GroupKind::Rejoin, package.data);
+        let statement = rejoin_statement(group, &package.r#ref, &leaf_key);
+        let signature = self.identity.sign(REJOIN_PROOF_DOMAIN, &statement);
+        let body =
+            GroupBody::inline(*group, GroupKind::Rejoin, package.data).with_rejoin_proof(signature);
         let envelopes = self.seal_to(&admins, &body)?;
         self.record_mut(group)?.state = GroupState::OutOfSync { since_ms: now_ms };
         self.persist()?;
@@ -1752,15 +2112,28 @@ impl Groups {
 
     /// The invite link for `group`, naming this device as the one to ask:
     /// the request comes here, whichever of the admin's devices this is.
+    ///
+    /// The link key comes from this device's own link secret, made the
+    /// first time a link is asked for and kept only here: a link works
+    /// with the admin device that made it and no other, and no member can
+    /// derive one from what the group shares.
     pub fn invite_link(&mut self, group: &GroupId, relay: Option<String>) -> Result<GroupLink> {
         if !self.active(group)?.is_admin(&self.account()) {
             return Err(GroupError::NotAdmin);
         }
-        let extension = self.extension(group)?;
+        let secret = match &self.record(group)?.link_secret {
+            Some(secret) => secret.key,
+            None => {
+                let key = self.random_32()?;
+                self.record_mut(group)?.link_secret = Some(LinkSecret { key });
+                self.persist()?;
+                key
+            }
+        };
         Ok(GroupLink {
             group: *group,
             via: self.device(),
-            key: group::link_key(&extension.invite_key, group),
+            key: group::link_key(&secret, group),
             relay,
         })
     }
@@ -1870,7 +2243,7 @@ impl Groups {
                 self.receive_protocol_message(group, from, mls, now_ms)
             }
             GroupKind::Join => self.receive_join(group, body, mls, now_ms),
-            GroupKind::Rejoin => self.receive_rejoin(group, mls, now_ms),
+            GroupKind::Rejoin => self.receive_rejoin(group, body, mls),
         };
         // Persisted whatever happened. A commit merged, or a message key
         // consumed, and then something afterwards failing used to leave
@@ -1920,18 +2293,20 @@ impl Groups {
                         ),
                     }]);
                 }
-                // Out of sync, removed, left or broken: whatever state is
-                // left of the old membership goes; this Welcome starts
-                // afresh. It has parsed by now, so nonsense costs
-                // nothing; a well-formed Welcome still costs the state
-                // even when the checks below turn it down, because
-                // OpenMLS takes the group id as the staged Welcome is
-                // read and the old group has to be out of the way first.
-                _ => self.drop_state(&group),
+                // Out of sync, removed, left or broken: the Welcome may
+                // start the group afresh, but only once it is known to
+                // come from someone this record says may do that (below).
+                _ => {}
             }
         }
+        // Staged beside the state the record still has: nothing of the old
+        // membership goes until the checks below have passed, so a
+        // Welcome from the wrong sender costs nothing but its own reading.
         let staged =
-            StagedWelcome::new_from_welcome(&self.provider, &Self::join_config(), welcome, None)
+            StagedWelcome::build_from_welcome(&self.provider, &Self::join_config(), welcome)
+                .map_err(mls_err)?
+                .replace_old_group()
+                .build()
                 .map_err(mls_err)?;
         let sender = staged.welcome_sender().map_err(mls_err)?;
         let inviter = verify_leaf(sender, None)?;
@@ -1942,6 +2317,7 @@ impl Groups {
         if context.group_id().as_slice() != group.as_bytes() {
             return Err(GroupError::Mls("the Welcome names another group".into()));
         }
+        let welcome_epoch = context.epoch().as_u64();
         let extension = extension_of(context.extensions())?;
         // An admin adds anyone; one's own identity's device adds one's own.
         let inviter_in = staged
@@ -1953,15 +2329,62 @@ impl Groups {
             ));
         }
         let _ = from;
+        // A device its account unlinked keeps its keys and a certificate
+        // that still verifies; its Welcome is no one's word any more —
+        // least of all this account's own, which would be taken without
+        // asking.
+        if self.is_revoked_device(&inviter.device) {
+            return Ok(vec![GroupEvent::Refused {
+                group,
+                reason: format!(
+                    "a Welcome from {}…, a device its account unlinked",
+                    inviter.device.short()
+                ),
+            }]);
+        }
+        // A group this client already knows is replaced only by one of the
+        // admins it last knew there, or by this account's own device. The
+        // Welcome's own admin list is whatever its author wrote, so going
+        // by it let anyone who knew the id put a group of theirs in this
+        // one's place — its history, its name and alias — after a single
+        // envelope had made the member look out of sync.
+        if let Some(record) = &previous
+            && inviter.account != me
+            && !record.is_admin(&inviter.account)
+        {
+            return Ok(vec![GroupEvent::Refused {
+                group,
+                reason: format!(
+                    "a Welcome from {}…, who was not an admin of this group; /group forget it to take invitations from others",
+                    inviter.account.short()
+                ),
+            }]);
+        }
+        // Nothing older than what this client already knew: a Welcome made
+        // from the last-resort key package can be read again after the
+        // group was left, lost or declined (see `remember_forgotten`).
+        if self
+            .last_known_epoch(&group)
+            .is_some_and(|known| welcome_epoch <= known)
+        {
+            return Ok(vec![GroupEvent::Refused {
+                group,
+                reason: format!(
+                    "a Welcome for epoch {welcome_epoch}, which this client has seen before"
+                ),
+            }]);
+        }
         // No second yes from the user for the answer to a join request we
-        // sent this admin (by either id the link named), for a group the
-        // primary named when this device was linked, or for one's own
-        // identity's other device adding this one.
-        let asked = self
-            .file
-            .joins
-            .get(&group)
-            .is_some_and(|via| *via == inviter.account || *via == inviter.device);
+        // sent this admin (by either id the link named) not long ago, for
+        // a group the primary named when this device was linked, or for
+        // one's own identity's other device adding this one.
+        let asked_at = self.file.joins_at.get(&group).copied();
+        let asked = asked_at.is_some_and(|at| at.saturating_add(JOIN_ANSWER_FOR_MS) > now_ms)
+            && self
+                .file
+                .joins
+                .get(&group)
+                .is_some_and(|via| *via == inviter.account || *via == inviter.device);
         let ours = inviter.account == me;
         // A group named at link time is one this account's primary said it
         // would put this device in (section 14.7), so only the account
@@ -1991,6 +2414,11 @@ impl Groups {
                     "{MAX_INVITATIONS} invitations are already waiting; answer one before another arrives"
                 ),
             }]);
+        }
+        // Whatever is left of the old membership goes now; this Welcome
+        // starts afresh.
+        if previous.is_some() {
+            self.drop_state(&group);
         }
         // Join now, so the group stays in sync while the user decides; the
         // key package that let us in is spent by this.
@@ -2039,16 +2467,24 @@ impl Groups {
             // until an admin says otherwise; a newcomer is told the
             // group's timer by whoever added it.
             expire_after_s: previous.as_ref().map_or(0, |r| r.expire_after_s),
-            seen: previous.map(|r| r.seen).unwrap_or_default(),
             // Admin because the Welcome said so, and the Welcome is the
             // inviter's to write. Not so when this account added itself.
             conferred_admin: !ours && extension.is_admin(&me),
             // Nothing has been asked of this device's copy of the link.
             link_uses: None,
+            link_secret: None,
+            removed: previous
+                .as_ref()
+                .map(|r| r.removed.clone())
+                .unwrap_or_default(),
+            behind: None,
+            ahead_seen_ms: None,
+            seen: previous.map(|r| r.seen).unwrap_or_default(),
         };
         self.file.groups.insert(group, record);
         if taken {
             self.file.joins.remove(&group);
+            self.file.joins_at.remove(&group);
             self.persist()?;
             return Ok(vec![GroupEvent::Joined { group }]);
         }
@@ -2098,6 +2534,7 @@ impl Groups {
         if !matches!(self.record(group)?.state, GroupState::Invited { .. }) {
             return Err(GroupError::NotActive("not an invitation".into()));
         }
+        self.remember_forgotten(group);
         self.drop_state(group);
         self.file.groups.remove(group);
         self.persist()
@@ -2118,32 +2555,46 @@ impl Groups {
             // nothing new.
             _ => return Ok(Vec::new()),
         }
-        let mut events = self.process_one(group, from, mls, now_ms)?;
+        let mut events = self.process_one(group, from, mls, now_ms, now_ms)?;
         // Held messages may be readable now.
         let mut progressed = true;
         while progressed {
             progressed = false;
             let held: Vec<Held> = std::mem::take(&mut self.record_mut(&group)?.held);
             for item in held {
-                if item.received_at_ms + HOLD_FOR_MS <= now_ms {
+                if item.received_at_ms.saturating_add(HOLD_FOR_MS) <= now_ms {
                     continue;
                 }
                 let before = self.record(&group)?.held.len();
-                let more = self.process_one(group, item.from, &item.mls, now_ms)?;
+                // Held again, if it is still from the future, under the
+                // time it first arrived: a fresh time on every pass kept
+                // a message that never became readable held for ever.
+                // And one that fails is that one's failure: the rest of
+                // the queue, already taken out, would otherwise be lost
+                // with it.
+                match self.process_one(group, item.from, &item.mls, item.received_at_ms, now_ms) {
+                    Ok(more) => events.extend(more),
+                    Err(e) => events.push(GroupEvent::Refused {
+                        group,
+                        reason: format!("a held group message could not be read: {e}"),
+                    }),
+                }
                 if self.record(&group)?.held.len() == before {
                     progressed = true;
                 }
-                events.extend(more);
             }
         }
         Ok(events)
     }
 
+    /// Read one MLS message. `received_at_ms` is when it first arrived,
+    /// which a message held for a later epoch keeps.
     fn process_one(
         &mut self,
         group: GroupId,
         from: UserId,
         mls: &[u8],
+        received_at_ms: u64,
         now_ms: u64,
     ) -> Result<Vec<GroupEvent>> {
         let message =
@@ -2160,6 +2611,7 @@ impl Groups {
         let message_epoch = protocol.epoch().as_u64();
         let is_handshake = protocol.is_handshake_message();
         let me = self.identity.user_id();
+        let account = self.account();
         let crypto = self.provider.crypto();
         let handle = load_handle(&mut self.handles, &self.provider, &group)?;
         let our_epoch = handle.epoch().as_u64();
@@ -2180,18 +2632,34 @@ impl Groups {
                 .ok_or(GroupError::NoSuchGroup)?;
             record
                 .held
-                .retain(|h| h.received_at_ms + HOLD_FOR_MS > now_ms);
+                .retain(|h| h.received_at_ms.saturating_add(HOLD_FOR_MS) > now_ms);
+            // Whatever happens to it, the group may have moved on without
+            // us; the sequencer is asked (`self_updates_due`).
+            if record.ahead_seen_ms.is_none() {
+                record.ahead_seen_ms = Some(now_ms);
+            }
             let bytes: usize = record.held.iter().map(|h| h.mls.len()).sum();
             if record.held.len() >= HOLD_LIMIT
-                || message_epoch > our_epoch + HOLD_LIMIT as u64
+                || too_far_ahead(our_epoch, message_epoch)
                 || !GroupBody::fits_inline(mls.len())
                 || bytes + mls.len() > HOLD_BYTES
             {
-                record.state = GroupState::OutOfSync { since_ms: now_ms };
-                return Ok(vec![GroupEvent::OutOfSync { group }]);
+                // Dropped, and nothing else. This used to put the group out
+                // of sync, and since the header is anyone's to write, one
+                // envelope from a stranger stopped a member sending and
+                // started a rejoin that could hand the group to a Welcome
+                // of the stranger's. Going out of sync now takes
+                // the relay's sequencer's word ([`Groups::sequencer_ahead`])
+                // or a commit OpenMLS could attribute (below).
+                return Ok(vec![GroupEvent::Refused {
+                    group,
+                    reason: format!(
+                        "a change for epoch {message_epoch}, ahead of ours ({our_epoch}), could not be kept for later"
+                    ),
+                }]);
             }
             record.held.push(Held {
-                received_at_ms: now_ms,
+                received_at_ms,
                 from,
                 mls: mls.to_vec(),
             });
@@ -2205,8 +2673,15 @@ impl Groups {
                 // — means the group has moved on without us. Refusing it
                 // and saying nothing left the group stuck for good; going
                 // out of sync starts the recovery that is already there
-                // (SM-G-03).
-                if is_handshake && message_epoch >= our_epoch {
+                // (SM-G-03). Only a commit that got as far as staging
+                // counts: by then OpenMLS has decrypted it with this
+                // epoch's keys and checked a member's signature on it,
+                // where anything before that is a header anyone can write.
+                // An invitation is never put out of sync: it waits for the
+                // user, and coming back into sync would make it a group
+                // they never said yes to.
+                let authenticated = matches!(e, ProcessMessageError::InvalidCommit(_));
+                if authenticated && is_handshake && message_epoch == our_epoch {
                     let record = self
                         .file
                         .groups
@@ -2233,15 +2708,36 @@ impl Groups {
             Sender::Member(index) => Some(*index),
             _ => None,
         };
-        let sender = match sender_index.map(|i| leaf_at(handle, i)) {
-            Some(leaf) => leaf?.account,
-            None => {
+        let Some(index) = sender_index else {
+            return Ok(vec![GroupEvent::Refused {
+                group,
+                reason: "a message from outside the group".into(),
+            }]);
+        };
+        // Who sent it is the credential OpenMLS checked the signature
+        // against: the leaf at that index *in the message's own epoch*.
+        // An application message may come from up to `PAST_EPOCHS` epochs
+        // back, and reading the index in today's tree named whoever holds
+        // that slot now — a removed member's last words shown as those of
+        // the member who took its place. Every leaf that was ever
+        // in the tree passed `verify_leaf` as it came in (the Welcome's
+        // member list, `check_commit`), so its credential names an
+        // account that leaf was checked to belong to.
+        let sender = match account_of(processed.credential()) {
+            Ok(sender) => sender,
+            Err(e) => {
                 return Ok(vec![GroupEvent::Refused {
                     group,
-                    reason: "a message from outside the group".into(),
+                    reason: format!("a message whose sender cannot be told: {e}"),
                 }]);
             }
         };
+        if processed.epoch().as_u64() == our_epoch && leaf_at(handle, index)?.account != sender {
+            return Ok(vec![GroupEvent::Refused {
+                group,
+                reason: "a message whose sender does not match its leaf".into(),
+            }]);
+        }
         match processed.into_content() {
             ProcessedMessageContent::ApplicationMessage(application) => {
                 let plain = GroupPlaintext::decode(&application.into_bytes())?;
@@ -2414,10 +2910,20 @@ impl Groups {
                         let before = record.identities();
                         record.members = members;
                         record.name = extension_after.name.clone();
+                        // Back in step. An invitation stays one: only the
+                        // user's yes makes it a group they are in.
                         if matches!(record.state, GroupState::OutOfSync { .. }) {
                             record.state = GroupState::Active;
                         }
                         push_token(record, epoch, token);
+                        record.caught_up(epoch);
+                        record.note_change(&change);
+                        // An admin no more: the links this device made stop
+                        // working, now and if it is made one again.
+                        if !record.is_admin(&account) {
+                            record.link_secret = None;
+                            record.link_uses = None;
+                        }
                         let after = record.identities();
                         for change in describe(
                             change,
@@ -2463,11 +2969,30 @@ impl Groups {
         let kp = parse_key_package(mls, self.provider.crypto())?;
         let leaf = verify_leaf(kp.leaf_node(), None)?;
         let joiner = leaf.account;
-        let extension = self.extension(&group)?;
-        if !group::verify_join_proof(&extension.invite_key, &group, &joiner, &proof.proof) {
+        // The link is this device's: its key comes from the secret only
+        // this device holds. No link made here, no valid proof.
+        let Some(secret) = record.link_secret.as_ref().map(|s| s.key) else {
+            return Ok(vec![GroupEvent::Refused {
+                group,
+                reason: format!(
+                    "{} presented a link this device did not make",
+                    joiner.short()
+                ),
+            }]);
+        };
+        if !group::verify_join_proof(&secret, &group, &joiner, &proof.proof) {
             return Ok(vec![GroupEvent::Refused {
                 group,
                 reason: format!("{} presented a link that is not valid", joiner.short()),
+            }]);
+        }
+        if self.is_revoked_device(&leaf.device) {
+            return Ok(vec![GroupEvent::Refused {
+                group,
+                reason: format!(
+                    "{} asked to join from a device their account unlinked",
+                    joiner.short()
+                ),
             }]);
         }
         // A member asks for nothing, whichever of its devices presents the
@@ -2481,7 +3006,7 @@ impl Groups {
         // What this link has cost so far. Anyone holding it can ask, and
         // each ask is a commit and a Welcome to every member, so a link
         // that has done its round is spent until the admin resets it.
-        let link = group::link_key(&extension.invite_key, &group);
+        let link = group::link_key(&secret, &group);
         let uses = self
             .file
             .groups
@@ -2507,14 +3032,17 @@ impl Groups {
             group,
             joiner,
             key_package: mls.to_vec(),
+            // Someone removed them; a link they kept from before does not
+            // overrule that by itself.
+            removed_before: record.removed.contains(&joiner),
         }])
     }
 
     fn receive_rejoin(
         &mut self,
         group: GroupId,
+        body: &GroupBody,
         mls: &[u8],
-        _now_ms: u64,
     ) -> Result<Vec<GroupEvent>> {
         let record = match self.file.groups.get(&group) {
             Some(record) if record.state == GroupState::Active => record.clone(),
@@ -2533,6 +3061,61 @@ impl Groups {
                 group,
                 reason: format!(
                     "{} asked to rejoin a group they are not in",
+                    leaf.account.short()
+                ),
+            }]);
+        }
+        if self.is_revoked_device(&leaf.device) {
+            return Ok(vec![GroupEvent::Refused {
+                group,
+                reason: format!(
+                    "{} asked to rejoin from a device their account unlinked",
+                    leaf.account.short()
+                ),
+            }]);
+        }
+        // The key package is public — the relay hands it to anyone, and
+        // every Add commit carries one — so it says nothing about who sent
+        // the request. Answering it as it was let anyone have this client
+        // remove a member's leaf and add one back that the member may not
+        // be able to use. The request has to be signed by the
+        // device whose leaf it replaces, over that leaf as it stands now:
+        // which also makes a request good once, since the re-added leaf
+        // has another key.
+        let Some(proof) = body.rejoin else {
+            return Ok(vec![GroupEvent::Refused {
+                group,
+                reason: format!(
+                    "{} asked to rejoin without signing the request (an older client?); /group add them again if they are out of sync",
+                    leaf.account.short()
+                ),
+            }]);
+        };
+        let crypto = self.provider.crypto();
+        let reference: [u8; 32] = kp
+            .hash_ref(crypto)
+            .map_err(mls_err)?
+            .as_slice()
+            .try_into()
+            .map_err(|_| GroupError::KeyPackage("hash ref is not 32 bytes".into()))?;
+        let leaf_key = {
+            let handle = load_handle(&mut self.handles, &self.provider, &group)?;
+            handle
+                .members()
+                .find(|m| m.signature_key.as_slice() == leaf.device.as_bytes())
+                .map(|m| m.encryption_key)
+                .ok_or(GroupError::NotAMember(leaf.account))?
+        };
+        let statement = rejoin_statement(&group, &reference, &leaf_key);
+        if leaf
+            .device
+            .verify(REJOIN_PROOF_DOMAIN, &statement, &proof.signature)
+            .is_err()
+        {
+            return Ok(vec![GroupEvent::Refused {
+                group,
+                reason: format!(
+                    "a rejoin request for {} that their device did not sign for the leaf it has now",
                     leaf.account.short()
                 ),
             }]);
@@ -2560,6 +3143,12 @@ impl Groups {
         }
         let kp = parse_key_package(key_package, self.provider.crypto())?;
         let leaf = verify_leaf(kp.leaf_node(), Some(&member))?;
+        if self.is_revoked_device(&leaf.device) {
+            return Err(GroupError::KeyPackage(format!(
+                "the device {}… was unlinked from its account",
+                leaf.device.short()
+            )));
+        }
         let index = {
             let handle = load_handle(&mut self.handles, &self.provider, group)?;
             leaves_of(handle)?
@@ -2583,16 +3172,105 @@ impl Groups {
         )
     }
 
-    /// Ask that a group be marked out of sync (a commit was missed for
-    /// good).
+    /// The user says the group is out of sync (`/group rejoin` does this
+    /// through [`Groups::rejoin_request`]). Only a group the user is in
+    /// can be: an invitation waits for the user's yes whatever happens to
+    /// it, and nothing else is in step to begin with.
     pub fn mark_out_of_sync(&mut self, group: &GroupId, now_ms: u64) -> Result<()> {
-        self.record_mut(group)?.state = GroupState::OutOfSync { since_ms: now_ms };
+        let record = self.record_mut(group)?;
+        if record.state != GroupState::Active {
+            return Err(GroupError::NotActive(
+                "not one that can fall out of sync".into(),
+            ));
+        }
+        record.state = GroupState::OutOfSync { since_ms: now_ms };
         self.persist()
+    }
+
+    /// The relay's sequencer refused one of our commits as stale and
+    /// stands at epoch `theirs`. If that is past ours, the group moved on
+    /// without us: a commit race lost (the winner's commit is on its way)
+    /// or a commit missed for good. The first answer is noted; a second
+    /// one, [`BEHIND_GRACE_MS`] later with this client still short of
+    /// that epoch, puts the group out of sync and returns
+    /// [`GroupEvent::OutOfSync`], and the usual rejoin follows.
+    ///
+    /// This is the one way a group falls out of sync on someone else's
+    /// word, and that someone is the relay, which could stop the group
+    /// anyway by refusing every commit; a handshake's header, which
+    /// anyone can write, only prompts the question
+    /// ([`Groups::self_updates_due`]).
+    pub fn sequencer_ahead(
+        &mut self,
+        group: &GroupId,
+        theirs: u64,
+        now_ms: u64,
+    ) -> Result<Vec<GroupEvent>> {
+        if self.record(group)?.state != GroupState::Active {
+            return Ok(Vec::new());
+        }
+        let ours = load_handle(&mut self.handles, &self.provider, group)?
+            .epoch()
+            .as_u64();
+        let record = self.record_mut(group)?;
+        if theirs <= ours {
+            return Ok(Vec::new());
+        }
+        let events = match record.behind {
+            Some(behind) if behind.since_ms.saturating_add(BEHIND_GRACE_MS) <= now_ms => {
+                record.behind = None;
+                record.state = GroupState::OutOfSync { since_ms: now_ms };
+                vec![GroupEvent::OutOfSync { group: *group }]
+            }
+            Some(behind) => {
+                record.behind = Some(Behind {
+                    epoch: behind.epoch.max(theirs),
+                    ..behind
+                });
+                Vec::new()
+            }
+            None => {
+                record.behind = Some(Behind {
+                    epoch: theirs,
+                    since_ms: now_ms,
+                });
+                Vec::new()
+            }
+        };
+        self.persist()?;
+        Ok(events)
     }
 
     fn extension(&mut self, group: &GroupId) -> Result<SilverGroup> {
         let handle = load_handle(&mut self.handles, &self.provider, group)?;
         extension_of(handle.extensions())
+    }
+
+    /// The identities still members after a commit that removes the leaves
+    /// at `removing` and, when it consumes the stored proposals (as an
+    /// admin's does), the leaves whose own Remove is stored (they left).
+    fn members_after(
+        &mut self,
+        group: &GroupId,
+        removing: &[LeafNodeIndex],
+        consume: bool,
+    ) -> Result<Vec<UserId>> {
+        let handle = load_handle(&mut self.handles, &self.provider, group)?;
+        let mut gone: Vec<LeafNodeIndex> = removing.to_vec();
+        if consume {
+            for queued in handle.pending_proposals() {
+                if let Proposal::Remove(remove) = queued.proposal() {
+                    gone.push(remove.removed());
+                }
+            }
+        }
+        let mut staying = Vec::new();
+        for (index, leaf) in leaves_of(handle)? {
+            if !gone.contains(&index) && !staying.contains(&leaf.account) {
+                staying.push(leaf.account);
+            }
+        }
+        Ok(staying)
     }
 
     /// The MLS storage, for tests.
@@ -2720,6 +3398,26 @@ fn identity_of(leaf: &LeafNode) -> Result<(UserId, UserId)> {
     Ok((account, certificate.device))
 }
 
+/// The account a credential names: what a message's sender is taken to
+/// be once OpenMLS has checked the signature against the leaf that
+/// carried that credential in the message's epoch.
+fn account_of(credential: &Credential) -> Result<UserId> {
+    let bytes: [u8; 32] = credential
+        .serialized_content()
+        .try_into()
+        .map_err(|_| GroupError::KeyPackage("credential is not a user id".into()))?;
+    UserId::from_bytes(bytes)
+        .map_err(|_| GroupError::KeyPackage("credential is not a valid key".into()))
+}
+
+/// Whether a handshake for `theirs` is further ahead of `ours` than any
+/// hold queue would bridge. Saturating: a Welcome's epoch is whatever its
+/// author wrote, and `ours + HOLD_LIMIT` overflowing panicked a release
+/// build, which checks overflow.
+fn too_far_ahead(ours: u64, theirs: u64) -> bool {
+    theirs > ours.saturating_add(HOLD_LIMIT as u64)
+}
+
 /// Check a leaf: identity as above (`expected`'s, when given), and the
 /// sealing key present.
 fn verify_leaf(leaf: &LeafNode, expected: Option<&UserId>) -> Result<Leaf> {
@@ -2767,6 +3465,23 @@ fn leaves_of(handle: &MlsGroup) -> Result<Vec<(LeafNodeIndex, Leaf)>> {
         .members()
         .map(|member| Ok((member.index, leaf_in(&tree, &member)?)))
         .collect()
+}
+
+/// `extension` without the admins who are not among `members`, unless
+/// that would leave nobody (which the readers refuse anyway).
+fn without_departed_admins(extension: SilverGroup, members: &[UserId]) -> SilverGroup {
+    if !extension.admins.iter().any(|a| members.contains(a)) {
+        return extension;
+    }
+    let departed: Vec<UserId> = extension
+        .admins
+        .iter()
+        .filter(|a| !members.contains(a))
+        .copied()
+        .collect();
+    departed
+        .iter()
+        .fold(extension, |extension, admin| extension.without_admin(admin))
 }
 
 fn extension_of(extensions: &Extensions<GroupContext>) -> Result<SilverGroup> {
@@ -2906,9 +3621,15 @@ fn check_commit(
     }
     // Whose every leaf went by its own proposal: they left. An admin who
     // leaves is still named in the extension until an admin's commit
-    // takes them out, and the co-admin's next self-update does not touch
-    // the extension — so requiring every admin to be a member broke the
-    // group and blamed the honest co-admin (SM-G-03).
+    // takes them out, and a member's self-update cannot touch the
+    // extension — so requiring every admin to be a member broke the
+    // group and blamed the honest committer (SM-G-03). That holds in the
+    // leave commit and in every commit after it until an admin drops the
+    // name (an admin's own commits do, `without_departed_admins`): a
+    // commit that carried a leave without dropping the name, from an
+    // older client, otherwise broke the group at the next commit anyone
+    // made. What no commit may do is name somebody
+    // outside the group who was not named before.
     let left_by_self: Vec<UserId> = removed
         .iter()
         .filter(|(_, by_self)| *by_self)
@@ -2920,10 +3641,13 @@ fn check_commit(
                 .all(|(_, by_self)| *by_self)
         })
         .collect();
+    let departed_admin = |a: &UserId| {
+        before.admins.contains(a) && (!ids_before.contains(a) || left_by_self.contains(a))
+    };
     if after
         .admins
         .iter()
-        .any(|a| !ids_after.contains(a) && !left_by_self.contains(a))
+        .any(|a| !ids_after.contains(a) && !departed_admin(a))
     {
         return Err("the commit names an admin who is not a member".into());
     }

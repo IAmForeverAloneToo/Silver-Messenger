@@ -31,7 +31,7 @@
 //! handshake follow the same rules with a smaller deposit (ten, topped up
 //! below five): each is 1.2 KB rather than 32 bytes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -73,6 +73,8 @@ pub const MAX_SESSIONS_PER_PEER: usize = 5;
 /// who only ever wrote to us before somebody the user has written back
 /// to, and the least recently used before the rest.
 pub const MAX_SESSION_PEERS: usize = 256;
+/// Device revocations remembered at once; the oldest is forgotten first.
+pub const MAX_REVOKED_DEVICES: usize = 1024;
 /// Deposits of fresh one-time keys made in an hour. An honest relay asks
 /// for one when a conversation or two has started; more than this is a
 /// relay asking, not a need.
@@ -174,6 +176,13 @@ struct PeerSession {
     pending_init: Option<InitHeader>,
     #[serde(default)]
     active: bool,
+    /// We have sent on this session. A session the peer started and we
+    /// answered is a conversation as much as one we started; a session
+    /// a stranger started and nobody answered is not, and the two are
+    /// told apart when room has to be made. Absent before 0.25.0, when
+    /// only who started a session was known.
+    #[serde(default)]
+    sent: bool,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -185,6 +194,18 @@ struct PeerSessions {
 pub(crate) struct SessionsFile {
     #[serde(default)]
     peers: HashMap<UserId, PeerSessions>,
+    /// Devices whose accounts revoked them, as this client has seen and
+    /// placed them, oldest first (`docs/PROTOCOL.md` section 14.2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    revoked_devices: Vec<RevokedDevice>,
+}
+
+/// A device its account revoked: a body that comes from it in the
+/// account's name is refused from then on, whatever the relay says later.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct RevokedDevice {
+    account: UserId,
+    device: UserId,
 }
 
 /// How much of a session resists a quantum adversary, from least to most.
@@ -263,17 +284,25 @@ pub struct SessionStore {
     /// client start over gets a fresh process, and the work of one
     /// deposit at start-up is what any client does anyway.
     top_ups: Vec<u64>,
+    /// Peers whose sessions are kept before any stranger's when room has
+    /// to be made: the contacts and their devices, as the front end last
+    /// said. In memory only; it is told again on every start.
+    kept: HashSet<UserId>,
+    revoked_devices: Vec<RevokedDevice>,
 }
 
 impl SessionStore {
     /// Load from the data directory (missing files mean a fresh start).
     pub fn load(store: &Store, me: UserId) -> anyhow::Result<Self> {
+        let sessions = store.load_sessions()?;
         Ok(Self {
             prekeys: store.load_prekeys()?,
-            peers: store.load_sessions()?.peers,
+            peers: sessions.peers,
             store: Some(store.clone()),
             me,
             top_ups: Vec::new(),
+            kept: HashSet::new(),
+            revoked_devices: sessions.revoked_devices,
         })
     }
 
@@ -285,6 +314,8 @@ impl SessionStore {
             prekeys: PrekeyFile::default(),
             peers: HashMap::new(),
             top_ups: Vec::new(),
+            kept: HashSet::new(),
+            revoked_devices: Vec::new(),
         }
     }
 
@@ -507,6 +538,7 @@ impl SessionStore {
         {
             let message = current.session.encrypt(plaintext)?;
             current.last_used_ms = now_ms;
+            current.sent = true;
             let body = RatchetBody {
                 v: current.session.body_version(),
                 session: *current.session.id(),
@@ -548,6 +580,7 @@ impl SessionStore {
             last_used_ms: now_ms,
             pending_init: Some(init),
             active: true,
+            sent: true,
         });
         Self::prune(entry);
         self.persist_sessions()?;
@@ -687,6 +720,7 @@ impl SessionStore {
             last_used_ms: now_ms,
             pending_init: None,
             active: !ours_wins,
+            sent: false,
         });
         Self::prune(entry);
         self.persist_sessions()?;
@@ -730,6 +764,48 @@ impl SessionStore {
         Ok(peers)
     }
 
+    /// The peers whose sessions outrank any stranger's when room has to
+    /// be made: the front end's contacts and their devices.
+    pub fn keep(&mut self, peers: impl IntoIterator<Item = UserId>) {
+        self.kept = peers.into_iter().collect();
+    }
+
+    /// Whether `peer` is one we have sent to on a session, which is what
+    /// says a conversation with them is under way rather than only heard.
+    pub fn has_sent_to(&self, peer: &UserId) -> bool {
+        self.peers
+            .get(peer)
+            .is_some_and(|p| p.sessions.iter().any(|s| s.sent || s.initiator == self.me))
+    }
+
+    /// Remember that `account` revoked `device`, which the caller has
+    /// checked (the statement verifies and the device is known as the
+    /// account's), and drop the sessions with the device. Kept in
+    /// `sessions.json`, so a revoked device stays refused after a restart
+    /// even when the relay is not asked, or does not say.
+    pub fn note_revoked_device(&mut self, account: UserId, device: UserId) -> anyhow::Result<()> {
+        let entry = RevokedDevice { account, device };
+        let known = self.revoked_devices.contains(&entry);
+        if !known {
+            self.revoked_devices.push(entry);
+            while self.revoked_devices.len() > MAX_REVOKED_DEVICES {
+                self.revoked_devices.remove(0);
+            }
+        }
+        let had = self.peers.remove(&device).is_some();
+        if !known || had {
+            self.persist_sessions()?;
+        }
+        Ok(())
+    }
+
+    /// Whether `account` is known to have revoked `device`.
+    pub fn is_revoked_device(&self, account: &UserId, device: &UserId) -> bool {
+        self.revoked_devices
+            .iter()
+            .any(|r| r.account == *account && r.device == *device)
+    }
+
     /// Make room for a session with `peer`: drop peers whose sessions
     /// have all gone unused past [`SESSION_RETENTION`], and, if there are
     /// still [`MAX_SESSION_PEERS`] of them, the least useful one.
@@ -739,6 +815,12 @@ impl SessionStore {
     /// and among those, and then among the rest, the one whose newest
     /// session has sat longest. A dropped peer loses nothing that cannot
     /// be rebuilt: their next message starts a session anew.
+    ///
+    /// "Written to" is any session we sent on, whoever started it, or a
+    /// peer the front end named as a contact. Ranking by who started the
+    /// session put a contact who opened the conversation among the
+    /// strangers, and a few hundred throwaway handshakes then pushed
+    /// their session out.
     fn make_room(&mut self, peer: &UserId, now_ms: u64) {
         if self.peers.contains_key(peer) {
             return;
@@ -751,7 +833,11 @@ impl SessionStore {
                 .peers
                 .iter()
                 .map(|(id, entry)| {
-                    let ours = entry.sessions.iter().any(|s| s.initiator == self.me);
+                    let ours = self.kept.contains(id)
+                        || entry
+                            .sessions
+                            .iter()
+                            .any(|s| s.sent || s.initiator == self.me);
                     let newest = entry.sessions.iter().map(|s| s.last_used_ms).max();
                     (*id, (ours, newest.unwrap_or(0)))
                 })
@@ -857,11 +943,13 @@ impl SessionStore {
                             last_used_ms: s.last_used_ms,
                             pending_init: s.pending_init.clone(),
                             active: s.active,
+                            sent: s.sent,
                         })
                         .collect(),
                 },
             );
         }
+        file.revoked_devices = self.revoked_devices.clone();
         store.save_sessions(&file)
     }
 }
@@ -1351,6 +1439,84 @@ mod tests {
         );
         alice.sessions.forget(&bob.identity.user_id()).unwrap();
         assert!(!alice.sessions.has_session(&bob.identity.user_id()));
+    }
+
+    /// A contact who started the conversation, and whom we answered,
+    /// keeps the session however many strangers come knocking; so does a
+    /// contact the front end named, answered or not.
+    #[test]
+    fn strangers_do_not_push_out_a_conversation_the_peer_started() {
+        let mut now = 1_000_000u64;
+        let mut alice = Party::new();
+        let mut bob = Party::new();
+        let mut carol = Party::new();
+        let bob_bundle = bob.bundle(now);
+        let alice_bundle = alice.bundle(now);
+        let alice_id = alice.identity.user_id();
+        let carol_id = carol.identity.user_id();
+
+        // Alice starts; Bob answers inside her session.
+        let first = alice.send(&bob_bundle, "hi bob", now);
+        bob.recv(&alice, &first, now);
+        let reply = bob
+            .sessions
+            .encrypt(&bob.identity, &alice_bundle, &plain("hi"), now)
+            .unwrap();
+        assert!(
+            reply.init.is_none(),
+            "the answer went inside alice's session"
+        );
+        assert!(bob.sessions.has_sent_to(&alice_id));
+        // Carol starts one too and is never answered, but is a contact.
+        let hello = carol.send(&bob.bundle(now), "hello", now);
+        bob.recv(&carol, &hello, now);
+        assert!(!bob.sessions.has_sent_to(&carol_id));
+        bob.sessions.keep([carol_id]);
+
+        // Strangers start sessions from the published bundle, which needs
+        // no one-time key, until the store has turned over its whole
+        // capacity and more.
+        let mut published = bob.bundle(now);
+        if let Some(prekeys) = published.prekeys.as_mut() {
+            prekeys.one_time.clear();
+            prekeys.pq_one_time.clear();
+        }
+        for _ in 0..(MAX_SESSION_PEERS + 20) {
+            now += 1000;
+            let mut stranger = Party::new();
+            let body = stranger.send(&published, "x", now);
+            bob.sessions
+                .decrypt(&bob.identity, stranger.identity.user_id(), &body, now)
+                .unwrap();
+        }
+        assert!(bob.sessions.peers.len() <= MAX_SESSION_PEERS);
+        assert!(
+            bob.sessions.has_session(&alice_id),
+            "the answered conversation stays"
+        );
+        assert!(bob.sessions.has_session(&carol_id), "the contact stays");
+    }
+
+    /// A device revocation is remembered through the store, and drops the
+    /// sessions with the device.
+    #[test]
+    fn revoked_devices_are_remembered_through_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let (identity, _) = store.load_or_create_identity().unwrap();
+        let me = identity.user_id();
+        let account = Identity::generate().user_id();
+        let device = Identity::generate().user_id();
+        let other = Identity::generate().user_id();
+        let mut sessions = SessionStore::load(&store, me).unwrap();
+        assert!(!sessions.is_revoked_device(&account, &device));
+        sessions.note_revoked_device(account, device).unwrap();
+        assert!(sessions.is_revoked_device(&account, &device));
+        // Bound to the account that revoked it.
+        assert!(!sessions.is_revoked_device(&other, &device));
+        drop(sessions);
+        let again = SessionStore::load(&store, me).unwrap();
+        assert!(again.is_revoked_device(&account, &device));
     }
 
     #[test]

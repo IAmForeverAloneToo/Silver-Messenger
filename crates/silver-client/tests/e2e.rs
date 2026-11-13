@@ -699,8 +699,10 @@ async fn clients_with_prekeys_talk_over_forward_secret_sessions() {
         matches!(e, ClientEvent::SessionEstablished { peer, initiated_by_us: true, .. } if *peer == bob.user_id())
     })
     .await;
+    // A session the peer started is checked against the key the relay
+    // publishes for them, pin or no pin.
     wait_for(&mut bob_ev, "bob's session", |e| {
-        matches!(e, ClientEvent::SessionEstablished { peer, initiated_by_us: false, identity_dh: Some(dh), published: None } if *peer == alice.user_id() && *dh == alice.dh_public())
+        matches!(e, ClientEvent::SessionEstablished { peer, initiated_by_us: false, identity_dh: Some(dh), published: Some(published) } if *peer == alice.user_id() && *dh == alice.dh_public() && published.dh_public == alice.dh_public())
     })
     .await;
     let got = wait_for(&mut bob_ev, "bob's message", |e| message(e).is_some()).await;
@@ -1409,11 +1411,13 @@ async fn a_file_sent_while_the_recipient_is_offline_is_fetched_on_arrival() {
     // wait for the connection to be ready rather than fail.
     let (bob_c, mut bob_ev) =
         Client::spawn(url.clone(), bob.clone(), reuse_sessions(&bob_sessions)).unwrap();
-    let got = wait_for(
-        &mut bob_ev,
-        "file message",
-        |e| matches!(e, ClientEvent::Message(m) if matches!(m.content, Content::File { .. })),
-    )
+    // The message starts a session, whose key is looked up before it is
+    // shown, so it may come before or after the connection is ready.
+    let mut ready = false;
+    let got = wait_for(&mut bob_ev, "file message", |e| {
+        ready |= matches!(e, ClientEvent::Connected { .. });
+        matches!(e, ClientEvent::Message(m) if matches!(m.content, Content::File { .. }))
+    })
     .await;
     let ClientEvent::Message(m) = got else {
         unreachable!()
@@ -1424,7 +1428,9 @@ async fn a_file_sent_while_the_recipient_is_offline_is_fetched_on_arrival() {
         .await
         .unwrap();
     assert_eq!(std::fs::read(&saved).unwrap(), data);
-    connected(&mut bob_ev, "bob").await;
+    if !ready {
+        connected(&mut bob_ev, "bob").await;
+    }
     // The chunks went over the anonymous connection, not the authenticated
     // one that was still being set up.
     assert_eq!(state.anonymous_submission_count(), 1);

@@ -27,6 +27,14 @@
 //! file's length is recorded in [`HistoryState`] and a shorter one is
 //! refused.
 //!
+//! Whether a directory is bound at all is not left to the anchor, which
+//! sits in plaintext `vault.json` and can be deleted: the vault's own
+//! wrap of the data key says so (version 3, and version 2), so a bound
+//! directory whose anchor has gone is refused rather than taken for one
+//! from before the record existed. A file the record names that is not
+//! there is refused too, rather than read as never having been written:
+//! `blocked.json` deleted is not "nobody is blocked".
+//!
 //! ## What this cannot do
 //!
 //! An attacker who rolls the **whole directory** back to a consistent
@@ -106,6 +114,22 @@ pub(crate) struct State {
     /// them in again (`docs/design/format-changes.md` section 5.7).
     #[serde(default)]
     pub covers: u32,
+    /// The record was written ahead of a protection, or of the adoption of
+    /// a directory from before the record existed, that has not finished:
+    /// some files may still be in the clear or bound to their names alone,
+    /// and the next unlock is to finish the job.
+    ///
+    /// The only thing that lets a plaintext file into a protected
+    /// directory, and it is in here because here is where nobody without
+    /// the key can put it. Until 0.25.0 a cut-short protection was
+    /// recognised by its absence -- no anchor in `vault.json` -- and
+    /// anybody can delete an anchor, after which every file was adopted
+    /// as it stood and every plaintext file sealed. A record that says it
+    /// is unfinished has generation 0, and what it lets in is files at
+    /// generation 1 at most: a copy of it put back later, with the vault
+    /// that pointed at it, finds files further on than that and refuses.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unfinished: bool,
 }
 
 /// Where a directory stands with respect to rollback binding.
@@ -200,6 +224,13 @@ impl State {
     pub fn removed_history(&mut self, name: &str) {
         self.history.remove(name);
     }
+
+    /// Whether the record says `name` exists. A file it names that is not
+    /// on disk was deleted by somebody other than this client, which
+    /// records every removal it makes.
+    pub fn records(&self, name: &str) -> bool {
+        self.files.contains_key(name) || self.history.contains_key(name)
+    }
 }
 
 #[cfg(test)]
@@ -253,6 +284,28 @@ mod tests {
         };
         state.wrote("config.json", 3);
         assert_eq!(state.acceptable("config.json"), vec![3]);
+    }
+
+    /// `unfinished` is only ever written when it is true, so a record
+    /// from before it existed, or after the protection finished, reads as
+    /// finished and is written as it always was.
+    #[test]
+    fn a_record_says_it_is_unfinished_only_when_it_is() {
+        let state: State =
+            serde_json::from_str(r#"{"generation":3,"files":{},"history":{}}"#).unwrap();
+        assert!(!state.unfinished);
+        assert!(
+            !serde_json::to_string(&state)
+                .unwrap()
+                .contains("unfinished")
+        );
+        let unfinished = State {
+            unfinished: true,
+            ..State::default()
+        };
+        let back: State =
+            serde_json::from_str(&serde_json::to_string(&unfinished).unwrap()).unwrap();
+        assert!(back.unfinished && back.generation == 0);
     }
 
     /// A record written by a client that does not know `covers` (0.18.1

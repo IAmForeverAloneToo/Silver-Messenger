@@ -22,20 +22,25 @@ open chat. The rest of the client (commands, keys, the store, the
 network) is the same code.
 
 **What the lines say.** Messages in the open chat as `alice: hello`, in
-another chat as `alice, in team: hello` (for a contact, whose chat is
+another chat as `alice, in group team: hello` (for a contact, whose chat is
 named after them, `alice, in another chat: hello`); sent lines as `you:
 hello` when the client records them, which is before the relay answers,
 a refusal arriving after as the warning and the toast the full mode
 shows (`Not delivered: …`); edits as `alice edited: …`, deletions as
 `alice deleted a message`, reactions as `alice reacted 👍 to: hello…` and
-`alice took back a reaction to: hello…`, each with `, in team,` after
+`alice took back a reaction to: hello…`, each with `, in group team,` after
 the name when that chat is not open; system notices, toasts and timer
 notes as themselves. Clocks are left out of the lines (a reader would
 say every one); `/history` shows them.
 
 **Where you are.** Switching chats prints `Chat: bob, 3 unread` followed
 by the unread lines, or the last three when nothing is unread; the
-prompt reads `bob> `. Selecting a message with Shift-Up prints
+prompt reads `bob> `. A group is always said to be one — `Chat: group
+team`, `group team> `, `group team: 2` in `/unread` — because its name is
+its creator's choice: a contact can make a group called what you call
+somebody else, or `system`, and heard rather than seen the two would be
+the same chat. Such a group is also flagged in System when it arrives.
+Selecting a message with Shift-Up prints
 `Selected: alice: hello`, and the commands act on it as in the full
 mode.
 
@@ -155,8 +160,9 @@ reaches the screen through ratatui's cell buffer, which draws a
 character or does not; reader mode has no cell buffer, so whatever the
 journal holds is written to the terminal as it stands. `say` therefore
 filters, and the filter is `one_sentence`: newlines become a visible ` /
-`, control characters become spaces, and invisible and bidirectional
-characters go. The filter sits at that one choke point rather than at
+`, control characters become spaces, invisible and bidirectional
+characters go, and every run of spaces becomes one, since enough spaces
+push what follows onto a terminal row of its own. The filter sits at that one choke point rather than at
 the call sites, so every caller passes one logical line and a caller
 that wants two says twice; and `Reader::flush` passes the compose prompt
 through `one_line` for the same reason, since the prompt is the open
@@ -196,7 +202,11 @@ Every mouse action and its keyboard equivalent, as of 0.10.0:
 | Click the status line for help | `F1`, `/help` |
 
 `/go <name>` opens the chat whose contact alias, group name or id starts
-with `name` (case-insensitive), or says it is ambiguous. `/sidebar <n>`
+with `name` (case-insensitive), or says it is ambiguous. A name you gave
+(a contact's alias, System) wins over the same name a group's creator
+gave the group; a group whose name only a contact's name starts with is
+ambiguous rather than chosen; `/go group <name>` looks among the groups
+alone. `/sidebar <n>`
 sets the chat list's width in columns (12 to 60) and keeps it in
 `config.json`, where `sidebar_width` already lives.
 

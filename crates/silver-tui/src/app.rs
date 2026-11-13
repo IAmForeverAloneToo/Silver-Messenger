@@ -5,6 +5,7 @@ mod devices;
 mod everyday;
 mod groups;
 mod journal;
+mod typing;
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -398,6 +399,10 @@ const MAX_HELD_CHARS: usize = 4000;
 /// just asked; after this the question is forgotten rather than left
 /// lying around for a later line to answer by accident.
 const CONFIRM_PATIENCE: Duration = Duration::from_secs(120);
+/// Key events handled between two frames at most, when they come faster
+/// than frames: enough that a paste does not crawl in a frame a key, few
+/// enough that the screen keeps up with somebody holding a key down.
+const KEYS_PER_FRAME: usize = 256;
 /// Message ids remembered for de-duplication.
 const KNOWN_IDS_CAP: usize = 20_000;
 /// Blob ids of parked group messages already fetched, remembered so that
@@ -692,6 +697,9 @@ pub struct App {
     quit_armed: Option<Instant>,
     /// What the last frame drew.
     pub view: View,
+    /// The open conversation's rows as last laid out; see
+    /// [`ui::RowCache`].
+    pub row_cache: ui::RowCache,
     pub selection: Option<Selection>,
     /// The left button is down in the message pane.
     selecting: bool,
@@ -755,11 +763,17 @@ pub struct App {
     /// Lock after this long without a keystroke, when set and possible.
     lock_after: Option<Duration>,
     last_activity: Instant,
-    /// When the current input line was begun, and whether the line just
-    /// submitted came in faster than a person types (see
-    /// [`App::looks_pasted`]).
-    line_started: Instant,
+    /// How the keys of the current input line arrived, and whether the
+    /// line just submitted was pasted rather than typed (see
+    /// [`typing::LineTiming`]).
+    typing: typing::LineTiming,
     pasted_line: bool,
+    /// Each group's and invitation's name as last checked against the
+    /// contacts' names (see [`App::check_group_names`]).
+    group_names_checked: HashMap<silver_protocol::group::GroupId, String>,
+    /// An `/add` whose lookup is out, and the pane that was open when it
+    /// was asked for: the new chat opens only if that is still the one.
+    adding: Option<(UserId, Pane)>,
     /// A command held at its confirmation step, and when it was held; see
     /// [`Pending`].
     pending: Option<(Pending, Instant)>,
@@ -979,6 +993,7 @@ impl App {
             clipboard: Clipboard::new(),
             quit_armed: None,
             view: View::default(),
+            row_cache: ui::RowCache::default(),
             selection: None,
             selecting: false,
             last_click: None,
@@ -1013,8 +1028,10 @@ impl App {
             at_rest,
             lock_after,
             last_activity: Instant::now(),
-            line_started: Instant::now(),
+            typing: typing::LineTiming::default(),
             pasted_line: false,
+            group_names_checked: HashMap::new(),
+            adding: None,
             pending: None,
             confirm_patience: CONFIRM_PATIENCE,
             lock_requested: false,
@@ -1104,6 +1121,12 @@ impl App {
         Ok(app)
     }
 
+    /// Something has asked for the session to end or lock, or to restart
+    /// into an update: no more input is taken before the loop sees it.
+    fn leaving(&self) -> bool {
+        self.should_quit || self.lock_requested || self.restart_requested || self.wiped.is_some()
+    }
+
     /// Debug builds only: panic on the first tick after `delay`, so the
     /// terminal test can see what the panic hook leaves behind.
     #[cfg(debug_assertions)]
@@ -1121,6 +1144,7 @@ impl App {
         let mut tick = tokio::time::interval(Duration::from_millis(250));
 
         let exit = loop {
+            self.check_group_names();
             match &mut surface {
                 Surface::Screen(terminal) => {
                     terminal.draw(|frame| ui::draw(frame, &mut self))?;
@@ -1132,9 +1156,24 @@ impl App {
                 + self.held_message_count();
             self.notifier.set_unread(unread);
             tokio::select! {
-                Some(ev) = keys.recv() => {
+                Some((ev, arrival)) = keys.recv() => {
                     self.last_activity = Instant::now();
-                    self.handle_terminal_event(ev)
+                    let mut key = matches!(ev, Event::Key(_));
+                    self.handle_terminal_event(ev, arrival);
+                    // Keys already waiting are taken before the next frame:
+                    // a frame a key made a long paste take minutes to
+                    // type in. Up to the first event that is not a key, so
+                    // the mouse still sees the screen it clicked on, and
+                    // never past a key that ends the session or locks it.
+                    let mut taken = 0;
+                    while key && taken < KEYS_PER_FRAME && !self.leaving() {
+                        let Ok((ev, arrival)) = keys.try_recv() else {
+                            break;
+                        };
+                        key = matches!(ev, Event::Key(_));
+                        self.handle_terminal_event(ev, arrival);
+                        taken += 1;
+                    }
                 }
                 Some(ev) = events.recv() => self.handle_client_event(ev),
                 Some(ev) = internal_rx.recv() => self.handle_internal(ev),
@@ -1323,6 +1362,93 @@ impl App {
     /// Where `pane` is in the chat list, if it is listed.
     pub fn pane_index(&self, pane: Pane) -> Option<usize> {
         self.panes().iter().position(|p| *p == pane)
+    }
+
+    /// Keep `open` the open pane across a change to the chat list.
+    ///
+    /// The selection is an index into the list, so a contact added or
+    /// removed before the open pane moves what the index points at; this
+    /// puts it back on the same pane without the side effects of opening
+    /// one. A pane that is gone gives way to System.
+    pub(super) fn keep_open(&mut self, open: Pane) {
+        match self.pane_index(open) {
+            Some(index) => self.selected = index,
+            // A request that became a contact goes on as their chat.
+            None => match open {
+                Pane::Request(from) if self.select_pane(Pane::Thread(from)) => {}
+                _ => self.select(0),
+            },
+        }
+    }
+
+    /// Warn about a group, or an invitation to one, whose name is also a
+    /// contact's or the System pane's, once per name it takes.
+    ///
+    /// A group's name is its creator's to choose, and a contact can
+    /// create one called what you call another contact. The chat list
+    /// draws a group as one and reader mode says "group", but a name
+    /// that is somebody else's is worth a word of its own when it
+    /// arrives: whoever chose it may be hoping for text meant for that
+    /// somebody.
+    pub(super) fn check_group_names(&mut self) {
+        let mut named: Vec<(silver_protocol::group::GroupId, String, bool)> = self
+            .group_list
+            .iter()
+            .map(|g| (*g, self.group_name(g), false))
+            .collect();
+        named.extend(
+            self.invitations()
+                .into_iter()
+                .map(|held| (held.group, held.name, true)),
+        );
+        for (group, name, invitation) in named {
+            if self.group_names_checked.get(&group) == Some(&name) {
+                continue;
+            }
+            self.group_names_checked.insert(group, name.clone());
+            let Some(clash) = self.name_clash(&name) else {
+                continue;
+            };
+            let shown = silver_client::files::printable(&name, MAX_ALIAS_CHARS);
+            let what = if invitation {
+                "An invitation is to a group called"
+            } else {
+                "A group is called"
+            };
+            self.system(
+                Level::Warn,
+                format!(
+                    "{what} \"{shown}\", which is also {clash}. It is not that chat: the chat list marks it as a group and reader mode says \"group {shown}\". Check which chat is open before writing anything meant for one person."
+                ),
+            );
+        }
+    }
+
+    /// What else answers to `name`, if anything: a contact, or a pane
+    /// this program names itself.
+    fn name_clash(&self, name: &str) -> Option<String> {
+        let wanted: String = name
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        if wanted.is_empty() {
+            return None;
+        }
+        match wanted.as_str() {
+            "system" => return Some("the name of the System pane".to_owned()),
+            "requests" => return Some("what /go calls the requests that wait".to_owned()),
+            "you" => return Some("what reader mode calls you".to_owned()),
+            _ => {}
+        }
+        self.contacts
+            .iter()
+            .find(|c| {
+                c.display_name().to_lowercase() == wanted
+                    || format!("{}…", c.user_id.short()).to_lowercase() == wanted
+                    || c.user_id.to_string().to_lowercase() == wanted
+            })
+            .map(|c| format!("what you call the contact {}", c.display_name()))
     }
 
     /// Open `pane`, if it is listed.
@@ -1537,7 +1663,7 @@ impl App {
     /// lands here is the relay's, or a peer's, and the pane is also read
     /// aloud and written to the log. This program's own lines are single
     /// lines of plain text, so nothing of theirs is lost.
-    fn system(&mut self, level: Level, text: impl Into<String>) {
+    pub(crate) fn system(&mut self, level: Level, text: impl Into<String>) {
         let text = silver_client::files::one_line(&text.into());
         if self.reader && level != Level::Code {
             self.say(journal::system_sentence(level, &text));
@@ -1601,15 +1727,18 @@ impl App {
 
     // --- terminal input ----------------------------------------------------
 
-    fn handle_terminal_event(&mut self, ev: Event) {
+    /// One event from the terminal, with when and in which read the input
+    /// thread got it.
+    fn handle_terminal_event(&mut self, ev: Event, arrival: typing::Arrival) {
         match ev {
             Event::Key(key) if key.kind != KeyEventKind::Release => {
-                // When the line starts, so that a line that arrived
-                // faster than a person types can be told from a typed
-                // one on a terminal with no bracketed paste.
+                // Every key counts, spaces and all, so that a line that
+                // was pasted can be told from a typed one on a terminal
+                // with no bracketed paste; an empty input is a new line.
                 if self.input.is_empty() {
-                    self.line_started = Instant::now();
+                    self.typing.start();
                 }
+                self.typing.key(arrival);
                 let before = self.input.len();
                 let typed_at = self.cursor;
                 self.handle_key(key);
@@ -1625,7 +1754,10 @@ impl App {
                     self.toast = None;
                 }
             }
-            Event::Paste(text) => self.insert_str(&text.replace("\r\n", "\n").replace('\r', "\n")),
+            Event::Paste(text) => {
+                self.typing.paste();
+                self.insert_str(&text.replace("\r\n", "\n").replace('\r', "\n"))
+            }
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::ScrollUp if self.help_open => {
                     self.help_scroll = self.help_scroll.saturating_sub(MOUSE_SCROLL_STEP)
@@ -2177,7 +2309,10 @@ impl App {
 
     fn paste_from_clipboard(&mut self) {
         match self.clipboard.get() {
-            Some(text) => self.insert_str(&text.replace("\r\n", "\n").replace('\r', "\n")),
+            Some(text) => {
+                self.typing.paste();
+                self.insert_str(&text.replace("\r\n", "\n").replace('\r', "\n"))
+            }
             None if self.clipboard.can_read() => self.toast("The clipboard is empty."),
             None => self.toast(
                 "No system clipboard here; paste with the terminal's own shortcut (Ctrl-Shift-V, Shift-Insert or the menu).",
@@ -2573,33 +2708,45 @@ impl App {
 
     /// `/go <name>`: open the chat whose alias, group name or id starts
     /// with `name`, without the mouse and without cycling through the
-    /// list; `system` names that pane, and `requests` the first entry
-    /// that waits.
+    /// list; `system` names that pane, `requests` the first entry that
+    /// waits, and `group <name>` looks among the groups alone.
+    ///
+    /// A name you gave — a contact's alias, System — wins over the same
+    /// name a group's creator gave their group, and a group's name that
+    /// is only part of a contact's is not taken as the one meant: a
+    /// contact can make a group called what you call somebody else, and
+    /// `/go` landing there would send what was meant for one person to
+    /// a roomful.
     fn cmd_go(&mut self, args: &[&str]) {
         let wanted = args.join(" ").trim().to_lowercase();
         if wanted.is_empty() {
             self.toast("Usage: /go <contact, group, request, system or requests>");
             return;
         }
-        // Every name a pane answers to, lower-cased, with its index.
-        let mut panes: Vec<(usize, String)> = Vec::new();
+        let (wanted, groups_only) = match wanted.strip_prefix("group ") {
+            Some(rest) => (rest.trim().to_owned(), true),
+            None => (wanted, false),
+        };
+        // Every name a pane answers to, lower-cased, with its index and
+        // whether somebody else chose it.
+        let mut panes: Vec<(usize, String, bool)> = Vec::new();
         for (index, pane) in self.panes().into_iter().enumerate() {
             match pane {
-                Pane::System => panes.push((index, "system".to_owned())),
+                Pane::System => panes.push((index, "system".to_owned(), false)),
                 Pane::Thread(id) => {
                     if let Some(contact) = self.contacts.iter().find(|c| c.user_id == id) {
-                        panes.push((index, contact.display_name().to_lowercase()));
+                        panes.push((index, contact.display_name().to_lowercase(), false));
                     }
-                    panes.push((index, id.to_string().to_lowercase()));
+                    panes.push((index, id.to_string().to_lowercase(), false));
                 }
                 Pane::Group(group) => {
-                    panes.push((index, self.group_name(&group).to_lowercase()));
-                    panes.push((index, group.to_string().to_lowercase()));
+                    panes.push((index, self.group_name(&group).to_lowercase(), true));
+                    panes.push((index, group.to_string().to_lowercase(), true));
                 }
-                Pane::Request(id) => panes.push((index, id.to_string().to_lowercase())),
+                Pane::Request(id) => panes.push((index, id.to_string().to_lowercase(), false)),
                 Pane::Invitation(group) => {
                     if let Some(held) = self.invitations().iter().find(|h| h.group == group) {
-                        panes.push((index, held.name.to_lowercase()));
+                        panes.push((index, held.name.to_lowercase(), true));
                     }
                 }
             }
@@ -2609,26 +2756,44 @@ impl App {
             .first()
             .and_then(|(_, first)| self.pane_index(*first))
         {
-            panes.push((index, "requests".to_owned()));
+            panes.push((index, "requests".to_owned(), false));
         }
-        let exact: Vec<usize> = panes
-            .iter()
-            .filter(|(_, name)| *name == wanted)
-            .map(|(pane, _)| *pane)
-            .collect();
-        let mut found: Vec<usize> = if exact.is_empty() {
-            panes
-                .iter()
-                .filter(|(_, name)| name.starts_with(&wanted))
-                .map(|(pane, _)| *pane)
-                .collect()
-        } else {
-            exact
+        if groups_only {
+            panes.retain(|(_, _, theirs)| *theirs);
+        }
+        let indexes = |keep: &dyn Fn(&(usize, String, bool)) -> bool| -> Vec<usize> {
+            let mut found: Vec<usize> = panes.iter().filter(|p| keep(p)).map(|p| p.0).collect();
+            found.sort_unstable();
+            found.dedup();
+            found
         };
-        found.dedup();
+        let exact_mine = indexes(&|(_, name, theirs)| !theirs && *name == wanted);
+        let exact = indexes(&|(_, name, _)| *name == wanted);
+        let found = if !exact_mine.is_empty() {
+            exact_mine
+        } else if !exact.is_empty() {
+            // Only a group answers to it exactly. A contact whose name
+            // starts with it might be the one meant all the same.
+            let mut found = exact;
+            found.extend(indexes(&|(_, name, theirs)| {
+                !theirs && name.starts_with(&wanted)
+            }));
+            found.sort_unstable();
+            found.dedup();
+            found
+        } else {
+            indexes(&|(_, name, _)| name.starts_with(&wanted))
+        };
+        let any_group = found
+            .iter()
+            .any(|i| panes.iter().any(|(at, _, theirs)| at == i && *theirs));
         match found.as_slice() {
             [] => self.toast(format!("No chat called {wanted}.")),
             [pane] => self.select(*pane),
+            _ if any_group && !groups_only => self.toast(format!(
+                "{} chats answer to {wanted}, a group among them; say more of the name, or /go group {wanted} for the group.",
+                found.len()
+            )),
             _ => self.toast(format!(
                 "{} chats start with {wanted}; say more of the name.",
                 found.len()
@@ -2726,12 +2891,14 @@ impl App {
     }
 
     fn submit(&mut self) {
+        // Judged before anything is trimmed: padding is part of how the
+        // line arrived.
+        self.pasted_line = self.typing.judge();
         let line = std::mem::take(&mut self.input).trim().to_owned();
         self.cursor = 0;
         if line.is_empty() {
             return;
         }
-        self.pasted_line = self.looks_pasted(&line);
         self.remember(&line);
         match line.strip_prefix('/') {
             Some(command) => self.run_command(command),
@@ -2762,23 +2929,9 @@ impl App {
         }
     }
 
-    /// Whether the line just submitted arrived faster than anyone types.
-    ///
-    /// A terminal without bracketed paste — the Linux console, older
-    /// Windows consoles, some multiplexer setups — hands a paste over as
-    /// plain keystrokes, so a pasted `hello\r/revoke confirm\r` runs the
-    /// command with its confirmation on the same line. A paste arrives in
-    /// one read, microseconds a character; four milliseconds a character
-    /// is about three thousand words a minute, so the line between them
-    /// is wide in both directions. Short lines are not judged, there
-    /// being nothing to measure.
-    fn looks_pasted(&self, line: &str) -> bool {
-        let chars = line.chars().count() as u64;
-        chars >= 8 && self.line_started.elapsed() < Duration::from_millis(chars * 4)
-    }
-
-    /// Refuse a command that undoes an identity when the line it came on
-    /// was pasted rather than typed, and say why.
+    /// Refuse a command whose effect is not to be had on somebody else's
+    /// say-so when the line it came on was pasted rather than typed
+    /// ([`typing::LineTiming::judge`]), and say why.
     fn typed_it_themselves(&mut self, what: &str) -> bool {
         if !self.pasted_line {
             return true;
@@ -2896,6 +3049,14 @@ impl App {
             "session" => self.cmd_session(),
             "receipts" => self.cmd_receipts(&rest),
             "cover" => self.cmd_cover(&rest),
+            // Making somebody an admin hands them the group: who is in
+            // it, and who else runs it. The rest of `/group` lives with
+            // the groups; the guard sits here, where every command passes.
+            "group" | "g"
+                if rest.len() > 2
+                    && rest[0].eq_ignore_ascii_case("admin")
+                    && rest[1].eq_ignore_ascii_case("add")
+                    && !self.typed_it_themselves("making somebody a group admin") => {}
             "group" | "g" => self.cmd_group(&rest),
             "decline" => self.cmd_decline(&rest),
             "notify" => self.cmd_notify(&rest),
@@ -3298,6 +3459,7 @@ impl App {
             }
             self.select(i + 1);
         }
+        self.adding = Some((user_id, self.selected_pane()));
         self.lookup_contact(user_id, alias);
     }
 
@@ -3624,6 +3786,11 @@ impl App {
                 self.select(0);
             }
             Some("ok") | Some("yes") => {
+                // The mark says a person compared the number; a pasted
+                // line is somebody else saying so.
+                if !self.typed_it_themselves("marking a contact verified") {
+                    return;
+                }
                 self.contacts[index].set_verified(true);
                 self.persist_contacts();
                 self.sync_contact(silver_protocol::device::ContactAction::Verify {
@@ -3688,6 +3855,11 @@ impl App {
             self.toast("Select a contact first.");
             return;
         };
+        // The pinned key and the verified mark go with the contact, on
+        // every device of this identity.
+        if !self.typed_it_themselves("removing a contact") {
+            return;
+        }
         let removed = self.contacts.remove(index);
         self.threads.remove(&removed.user_id);
         self.unread.remove(&removed.user_id);
@@ -4080,8 +4252,15 @@ impl App {
     // --- messaging ---------------------------------------------------------
 
     fn send_message(&mut self, text: String) {
-        // Answering a stranger is accepting them (docs/design/requests.md).
+        // Answering a stranger is accepting them (docs/design/requests.md),
+        // and so it is guarded as `/accept` is. The answer stays in the
+        // input: Enter, pressed by hand, sends it.
         if let Some(index) = self.selected_request_index() {
+            if !self.typed_it_themselves("accepting a request") {
+                self.input = text;
+                self.cursor = self.input.chars().count();
+                return;
+            }
             let from = self.accept_request(index);
             self.send_content_to(from, Content::text(text));
             return;
@@ -4252,6 +4431,7 @@ impl App {
                             contact.alias = alias.clone();
                             contact.bundle = bundle.clone();
                             let name = contact.display_name();
+                            let open = self.selected_pane();
                             self.contacts.push(contact);
                             self.threads.entry(user_id).or_default();
                             self.persist_contacts();
@@ -4260,7 +4440,16 @@ impl App {
                                 alias,
                                 bundle: bundle.map(Box::new),
                             });
-                            self.select(self.contacts.len());
+                            // The relay says when this answer comes. If the
+                            // user has gone on to another chat meanwhile,
+                            // and may be typing into it, the new one does
+                            // not take its place: text meant for one person
+                            // would go to another.
+                            if self.adding.take() == Some((user_id, open)) {
+                                self.select(self.contacts.len());
+                            } else {
+                                self.keep_open(open);
+                            }
                             if found {
                                 self.system(Level::Info, format!("Added {name} ({user_id})"));
                             } else {
@@ -4796,6 +4985,12 @@ impl App {
                     "a device of {}'s was revoked",
                     self.contact_name(&revocation.account)
                 );
+                // The group engine refuses Welcomes and requests from a
+                // revoked device, and takes its leaves out, only once it
+                // has been told.
+                if let Err(e) = self.groups.note_revoked_devices([revocation.device]) {
+                    tracing::warn!("noting a revoked device for the groups: {e}");
+                }
             }
             ClientEvent::DeviceGone { account, .. } => {
                 tracing::debug!("a device of {}… is gone", account.short());
@@ -5259,7 +5454,7 @@ impl App {
         use anyhow::Context;
         let path = &self.received_file(path)?;
         let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-        if !silver_client::FileCipher::is_encrypted(&bytes) {
+        if !silver_client::FileCipher::is_encrypted_download(&bytes) {
             return Ok(path.to_path_buf());
         }
         let cipher = self
@@ -5270,7 +5465,7 @@ impl App {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .context("no file name")?;
-        let plain = cipher.decrypt(&name, &bytes)?;
+        let plain = cipher.decrypt_download(&name, &bytes)?;
         let dir = self.store.downloads_dir().join(OPEN_DIR);
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         let copy = dir.join(&name);
@@ -5368,14 +5563,14 @@ impl App {
             use anyhow::Context;
             let path = self.received_file(&path)?;
             let bytes = std::fs::read(&path)?;
-            if !silver_client::FileCipher::is_encrypted(&bytes) {
+            if !silver_client::FileCipher::is_encrypted_download(&bytes) {
                 anyhow::bail!("{name} is a plain file already");
             }
             let cipher = self
                 .store
                 .cipher()
                 .context("the data directory is not unlocked")?;
-            let plain = cipher.decrypt(&name, &bytes)?;
+            let plain = cipher.decrypt_download(&name, &bytes)?;
             let dir = self.store.downloads_dir();
             silver_client::files::save(&dir, &name, &plain, self.downloads_quota)
         })();
@@ -5545,6 +5740,10 @@ impl App {
                 ));
             }
             Some("auto") | Some("on") => {
+                // Whatever they send then lands on this disk unasked.
+                if !self.typed_it_themselves("fetching their files as they arrive") {
+                    return;
+                }
                 self.contacts[index].auto_files = true;
                 self.persist_contacts();
                 self.sync_contact(silver_protocol::device::ContactAction::Files {
@@ -5833,6 +6032,11 @@ impl App {
     }
 
     fn cmd_accept(&mut self, args: &[&str]) {
+        // A stranger accepted is a contact: their messages land in a chat
+        // of their own, and a pasted `/send` after it has somewhere to go.
+        if !self.typed_it_themselves("accepting a request") {
+            return;
+        }
         let Some(pane) = self.waiting_named(args, "accept") else {
             return;
         };
@@ -6033,6 +6237,11 @@ impl App {
     /// invitation's inviter; with an argument, a waiting entry's number, a
     /// person by alias, id or id prefix, or any id at all.
     fn cmd_block(&mut self, args: &[&str]) {
+        // A block reaches every device of this identity and takes the
+        // person out of every group shared with them.
+        if !self.typed_it_themselves("blocking someone") {
+            return;
+        }
         let id = match args.first() {
             None => match self.selected_pane() {
                 Pane::Request(from) => from,
@@ -6245,11 +6454,32 @@ fn short_hash(hash: &[u8; 32]) -> String {
 }
 
 /// Crossterm's reader blocks, so it gets a thread of its own.
-fn spawn_input_thread() -> mpsc::Receiver<Event> {
-    let (tx, rx) = mpsc::channel(64);
+///
+/// Each event is stamped here, as it is read, with the time and with
+/// which read brought it ([`typing::Arrival`]): the paste guard judges a
+/// line by how its keys arrived, and nothing the app does afterwards —
+/// a slow frame, a busy turn — may change that. The channel is unbounded
+/// for the same reason: a thread blocked on a full channel would leave
+/// typed keys piling up in the terminal, to be read later in one go and
+/// look pasted.
+fn spawn_input_thread() -> mpsc::UnboundedReceiver<(Event, typing::Arrival)> {
+    let (tx, rx) = mpsc::unbounded_channel();
     std::thread::spawn(move || {
-        while let Ok(ev) = event::read() {
-            if tx.blocking_send(ev).is_err() {
+        let mut burst = 0u64;
+        loop {
+            // Nothing waiting: the next event needs the terminal to
+            // write again, so it starts a new read.
+            if !event::poll(Duration::ZERO).unwrap_or(false) {
+                burst += 1;
+            }
+            let Ok(ev) = event::read() else {
+                break;
+            };
+            let arrival = typing::Arrival {
+                at: Instant::now(),
+                burst,
+            };
+            if tx.send((ev, arrival)).is_err() {
                 break;
             }
         }
@@ -7091,6 +7321,87 @@ mod tests {
         );
     }
 
+    /// A contact can make a group called what you call somebody else.
+    /// `/go` with that name opens the person, a group whose name is only
+    /// the start of a contact's is not taken for them, `/go group` names
+    /// the group, the group's arrival is flagged once, and reader mode
+    /// says it is a group wherever it names it.
+    #[tokio::test]
+    async fn a_group_named_like_a_contact_is_not_taken_for_them() {
+        let (mut app, _dir) = app();
+        let alice = Identity::generate();
+        let mut contact = Contact::new(alice.user_id());
+        contact.alias = Some("alice".into());
+        app.contacts.push(contact);
+        let impostor = app.groups.create("Alice", now_ms()).unwrap().group;
+        app.groups.create("ali", now_ms()).unwrap();
+        app.refresh_group_list();
+        let flagged = |app: &App| {
+            app.system
+                .iter()
+                .filter(|l| l.level == Level::Warn && l.text.contains("the contact alice"))
+                .count()
+        };
+        app.check_group_names();
+        assert_eq!(
+            flagged(&app),
+            1,
+            "the group called alice, not the one called ali"
+        );
+        app.check_group_names();
+        assert_eq!(flagged(&app), 1, "once, not every frame");
+
+        app.cmd_go(&["alice"]);
+        assert_eq!(app.selected_pane(), Pane::Thread(alice.user_id()));
+        app.select(0);
+        app.cmd_go(&["ali"]);
+        assert_eq!(
+            app.selected_pane(),
+            Pane::System,
+            "ambiguous, so nothing opens"
+        );
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|(t, _)| t.contains("/go group ali"))
+        );
+        app.cmd_go(&["group", "alice"]);
+        assert_eq!(app.selected_pane(), Pane::Group(impostor));
+
+        app.reader = true;
+        assert_eq!(app.reader_prompt(), "group Alice> ");
+    }
+
+    /// A lookup's answer comes when the relay sends it. Waited for, the
+    /// new chat opens; after the user has gone on to another, that one
+    /// stays open, though the new contact now comes before it in the list.
+    #[tokio::test]
+    async fn a_late_add_does_not_take_the_open_chat() {
+        let (mut app, _dir) = app();
+        let created = app.groups.create("team", now_ms()).unwrap();
+        app.refresh_group_list();
+        let answer = |who: &Identity| Internal::LookupDone {
+            user_id: who.user_id(),
+            alias: None,
+            result: Ok(Some(who.key_bundle())),
+        };
+
+        let carol = Identity::generate();
+        app.cmd_add(&[&carol.user_id().to_string()]);
+        app.select_pane(Pane::Group(created.group));
+        app.handle_internal(answer(&carol));
+        assert_eq!(app.selected_pane(), Pane::Group(created.group));
+        assert!(
+            app.contact_index(&carol.user_id()).is_some(),
+            "added all the same"
+        );
+
+        let dave = Identity::generate();
+        app.cmd_add(&[&dave.user_id().to_string()]);
+        app.handle_internal(answer(&dave));
+        assert_eq!(app.selected_pane(), Pane::Thread(dave.user_id()));
+    }
+
     #[tokio::test]
     async fn chats_are_reached_by_name_and_the_list_sized_by_command() {
         let (mut app, _dir) = app();
@@ -7411,6 +7722,90 @@ mod tests {
                 .is_some_and(|(t, _)| t.contains("type it out")),
             "a path is typeable, so the guard is the whole control here"
         );
+    }
+
+    /// Feed `text` and an Enter through the terminal event path, the keys
+    /// `gap` apart and `per_read` of them to a read, as the input thread
+    /// would stamp them.
+    fn keys_in(app: &mut App, text: &str, gap: Duration, per_read: usize, burst: &mut u64) {
+        let mut at = Instant::now();
+        let keys = text
+            .chars()
+            .map(KeyCode::Char)
+            .chain(std::iter::once(KeyCode::Enter));
+        for (i, code) in keys.enumerate() {
+            if i % per_read == 0 {
+                *burst += 1;
+            }
+            at += gap;
+            app.handle_terminal_event(
+                Event::Key(KeyEvent::new(code, KeyModifiers::NONE)),
+                typing::Arrival { at, burst: *burst },
+            );
+        }
+    }
+
+    /// The paste guard end to end, on a command it newly covers: a
+    /// `/verify ok` padded with spaces either side, as a terminal without
+    /// bracketed paste hands it over, is refused; the same line typed
+    /// goes ahead.
+    #[tokio::test]
+    async fn a_padded_paste_does_not_verify_a_contact() {
+        let (mut app, _dir) = app();
+        let peer = Identity::generate();
+        let mut contact = Contact::new(peer.user_id());
+        contact.bundle = Some(peer.key_bundle());
+        app.contacts.push(contact);
+        app.select_pane(Pane::Thread(peer.user_id()));
+        let padded = format!("{}/verify ok{}", " ".repeat(3000), " ".repeat(3000));
+        let mut burst = 0;
+        keys_in(
+            &mut app,
+            &padded,
+            Duration::from_micros(3),
+            1024,
+            &mut burst,
+        );
+        assert!(
+            !app.contacts[0].verified,
+            "a pasted line is not a comparison"
+        );
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|(t, _)| t.contains("type it out")),
+        );
+        keys_in(
+            &mut app,
+            "/verify ok",
+            Duration::from_millis(80),
+            1,
+            &mut burst,
+        );
+        assert!(app.contacts[0].verified, "typed, it goes ahead");
+    }
+
+    /// Bracketed paste is a paste whatever the timing: the text arrives
+    /// in one event, and the Enter after it may well be typed.
+    #[tokio::test]
+    async fn bracketed_paste_counts_as_pasted() {
+        let (mut app, _dir) = app();
+        let peer = Identity::generate();
+        app.contacts.push(Contact::new(peer.user_id()));
+        app.select_pane(Pane::Thread(peer.user_id()));
+        let at = Instant::now();
+        app.handle_terminal_event(
+            Event::Paste("/verify ok".into()),
+            typing::Arrival { at, burst: 1 },
+        );
+        app.handle_terminal_event(
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            typing::Arrival {
+                at: at + Duration::from_secs(1),
+                burst: 2,
+            },
+        );
+        assert!(!app.contacts[0].verified);
     }
 
     /// A session that loses post-quantum protection reads exactly like one

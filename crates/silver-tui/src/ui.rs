@@ -1,6 +1,9 @@
 //! Rendering. Pure function of [`App`] state, except that it records the
 //! message pane's scroll range so key handling can clamp to it.
 
+use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
+
 use chrono::{Local, NaiveDate, TimeZone};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
@@ -24,6 +27,22 @@ type Row = (Line<'static>, Option<usize>);
 /// Below this many columns the chat list is folded away and the chat
 /// title says which pane this is.
 const NARROW_WIDTH: u16 = 70;
+
+/// The rows each line of the open conversation was laid out as, kept from
+/// one frame to the next.
+///
+/// A frame is drawn for every key, and laying out a long conversation —
+/// wrapping every message, measuring every character — on each one is
+/// what made a long paste or a long history slow to type into. A line's
+/// rows depend only on what [`line_print`] hashes, so a line whose print
+/// is unchanged is drawn from here. The print covers everything the rows
+/// are made of, so what is drawn is what laying the line out afresh
+/// would draw; a stale entry costs a lookup, never a wrong row.
+#[derive(Default)]
+pub struct RowCache {
+    pane: Option<Pane>,
+    lines: HashMap<String, (u64, Vec<Line<'static>>)>,
+}
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     // The ground: the terminal's own colours, or the palette's when it
@@ -284,12 +303,20 @@ fn draw_messages(frame: &mut Frame, app: &mut App, area: Rect) {
     let height = area.height.saturating_sub(2) as usize;
 
     let pane = app.selected_pane();
+    let mut cache = std::mem::take(&mut app.row_cache);
+    if cache.pane != Some(pane) {
+        cache.lines.clear();
+        cache.pane = Some(pane);
+    }
     let (title, rows) = match pane {
-        Pane::Group(group) => (app.group_title(&group), group_rows(app, &group, width)),
+        Pane::Group(group) => (
+            app.group_title(&group),
+            group_rows(app, &group, width, &mut cache),
+        ),
         Pane::System => (" System ".to_owned(), system_rows(app, width)),
         Pane::Request(from) => (
             request_title(app, from, width),
-            request_rows(app, from, width),
+            request_rows(app, from, width, &mut cache),
         ),
         Pane::Invitation(group) => (
             invitation_title(app, group),
@@ -327,11 +354,12 @@ fn draw_messages(frame: &mut Frame, app: &mut App, area: Rect) {
                     },
                     &id,
                 ),
-                thread_rows(app, &id, width),
+                thread_rows(app, &id, width, &mut cache),
             ),
             None => (" System ".to_owned(), system_rows(app, width)),
         },
     };
+    app.row_cache = cache;
 
     let total = rows.len();
     app.max_scroll = total.saturating_sub(height);
@@ -473,8 +501,14 @@ fn system_rows(app: &App, width: usize) -> Vec<Row> {
             Span::styled(format!("{shown} "), app.theme.dim),
             Span::styled(mark, style),
         ];
+        // A row that carries a line on is marked as one, in the column
+        // the level mark takes. Lines written in the same minute leave
+        // the clock blank, so an unmarked continuation — text that some
+        // peer had a hand in, padded to wrap just so — would start where
+        // a fresh notice starts, and read as one this program wrote.
+        let continued = Span::styled(app.glyphs.continued, app.theme.dim);
         rows.extend(
-            wrap_message(prefix, &line.text, style, width)
+            wrap_continued(prefix, &line.text, style, width, Some(continued))
                 .into_iter()
                 .map(|l| (l, Some(i))),
         );
@@ -521,7 +555,7 @@ fn fit_id(width: usize, title: impl Fn(&str) -> String, id: &UserId) -> String {
 
 /// A stranger's held messages, laid out as a chat: every one, with its
 /// time, under the stranger's id; nothing was sent, so no marks.
-fn request_rows(app: &App, from: UserId, width: usize) -> Vec<Row> {
+fn request_rows(app: &App, from: UserId, width: usize, cache: &mut RowCache) -> Vec<Row> {
     let Some(request) = app.requests.iter().find(|r| r.from == from) else {
         return Vec::new();
     };
@@ -547,6 +581,7 @@ fn request_rows(app: &App, from: UserId, width: usize) -> Vec<Row> {
         &|text: &str| text.to_owned(),
         None,
         width,
+        cache,
     )
 }
 
@@ -600,7 +635,7 @@ fn invitation_rows(app: &App, group: silver_protocol::group::GroupId, width: usi
     rows
 }
 
-fn thread_rows(app: &App, peer: &UserId, width: usize) -> Vec<Row> {
+fn thread_rows(app: &App, peer: &UserId, width: usize, cache: &mut RowCache) -> Vec<Row> {
     let Some(lines) = app.threads.get(peer) else {
         return Vec::new();
     };
@@ -623,10 +658,16 @@ fn thread_rows(app: &App, peer: &UserId, width: usize) -> Vec<Row> {
         &|text: &str| text.to_owned(),
         marker,
         width,
+        cache,
     )
 }
 
-fn group_rows(app: &App, group: &silver_protocol::group::GroupId, width: usize) -> Vec<Row> {
+fn group_rows(
+    app: &App,
+    group: &silver_protocol::group::GroupId,
+    width: usize,
+    cache: &mut RowCache,
+) -> Vec<Row> {
     let Some(lines) = app.group_threads.get(group) else {
         return Vec::new();
     };
@@ -646,6 +687,7 @@ fn group_rows(app: &App, group: &silver_protocol::group::GroupId, width: usize) 
         &|text: &str| app.decode_mentions(group, text),
         marker,
         width,
+        cache,
     )
 }
 
@@ -654,6 +696,10 @@ fn group_rows(app: &App, group: &silver_protocol::group::GroupId, width: usize) 
 /// answers above it and the reactions to it below. `name_of` names the
 /// writer of a received line (an empty name is a note about the chat);
 /// `who` names whoever reacted.
+///
+/// What each line needs is worked out here, cheaply, and its rows come
+/// from `cache` when that is unchanged; see [`RowCache`].
+#[allow(clippy::too_many_arguments)]
 fn lines_rows(
     app: &App,
     lines: &[ChatLine],
@@ -662,11 +708,27 @@ fn lines_rows(
     shown: &dyn Fn(&str) -> String,
     marker: Option<&str>,
     width: usize,
+    cache: &mut RowCache,
 ) -> Vec<Row> {
     let mut rows: Vec<Row> = Vec::new();
     let mut last_day: Option<NaiveDate> = None;
     let today = Local::now().date_naive();
-    let g = app.glyphs;
+    // The message a reply answers, found by id once per frame rather than
+    // by a search through the conversation per reply. The first line with
+    // an id is the one meant, as a search from the top would find.
+    let mut by_id: HashMap<&str, &ChatLine> = HashMap::with_capacity(lines.len());
+    for line in lines {
+        by_id.entry(line.id.as_str()).or_insert(line);
+    }
+    // What every line's rows depend on alike.
+    let frame_print = {
+        let mut h = DefaultHasher::new();
+        width.hash(&mut h);
+        app.glyphs.ascii.hash(&mut h);
+        format!("{:?}", app.theme).hash(&mut h);
+        h.finish()
+    };
+    let mut kept: HashMap<String, (u64, Vec<Line<'static>>)> = HashMap::with_capacity(lines.len());
     for (i, line) in lines.iter().enumerate() {
         // A separator whenever the calendar day changes.
         let day = Local
@@ -686,30 +748,53 @@ fn lines_rows(
         if marker == Some(line.id.as_str()) {
             rows.push((separator(" new messages ", width, app.theme.accent), None));
         }
-        let (name, name_style): (String, Style) = match line.direction {
-            Direction::Sent => ("you".to_owned(), app.theme.you),
-            Direction::Received => (name_of(line), app.theme.peer),
+        let parts = LineParts::of(line, &by_id, name_of, who, shown);
+        let print = line_print(frame_print, line, &parts);
+        let laid = match cache.lines.remove(&line.id) {
+            Some((was, laid)) if was == print => laid,
+            _ => line_rows(app, line, parts, width),
         };
-        let stamp = format!("{} ", clock(line.timestamp_ms));
-        let indent = " ".repeat(stamp.width().min(width / 2));
-        // Deleted for everyone by its author: a placeholder, dim.
+        rows.extend(laid.iter().cloned().map(|l| (l, Some(i))));
+        kept.insert(line.id.clone(), (print, laid));
+    }
+    cache.lines = kept;
+    rows
+}
+
+/// What a line's rows show that does not come from the line itself: the
+/// names, the text as shown, the quote of what it answers.
+struct LineParts {
+    name: String,
+    quote: Option<String>,
+    text: String,
+    reactions: Vec<(String, String)>,
+}
+
+impl LineParts {
+    fn of(
+        line: &ChatLine,
+        by_id: &HashMap<&str, &ChatLine>,
+        name_of: &dyn Fn(&ChatLine) -> String,
+        who: &dyn Fn(&UserId) -> String,
+        shown: &dyn Fn(&str) -> String,
+    ) -> Self {
+        let name = match line.direction {
+            Direction::Sent => "you".to_owned(),
+            Direction::Received => name_of(line),
+        };
         if line.deleted {
-            let text = format!("· {name} deleted a message");
-            rows.extend(
-                wrap_message(
-                    vec![Span::styled(stamp, app.theme.dim)],
-                    &text,
-                    app.theme.dim,
-                    width,
-                )
-                .into_iter()
-                .map(|l| (l, Some(i))),
-            );
-            continue;
+            return Self {
+                name,
+                quote: None,
+                text: String::new(),
+                reactions: Vec::new(),
+            };
         }
         // The message answered, quoted from this side's own copy of it.
-        if let Some(target) = &line.reply_to {
-            let quote = match lines.iter().find(|l| l.id == *target) {
+        let quote = line
+            .reply_to
+            .as_ref()
+            .map(|target| match by_id.get(target.as_str()) {
                 Some(t) if t.deleted => "a deleted message".to_owned(),
                 Some(t) => {
                     let author = match t.direction {
@@ -721,100 +806,153 @@ fn lines_rows(
                     format!("{author}: {first}")
                 }
                 None => "a message you do not have".to_owned(),
-            };
-            let room = width.saturating_sub(indent.width()).max(1);
-            rows.push((
-                Line::from(vec![
-                    Span::raw(indent.clone()),
-                    Span::styled(
-                        truncate(&format!("{} {quote}", g.reply), room),
-                        app.theme.dim,
-                    ),
-                ]),
-                Some(i),
-            ));
-        }
-        // ⋯ waiting for the relay, ✓ accepted by the relay, ✓✓ delivered to
-        // their device, ✓✓ in colour read, ✗ refused for good (or their
-        // ASCII stand-ins).
-        let (mark, mark_style) = match line.direction {
-            Direction::Sent if line.failed => (g.failed, app.theme.error),
-            Direction::Sent if !line.delivered => (g.pending, app.theme.dim),
-            Direction::Sent => match line.receipt {
-                Some(ReceiptKind::Read) => (g.delivered, app.theme.read),
-                Some(ReceiptKind::Delivered) => (g.delivered, app.theme.dim),
-                None => (g.accepted, app.theme.dim),
-            },
-            Direction::Received => ("", Style::default()),
-        };
-        let mark = if mark.is_empty() {
-            String::new()
-        } else {
-            format!(" {mark}")
-        };
-        // A line with a timer carries the hourglass, so what will go is
-        // told from what stays.
-        let timer = if line.expire_after_s > 0 {
-            format!(" {}", g.timer)
-        } else {
-            String::new()
-        };
-        let prefix = if name.is_empty() {
-            vec![Span::styled(stamp, app.theme.dim)]
-        } else {
-            vec![
-                Span::styled(stamp, app.theme.dim),
-                Span::styled(name, name_style.add_modifier(Modifier::BOLD)),
-                Span::styled(mark, mark_style),
-                Span::styled(timer, app.theme.dim),
-                Span::raw(": "),
-            ]
-        };
-        // Dimmed only when this client wrote it: a received message that
-        // began with the note prefix used to be dimmed like one, which
-        // let a sender dress a message up as the conversation's own voice.
-        let style = if line.is_note() {
-            app.theme.dim
-        } else {
-            Style::default()
-        };
+            });
         let text = if line.edited {
             format!("{} (edited)", shown(&line.text))
         } else {
             shown(&line.text)
         };
-        rows.extend(
-            wrap_message(prefix, &text, style, width)
-                .into_iter()
-                .map(|l| (l, Some(i))),
-        );
-        // The reactions, by reaction, with the names of those who gave it.
-        if !line.reactions.is_empty() {
-            let mut given: Vec<(&str, Vec<String>)> = Vec::new();
-            for reaction in &line.reactions {
+        let reactions = line
+            .reactions
+            .iter()
+            .map(|reaction| {
                 let name = match reaction.from {
                     None => "you".to_owned(),
                     Some(user) => who(&user),
                 };
-                match given.iter_mut().find(|(e, _)| *e == reaction.emoji) {
-                    Some((_, names)) => names.push(name),
-                    None => given.push((reaction.emoji.as_str(), vec![name])),
-                }
-            }
-            let text = given
-                .iter()
-                .map(|(emoji, names)| format!("{emoji} {}", names.join(", ")))
-                .collect::<Vec<_>>()
-                .join(" · ");
-            let room = width.saturating_sub(indent.width()).max(1);
-            rows.push((
-                Line::from(vec![
-                    Span::raw(indent.clone()),
-                    Span::styled(truncate(&text, room), app.theme.dim),
-                ]),
-                Some(i),
-            ));
+                (reaction.emoji.clone(), name)
+            })
+            .collect();
+        Self {
+            name,
+            quote,
+            text,
+            reactions,
         }
+    }
+}
+
+/// A hash of everything [`line_rows`] reads, for [`RowCache`].
+fn line_print(frame_print: u64, line: &ChatLine, parts: &LineParts) -> u64 {
+    let mut h = DefaultHasher::new();
+    frame_print.hash(&mut h);
+    line.timestamp_ms.hash(&mut h);
+    matches!(line.direction, Direction::Sent).hash(&mut h);
+    line.deleted.hash(&mut h);
+    line.failed.hash(&mut h);
+    line.delivered.hash(&mut h);
+    line.receipt
+        .map(|r| matches!(r, ReceiptKind::Read))
+        .hash(&mut h);
+    (line.expire_after_s > 0).hash(&mut h);
+    line.is_note().hash(&mut h);
+    parts.name.hash(&mut h);
+    parts.quote.hash(&mut h);
+    parts.text.hash(&mut h);
+    parts.reactions.hash(&mut h);
+    h.finish()
+}
+
+/// The rows of one line of a conversation, without the rules above it.
+fn line_rows(app: &App, line: &ChatLine, parts: LineParts, width: usize) -> Vec<Line<'static>> {
+    let g = app.glyphs;
+    let mut rows: Vec<Line<'static>> = Vec::new();
+    let LineParts {
+        name,
+        quote,
+        text,
+        reactions,
+    } = parts;
+    let name_style = match line.direction {
+        Direction::Sent => app.theme.you,
+        Direction::Received => app.theme.peer,
+    };
+    let stamp = format!("{} ", clock(line.timestamp_ms));
+    let indent = " ".repeat(stamp.width().min(width / 2));
+    // Deleted for everyone by its author: a placeholder, dim.
+    if line.deleted {
+        let text = format!("· {name} deleted a message");
+        return wrap_message(
+            vec![Span::styled(stamp, app.theme.dim)],
+            &text,
+            app.theme.dim,
+            width,
+        );
+    }
+    if let Some(quote) = quote {
+        let room = width.saturating_sub(indent.width()).max(1);
+        rows.push(Line::from(vec![
+            Span::raw(indent.clone()),
+            Span::styled(
+                truncate(&format!("{} {quote}", g.reply), room),
+                app.theme.dim,
+            ),
+        ]));
+    }
+    // ⋯ waiting for the relay, ✓ accepted by the relay, ✓✓ delivered to
+    // their device, ✓✓ in colour read, ✗ refused for good (or their
+    // ASCII stand-ins).
+    let (mark, mark_style) = match line.direction {
+        Direction::Sent if line.failed => (g.failed, app.theme.error),
+        Direction::Sent if !line.delivered => (g.pending, app.theme.dim),
+        Direction::Sent => match line.receipt {
+            Some(ReceiptKind::Read) => (g.delivered, app.theme.read),
+            Some(ReceiptKind::Delivered) => (g.delivered, app.theme.dim),
+            None => (g.accepted, app.theme.dim),
+        },
+        Direction::Received => ("", Style::default()),
+    };
+    let mark = if mark.is_empty() {
+        String::new()
+    } else {
+        format!(" {mark}")
+    };
+    // A line with a timer carries the hourglass, so what will go is
+    // told from what stays.
+    let timer = if line.expire_after_s > 0 {
+        format!(" {}", g.timer)
+    } else {
+        String::new()
+    };
+    let prefix = if name.is_empty() {
+        vec![Span::styled(stamp, app.theme.dim)]
+    } else {
+        vec![
+            Span::styled(stamp, app.theme.dim),
+            Span::styled(name, name_style.add_modifier(Modifier::BOLD)),
+            Span::styled(mark, mark_style),
+            Span::styled(timer, app.theme.dim),
+            Span::raw(": "),
+        ]
+    };
+    // Dimmed only when this client wrote it: a received message that
+    // began with the note prefix used to be dimmed like one, which
+    // let a sender dress a message up as the conversation's own voice.
+    let style = if line.is_note() {
+        app.theme.dim
+    } else {
+        Style::default()
+    };
+    rows.extend(wrap_message(prefix, &text, style, width));
+    // The reactions, by reaction, with the names of those who gave it.
+    if !reactions.is_empty() {
+        let mut given: Vec<(&str, Vec<&str>)> = Vec::new();
+        for (emoji, name) in &reactions {
+            match given.iter_mut().find(|(e, _)| e == emoji) {
+                Some((_, names)) => names.push(name),
+                None => given.push((emoji.as_str(), vec![name.as_str()])),
+            }
+        }
+        let text = given
+            .iter()
+            .map(|(emoji, names)| format!("{emoji} {}", names.join(", ")))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let room = width.saturating_sub(indent.width()).max(1);
+        rows.push(Line::from(vec![
+            Span::raw(indent.clone()),
+            Span::styled(truncate(&text, room), app.theme.dim),
+        ]));
     }
     rows
 }
@@ -1013,6 +1151,18 @@ fn wrap_message(
     style: Style,
     width: usize,
 ) -> Vec<Line<'static>> {
+    wrap_continued(prefix, text, style, width, None)
+}
+
+/// [`wrap_message`], with `continued` (when given) at the end of each
+/// continuation row's indent, followed by a space.
+fn wrap_continued(
+    prefix: Vec<Span<'static>>,
+    text: &str,
+    style: Style,
+    width: usize,
+    continued: Option<Span<'static>>,
+) -> Vec<Line<'static>> {
     let width = width.max(8);
     let prefix_width: usize = prefix.iter().map(|s| s.content.width()).sum();
     let indent = prefix_width.min(width / 2);
@@ -1025,10 +1175,18 @@ fn wrap_message(
             rows.push(Line::from(spans));
             first = false;
         } else {
-            rows.push(Line::from(vec![
-                Span::raw(" ".repeat(indent)),
-                Span::styled(chunk, style),
-            ]));
+            let mut spans = Vec::with_capacity(4);
+            match &continued {
+                Some(mark) if indent > mark.content.width() => {
+                    let pad = indent - mark.content.width() - 1;
+                    spans.push(Span::raw(" ".repeat(pad)));
+                    spans.push(mark.clone());
+                    spans.push(Span::raw(" "));
+                }
+                _ => spans.push(Span::raw(" ".repeat(indent))),
+            }
+            spans.push(Span::styled(chunk, style));
+            rows.push(Line::from(spans));
         }
     }
     if rows.is_empty() {
@@ -1179,6 +1337,124 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn test_app() -> (App, tempfile::TempDir) {
+        use silver_client::{Client, ConnectOptions, Store};
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let (identity, _) = store.load_or_create_identity().unwrap();
+        let url = "ws://127.0.0.1:1/ws".to_owned();
+        let (client, _events) =
+            Client::spawn(url.clone(), Arc::new(identity), ConnectOptions::default()).unwrap();
+        let app = App::new(
+            store,
+            client,
+            url,
+            false,
+            1,
+            crate::glyphs::UNICODE,
+            crate::theme::Theme::dark(),
+            crate::app::AtRest::Passphrase,
+        )
+        .unwrap();
+        (app, dir)
+    }
+
+    fn screen(app: &mut App, width: u16, height: u16) -> String {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|f| draw(f, app)).unwrap();
+        let buf = terminal.backend().buffer();
+        let mut got = String::new();
+        for y in 0..buf.area.height {
+            let line: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+            got.push_str(line.trim_end());
+            got.push('\n');
+        }
+        got
+    }
+
+    /// Rows kept from the last frame are the rows laying the line out
+    /// again would give: after a receipt, an edit, a reaction, a renamed
+    /// contact and a deleted quote, the screen drawn through the cache is
+    /// the screen drawn without one.
+    #[tokio::test]
+    async fn the_row_cache_draws_what_laying_out_afresh_would() {
+        use silver_client::Contact;
+        use silver_protocol::Identity;
+        let (mut app, _dir) = test_app();
+        let bob = Identity::generate().user_id();
+        let mut contact = Contact::new(bob);
+        contact.alias = Some("bob".into());
+        app.contacts.push(contact);
+        let at = 1_735_732_800_000;
+        let mut lines = vec![
+            ChatLine {
+                delivered: true,
+                ..ChatLine::new("1", Direction::Sent, at, "hello bob")
+            },
+            ChatLine::new(
+                "2",
+                Direction::Received,
+                at + 60_000,
+                "a longer message that has to wrap onto a second row so the indent shows",
+            ),
+        ];
+        lines.push(ChatLine {
+            reply_to: Some("2".into()),
+            ..ChatLine::new("3", Direction::Sent, at + 120_000, "answering that")
+        });
+        app.threads.insert(bob, lines);
+        app.select_pane(Pane::Thread(bob));
+        let first = screen(&mut app, 80, 20);
+        assert_eq!(
+            screen(&mut app, 80, 20),
+            first,
+            "unchanged, drawn from the cache"
+        );
+
+        let thread = app.threads.get_mut(&bob).unwrap();
+        thread[0].receipt = Some(ReceiptKind::Read);
+        thread[1].text = "changed".into();
+        thread[1].edited = true;
+        thread[0].reactions.push(silver_client::Reaction {
+            from: Some(bob),
+            emoji: "+1".into(),
+        });
+        app.contacts[0].alias = Some("robert".into());
+        let cached = screen(&mut app, 80, 20);
+        assert!(cached.contains("robert: changed (edited)"), "{cached}");
+        assert!(
+            cached.contains("robert: changed"),
+            "the quote follows the edit"
+        );
+        app.row_cache = RowCache::default();
+        assert_eq!(screen(&mut app, 80, 20), cached);
+
+        app.threads.get_mut(&bob).unwrap()[1].deleted = true;
+        let cached = screen(&mut app, 60, 20);
+        app.row_cache = RowCache::default();
+        assert_eq!(screen(&mut app, 60, 20), cached, "and at another width");
+        assert!(cached.contains("a deleted message"));
+    }
+
+    /// A System line that wraps marks its continuation rows, so text
+    /// padded to wrap just so cannot pass for a notice of its own.
+    #[tokio::test]
+    async fn a_wrapped_system_line_is_marked_as_carrying_on() {
+        let (mut app, _dir) = test_app();
+        app.system(
+            Level::Info,
+            format!("Lookup failed: {}Connected to the relay.", " ".repeat(150)),
+        );
+        let shown = screen(&mut app, 100, 30);
+        let row = shown
+            .lines()
+            .find(|l| l.contains("Connected to the relay."))
+            .unwrap();
+        assert!(row.contains("┆ Connected"), "{row:?}");
     }
 
     /// The main screen, drawn into a test backend and compared with

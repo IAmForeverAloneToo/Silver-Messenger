@@ -10,8 +10,9 @@ back: `typed_it_themselves`, the paste guard. A terminal without
 bracketed paste — the Linux console, older Windows consoles, some
 multiplexer setups — hands a paste over as ordinary keystrokes, so a
 pasted `hello\r/revoke confirm\r` runs the command and its confirmation
-in one go. The guard measures how fast the line arrived and refuses one
-that came in faster than anyone types, telling the user to type it out.
+in one go. The guard judges how the line's keys arrived and refuses one
+that was pasted, telling the user to type it out (section 7 says how it
+judges).
 
 The audit found the guard applied to three commands and missing from the
 one that gives away the most. `/devices link <link>` runs on a single
@@ -55,6 +56,16 @@ late to be an answer. Also the three that already had it: `/revoke`,
 `/rotate`, `/devices leave` — and `/rekey`, added with them in mind: it
 costs every contact a `/verify`, which is the same size of thing as
 `/rotate` from where the contacts sit.
+
+And, after the third review, the commands that change whom this identity
+trusts, each short and typeable: `/verify ok` (the mark says a person
+compared the number; a pasted line is somebody else saying so),
+`/accept` and answering a request, which accepts it (a stranger made a
+contact is somewhere for a pasted `/send` to go), `/block`, `/remove`,
+`/devices remove`, `/group admin add` and `/files auto`. A request
+answered by a pasted line keeps the answer in the input, so Enter, pressed
+by hand, sends it. `/verify no` and `/files ask` take trust away and
+stay unguarded, for the reason `/unblock` does below.
 
 **Which get neither.** `/unblock`, whose argument must be a prefix of an
 id *already on the blocked list*, so the worst a pasted line achieves is
@@ -135,9 +146,10 @@ a paste, and against the file on disk.
 - **A yes/no prompt.** The client's other irreversible commands take a
   second line, not a modal; matching them keeps one habit rather than two,
   and keeps reader mode working without a special case.
-- **Bracketed-paste detection.** The guard measures arrival speed because
-  the terminals that need it are the ones that do not offer bracketed
-  paste. That is unchanged here.
+- **Relying on bracketed paste.** The guard judges arrival because the
+  terminals that need it are the ones that do not offer bracketed paste.
+  Where bracketed paste does arrive, it counts as pasted whatever the
+  timing (section 7).
 
 ## 6. What is tested
 
@@ -159,3 +171,42 @@ a paste, and against the file on disk.
   alarm for a key that is not theirs.
 - `/send`'s guard, and the group alias on the way in, on the way out, cut
   to length, and read back from a record that reached disk unfiltered.
+- The judge (`app/typing.rs`) with synthetic arrival stamps: a typed line,
+  a paste padded with twenty thousand spaces either side (in reads of a
+  kilobyte, and one key to a read), a paste judged after slow frames, the
+  second line of one paste, a line and its newline in one read, and
+  bracketed paste. End to end in `app.rs`, a padded pasted `/verify ok`
+  refused and the typed one taken, and in `tests/tui/test_devices.py` a
+  padded pasted `/devices link confirm` refused through a real pty.
+
+## 7. How a line is judged (third review, H6)
+
+The guard first timed the line from its first key to the moment it was
+handled, against four milliseconds a character of the *trimmed* line.
+Both halves were wrong. Spaces padding a pasted command each cost a key
+event and a frame, and counted for nothing once trimmed, so a paste of
+`/devices link <link>\r`, twenty thousand spaces and `/devices link
+confirm\r` passed as typed and signed the attacker's device. And handling
+time is not arrival time, so one slow frame did the same for any paste.
+
+Now the input thread stamps each event as it reads it, with the time and
+the read it came in: an event read without waiting for the terminal
+shares the read of the one before. The channel to the interface is
+unbounded, so the thread never stops reading and a person's keys never
+pile up to arrive together. A line — every key since the input was last
+empty, spaces and all — is pasted when:
+
+- anything went into it by bracketed paste or from the system clipboard;
+- its first key came in the read that ended the line before (the second
+  line of `hello\r/rotate\r`);
+- its Enter came in one read with the key before it (a line and its
+  newline delivered together, including a pasted Up-arrow and Enter);
+- four gaps in a row between its keys were under three milliseconds,
+  which no finger makes and which a terminal feeding a paste out slowly
+  still does.
+
+Padding only adds fast keys, and how long the interface took over them
+does not enter into it. A person's keys come in reads of their own, tens
+of milliseconds apart; two of them bunched by a busy machine are not
+four, and an Enter bunched with the key before it is refused with the
+remedy of typing it again.

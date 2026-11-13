@@ -340,4 +340,27 @@ On Windows, in CI: the rename-aside path, and the deletion of a leftover
   renamed to a hidden `.silver.exe.replaced` until the next start removes
   it, and the `silver.exe.old` earlier versions kept beside the program is
   removed at start as well.
+* **Nothing in the data directory is run or installed on its own word**
+  (0.25.0). Section 5's `--rollback` ran the kept copy to ask its version
+  and then installed it, and a download made ready in the background was
+  put in place at a later `/update` without being hashed again; both sit
+  in `update/`, which anybody who can write the data directory can
+  replace. Now the hash a download was checked against is kept in the
+  process that checked it, and the copy made beside the program is hashed
+  against it before the rename; the download is also hashed again right
+  before it is run for its version. The swap writes `update/previous.json`
+  with the version it kept and that copy's SHA-256. `--rollback` hashes
+  the copy, requires the hash the record gives, and then requires the
+  project's signature: the release of that version must list that hash
+  for this platform in a `SHA256SUMS` whose minisign signature checks out,
+  as for an update. Only then, after showing the version and asking
+  (unless `--yes`), is the copy put back, and it is not run first. A copy
+  kept by a client older than 0.25.0 has no record and is refused, with
+  `silver update --to <version>` named as the checked way back. The
+  `SHA256SUMS` and signature requests now have section 7's 20-second bound
+  as a whole, as the release API request had; before, a host that
+  answered and then said nothing held them indefinitely. The download is
+  created afresh (an existing file or link at its path removed first),
+  and `update/` and a data directory an update makes before the first
+  start are created owner-only.
 

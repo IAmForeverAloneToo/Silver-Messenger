@@ -45,6 +45,86 @@ The releases, newest first; each version links to its entry.
 | [0.2.0](#020---2026-09-04) | 2026-09-04 | Phase 2: the trust model completed |
 | [0.1.0](#010---2026-09-04) | 2026-09-04 | First tagged release |
 
+## Unreleased
+
+A security review of the client, the protocol and the security-key code,
+the relay having had its own, with everything the code could fix fixed.
+The cryptography held; what was found was around it.
+
+**Upgrading.** `/update`, or `silver update`. A protected data directory
+is rewritten on its first unlock into a vault this version binds to its
+rollback record (version 3); a client older than this one cannot open it
+afterwards, so roll back with `silver update --rollback` rather than by
+hand. Group invite links made by older clients stop working: an admin
+makes a new one with `/group invite`. The relay is unchanged.
+
+### Security
+
+- A relay could add a device of its own to the bundle a contact's key
+  change was checked against, and the reply was then sealed to it too:
+  every bundle handed on is now verified first, a pinned bundle that
+  does not verify is neither used nor fanned out over, and a cached
+  device bundle must name the account it is used for.
+- A revoked linked device could go on writing as its account: device
+  revocations are now remembered across restarts, and a body from a
+  device that is revoked, or not on its account's current list, is
+  refused.
+- Groups:
+  - A member, or a member since removed, could make a working invite
+    link from the group's shared state: a link's secret is now kept by
+    the admin device that made it, and someone removed is not let back
+    in by a link without the admin saying so.
+  - A message from an earlier epoch was attributed to whoever holds that
+    leaf now: the sender is now who signed it then.
+  - One forged message could put a member out of step, open the way
+    for a replacement group under the same id, and turn an invitation
+    into membership without the user agreeing: none of that follows
+    from unauthenticated bytes any more.
+  - A rejoin request now carries the requesting device's signature.
+  - An admin leaving no longer breaks the group at the next change.
+  - Revoked devices are refused; held messages expire as they should,
+    and old Welcomes and join answers are not taken again.
+- The data directory: deleting the rollback anchor no longer makes the
+  next unlock adopt whatever is on disk; plaintext lines in an encrypted
+  conversation and recorded files that have gone missing are refused; a
+  planted note can no longer make the client delete its own key from the
+  key store; received files are sealed apart from the store's own files;
+  a security-key slot for another relying party is refused.
+- Updates: a kept or staged executable is checked against its recorded
+  hash before it is run or swapped in, and `--rollback` checks the kept
+  copy against the project's signed checksums; the signature fetches
+  time out.
+- The terminal:
+  - The paste guard is judged by when keys arrived, not how long the
+    client took to handle them, so padding a pasted line with spaces no
+    longer makes it look typed; `/verify ok`, `/accept`, `/block`,
+    `/remove`, `/files auto`, `/devices remove` and `/group admin add`
+    are guarded too.
+  - Relay text printed during `silver --link`, and every error printed
+    at exit, is filtered for terminal control sequences.
+  - Reader mode says when a chat is a group, and warns of a group named
+    like a contact.
+  - Security-key labels are filtered; wrapped rows in System are marked;
+    the open chat stays the same chat when the contact list changes.
+- A contact's sequence number near the top of its range, and a relay's
+  extra upload acknowledgements, can no longer crash the client.
+- The client checks its own entries in the relay's key log, refuses to
+  fall back to a key the log shows revoked, checks every session a peer
+  starts against the key they publish, never sends over the logged-in
+  connection under `--require-anonymous`, and keeps a contact's session
+  when strangers flood it with handshakes.
+- Windows 10: unlocking with a security key no longer elevates a
+  `silver.exe` in a folder its user can write to (the helper is refused
+  with the reason; the recovery passphrase still opens the directory),
+  DLLs load from System32 only, and the helper's command line is quoted.
+  More than one security key plugged in is refused rather than the first
+  taken.
+- Smaller: a relay's error text is cleaned where it is read; strangers'
+  log heads are ignored; held state from a relay is bounded; a proxy
+  password and an invite token are no longer passed on the command
+  line after an update; a hung notification daemon no longer freezes the
+  interface.
+
 ## 0.24.1 - 2026-11-11
 
 The security key's PIN protocol off a crypto library with a timing

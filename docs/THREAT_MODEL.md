@@ -129,7 +129,10 @@ Can:
   client remembers what each relay host has offered and says so, with
   what it costs, whenever something goes missing; the status line marks a
   connection whose sends are no longer anonymous, and `--require-anonymous`
-  refuses to send at all rather than fall back.
+  refuses to send at all rather than fall back: when the anonymous
+  connection is refused or lost, the client disconnects, and nothing it
+  submits, a group sequencer frame included, ever goes on the logged-in
+  connection meanwhile.
 - Keep a timeline of when each identity published: the transparency log
   stores the time of every entry and is served to anyone who asks, so a
   permanent record of when an identity was active is a side effect of
@@ -252,7 +255,12 @@ Cannot:
   revoked, and is caught for either by the transparency log, where a
   device's bundles and its revocation are logged under the device as an
   identity's are; a revoked device is also refused by the relay itself and
-  dropped by every contact the primary's next message reaches.
+  dropped by every contact the primary's next message reaches. A lookup
+  answer it alters is no answer: clients verify every bundle a lookup
+  returns before using it or handing it to be pinned, the key check of a
+  session a peer started included, and do not seal to a pin, or to a
+  cached device bundle, that does not verify or that claims another
+  account.
 - Cut an identity off by treating it as somebody's device. An account
   signs a list, and a list is only that account's word: a key is a device
   of that account here when the bundle it published carries the account's
@@ -357,6 +365,11 @@ Cannot:
   revocation naming it, since a signature is only their own word, but a
   client acts on one only for a device it knows as that account's, and the
   relay takes one only from the account the device claims.
+- Raise a key-log alarm about your relay: the log head inside a message
+  is compared only when it comes from a contact.
+- Push a contact's session out of your session store with throwaway
+  handshakes: a session you have written on, or with a contact, is kept
+  before any stranger's.
 
 ### Malicious contact
 
@@ -454,8 +467,21 @@ In a group:
   client is in or as a Welcome, which is how a group first arrives. A
   handshake from a future epoch, which nothing has read yet, is kept only
   when it travelled inside its envelope, and within a size (384 KiB per
-  group) as well as a count; anything else puts the group out of sync,
-  which rejoins.
+  group) as well as a count; anything else is dropped. Its header is
+  anyone's to write, so it changes no state: it only prompts a
+  self-update, at most hourly, and the group goes out of sync only on the
+  relay sequencer's word, given twice, or a commit a member signed that
+  will not apply. An invitation never goes out of sync, and a Welcome
+  takes a known group's place only from an admin that group last had.
+- An invite link works only with the admin device that made it: its key
+  comes from a secret that device keeps to itself, not from anything the
+  group shares, so neither a member nor a member removed later can make
+  one. A link a removed member kept is not answered on its own say-so;
+  the admin decides. A rejoin request is signed by the device it
+  re-adds, over its current leaf, so a public key package cannot be used
+  to have an admin swap a member's leaf. A message from a past epoch is
+  attributed to whoever held the leaf then, not to whoever holds that
+  slot now.
 - A member who turns hostile can send a commit that breaks the group's
   rules (an add or a removal by a non-admin, a group left without admins,
   a changed ciphersuite); every honest client refuses it, marks the group
@@ -464,7 +490,11 @@ In a group:
   an intruder's keys accepted or read on after being removed.
 - An admin controls membership: a compromised admin can add anyone and
   remove anyone until the other admins remove it, and a group with one
-  admin is that person's to keep or lose. A member who leaves keeps
+  admin is that person's to keep or lose. A device its account unlinked
+  keeps its keys: once a client has seen the revocation it takes no
+  Welcome from that device and answers none of its requests, and the
+  account's own client takes its leaves out of the groups it may. A
+  member who leaves keeps
   whatever it read; a removed one reads nothing sent after the commit that
   removed it, and nothing before it that was not already delivered.
 - Group messages are not deniable: MLS signs every one with the sender's
@@ -494,6 +524,8 @@ With the data directory alone:
   was written: the name of a key whose fate is undecided is written to
   `vault.pending` *before* the step that could orphan it, and the next
   start takes out anything that file names and the vault does not need,
+  once the note checks out under the key it names (a MAC over the
+  directory and the name, so only this installation can write one),
   so a crash, a kill or a power loss in that window costs an extra start,
   not a key left in the store for good. The same check refuses to delete
   when the vault cannot be read at all rather than when it says no: an
@@ -525,8 +557,49 @@ With the data directory alone:
   reading. A program running as you could start the helper itself, but it
   would need you to approve a UAC prompt nobody asked for, then type your
   PIN into a window nobody asked for, then touch the key: three warnings.
-  Until the Windows binaries are signed the UAC prompt names an unknown
-  publisher, as it does for any unsigned program.
+  The prompt you *do* expect is the larger risk: you approve one at every
+  unlock, and whatever is at `silver.exe`'s path then runs as
+  administrator and is typed your PIN. A program running as you that can
+  replace `silver.exe`, put a DLL beside it (Windows looks in a
+  program's own folder first for the DLLs it imports), or swap a folder
+  on its path for another would be elevated by that approval, with no
+  warning at all; a download kept in your own folders, which `silver
+  update` rewrites as you, is exactly such a place. So before it starts
+  the helper the client asks Windows (`AccessCheck`, with your
+  unelevated token) what you may do to the executable and to every
+  folder above it, and refuses the helper, saying why and falling back
+  to the recovery passphrase, unless nothing running as you could change
+  any of them: in practice `silver.exe` in a folder only administrators
+  can write, such as `C:\Program Files\Silver Messenger`, where `silver
+  update` cannot replace it either and updating is an administrator's
+  job. An administrator can accept the risk and allow the helper from
+  anywhere with the DWORD value `AllowSecurityKeyHelperAnywhere` = 1
+  under `HKEY_LOCAL_MACHINE\SOFTWARE\Silver Messenger`; it is a machine
+  setting, not an environment variable or a file of yours, because the
+  program it guards against runs as you and could set those. A client
+  that was itself started as administrator talks to the key directly
+  and starts no helper. The helper loads run-time DLLs from System32
+  alone; the DLLs the executable imports are found before any of its
+  code runs, which only the linker's `/DEPENDENTLOADFLAG` governs
+  (docs/design/security-key.md, section 10). Until the Windows binaries
+  are signed the UAC prompt names an unknown publisher, as it does for
+  any unsigned program, and the client does not check a signature
+  itself: that the binary in the safe folder is the one released rests
+  on the release's checksums and attestation, checked by whoever put it
+  there.
+- Nothing proves that the device answering is a genuine security key:
+  the client asks for no attestation, and whatever answers CTAP2 over
+  USB is taken at its word, down to which PIN protocol it speaks (the
+  client uses protocol 2 whenever the device lists it) and whether it
+  gives PIN tokens limited to one relying party and one command or the
+  older kind that are not. A counterfeit or interposed device
+  learns the first 16 bytes of the PIN's SHA-256, enough to find a
+  short PIN by trying them all; at enrollment it chooses the secret the
+  data key is wrapped under, which its maker may know; at an unlock it
+  can only refuse. With more than one FIDO device plugged in the client
+  refuses to pick, so that a second device cannot quietly take the PIN
+  meant for the first. Keys bought from their maker, or a seller you
+  trust, are the defence.
 - Where there is neither key store nor passphrase, the files are plain
   and the client says so at start.
 - Plain or not, on Unix the data directory and every file in it are the
@@ -540,7 +613,10 @@ With the data directory alone:
   world-writable, do not.
 - Received files in `downloads/` are saved as ordinary files so other
   programs can open them, unless `/files encrypt on` was chosen, which
-  writes them under the data key like the rest; `/open` then hands the
+  writes them under the data key like the rest, in a shape of their own
+  (`SMD1`, with associated data no store file uses, since 0.25.0), so a
+  received file and one of the store's files cannot be read as each
+  other whatever the sender names it; `/open` then hands the
   opener a private plain copy under `downloads/.open/`, removed when the
   client exits and at its next start, and `/files decrypt` writes a plain
   copy on request. Both act on `downloads/` and nothing else: where a
@@ -565,6 +641,19 @@ different case from the thief, and a sharper one than it looks:
   name, recorded in an encrypted `state` file whose own generation is the
   one number `vault.json` carries in the clear, so a file at the wrong
   generation does not decrypt at all.
+- They cannot detach that record by deleting the number: since 0.25.0
+  the vault's own wrap of the data key says the directory keeps a record
+  (version 3, and version 2), so a bound directory without its anchor is
+  refused rather than adopted afresh. Nor can they slip in a file in the
+  clear (a `config.json`, a `blocked.json`, a line of history) and have
+  it sealed or read: plaintext in a protected directory is accepted only
+  where the encrypted record says a protection is still being finished.
+  A file the record names that has been deleted is refused rather than
+  read as never written, and `vault.pending` is acted on only for a note
+  tagged under the key it names, so it cannot be used to delete another
+  directory's key store entry. A version 1 vault from before 0.25.0,
+  put back together with every file as it was then, is the whole-directory
+  rollback below.
 - They can roll back the **whole directory**, every file and the anchor
   together, to a state it really was in, and that cannot be told from the
   passage of time, because every file agrees with every other exactly as
@@ -619,7 +708,12 @@ Which device matters (protocol section 14):
   what it was: the revocation is served and logged by the relay, which
   cuts the device off, and pushed to contacts inside the next message,
   and they drop their sessions with the device; its leaves go from every
-  group with the next commit, so it reads nothing sent after.
+  group with the next commit, so it reads nothing sent after. What the
+  thief seals in your name after that is refused by every contact that
+  has seen the revocation (remembered across restarts) or that looks your
+  account up and finds the device revoked or off its list; a contact
+  whose relay withholds that answer and who never saw the revocation
+  still takes it on the device's certificate, which does not expire.
 - A **primary's** thief gets what the identity thief above gets, and with
   it the power to link devices of their own and to revoke yours; the
   pre-signed revocation certificate ends the identity, devices included.
@@ -702,12 +796,19 @@ Two controls answer this, and which one applies is a judgement about the
 command's argument rather than about its blast radius:
 
 - Where the argument is something a person can type, a file path, the
-  paste guard is the whole answer. The client measures how fast the line
-  arrived: a paste is microseconds a character, four milliseconds a
-  character is three thousand words a minute, and a line that came in
-  faster than anyone types is refused with the remedy of typing it out.
-  `/send`, `/revoke`, `/rotate`, `/rekey` and `/devices leave` are guarded
-  this way.
+  paste guard is the whole answer. The client judges how the line's keys
+  arrived, stamped by the input thread as each is read: a line is pasted
+  when it began in the read that ended the line before, when its Enter
+  came in one read with the key before it, when four gaps in a row were
+  under three milliseconds, or when any of it came by bracketed paste or
+  the clipboard. Nothing is trimmed first and the app's own speed does not
+  enter into it, so padding a paste with spaces, or a slow frame, does not
+  make it look typed (the guard it replaced timed the trimmed line against
+  the time taken to handle it, and lost on both counts). A pasted line is
+  refused with the remedy of typing it out. `/send`, `/revoke`,
+  `/rotate`, `/rekey`, `/devices leave`, `/devices remove`, `/verify ok`,
+  `/accept` (and answering a request, which accepts it), `/block`,
+  `/remove`, `/group admin add` and `/files auto` are guarded this way.
 - Where the argument is itself pasted by design (a device link, a group
   link, a relay URL, all of which carry ids and secrets nobody types), the
   guard alone would be a control that cannot be satisfied, so the command
@@ -781,6 +882,11 @@ commands above need.
 - Can certify devices of their own and revoke the victim's: a device the
   victim did not link shows in `/devices`, every list change is a logged
   bundle change, and the revocation ends every device with the identity.
+- Is seen by the victim's own client when they publish: a client notes
+  every bundle and statement it publishes and reports, as it replays the
+  log, any entry under its own id it did not make. That needs the victim's
+  client to be running against the same relay log; it says that someone
+  else holds the key, not who.
 - The victim recovers by retiring the key: `/revoke` declares it dead so
   contacts stop trusting it, and `/rotate` hands over to a fresh identity
   with a cross-signed succession so contacts re-pin to the new key on

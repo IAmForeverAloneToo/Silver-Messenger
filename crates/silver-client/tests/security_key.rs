@@ -271,7 +271,11 @@ fn removing_needs_the_recovery_passphrase_and_the_last_key_leaves_a_passphrase()
     assert_eq!(left, Protection::Passphrase);
     assert_eq!(store.protection(), Protection::Passphrase);
     let v = vault(dir.path());
-    assert_eq!(v.version, 1, "no key left: back to a version 1 vault");
+    assert_eq!(
+        v.version,
+        silver_client::vault::BOUND_VAULT_VERSION,
+        "no key left: back to a single-wrap vault"
+    );
     assert!(v.slots.is_empty());
 
     let mut again = Store::open(dir.path()).unwrap();

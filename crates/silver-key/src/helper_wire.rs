@@ -52,15 +52,6 @@ fn unhex(text: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-/// A relying party id as it may appear on a command line: a host name.
-fn valid_rp(rp_id: &str) -> bool {
-    !rp_id.is_empty()
-        && rp_id.len() <= 253
-        && rp_id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
-}
-
 /// A pipe name the client would have made: the prefix and 32 hex digits.
 pub fn valid_pipe(name: &str) -> bool {
     name.strip_prefix(PIPE_PREFIX)
@@ -68,8 +59,19 @@ pub fn valid_pipe(name: &str) -> bool {
 }
 
 impl Request {
-    /// The helper's command line for this request and `pipe`.
-    pub fn to_args(&self, pipe: &str) -> Vec<String> {
+    /// The helper's command line for this request and `pipe`. The
+    /// relying party id comes from `vault.json`, which a program running
+    /// as the user can rewrite, and the pipe from the caller: each is
+    /// refused here unless it is what [`Request::from_args`] would take
+    /// back, so nothing else reaches an elevated command line.
+    pub fn to_args(&self, pipe: &str) -> Result<Vec<String>, Error> {
+        if !valid_pipe(pipe) {
+            return Err(Error::Malformed("the helper's pipe name"));
+        }
+        let rp_id = match self {
+            Request::Enroll { rp_id, .. } | Request::Secret { rp_id, .. } => rp_id,
+        };
+        crate::rp::check(rp_id)?;
         let mut args = vec!["--pipe".to_owned(), pipe.to_owned()];
         match self {
             Request::Enroll { rp_id, input } => {
@@ -82,7 +84,7 @@ impl Request {
                 }
             }
         }
-        args
+        Ok(args)
     }
 
     /// The pipe and the request, read back from the helper's command line;
@@ -100,7 +102,7 @@ impl Request {
                 .ok_or(Error::Malformed("the helper's command line"))?;
             match flag.as_str() {
                 "--pipe" if pipe.is_none() && valid_pipe(value) => pipe = Some(value.clone()),
-                "--rp" if rp_id.is_none() && valid_rp(value) => rp_id = Some(value.clone()),
+                "--rp" if rp_id.is_none() && crate::rp::valid(value) => rp_id = Some(value.clone()),
                 "--enroll" if enroll.is_none() => {
                     enroll = Some(unhex(value).ok_or(Error::Malformed("the helper's input"))?);
                 }
@@ -128,6 +130,54 @@ impl Request {
         };
         Ok((pipe, request))
     }
+}
+
+/// `args` as one Windows command line, each quoted so that the C
+/// runtime's parser, Rust's `std::env::args` and `CommandLineToArgvW` all
+/// read back exactly these strings. What [`Request::to_args`] makes needs
+/// no quoting (hex, flags, a host name and a pipe name); this is so that
+/// it stays right if that ever changes. A NUL cannot be passed at all.
+pub fn command_line(args: &[String]) -> Result<String, Error> {
+    let mut line = String::new();
+    for (i, arg) in args.iter().enumerate() {
+        if arg.contains('\0') {
+            return Err(Error::Malformed("a NUL on the helper's command line"));
+        }
+        if i > 0 {
+            line.push(' ');
+        }
+        quote_into(&mut line, arg);
+    }
+    Ok(line)
+}
+
+/// One argument: as it is when nothing in it is special, else in quotes,
+/// with backslashes doubled where they come before a quote (an escaped
+/// one, or the closing one) and left alone elsewhere.
+fn quote_into(line: &mut String, arg: &str) {
+    if !arg.is_empty() && !arg.contains([' ', '\t', '\n', '\x0b', '"']) {
+        line.push_str(arg);
+        return;
+    }
+    line.push('"');
+    let mut backslashes = 0;
+    for c in arg.chars() {
+        match c {
+            '\\' => backslashes += 1,
+            '"' => {
+                line.extend(std::iter::repeat_n('\\', 2 * backslashes + 1));
+                line.push('"');
+                backslashes = 0;
+            }
+            c => {
+                line.extend(std::iter::repeat_n('\\', backslashes));
+                line.push(c);
+                backslashes = 0;
+            }
+        }
+    }
+    line.extend(std::iter::repeat_n('\\', 2 * backslashes));
+    line.push('"');
 }
 
 /// Status bytes, and what each stands for.
@@ -225,9 +275,114 @@ mod tests {
                 candidates: vec![(vec![1, 2, 3], vec![4; 32]), (vec![9; 70], vec![5; 32])],
             },
         ] {
-            let args = request.to_args(&pipe);
+            let args = request.to_args(&pipe).unwrap();
             assert_eq!(Request::from_args(&args).unwrap(), (pipe.clone(), request));
+            // On a command line as it is, quoting nothing.
+            assert_eq!(command_line(&args).unwrap(), args.join(" "));
+            assert_eq!(split(&command_line(&args).unwrap()), args);
         }
+    }
+
+    #[test]
+    fn the_client_writes_no_command_line_it_would_refuse() {
+        let pipe = fresh_pipe_name();
+        for rp_id in ["", "a b", "a\" --enroll 00", "a\\", "a\tb"] {
+            let request = Request::Enroll {
+                rp_id: rp_id.into(),
+                input: vec![1],
+            };
+            assert!(
+                matches!(request.to_args(&pipe), Err(Error::InvalidRpId)),
+                "{rp_id:?}"
+            );
+            let request = Request::Secret {
+                rp_id: rp_id.into(),
+                candidates: vec![(vec![1], vec![2])],
+            };
+            assert!(request.to_args(&pipe).is_err(), "{rp_id:?}");
+        }
+        let request = Request::Enroll {
+            rp_id: "silver-messenger.local".into(),
+            input: vec![1],
+        };
+        assert!(request.to_args(r"\\.\pipe\elsewhere").is_err());
+    }
+
+    /// A Windows command line split as the C runtime and Rust's
+    /// `std::env::args` split what follows the program's name.
+    fn split(line: &str) -> Vec<String> {
+        let mut args = Vec::new();
+        let mut chars = line.chars().peekable();
+        loop {
+            while chars.next_if(|c| *c == ' ' || *c == '\t').is_some() {}
+            if chars.peek().is_none() {
+                return args;
+            }
+            let mut arg = String::new();
+            let mut quoted = false;
+            while let Some(&c) = chars.peek() {
+                match c {
+                    ' ' | '\t' if !quoted => break,
+                    '\\' => {
+                        let mut n = 0;
+                        while chars.next_if_eq(&'\\').is_some() {
+                            n += 1;
+                        }
+                        if chars.peek() == Some(&'"') {
+                            arg.extend(std::iter::repeat_n('\\', n / 2));
+                            if n % 2 == 1 {
+                                arg.push('"');
+                                chars.next();
+                            }
+                        } else {
+                            arg.extend(std::iter::repeat_n('\\', n));
+                        }
+                    }
+                    '"' => {
+                        chars.next();
+                        if quoted && chars.peek() == Some(&'"') {
+                            arg.push('"');
+                            chars.next();
+                        } else {
+                            quoted = !quoted;
+                        }
+                    }
+                    c => {
+                        arg.push(c);
+                        chars.next();
+                    }
+                }
+            }
+            args.push(arg);
+        }
+    }
+
+    #[test]
+    fn a_command_line_reads_back_as_the_arguments_it_was_made_of() {
+        let tricky = [
+            "plain",
+            "",
+            "two words",
+            "a\"b",
+            r#"\"#,
+            r#"ends\"#,
+            r#"ends \\"#,
+            r#"\\\"quoted\\\""#,
+            r#"C:\Program Files\Silver Messenger\"#,
+            "\"",
+            "\"\"",
+            "tab\there",
+            "line\nfeed",
+            "é ünïcödé",
+        ];
+        let args: Vec<String> = tricky.iter().map(|s| s.to_string()).collect();
+        let line = command_line(&args).unwrap();
+        assert_eq!(split(&line), args, "{line}");
+        for one in &args {
+            let line = command_line(std::slice::from_ref(one)).unwrap();
+            assert_eq!(split(&line), vec![one.clone()], "{line}");
+        }
+        assert!(command_line(&["a\0b".to_string()]).is_err());
     }
 
     #[test]

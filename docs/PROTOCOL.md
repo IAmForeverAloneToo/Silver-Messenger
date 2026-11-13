@@ -1296,7 +1296,27 @@ for the lookup fails with the refusal rather than falling back to a bundle
 it already held. A revocation or a succession carried by a refused answer
 is still the owner's own signature, so one that verifies is raised even
 though the answer around it was thrown away; a hostile relay does not get
-to bury a revocation by making the rest of its answer fail.
+to bury a revocation by making the rest of its answer fail. Whether or
+not a log is kept, every answer is also checked before any caller sees
+it, the key check of a session a peer started included: the bundle must
+be the one asked for and verify, or the answer is taken as none.
+
+**Falling back.** When a send needs a lookup and the relay does not
+answer, the client may still seal to a key it already holds (the pin, or
+a device's bundle from an earlier lookup), but not past its own replay
+of the log: if the log records a revocation or a succession of that
+identity, or, with no session running to carry the message, a latest
+bundle other than the one held, the send is refused instead (0.25.0). A
+held key the log shows superseded is not used without a lookup first.
+
+**Its own entries.** A client notes the leaf of every bundle and
+statement it publishes under its own id, and as it replays the log it
+reports any entry under that id it did not make (a key logged by somebody
+holding a copy of the identity key, or by the relay on nobody's say);
+nobody else can tell, since a reader checks only that the key it was
+shown is the one logged. Entries logged before a client started keeping
+track are not judged, and a linked device does not count its account's
+revocation of it against the relay (0.25.0).
 
 **Gossip.** Every body carries the sender's verified head (4.1). On
 receipt: at the same index the hashes must match; at a lower index the
@@ -1307,7 +1327,11 @@ checkpoint's hash before its hash at the contact's index means anything
 (a segment that does not is the relay's own doing and is reported as the
 relay's fork); at a higher index the client tails to it, and the chain it
 gets must pass through that head. A mismatch is a fork, reported with the
-contact's name: the relay showed the two of them different logs. A relay whose head is lower than
+contact's name: the relay showed the two of them different logs. Only a
+contact's head is compared (one with a pinned key, or, for a client that
+keeps no contact list, a peer it has written to on a session): anybody
+can write to anybody, and a stranger's head that is off the chain would
+otherwise raise an alarm about the relay at will. A relay whose head is lower than
 the client's last verified head has been *rewound* (a restore of an older
 backup, or a replaced log); that is reported, and the client replays the
 log from the start.
@@ -1455,7 +1479,10 @@ of this section is ever sent to a client that does not advertise it.
   ```
 
   Trailing bytes, an unknown version, an unsorted list or an empty one
-  make the extension malformed and the group unusable.
+  make the extension malformed and the group unusable. `invite_key` is
+  kept for the encoding but no longer derives invite links: every member
+  reads the group context, so a link derived from it could be made by
+  any member, and by one removed later (13.7).
 * **Leaf capability `0xF003`** (`silver_everyday`, private use): declared
   in the capabilities of every key package and leaf from 0.10.0 and never
   carried as an extension. A leaf that declares it reads the kinds of 4.7
@@ -1490,7 +1517,8 @@ A body with `v: 5` carries one MLS message for one group to one member:
 { "v": 5, "group": "<b64 32 bytes>", "kind": "<kind>",
   "mls": "<b64 TLS-serialised MLSMessage>",
   "blob": { "blob": "<32 hex>", "key": "<b64 32 bytes>", "chunks": n, "size": n, "sha256": "<b64 32 bytes>" },
-  "join": { "proof": "<b64 32 bytes>" } }
+  "join": { "proof": "<b64 32 bytes>" },
+  "rejoin": { "signature": "<b64 64 bytes>" } }
 ```
 
 * `group`: the group id, 32 random bytes chosen by the creator; b64 in
@@ -1522,15 +1550,18 @@ A body with `v: 5` carries one MLS message for one group to one member:
   applies no threshold of its own — the body cap has already bounded what
   reached it — so a message from a sender with an older, higher threshold
   still reads.
-* `join` is present exactly when `kind` is `join`.
+* `join` is present exactly when `kind` is `join`. `rejoin` is present
+  only when `kind` is `rejoin` (13.8); a client from before it existed
+  sends a `rejoin` body without it, which parses and is then refused.
 * The body is padded to 160-byte steps like every other (section 4), so
   a short group text is the size of a short one-to-one text.
 * The sealed layer (section 3) carries no signature for a v5 body, as
   for v4: the 64 signature bytes are zero and are not checked. Every
   kind is authenticated inside MLS (the sender's leaf signature on a
   `PrivateMessage`, the signature over the `GroupInfo` inside a
-  `Welcome`, the key package's own signature for `join` and `rejoin`),
-  and MLS's single-use message keys rule out replay. The sender id in
+  `Welcome`, the key package's own signature for `join`, and for
+  `rejoin` the requesting device's identity signature, 13.8), and MLS's
+  single-use message keys rule out replay. The sender id in
   the sealed prefix is set truthfully but is a hint: the receiving client
   takes the sender from MLS and ignores the hint.
 * A v5 body inside a session (a ratchet body's inner body) is refused.
@@ -1698,11 +1729,19 @@ handshake messages from a future epoch (at most 16, for at most ten
 minutes, and at most 384 KiB of them) and retries them after each merge.
 Nothing held has been read yet — the epoch and the content type are
 plaintext header fields anyone can write — so only a message that
-travelled inside its envelope is held; a parked one (13.2) never is. A
-commit further ahead than the queue reaches, a queue that fills by count
-or by size, or a parked commit from a future epoch means a commit was
-missed for good: the client marks the group out of sync and asks to
-rejoin (13.8).
+travelled inside its envelope is held, under the time it first arrived
+however often the queue is retried; a parked one (13.2) never is. A
+commit further ahead than the queue reaches, one that finds the queue
+full by count or by size, or a parked commit from a future epoch is
+dropped and changes nothing else: since its header is anyone's to
+write, it is only a reason to ask where the group stands. The client
+asks the sequencer (13.5) by way of a self-update, at most once an hour
+on this ground and two minutes after the hint. If the sequencer refuses
+it as stale at an epoch past the client's own, and again two minutes
+later with the client still short of that epoch (a lost race clears in
+seconds, when the winner's commit arrives), the group is out of sync and
+the client asks to rejoin (13.8). An invitation not yet accepted never
+goes out of sync.
 Application messages decrypt for three epochs after the one they were
 sent in; older ones are reported as unreadable, as a ratchet that moved
 on would. Within an epoch a sender's messages may arrive up to 64
@@ -1738,9 +1777,17 @@ What is refused: a Welcome for a group the client is in already, and
 the twenty-first invitation waiting for an answer, until one is
 answered, since a Welcome needs no permission from the person it invites
 and each one is a tree on disk. A Welcome for a group the client left,
-was removed from or that broke replaces what was left of the old
-membership, but only once it has parsed as a Welcome, so a body that is
-not one costs an out-of-sync member nothing.
+was removed from, that broke or that is out of sync replaces what was
+left of the old membership only when it comes from an admin that
+membership last knew, or from the client's own account; the Welcome's
+own admin list is its author's word, and a group id is no secret. It is
+read beside the old state, which stays until every check has passed. A
+Welcome from a device the client knows was unlinked (14.6) is refused,
+its own account's included. So is a Welcome whose epoch is not newer
+than the last one the client knew of the group, kept for 256 groups
+after they are forgotten or declined: the last-resort key package
+(13.4) is not spent by the Welcome that uses it, so an old Welcome made
+from it could otherwise bring a group back.
 
 A client that is an admin only because the Welcome that brought it in
 said so does an admin's automatic work (a join, a rejoin) only when the
@@ -1753,10 +1800,17 @@ so that is the inviter's word, not the group's.
 silver://group/<group id b58>?via=<admin id b58>&key=<link key b58>[&relay=<percent-encoded url>]
 ```
 
-with `key = HMAC-SHA256(invite_key, "silver-messenger/v1/group-invite" || group id)[0..16]`,
-so a link does not carry the invite key and a rotated invite key
-(`/group link reset`, a `GroupContextExtensions` commit with a fresh
-random `invite_key`) voids every link made before. Whoever presents the
+with `key = HMAC-SHA256(link_secret, "silver-messenger/v1/group-invite" || group id)[0..16]`,
+where `link_secret` is 32 random bytes the admin's device makes the
+first time it prints a link for the group and keeps to itself (in
+`groups.json`, never in the group). A link therefore works only with the
+admin device that made it, which is the device it names, and no member
+can derive one from what the group shares. `/group link reset` replaces
+that device's secret, without a commit, voiding every link it made
+before; another admin's links are that admin's to reset. A device that
+stops being an admin drops its secret. Links made before 0.25.0 came from
+the group's `invite_key` and no longer work: an admin prints a new one.
+Whoever presents the
 link looks the named admin up as `/add` does, makes a fresh key package
 for the purpose, and sends the admin a `join` body carrying it with
 
@@ -1764,18 +1818,23 @@ for the purpose, and sends the admin a `join` body carrying it with
 join.proof = HMAC-SHA256(key, "silver-messenger/v1/group-join" || group id || joiner id)
 ```
 
-The admin's client checks the proof against the group's current
-`invite_key` in constant time, that it is an admin of an active group,
-that the joiner is not blocked and not a member — an identity, so a
+The admin's client checks the proof against its own current
+`link_secret` in constant time, that it is an admin of an active group,
+that the joiner's device is not one it knows was unlinked, that the
+joiner is not blocked and not a member — an identity, so a
 member's further device asks for nothing here, being brought in by its
 own primary (section 14) — and adds the joiner as above; members see "X
-joined by link". A link is a key rather than a ticket, so every holder
-presents the same proof and each valid one costs the admin a commit and
-a Welcome to every member: an admin's client answers at most 32 asks for
-one invite key and then says the link wants resetting, which
+joined by link". A joiner this client saw removed from the group is not
+added on the link's word: the admin is told, and `/group add` brings
+them back if that is the admin's wish. A link is a key rather than a
+ticket, so every holder presents the same proof and each valid one
+costs the admin a commit and a Welcome to every member: an admin's
+client answers at most 32 asks for one link and then says the link
+wants resetting, which
 `/group link reset` does. The joiner's client remembers
 which admin it asked for which group and takes that admin's Welcome as
-the answer. A link names one admin, by the id of the device that made
+the answer for seven days; after that a Welcome is an ordinary
+invitation. A link names one admin, by the id of the device that made
 it (section 14), so the request reaches the device whose owner is
 watching; if that admin is gone the link is dead and another admin makes
 a new one.
@@ -1803,9 +1862,14 @@ group context of the epoch the commit leaves:
 * The ciphersuite is unchanged, and the required capabilities still list
   `0xF000` and `0xF001`.
 * After the commit `admins` is not empty and lists only members, except
-  an admin whose every leaf left the tree by its own Remove in this
-  commit: an admin that leaves stays named until an admin's commit takes
-  it out of the extension.
+  an identity that was already named before the commit and either had
+  already left or left by its own Removes in this commit: an admin that
+  leaves may stay named until an admin's commit takes it out of the
+  extension, and every commit until then is read as valid. An admin's
+  commit that carries a leave (or a removal) drops the departing admin
+  from `admins` in the same commit, and an admin's settings commit drops
+  any departed admin still named; a commit naming anyone else outside the
+  group is refused.
 * After the commit the group has at most 256 members, at most nine
   leaves for any one identity (the devices an account may link, 14.1),
   and at most 256 × 9 leaves in all: every leaf costs every member a
@@ -1825,21 +1889,47 @@ merge: the commit that left it is the fault and its committer is named,
 rather than the failure surfacing at whoever commits next. A message
 that cannot be processed at all (a replay MLS refuses, an unreadable
 message from an epoch too far back) is reported and dropped without
-changing anything — except a handshake at or above the reader's own
-epoch, which means the group moved on without it: that marks the group
-out of sync (13.8) rather than leaving it stuck.
+changing anything — except a commit at the reader's own epoch that
+OpenMLS decrypted and whose member signature it checked, but that will
+not stage (one referencing a proposal the reader never received): the
+group moved on without it, and that marks the group out of sync (13.8)
+rather than leaving it stuck. A handshake that fails before that point
+is anyone's to write and changes nothing.
+
+The sender of an application message is the account the credential of
+its sender's leaf names *in the message's own epoch*, the leaf against
+which MLS checked the signature, never the leaf at that index in the
+current tree: a message from up to three epochs back may come from a
+member since removed, whose slot somebody else now holds.
 
 ### 13.8 Out of sync and rejoin
 
 A member falls out of sync when it misses a commit for good (a full or
 expired mailbox, a lost race whose winning commit never arrived). It
-notices as in 13.6, marks the group out of sync, and sends a `rejoin`
-body (a fresh key package) to every admin it knows of and to its own
-identity's other devices (section 14). A client that receives it checks
-the key package (13.1) against the sender, that the sender is a current
-member and that it may act for it (an admin, or a device of the same
-identity), and commits a Remove of the sender's old leaf and an Add of
-the new key package in one commit, sending the Welcome as for an add.
+notices as in 13.6 — the sequencer's word, given twice, or a commit at
+its own epoch that authenticates and will not stage — marks the group
+out of sync, and sends a `rejoin` body (a fresh key package) to every
+admin it knows of and to its own identity's other devices (section 14),
+with
+
+```text
+rejoin.signature = Ed25519(device identity key,
+    "silver-messenger/v1/group-rejoin" || group id || key package hash ref (32)
+    || leaf HPKE key length (4 BE) || leaf HPKE key)
+```
+
+over the HPKE encryption key of its own leaf as it last knew it, signed
+as identity signatures are (section 2). A key package is public — the
+relay hands it to anyone, and every Add commit carries one — so it says
+nothing about who sent the request. A client that receives it checks
+the key package (13.1), that the device is a current member and not one
+it knows was unlinked, that it may act for it (an admin, or a device of
+the same identity), and that the signature verifies under the device's
+key for the leaf that device has in the tree now; a request without one
+is refused. The leaf's key makes a request good once: after the re-add,
+or any refresh, it no longer matches. The client then commits a Remove
+of the old leaf and an Add of the new key package in one commit, sending
+the Welcome as for an add.
 The member keeps its history; the messages between are lost, and the
 client says so. `/group rejoin` sends the same
 request on demand. A member that stays out of sync asks again and
@@ -1858,7 +1948,9 @@ at most four rejoins per member per group in an hour.
   the tree. Committing a leave is an admin's job: a non-admin's own
   refresh commit leaves the stored proposals alone, so a leaver's Remove
   cannot ride along in a weekly self-update nobody asked for and have
-  every reader see a non-admin removing a member. A
+  every reader see a non-admin removing a member. An admin's commit that
+  carries an admin's leave takes the leaver off `admins` in the same
+  commit (13.7). A
   proposal is accepted by reference only from the leaf it removes. The
   last admin of a group with other members cannot leave; the last member
   leaving deletes the group.
@@ -2116,7 +2208,20 @@ good.
 
 A contact that sees a revocation for a device it knows as that account's
 drops its sessions with it, forgets the device's bundle and stops
-sending to it. The
+sending to it. It also remembers the statement, beside its sessions, so
+that it outlasts a restart, and from then on refuses a body that device
+seals in the account's name: a certificate does not expire, and says
+only that the device was enrolled, so whoever holds a revoked device's
+keys could otherwise go on writing as the account through any relay
+connection, the anonymous one included. A body from a linked device the
+reader cannot place on its account's list as last looked up waits while
+the account is looked up again, and is refused when the device is
+revoked or no longer on the account's signed list; a device a reader
+holds a bundle for, which it keeps only while the device is listed, goes
+through at once, as does the first message of a newly linked device
+once the fresh list names it. When the relay does not answer that
+lookup the body is taken on its certificate unless a revocation of the
+device is remembered (0.25.0). The
 primary pushes the statement to contacts whose last message advertised
 `devices` (4.3), which know the kind; a client from before 0.9.0 would
 refuse the whole body. A device the relay tells it is revoked says so and

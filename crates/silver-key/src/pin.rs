@@ -11,7 +11,7 @@ use hkdf::Hkdf;
 use hmac::{Hmac, KeyInit, Mac};
 use p256::elliptic_curve::point::AffineCoordinates;
 use p256::elliptic_curve::sec1::ToSec1Point;
-use p256::{PublicKey, SecretKey};
+use p256::{PublicKey, Scalar, SecretKey};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
@@ -54,11 +54,26 @@ impl Protocol {
     }
 
     /// The secret shared between `ours` and `peer`.
+    ///
+    /// Every intermediate this code holds is wiped when it goes: the
+    /// scalar, the product, the point, its x coordinate (Z) and, under
+    /// protocol 1, its hash, which is hashed from Z in place rather than
+    /// from a copy. What is left is inside other crates: the SHA-256
+    /// state that saw Z, and under protocol 2 the HMAC state HKDF keeps
+    /// its pseudorandom key in. `sha2` and `hmac` wipe those only with
+    /// their `zeroize` feature, which the dependency tree does not turn on
+    /// today; both are dropped as soon as they are used.
     pub fn shared(self, ours: &SecretKey, peer: &PublicKey) -> Shared {
-        let point = (peer.to_projective() * *ours.to_nonzero_scalar()).to_affine();
-        let z = Zeroizing::new(<[u8; 32]>::from(point.x()));
+        let scalar = Zeroizing::new(ours.to_nonzero_scalar());
+        // By reference, so that no copy of the scalar is left unwiped.
+        let product = Zeroizing::new(peer.to_projective() * AsRef::<Scalar>::as_ref(&*scalar));
+        let point = Zeroizing::new(product.to_affine());
+        let z = Zeroizing::new(point.x());
         let secret = match self {
-            Protocol::One => Zeroizing::new(Sha256::digest(*z).to_vec()),
+            Protocol::One => {
+                let hash = Zeroizing::new(Sha256::digest(z.as_slice()));
+                Zeroizing::new(hash.to_vec())
+            }
             Protocol::Two => {
                 let hk = Hkdf::<Sha256>::new(Some(&[0u8; 32]), z.as_slice());
                 let mut out = Zeroizing::new(vec![0u8; 64]);

@@ -69,6 +69,30 @@ pub struct Break {
 
 /// Breaks kept before the oldest is dropped.
 pub const BREAKS_KEPT: usize = 8;
+/// Leaves of this client's own publishing kept, oldest dropped first. A
+/// bundle's leaf changes when its signed prekeys rotate, weekly, and when
+/// its key, capabilities or devices change: years of publishing.
+pub const OWN_LEAVES_KEPT: usize = 256;
+
+/// What this client itself put in the log under its own id, so that an
+/// entry under that id it did not put there is noticed. The key owner is
+/// the one reader who knows for certain which of its entries are its own;
+/// everyone else can only check that a key was logged, not that its
+/// owner published it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Own {
+    pub user: UserId,
+    /// Entries at or below this index were logged before this client
+    /// started keeping track, and are not judged.
+    pub since: u64,
+    /// The leaves of the bundles and statements it published, oldest
+    /// first.
+    #[serde(default)]
+    pub leaves: Vec<OwnLeaf>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnLeaf(#[serde(with = "b64_array")] pub Hash);
 
 impl Checkpoint {
     fn head(&self) -> LogHead {
@@ -118,6 +142,9 @@ pub struct LogState {
     /// When the head was last confirmed against the relay, in ms.
     #[serde(default)]
     pub verified_at_ms: u64,
+    /// What this client published under its own id; kept through a reset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own: Option<Own>,
 }
 
 /// Something a lookup showed that the log does not bear out.
@@ -281,11 +308,53 @@ impl LogStore {
         while breaks.len() > BREAKS_KEPT {
             breaks.remove(0);
         }
+        let own = self.state.own.take();
         self.state = LogState {
             breaks,
+            own,
             ..LogState::default()
         };
         self.persist();
+    }
+
+    /// Note that this client is about to publish `leaf` under `user`, its
+    /// own id. `relay_index` is where the relay said its log stood; the
+    /// first note starts the audit from the later of that and our head,
+    /// since what was logged before then cannot be told apart from what
+    /// this client published before it kept track.
+    pub fn note_own(&mut self, user: UserId, leaf: Hash, relay_index: u64) {
+        let head = self.state.head.index;
+        let own = match &mut self.state.own {
+            Some(own) if own.user == user => own,
+            slot => slot.insert(Own {
+                user,
+                since: head.max(relay_index),
+                leaves: Vec::new(),
+            }),
+        };
+        if own.leaves.iter().any(|l| l.0 == leaf) {
+            return;
+        }
+        own.leaves.push(OwnLeaf(leaf));
+        while own.leaves.len() > OWN_LEAVES_KEPT {
+            own.leaves.remove(0);
+        }
+        self.persist();
+    }
+
+    /// The entries among `entries` under `user`'s own id that this client
+    /// did not publish, by index; nothing while it keeps no track.
+    pub fn not_our_own(&self, user: &UserId, entries: &[LogEntry]) -> Vec<(u64, EntryKind)> {
+        let Some(own) = self.state.own.as_ref().filter(|o| o.user == *user) else {
+            return Vec::new();
+        };
+        let mine = subject(user);
+        entries
+            .iter()
+            .filter(|e| e.subject == mine && e.index > own.since)
+            .filter(|e| !own.leaves.iter().any(|l| l.0 == e.leaf))
+            .map(|e| (e.index, e.kind))
+            .collect()
     }
 
     /// Every time the relay's log contradicted this client's replay of it,
@@ -808,6 +877,49 @@ mod tests {
         );
         assert_eq!(ours.checkpoint_below(3), LogHead::EMPTY);
         assert!(ours.state.checkpoints.len() < n as usize);
+    }
+
+    /// An entry under our own id is ours only if we published its leaf;
+    /// what was logged before we kept track is not judged, and the record
+    /// outlives a reset and a reload.
+    #[test]
+    fn entries_under_our_own_id_that_we_did_not_publish_are_found() {
+        let me = Identity::generate();
+        let other = Identity::generate();
+        let [before, published, planted] =
+            [1, 2, 3].map(|id| bundle_of(&me, id).transparency_leaf());
+        let mut relay = FakeLog::new();
+        let mut log = LogStore::ephemeral();
+        // Something under our id before we kept track: not judged.
+        let first = relay.add(&me.user_id(), EntryKind::Bundle, before);
+        assert!(
+            log.not_our_own(&me.user_id(), std::slice::from_ref(&first))
+                .is_empty()
+        );
+        log.note_own(me.user_id(), published, relay.head().index);
+
+        let ours = relay.add(&me.user_id(), EntryKind::Bundle, published);
+        let theirs = relay.add(
+            &other.user_id(),
+            EntryKind::Bundle,
+            bundle_of(&other, 1).transparency_leaf(),
+        );
+        let foreign = relay.add(&me.user_id(), EntryKind::Bundle, planted);
+        let page = vec![first, ours, theirs, foreign.clone()];
+        log.apply(&relay.since(0, 100), 1).unwrap();
+        assert_eq!(
+            log.not_our_own(&me.user_id(), &page),
+            vec![(foreign.index, EntryKind::Bundle)]
+        );
+        // Another identity's audit is its own business.
+        assert!(log.not_our_own(&other.user_id(), &page).is_empty());
+
+        // A reset keeps the record, and so does the file.
+        log.reset(true, LogHead::EMPTY, 2);
+        assert_eq!(log.not_our_own(&me.user_id(), &page).len(), 1);
+        let json = serde_json::to_vec(&log.state).unwrap();
+        let back: LogState = serde_json::from_slice(&json).unwrap();
+        assert_eq!(back.own, log.state.own);
     }
 
     #[test]

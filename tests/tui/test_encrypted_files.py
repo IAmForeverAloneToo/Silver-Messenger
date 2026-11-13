@@ -47,7 +47,7 @@ def main():
     assert b.wait("(encrypted)"), "the line says the file is encrypted"
     saved = os.path.join(b_dir, "downloads", "notes.txt")
     raw = open(saved, "rb").read()
-    assert raw.startswith(b"SMV1") and b"kept under" not in raw, "ciphertext on disk"
+    assert raw.startswith(b"SMD1") and b"kept under" not in raw, "ciphertext on disk"
 
     # A plain copy on request, beside it.
     b.type("/files decrypt\r")
@@ -70,7 +70,7 @@ def main():
     b.type("/get\r")
     assert b.wait("notes (3).txt"), "saved plain under the next free name"
     assert open(os.path.join(b_dir, "downloads", "notes (3).txt")).read() == "kept under the data key\n"
-    assert open(saved, "rb").read().startswith(b"SMV1"), "the encrypted one stays encrypted"
+    assert open(saved, "rb").read().startswith(b"SMD1"), "the encrypted one stays encrypted"
 
     # The plain copy for the opener goes with the client.
     b.quit()

@@ -123,6 +123,39 @@ fn text(s: &str) -> Content {
     Content::text(s)
 }
 
+/// What the front end does for a member that saw a handshake from far
+/// ahead: a self-update asks the sequencer where the group stands, and
+/// once the commits between have had time to arrive it asks again. The
+/// events of the second answer.
+fn ask_the_sequencer(party: &mut Party, seq: &mut Sequencer, group: GroupId) -> Vec<GroupEvent> {
+    let first = now_ms() + PROBE_EVERY_MS;
+    let mut ask = |at: u64| {
+        assert!(party.groups.self_updates_due(at).contains(&group));
+        let staged = party.groups.stage_self_update(&group).unwrap();
+        let theirs = seq.commit(staged).expect_err("the group moved on");
+        party.groups.discard_staged(&group).unwrap();
+        party.groups.sequencer_ahead(&group, theirs, at).unwrap()
+    };
+    assert!(
+        ask(first).is_empty(),
+        "once could be a commit race lost, the winner on its way"
+    );
+    ask(first + BEHIND_GRACE_MS)
+}
+
+/// A `PrivateMessage` as anyone can write one: the right group, an epoch
+/// of the writer's choosing, and nothing anyone could decrypt.
+fn forged_handshake(group: &GroupId, epoch: u64) -> Vec<u8> {
+    // MLS 1.0, private_message; the group id, the epoch, content type
+    // commit, no authenticated data, one byte each of sender data and
+    // ciphertext.
+    let mut out = vec![0, 1, 0, 2, 32];
+    out.extend_from_slice(group.as_bytes());
+    out.extend_from_slice(&epoch.to_be_bytes());
+    out.extend_from_slice(&[3, 0, 1, 0, 1, 0]);
+    out
+}
+
 /// Alice creates a group and adds bob and carol; everyone is in sync.
 fn three(
     seq: &mut Sequencer,
@@ -565,7 +598,11 @@ fn admins_are_appointed_names_change_and_links_rotate() {
     carol.drain(&blobs);
     assert!(bob.groups.get(&group).unwrap().is_admin(&bob.id()));
     let bob_link = bob.groups.invite_link(&group, None).unwrap();
-    assert_eq!(bob_link.key, link.key, "the same invite key, another admin");
+    assert_eq!(bob_link.via, bob.id());
+    assert_ne!(
+        bob_link.key, link.key,
+        "each admin device's links come from its own secret"
+    );
 
     // Bob renames; carol sees the name.
     let staged = bob
@@ -586,28 +623,26 @@ fn admins_are_appointed_names_change_and_links_rotate() {
     );
     assert_eq!(carol.groups.get(&group).unwrap().name, "the papers, vol. 2");
 
-    // A link reset voids the old link.
-    let staged = alice.groups.stage_link_reset(&group).unwrap();
-    assert_eq!(seq.commit(staged), Ok(4));
-    let out = alice.groups.commit_staged(&group, now_ms()).unwrap();
-    deliver(out, &mut [&mut bob, &mut carol], &mut blobs);
+    // A link reset voids the old link, on this device and with no
+    // commit; another admin's links are theirs.
+    let reset = alice.groups.reset_link(&group, None).unwrap();
+    assert_ne!(reset.key, link.key);
     assert_eq!(
-        bob.drain(&blobs),
-        vec![GroupEvent::Changed {
-            group,
-            by: alice.id(),
-            change: Change::LinkReset
-        }]
-    );
-    carol.drain(&blobs);
-    assert_ne!(
         alice.groups.invite_link(&group, None).unwrap().key,
-        link.key
+        reset.key
     );
+    assert_eq!(
+        bob.groups.invite_link(&group, None).unwrap().key,
+        bob_link.key
+    );
+    assert!(matches!(
+        carol.groups.reset_link(&group, None),
+        Err(GroupError::NotAdmin)
+    ));
 
     // The last admin cannot be demoted.
     let staged = alice.groups.stage_admin(&group, bob.id(), false).unwrap();
-    assert_eq!(seq.commit(staged), Ok(5));
+    assert_eq!(seq.commit(staged), Ok(4));
     let out = alice.groups.commit_staged(&group, now_ms()).unwrap();
     deliver(out, &mut [&mut bob, &mut carol], &mut blobs);
     bob.drain(&blobs);
@@ -675,10 +710,7 @@ fn a_link_lets_a_stranger_ask_and_an_admin_add_them() {
     carol.drain(&blobs);
 
     // A stale link (after a reset) is refused; a proof for another group too.
-    let staged = alice.groups.stage_link_reset(&group).unwrap();
-    assert_eq!(seq.commit(staged), Ok(3));
-    let out = alice.groups.commit_staged(&group, now_ms()).unwrap();
-    deliver(out, &mut [&mut bob, &mut carol, &mut dave], &mut blobs);
+    alice.groups.reset_link(&group, None).unwrap();
     let mut eve = Party::new();
     let out = eve
         .groups
@@ -918,13 +950,23 @@ fn a_member_out_of_sync_is_removed_and_added_back() {
         carol.drain(&blobs).as_slice(),
         [GroupEvent::Refused { .. }]
     ));
-    // The next commit she sees is far ahead: out of sync.
+    // The next commit she sees is far ahead. Its header is anyone's to
+    // write, so it changes nothing by itself; the sequencer, asked twice,
+    // says she is behind, and she is out of sync.
     let staged = alice.groups.stage_rename(&group, "far").unwrap();
     seq.commit(staged).unwrap();
     let out = alice.groups.commit_staged(&group, now_ms()).unwrap();
     deliver(out, &mut [&mut bob, &mut carol], &mut blobs);
     bob.drain(&blobs);
-    assert_eq!(carol.drain(&blobs), vec![GroupEvent::OutOfSync { group }]);
+    assert!(matches!(
+        carol.drain(&blobs).as_slice(),
+        [GroupEvent::Refused { .. }]
+    ));
+    assert_eq!(carol.groups.get(&group).unwrap().state, GroupState::Active);
+    assert_eq!(
+        ask_the_sequencer(&mut carol, &mut seq, group),
+        vec![GroupEvent::OutOfSync { group }]
+    );
     let out = carol.groups.rejoin_request(&group, now_ms()).unwrap();
     assert_eq!(out.envelopes.len(), 1, "to the one admin");
     deliver(out, &mut [&mut alice], &mut blobs);
@@ -1019,8 +1061,8 @@ fn a_large_group_parks_its_welcome_in_the_blob_store() {
     // Holding keeps bytes nothing has read yet — the epoch and the
     // content type are plaintext header fields anyone can write — in
     // memory and in `groups.json`, so only what fitted inside its
-    // envelope is worth keeping. A member that missed the epoch between
-    // goes out of sync instead and rejoins.
+    // envelope is worth keeping. It is dropped, and the member asks the
+    // sequencer where the group stands (`ask_the_sequencer`).
     let behind_id = others[0].id();
     let to_behind = move |out: &Outgoing| Outgoing {
         id: None,
@@ -1055,13 +1097,16 @@ fn a_large_group_parks_its_welcome_in_the_blob_store() {
         "a commit adding 20 to 21, and its Welcome, are both parked"
     );
     deliver(to_behind(&big), &mut [&mut others[0]], &mut blobs);
+    assert!(matches!(
+        others[0].drain(&blobs).as_slice(),
+        [GroupEvent::Refused { .. }]
+    ));
+    let record = others[0].groups.get(&group).unwrap();
+    assert!(record.held.is_empty(), "nothing of it is kept");
+    assert_eq!(record.state, GroupState::Active, "and nothing changed");
     assert_eq!(
-        others[0].drain(&blobs),
+        ask_the_sequencer(&mut others[0], &mut seq, group),
         vec![GroupEvent::OutOfSync { group }]
-    );
-    assert!(
-        others[0].groups.get(&group).unwrap().held.is_empty(),
-        "nothing of it is kept"
     );
 }
 
@@ -1431,7 +1476,14 @@ fn a_device_out_of_sync_is_re_added_by_its_identitys_other_device() {
     deliver(out, &mut [&mut bob, &mut laptop, &mut carol], &mut blobs);
     bob.drain(&blobs);
     carol.drain(&blobs);
-    assert_eq!(laptop.drain(&blobs), vec![GroupEvent::OutOfSync { group }]);
+    assert!(matches!(
+        laptop.drain(&blobs).as_slice(),
+        [GroupEvent::Refused { .. }]
+    ));
+    assert_eq!(
+        ask_the_sequencer(&mut laptop, &mut seq, group),
+        vec![GroupEvent::OutOfSync { group }]
+    );
     // The request goes to the admin and to bob's primary; bob, no admin,
     // answers for his own device.
     let out = laptop.groups.rejoin_request(&group, now_ms()).unwrap();
@@ -1687,11 +1739,7 @@ fn one_invite_link_is_answered_only_so_many_times() {
     assert!(reason.contains("invite link"), "{reason}");
 
     // A new link starts the count again.
-    let staged = alice.groups.stage_link_reset(&group).unwrap();
-    assert_eq!(seq.commit(staged), Ok(2));
-    let out = alice.groups.commit_staged(&group, now_ms()).unwrap();
-    let _ = out;
-    let link = alice.groups.invite_link(&group, None).unwrap();
+    let link = alice.groups.reset_link(&group, None).unwrap();
     let mut stranger = Party::new();
     let out = stranger
         .groups
@@ -1846,4 +1894,849 @@ fn a_group_alias_that_reached_disk_unfiltered_is_still_filtered_on_the_way_out()
         alice.groups.get(&group).unwrap().display_name(),
         "team]2;pwned"
     );
+}
+
+/// Links used to come from an invite key in the group context, which
+/// every member reads: any member, and one removed later, could make a
+/// valid link and have the admin's client add whoever presented it. A
+/// link now comes from a secret only the admin device that made it holds,
+/// and someone this client saw removed is not let back in by a link alone.
+#[test]
+fn a_link_works_only_from_the_admin_device_that_made_it_and_not_for_the_removed() {
+    let mut seq = Sequencer::default();
+    let mut blobs = HashMap::new();
+    let (mut alice, mut bob, mut carol, group) = three(&mut seq, &mut blobs);
+    let link = alice.groups.invite_link(&group, None).unwrap();
+
+    // Carol, a member, reads what the group shares and builds a link from
+    // it; a stranger presents it.
+    let shared = carol.groups.extension(&group).unwrap().invite_key;
+    let minted = GroupLink {
+        group,
+        via: alice.id(),
+        key: silver_protocol::group::link_key(&shared, &group),
+        relay: None,
+    };
+    let mut dave = Party::new();
+    let out = dave
+        .groups
+        .join_request(&minted, (alice.id(), alice.identity.dh_public()), now_ms())
+        .unwrap();
+    deliver(out, &mut [&mut alice], &mut blobs);
+    let events = alice.drain(&blobs);
+    assert!(
+        matches!(events.as_slice(), [GroupEvent::Refused { .. }]),
+        "{events:?}"
+    );
+
+    // Carol held the real link while she was in. Alice removes her; the
+    // link still verifies, but alice's client is told who it is.
+    let staged = alice.groups.stage_remove(&group, &[carol.id()]).unwrap();
+    seq.commit(staged).unwrap();
+    let out = alice.groups.commit_staged(&group, now_ms()).unwrap();
+    deliver(out, &mut [&mut bob, &mut carol], &mut blobs);
+    bob.drain(&blobs);
+    carol.drain(&blobs);
+    assert_eq!(alice.groups.get(&group).unwrap().removed, vec![carol.id()]);
+    assert_eq!(bob.groups.get(&group).unwrap().removed, vec![carol.id()]);
+    let out = carol
+        .groups
+        .join_request(&link, (alice.id(), alice.identity.dh_public()), now_ms())
+        .unwrap();
+    deliver(out, &mut [&mut alice], &mut blobs);
+    let events = alice.drain(&blobs);
+    let [
+        GroupEvent::JoinRequest {
+            joiner,
+            key_package,
+            removed_before,
+            ..
+        },
+    ] = events.as_slice()
+    else {
+        panic!("{events:?}");
+    };
+    assert_eq!(*joiner, carol.id());
+    assert!(*removed_before, "for the user to decide");
+
+    // When the user does add her back, she is no longer held against.
+    let staged = alice
+        .groups
+        .stage_add(&group, std::slice::from_ref(key_package))
+        .unwrap();
+    seq.commit(staged).unwrap();
+    let out = alice.groups.commit_staged(&group, now_ms()).unwrap();
+    deliver(out, &mut [&mut bob, &mut carol], &mut blobs);
+    bob.drain(&blobs);
+    carol.drain(&blobs);
+    assert!(alice.groups.get(&group).unwrap().removed.is_empty());
+    assert!(bob.groups.get(&group).unwrap().removed.is_empty());
+
+    // A device that never made a link answers none, whatever it presents.
+    let staged = alice.groups.stage_admin(&group, bob.id(), true).unwrap();
+    seq.commit(staged).unwrap();
+    let out = alice.groups.commit_staged(&group, now_ms()).unwrap();
+    deliver(out, &mut [&mut bob, &mut carol], &mut blobs);
+    bob.drain(&blobs);
+    carol.drain(&blobs);
+    let mut erin = Party::new();
+    let out = erin
+        .groups
+        .join_request(
+            &GroupLink {
+                via: bob.id(),
+                ..link.clone()
+            },
+            (bob.id(), bob.identity.dh_public()),
+            now_ms(),
+        )
+        .unwrap();
+    deliver(out, &mut [&mut bob], &mut blobs);
+    assert!(matches!(
+        bob.drain(&blobs).as_slice(),
+        [GroupEvent::Refused { reason, .. }] if reason.contains("did not make")
+    ));
+}
+
+/// An application message may come from a past epoch, and the index of
+/// its sender's leaf may belong to somebody else by now. The sender is
+/// whoever the leaf was in the message's own epoch.
+#[test]
+fn a_message_from_a_past_epoch_is_from_whoever_sent_it_then() {
+    let mut seq = Sequencer::default();
+    let mut blobs = HashMap::new();
+    let (mut alice, mut bob, mut carol, group) = three(&mut seq, &mut blobs);
+    let carol_index = {
+        let handle = load_handle(&mut bob.groups.handles, &bob.groups.provider, &group).unwrap();
+        leaves_of(handle)
+            .unwrap()
+            .into_iter()
+            .find(|(_, leaf)| leaf.account == carol.id())
+            .map(|(index, _)| index)
+            .unwrap()
+    };
+    let before = carol
+        .groups
+        .send(&group, text("before I go"), None, now_ms())
+        .unwrap();
+    // Alice removes carol, and dave takes the slot her leaf left.
+    let staged = alice.groups.stage_remove(&group, &[carol.id()]).unwrap();
+    seq.commit(staged).unwrap();
+    let out = alice.groups.commit_staged(&group, now_ms()).unwrap();
+    deliver(out, &mut [&mut bob, &mut carol], &mut blobs);
+    bob.drain(&blobs);
+    carol.drain(&blobs);
+    let mut dave = Party::new();
+    let kp = alice
+        .groups
+        .verify_key_package(&dave.id(), &dave.key_package(), now_ms())
+        .unwrap();
+    let staged = alice.groups.stage_add(&group, &[kp]).unwrap();
+    seq.commit(staged).unwrap();
+    let out = alice.groups.commit_staged(&group, now_ms()).unwrap();
+    deliver(out, &mut [&mut bob, &mut dave], &mut blobs);
+    bob.drain(&blobs);
+    dave.drain(&blobs);
+    let dave_index = {
+        let handle = load_handle(&mut bob.groups.handles, &bob.groups.provider, &group).unwrap();
+        leaves_of(handle)
+            .unwrap()
+            .into_iter()
+            .find(|(_, leaf)| leaf.account == dave.id())
+            .map(|(index, _)| index)
+            .unwrap()
+    };
+    assert_eq!(dave_index, carol_index, "dave sits where carol sat");
+    // Carol's message, two epochs late, is hers.
+    deliver(before, &mut [&mut alice, &mut bob], &mut blobs);
+    let events = bob.drain(&blobs);
+    assert!(
+        matches!(
+            events.as_slice(),
+            [GroupEvent::Message { from, .. }] if *from == carol.id()
+        ),
+        "{events:?}"
+    );
+    alice.drain(&blobs);
+}
+
+/// The epoch and content type of a handshake are plaintext header fields
+/// anyone can write. One of them used to put a member out of sync — no
+/// more sending, and a rejoin that let a Welcome of the writer's take the
+/// group's place — and could turn an invitation nobody accepted into a
+/// group the user was in. Now it is dropped and changes nothing.
+#[test]
+fn a_forged_handshake_from_far_ahead_changes_nothing() {
+    let mut seq = Sequencer::default();
+    let mut blobs = HashMap::new();
+    let (mut alice, mut bob, mut carol, group) = three(&mut seq, &mut blobs);
+    let stranger = Identity::generate().user_id();
+    let forge = |epoch: u64| {
+        let mls = forged_handshake(&group, epoch);
+        (
+            GroupBody::inline(group, GroupKind::Handshake, mls.clone()),
+            mls,
+        )
+    };
+    for epoch in [1_000_000, u64::MAX] {
+        let (body, mls) = forge(epoch);
+        let events = bob.groups.receive(stranger, &body, &mls, now_ms()).unwrap();
+        assert!(
+            matches!(events.as_slice(), [GroupEvent::Refused { .. }]),
+            "{events:?}"
+        );
+        assert_eq!(bob.groups.get(&group).unwrap().state, GroupState::Active);
+    }
+    // A full hold queue drops what comes next, and nothing more.
+    for _ in 0..HOLD_LIMIT {
+        let (body, mls) = forge(2);
+        assert!(
+            bob.groups
+                .receive(stranger, &body, &mls, now_ms())
+                .unwrap()
+                .is_empty()
+        );
+    }
+    let (body, mls) = forge(2);
+    assert!(matches!(
+        bob.groups
+            .receive(stranger, &body, &mls, now_ms())
+            .unwrap()
+            .as_slice(),
+        [GroupEvent::Refused { .. }]
+    ));
+    assert_eq!(bob.groups.get(&group).unwrap().state, GroupState::Active);
+    let out = bob
+        .groups
+        .send(&group, text("still here"), None, now_ms())
+        .unwrap();
+    deliver(out, &mut [&mut alice, &mut carol], &mut blobs);
+    alice.drain(&blobs);
+    carol.drain(&blobs);
+    // The honest commit for that epoch arrives; what was held in its name
+    // fails to decrypt and is refused, and bob stays in step.
+    let staged = alice.groups.stage_rename(&group, "on").unwrap();
+    seq.commit(staged).unwrap();
+    let out = alice.groups.commit_staged(&group, now_ms()).unwrap();
+    deliver(out, &mut [&mut bob, &mut carol], &mut blobs);
+    let events = bob.drain(&blobs);
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            GroupEvent::Changed {
+                change: Change::Renamed(_),
+                ..
+            }
+        )),
+        "{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, GroupEvent::OutOfSync { .. }))
+    );
+    let record = bob.groups.get(&group).unwrap();
+    assert_eq!(record.state, GroupState::Active);
+    assert_eq!(record.name, "on");
+    assert!(record.held.is_empty());
+    carol.drain(&blobs);
+
+    // An invitation stays one: no forged header turns it out of sync, and
+    // so no later commit brings it "back" into a group the user never
+    // said yes to.
+    let mut dave = Party::new();
+    let kp = alice
+        .groups
+        .verify_key_package(&dave.id(), &dave.key_package(), now_ms())
+        .unwrap();
+    let staged = alice.groups.stage_add(&group, &[kp]).unwrap();
+    seq.commit(staged).unwrap();
+    let out = alice.groups.commit_staged(&group, now_ms()).unwrap();
+    deliver(out, &mut [&mut bob, &mut carol, &mut dave], &mut blobs);
+    bob.drain(&blobs);
+    carol.drain(&blobs);
+    assert!(matches!(
+        dave.drain(&blobs).as_slice(),
+        [GroupEvent::Invited { .. }]
+    ));
+    let (body, mls) = forge(1_000_000);
+    dave.groups
+        .receive(stranger, &body, &mls, now_ms())
+        .unwrap();
+    let staged = alice.groups.stage_rename(&group, "later").unwrap();
+    seq.commit(staged).unwrap();
+    let out = alice.groups.commit_staged(&group, now_ms()).unwrap();
+    deliver(out, &mut [&mut bob, &mut carol, &mut dave], &mut blobs);
+    dave.drain(&blobs);
+    assert_eq!(
+        dave.groups.get(&group).unwrap().state,
+        GroupState::Invited { from: alice.id() }
+    );
+    assert!(dave.groups.mark_out_of_sync(&group, now_ms()).is_err());
+    assert!(dave.groups.rejoin_request(&group, now_ms()).is_err());
+}
+
+#[test]
+fn how_far_ahead_is_too_far_does_not_overflow() {
+    assert!(too_far_ahead(1, 1 + HOLD_LIMIT as u64 + 1));
+    assert!(!too_far_ahead(1, 1 + HOLD_LIMIT as u64));
+    assert!(!too_far_ahead(u64::MAX - 1, u64::MAX));
+    assert!(!too_far_ahead(u64::MAX, u64::MAX));
+}
+
+/// A group this client knows is replaced only by a Welcome from one of the
+/// admins it last knew there; the Welcome's own admin list is whatever its
+/// author wrote, and a group id is no secret.
+#[test]
+fn a_welcome_does_not_take_a_known_groups_place_on_its_authors_word() {
+    let mut seq = Sequencer::default();
+    let mut blobs = HashMap::new();
+    let (mut alice, mut bob, mut carol, group) = three(&mut seq, &mut blobs);
+    let staged = alice.groups.stage_remove(&group, &[carol.id()]).unwrap();
+    seq.commit(staged).unwrap();
+    let out = alice.groups.commit_staged(&group, now_ms()).unwrap();
+    deliver(out, &mut [&mut bob, &mut carol], &mut blobs);
+    bob.drain(&blobs);
+    carol.drain(&blobs);
+    bob.groups.mark_out_of_sync(&group, now_ms()).unwrap();
+
+    // Mallory makes a group under the same id, a few epochs on, and adds
+    // them both.
+    let mut mallory = Party::new();
+    let mut other = Sequencer::default();
+    other.create(
+        mallory
+            .groups
+            .create_with_id(group, "the papers", now_ms())
+            .unwrap(),
+    );
+    for name in ["a", "b", "the papers"] {
+        let staged = mallory.groups.stage_rename(&group, name).unwrap();
+        other.commit(staged).unwrap();
+        mallory.groups.commit_staged(&group, now_ms()).unwrap();
+    }
+    let packages: Vec<Vec<u8>> = [&mut bob, &mut carol]
+        .into_iter()
+        .map(|p| {
+            let id = p.id();
+            mallory
+                .groups
+                .verify_key_package(&id, &p.key_package(), now_ms())
+                .unwrap()
+        })
+        .collect();
+    let staged = mallory.groups.stage_add(&group, &packages).unwrap();
+    other.commit(staged).unwrap();
+    let out = mallory.groups.commit_staged(&group, now_ms()).unwrap();
+    deliver(out, &mut [&mut bob, &mut carol], &mut blobs);
+    for party in [&mut bob, &mut carol] {
+        let events = party.drain(&blobs);
+        assert!(
+            matches!(
+                events.as_slice(),
+                [GroupEvent::Refused { reason, .. }] if reason.contains("not an admin")
+            ),
+            "{events:?}"
+        );
+    }
+    assert_eq!(
+        carol.groups.get(&group).unwrap().state,
+        GroupState::Removed { by: alice.id() }
+    );
+    assert!(matches!(
+        bob.groups.get(&group).unwrap().state,
+        GroupState::OutOfSync { .. }
+    ));
+    // Bob's state is still there to recover from: alice's next commit
+    // brings him back.
+    let staged = alice.groups.stage_rename(&group, "still ours").unwrap();
+    seq.commit(staged).unwrap();
+    let out = alice.groups.commit_staged(&group, now_ms()).unwrap();
+    deliver(out, &mut [&mut bob], &mut blobs);
+    bob.drain(&blobs);
+    let record = bob.groups.get(&group).unwrap();
+    assert_eq!(record.state, GroupState::Active);
+    assert_eq!(record.name, "still ours");
+}
+
+/// The last-resort key package is not spent by the Welcome that uses it,
+/// so an old Welcome made from it can be read again. After the group was
+/// left, lost or declined, that is a group back from the past.
+#[test]
+fn an_old_welcome_is_not_taken_again() {
+    let mut seq = Sequencer::default();
+    let mut blobs = HashMap::new();
+    let mut alice = Party::new();
+    let mut dave = Party::new();
+    let mut erin = Party::new();
+    let last_resort = |p: &mut Party| p.groups.deposit(now_ms()).unwrap().1.unwrap().data;
+    let group = alice.groups.create("the papers", now_ms()).unwrap();
+    seq.create(group);
+    let group = group.group;
+    let packages = vec![
+        alice
+            .groups
+            .verify_key_package(&dave.id(), &last_resort(&mut dave), now_ms())
+            .unwrap(),
+        alice
+            .groups
+            .verify_key_package(&erin.id(), &last_resort(&mut erin), now_ms())
+            .unwrap(),
+    ];
+    let staged = alice.groups.stage_add(&group, &packages).unwrap();
+    seq.commit(staged).unwrap();
+    let out = alice.groups.commit_staged(&group, now_ms()).unwrap();
+    let welcomes = out.envelopes.clone();
+    deliver(out, &mut [&mut dave, &mut erin], &mut blobs);
+    for party in [&mut dave, &mut erin] {
+        assert!(matches!(
+            party.drain(&blobs).as_slice(),
+            [GroupEvent::Invited { .. }]
+        ));
+    }
+    dave.groups.accept_welcome(&group).unwrap();
+    erin.groups.decline_welcome(&group).unwrap();
+    let staged = alice.groups.stage_remove(&group, &[dave.id()]).unwrap();
+    seq.commit(staged).unwrap();
+    let mut out = alice.groups.commit_staged(&group, now_ms()).unwrap();
+    // Erin's dead leaf is still in the tree; she has forgotten the group.
+    out.envelopes.retain(|e| e.to == dave.id());
+    deliver(out, &mut [&mut dave], &mut blobs);
+    assert!(matches!(
+        dave.drain(&blobs).as_slice(),
+        [GroupEvent::Removed { .. }]
+    ));
+    // The same Welcomes again.
+    deliver(
+        Outgoing {
+            id: None,
+            envelopes: welcomes,
+            uploads: Vec::new(),
+        },
+        &mut [&mut dave, &mut erin],
+        &mut blobs,
+    );
+    for party in [&mut dave, &mut erin] {
+        let events = party.drain(&blobs);
+        assert!(
+            matches!(
+                events.as_slice(),
+                [GroupEvent::Refused { reason, .. }] if reason.contains("seen before")
+            ),
+            "{events:?}"
+        );
+    }
+    assert_eq!(
+        dave.groups.get(&group).unwrap().state,
+        GroupState::Removed { by: alice.id() }
+    );
+    assert!(erin.groups.get(&group).is_none());
+}
+
+/// A rejoin request names a key package, and key packages are public: the
+/// relay hands them to anyone, and every Add commit carries one. So the
+/// request is signed by the device whose leaf it replaces, over that leaf
+/// as it is now.
+#[test]
+fn a_rejoin_request_needs_the_signature_of_the_device_it_replaces() {
+    let mut seq = Sequencer::default();
+    let mut blobs = HashMap::new();
+    let (mut alice, mut bob, mut carol, group) = three(&mut seq, &mut blobs);
+    let mallory = Party::new();
+    // Mallory has one of carol's key packages, as anyone can.
+    let package = carol.key_package();
+    let unsigned = GroupBody::inline(group, GroupKind::Rejoin, package.clone());
+    let statement = rejoin_statement(&group, &[0; 32], b"anything");
+    let signed_by_mallory = unsigned
+        .clone()
+        .with_rejoin_proof(mallory.identity.sign(REJOIN_PROOF_DOMAIN, &statement));
+    for body in [unsigned, signed_by_mallory] {
+        let events = alice
+            .groups
+            .receive(mallory.id(), &body, &package, now_ms())
+            .unwrap();
+        assert!(
+            matches!(events.as_slice(), [GroupEvent::Refused { .. }]),
+            "{events:?}"
+        );
+    }
+
+    // Carol's own request is answered, and once only.
+    let out = carol.groups.rejoin_request(&group, now_ms()).unwrap();
+    let request = out.envelopes.clone();
+    deliver(out, &mut [&mut alice], &mut blobs);
+    let events = alice.drain(&blobs);
+    let [GroupEvent::RejoinRequest { key_package, .. }] = events.as_slice() else {
+        panic!("{events:?}");
+    };
+    let staged = alice
+        .groups
+        .stage_rejoin(&group, carol.id(), key_package)
+        .unwrap();
+    seq.commit(staged).unwrap();
+    let out = alice.groups.commit_staged(&group, now_ms()).unwrap();
+    deliver(out, &mut [&mut bob, &mut carol], &mut blobs);
+    bob.drain(&blobs);
+    carol.drain(&blobs);
+    deliver(
+        Outgoing {
+            id: None,
+            envelopes: request,
+            uploads: Vec::new(),
+        },
+        &mut [&mut alice],
+        &mut blobs,
+    );
+    let events = alice.drain(&blobs);
+    assert!(
+        matches!(events.as_slice(), [GroupEvent::Refused { .. }]),
+        "a replay names a leaf that is gone: {events:?}"
+    );
+}
+
+/// An admin who leaves goes from the admin list in the commit that takes
+/// them out, so the next commit anyone makes finds every named admin in
+/// the group.
+#[test]
+fn an_admin_who_leaves_is_dropped_from_the_admins_and_the_group_stays_whole() {
+    let mut seq = Sequencer::default();
+    let mut blobs = HashMap::new();
+    let (mut alice, mut bob, mut carol, group) = three(&mut seq, &mut blobs);
+    let staged = alice.groups.stage_admin(&group, bob.id(), true).unwrap();
+    seq.commit(staged).unwrap();
+    let out = alice.groups.commit_staged(&group, now_ms()).unwrap();
+    deliver(out, &mut [&mut bob, &mut carol], &mut blobs);
+    bob.drain(&blobs);
+    carol.drain(&blobs);
+    let out = alice.groups.leave(&group).unwrap();
+    deliver(out, &mut [&mut bob, &mut carol], &mut blobs);
+    assert!(matches!(
+        bob.drain(&blobs).as_slice(),
+        [GroupEvent::LeaveProposed { member, .. }] if *member == alice.id()
+    ));
+    carol.drain(&blobs);
+    // Bob, the co-admin, commits the leave.
+    let staged = bob.groups.stage_self_update(&group).unwrap();
+    seq.commit(staged).unwrap();
+    let out = bob.groups.commit_staged(&group, now_ms()).unwrap();
+    deliver(out, &mut [&mut alice, &mut carol], &mut blobs);
+    alice.drain(&blobs);
+    let events = carol.drain(&blobs);
+    assert!(
+        events.contains(&GroupEvent::Changed {
+            group,
+            by: bob.id(),
+            change: Change::Left(vec![alice.id()]),
+        }),
+        "{events:?}"
+    );
+    assert!(
+        events.contains(&GroupEvent::Changed {
+            group,
+            by: bob.id(),
+            change: Change::Admins(vec![bob.id()]),
+        }),
+        "{events:?}"
+    );
+    // Carol, no admin, refreshes her keys: everyone stays whole.
+    let staged = carol.groups.stage_self_update(&group).unwrap();
+    seq.commit(staged).unwrap();
+    let out = carol.groups.commit_staged(&group, now_ms()).unwrap();
+    deliver(out, &mut [&mut bob], &mut blobs);
+    assert_eq!(
+        bob.drain(&blobs),
+        vec![GroupEvent::Changed {
+            group,
+            by: carol.id(),
+            change: Change::Updated,
+        }]
+    );
+    for party in [&bob, &carol] {
+        let record = party.groups.get(&group).unwrap();
+        assert_eq!(record.state, GroupState::Active);
+        assert_eq!(record.admins(), vec![bob.id()]);
+        assert_eq!(record.identities(), vec![bob.id(), carol.id()]);
+    }
+}
+
+/// An older client committed a leave without dropping the leaver
+/// from the admins. Such a name is tolerated until an admin's commit drops
+/// it, rather than breaking the group at the next commit anyone makes.
+#[test]
+fn an_admin_who_left_but_is_still_named_breaks_nothing() {
+    let mut seq = Sequencer::default();
+    let mut blobs = HashMap::new();
+    let (mut alice, mut bob, mut carol, group) = three(&mut seq, &mut blobs);
+    let staged = alice.groups.stage_admin(&group, bob.id(), true).unwrap();
+    seq.commit(staged).unwrap();
+    let out = alice.groups.commit_staged(&group, now_ms()).unwrap();
+    deliver(out, &mut [&mut bob, &mut carol], &mut blobs);
+    bob.drain(&blobs);
+    carol.drain(&blobs);
+    let out = alice.groups.leave(&group).unwrap();
+    deliver(out, &mut [&mut bob, &mut carol], &mut blobs);
+    bob.drain(&blobs);
+    carol.drain(&blobs);
+    // The leave committed as the older client did: the proposal store
+    // consumed, the extension left alone.
+    let staged = bob
+        .groups
+        .stage(
+            &group,
+            |builder| Ok(builder.force_self_update(true).consume_proposal_store(true)),
+            Vec::new(),
+            Change::Updated,
+        )
+        .unwrap();
+    seq.commit(staged).unwrap();
+    let out = bob.groups.commit_staged(&group, now_ms()).unwrap();
+    deliver(out, &mut [&mut alice, &mut carol], &mut blobs);
+    alice.drain(&blobs);
+    carol.drain(&blobs);
+    assert!(
+        carol
+            .groups
+            .extension(&group)
+            .unwrap()
+            .admins
+            .contains(&alice.id())
+    );
+    // Carol's refresh is read by bob as it should be.
+    let staged = carol.groups.stage_self_update(&group).unwrap();
+    seq.commit(staged).unwrap();
+    let out = carol.groups.commit_staged(&group, now_ms()).unwrap();
+    deliver(out, &mut [&mut bob], &mut blobs);
+    assert!(matches!(
+        bob.drain(&blobs).as_slice(),
+        [GroupEvent::Changed {
+            change: Change::Updated,
+            ..
+        }]
+    ));
+    assert_eq!(bob.groups.get(&group).unwrap().state, GroupState::Active);
+    // Bob's next commit of the settings drops the name.
+    let staged = bob.groups.stage_rename(&group, "two of us").unwrap();
+    seq.commit(staged).unwrap();
+    let out = bob.groups.commit_staged(&group, now_ms()).unwrap();
+    deliver(out, &mut [&mut carol], &mut blobs);
+    let events = carol.drain(&blobs);
+    assert!(
+        events.contains(&GroupEvent::Changed {
+            group,
+            by: bob.id(),
+            change: Change::Admins(vec![bob.id()]),
+        }),
+        "{events:?}"
+    );
+    assert_eq!(carol.groups.get(&group).unwrap().state, GroupState::Active);
+    // And somebody outside the group who was never named still may not be.
+    let outsider = Identity::generate().user_id();
+    let extension = bob.groups.extension(&group).unwrap().with_admin(outsider);
+    let context = context_extensions(&extension).unwrap();
+    let staged = bob
+        .groups
+        .stage(
+            &group,
+            move |builder| {
+                builder
+                    .propose_group_context_extensions(context)
+                    .map_err(mls_err)
+            },
+            Vec::new(),
+            Change::Updated,
+        )
+        .unwrap();
+    seq.commit(staged).unwrap();
+    let out = bob.groups.commit_staged(&group, now_ms()).unwrap();
+    deliver(out, &mut [&mut carol], &mut blobs);
+    assert!(matches!(
+        carol.drain(&blobs).as_slice(),
+        [GroupEvent::Broken { .. }]
+    ));
+}
+
+/// A device its account unlinked keeps its keys and a certificate that
+/// still verifies. Once this client is told of the revocation, its
+/// Welcome is not taken — not even as one's own account's — its requests
+/// are not answered, and its leaves are listed until they are taken out.
+#[test]
+fn a_revoked_device_is_neither_taken_nor_answered() {
+    let mut seq = Sequencer::default();
+    let mut blobs = HashMap::new();
+    // Bob's phone, unlinked and kept by whoever has it, puts bob in a
+    // group of its own: a Welcome from his own account.
+    let mut bob = Party::new();
+    let mut phone = Party::device_of(&bob, "phone");
+    let created = phone.groups.create("from the phone", now_ms()).unwrap();
+    seq.create(created);
+    let kp = phone
+        .groups
+        .verify_key_package(&bob.id(), &bob.key_package(), now_ms())
+        .unwrap();
+    let staged = phone.groups.stage_add(&created.group, &[kp]).unwrap();
+    seq.commit(staged).unwrap();
+    let out = phone
+        .groups
+        .commit_staged(&created.group, now_ms())
+        .unwrap();
+    bob.groups.note_revoked_devices([phone.id()]).unwrap();
+    assert!(bob.groups.is_revoked_device(&phone.id()));
+    deliver(out, &mut [&mut bob], &mut blobs);
+    let events = bob.drain(&blobs);
+    assert!(
+        matches!(events.as_slice(), [GroupEvent::Refused { .. }]),
+        "{events:?}"
+    );
+    assert!(bob.groups.get(&created.group).is_none());
+
+    // An admin told of a revoked device answers neither a link nor a
+    // rejoin from it, adds it on nobody's word, and lists its leaf.
+    let (mut alice, mut bob, mut laptop, mut carol, group) = with_devices(&mut seq, &mut blobs);
+    let link = alice.groups.invite_link(&group, None).unwrap();
+    let mut dave = Party::new();
+    let mut tablet = Party::device_of(&dave, "tablet");
+    alice
+        .groups
+        .note_revoked_devices([tablet.id(), laptop.id()])
+        .unwrap();
+    let out = tablet
+        .groups
+        .join_request(&link, (alice.id(), alice.identity.dh_public()), now_ms())
+        .unwrap();
+    deliver(out, &mut [&mut alice], &mut blobs);
+    assert!(matches!(
+        alice.drain(&blobs).as_slice(),
+        [GroupEvent::Refused { reason, .. }] if reason.contains("unlinked")
+    ));
+    let kp = tablet.key_package();
+    assert!(alice.groups.stage_add(&group, &[kp]).is_err());
+    let _ = dave.key_package();
+    let out = laptop.groups.rejoin_request(&group, now_ms()).unwrap();
+    deliver(out, &mut [&mut alice, &mut bob], &mut blobs);
+    bob.drain(&blobs);
+    assert!(matches!(
+        alice.drain(&blobs).as_slice(),
+        [GroupEvent::Refused { reason, .. }] if reason.contains("unlinked")
+    ));
+    assert_eq!(alice.groups.revoked_leaves(), vec![(group, laptop.id())]);
+    assert!(
+        carol.groups.revoked_leaves().is_empty(),
+        "nobody's told carol"
+    );
+    let staged = alice
+        .groups
+        .stage_remove_device(&group, &laptop.id())
+        .unwrap();
+    seq.commit(staged).unwrap();
+    alice.groups.commit_staged(&group, now_ms()).unwrap();
+    assert!(alice.groups.revoked_leaves().is_empty());
+    let _ = &mut carol;
+}
+
+/// A handshake held for a later epoch is kept for `HOLD_FOR_MS` from when
+/// it arrived, however often the queue is gone through in between; and
+/// one that fails to read is that one's failure, not the queue's.
+#[test]
+fn held_handshakes_keep_their_time_and_fail_one_at_a_time() {
+    let mut seq = Sequencer::default();
+    let mut blobs = HashMap::new();
+    let (mut alice, mut bob, mut carol, group) = three(&mut seq, &mut blobs);
+    let t0 = now_ms();
+    let staged = alice.groups.stage_rename(&group, "one").unwrap();
+    seq.commit(staged).unwrap();
+    let first = alice.groups.commit_staged(&group, now_ms()).unwrap();
+    let staged = alice.groups.stage_rename(&group, "two").unwrap();
+    seq.commit(staged).unwrap();
+    let second = alice.groups.commit_staged(&group, now_ms()).unwrap();
+    let open = |party: &Party, out: &Outgoing| {
+        let envelope = out.envelopes.iter().find(|e| e.to == party.id()).unwrap();
+        let opened = open_bytes(&party.identity, envelope).unwrap();
+        let Body::Group(body) = Body::decode(&opened.body).unwrap() else {
+            panic!("not a group body");
+        };
+        let mls = body.mls.clone().unwrap();
+        (opened.from, body, mls)
+    };
+    let (from, body, mls) = open(&carol, &second);
+    assert!(
+        carol
+            .groups
+            .receive(from, &body, &mls, t0)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(carol.groups.get(&group).unwrap().held.len(), 1);
+    // Bob writes twice; each time carol goes through the queue.
+    for at in [t0 + HOLD_FOR_MS / 2, t0 + HOLD_FOR_MS + 1] {
+        let out = bob.groups.send(&group, text("hi"), None, now_ms()).unwrap();
+        let (from, body, mls) = open(&carol, &out);
+        carol.groups.receive(from, &body, &mls, at).unwrap();
+    }
+    assert!(
+        carol.groups.get(&group).unwrap().held.is_empty(),
+        "ten minutes from when it came, not from when it was last looked at"
+    );
+
+    // Something unreadable at the head of the queue does not take the
+    // rest with it.
+    let (from, body, mls) = open(&bob, &second);
+    assert!(
+        bob.groups
+            .receive(from, &body, &mls, now_ms())
+            .unwrap()
+            .is_empty()
+    );
+    bob.groups.file.groups.get_mut(&group).unwrap().held.insert(
+        0,
+        Held {
+            received_at_ms: now_ms(),
+            from,
+            mls: b"junk".to_vec(),
+        },
+    );
+    let (from, body, mls) = open(&bob, &first);
+    let events = bob.groups.receive(from, &body, &mls, now_ms()).unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, GroupEvent::Refused { .. })),
+        "{events:?}"
+    );
+    assert_eq!(bob.groups.get(&group).unwrap().name, "two");
+    assert!(bob.groups.get(&group).unwrap().held.is_empty());
+}
+
+/// The admin a join request went to may answer it without the user being
+/// asked again — for a while. A request long past is no reason to take a
+/// Welcome from that admin unasked.
+#[test]
+fn a_join_request_long_past_is_not_an_answer_any_more() {
+    let mut seq = Sequencer::default();
+    let mut blobs = HashMap::new();
+    let (mut alice, mut bob, mut carol, group) = three(&mut seq, &mut blobs);
+    let link = alice.groups.invite_link(&group, None).unwrap();
+    let mut dave = Party::new();
+    let long_ago = now_ms() - JOIN_ANSWER_FOR_MS - 1;
+    let out = dave
+        .groups
+        .join_request(&link, (alice.id(), alice.identity.dh_public()), long_ago)
+        .unwrap();
+    deliver(out, &mut [&mut alice], &mut blobs);
+    let events = alice.drain(&blobs);
+    let [GroupEvent::JoinRequest { key_package, .. }] = events.as_slice() else {
+        panic!("{events:?}");
+    };
+    let staged = alice
+        .groups
+        .stage_add(&group, std::slice::from_ref(key_package))
+        .unwrap();
+    seq.commit(staged).unwrap();
+    let out = alice.groups.commit_staged(&group, now_ms()).unwrap();
+    deliver(out, &mut [&mut bob, &mut carol, &mut dave], &mut blobs);
+    bob.drain(&blobs);
+    carol.drain(&blobs);
+    assert!(matches!(
+        dave.drain(&blobs).as_slice(),
+        [GroupEvent::Invited { .. }]
+    ));
 }

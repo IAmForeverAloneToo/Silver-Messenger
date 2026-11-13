@@ -249,12 +249,28 @@ class Term:
     # --- input ----------------------------------------------------------
 
     def type(self, text):
+        # A person's keys each come in a read of their own. The client
+        # judges a line pasted when its Enter shares a read with the key
+        # before it, so the Enter waits a little longer than the rest: a
+        # busy machine must not bunch the two together.
         for ch in text:
+            if ch == "\r":
+                time.sleep(0.04)
             os.write(self.m, ch.encode())
             time.sleep(0.01)
 
     def key(self, seq, settle=0.2):
-        os.write(self.m, seq)
+        # The pty is non-blocking, and a long sequence (a paste) can be
+        # taken in part: the rest is written as the client reads, with
+        # the screen pumped meanwhile so its output never blocks it.
+        while seq:
+            try:
+                seq = seq[os.write(self.m, seq):]
+            except BlockingIOError:
+                pass
+            if seq:
+                Term.pump_all()
+                time.sleep(0.01)
         time.sleep(settle)
         Term.pump_all()
 
@@ -293,9 +309,11 @@ FOCUS_IN, FOCUS_OUT = b"\x1b[I", b"\x1b[O"
 
 
 def flat(term):
-    """The screen as one line, with the box borders, the scrollbar and the
-    wrap indents taken out, for asserting on a sentence that wraps."""
-    return re.sub(r"[│║█┌┐└┘─\s]+", " ", " ".join(term.sc.display))
+    """The screen as one line, with the box borders, the scrollbar, the
+    wrap indents and the System pane's continuation marks taken out, for
+    asserting on a sentence that wraps."""
+    text = re.sub(r"(?<=\s)\|(?=\s)", " ", " ".join(term.sc.display))
+    return re.sub(r"[│║█┌┐└┘─┆\s]+", " ", text)
 
 
 def wait_flat(term, needle, timeout=15):
