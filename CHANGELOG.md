@@ -12,6 +12,7 @@ The releases, newest first; each version links to its entry.
 
 | Version | Date | What it was |
 | --- | --- | --- |
+| [0.25.0](#0250---2026-11-13) | 2026-11-13 | A security review of the client, groups and the security key, with every finding the code could fix fixed |
 | [0.24.1](#0241---2026-11-11) | 2026-11-11 | The security key off a timing advisory, a proxy password kept off the screen |
 | [0.24.0](#0240---2026-11-11) | 2026-11-11 | The relay hardened: everything a security review of it found that code can fix |
 | [0.23.1](#0231---2026-11-10) | 2026-11-10 | The in-app update's restart, the rollback copy kept, and the first start protecting first |
@@ -45,7 +46,7 @@ The releases, newest first; each version links to its entry.
 | [0.2.0](#020---2026-09-04) | 2026-09-04 | Phase 2: the trust model completed |
 | [0.1.0](#010---2026-09-04) | 2026-09-04 | First tagged release |
 
-## Unreleased
+## 0.25.0 - 2026-11-13
 
 A security review of the client, the protocol and the security-key code,
 the relay having had its own, with everything the code could fix fixed.
@@ -124,6 +125,11 @@ makes a new one with `/group invite`. The relay is unchanged.
   password and an invite token are no longer passed on the command
   line after an update; a hung notification daemon no longer freezes the
   interface.
+
+### Changed
+
+- axum-server 0.9.2 in the relay: 0.9.1, which the move to 0.9 took,
+  was yanked.
 
 ## 0.24.1 - 2026-11-11
 

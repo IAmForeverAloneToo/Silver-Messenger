@@ -117,7 +117,7 @@ clients.
 
 | Version | What the relay's upgrade changes |
 | --- | --- |
-| [Unreleased](#unreleased) | Nothing; the changes are the client's |
+| [0.25.0](#0250) | axum-server 0.9.2 only; the schema stays at 3 and the backup format at 2 |
 | [0.24.1](#0241) | Dependency updates only (axum-server 0.9, redb 4.5); the schema stays at 3 and the backup format at 2 |
 | [0.24.0](#0240) | `X-Forwarded-For` is believed only from `--trusted-proxy`; the schema stays at 3 and the backup format at 2 |
 | [0.23.1](#0231) | Nothing; the fixes are the client's |
@@ -135,9 +135,10 @@ clients.
 | [0.8.0](#080) | The schema moves to 2, the key transparency log; rolling back to 0.7.0 needs a restore |
 | [0.7.0](#070) | TLS in the relay, the admin socket, the schema version (1), metrics and JSON logs, arm64 and a container image |
 
-### Unreleased
+### 0.25.0
 
-* **Relay: optional.** Nothing changed in it.
+* **Relay: optional.** axum-server 0.9.2, in place of the yanked 0.9.1;
+  nothing else in it changed.
 * **Clients.**
   * A protected data directory moves to a version 3 vault at its first
     unlock. An older client cannot open it afterwards; roll back with
