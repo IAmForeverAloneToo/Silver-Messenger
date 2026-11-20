@@ -44,7 +44,7 @@ rlimit = "0.11"
 # Linux, through the zbus the key store already links; a WinRT toast on
 # Windows. macOS uses `osascript` and needs nothing.
 [target.'cfg(target_os = "linux")'.dependencies]
-nix = { version = "0.31", features = ["process"] }
+nix = { version = "0.32", features = ["process"] }
 zbus = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
